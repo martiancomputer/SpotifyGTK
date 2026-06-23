@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="com.github.spotifygtk.SpotifyGTK" path="/com/github/spotifygtk/SpotifyGTK/">
+
+    <key name="window-width" type="i">
+      <default>1100</default>
+      <summary>Window width</summary>
+    </key>
+
+    <key name="window-height" type="i">
+      <default>700</default>
+      <summary>Window height</summary>
+    </key>
+
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Window maximized state</summary>
+    </key>
+
+    <key name="volume" type="i">
+      <range min="0" max="100"/>
+      <default>50</default>
+      <summary>Playback volume (0-100)</summary>
+    </key>
+
+    <key name="poll-interval-ms" type="i">
+      <range min="1000" max="10000"/>
+      <default>3000</default>
+      <summary>Playback state polling interval in milliseconds</summary>
+    </key>
+
+    <key name="color-scheme" type="s">
+      <choices>
+        <choice value="default"/>
+        <choice value="prefer-dark"/>
+        <choice value="prefer-light"/>
+      </choices>
+      <default>'prefer-dark'</default>
+      <summary>Preferred color scheme</summary>
+    </key>
+
+  </schema>
+</schemalist>

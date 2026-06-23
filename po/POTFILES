@@ -1,0 +1,9 @@
+src/main.c
+src/app.c
+src/auth.c
+src/api.c
+src/player.c
+src/image_cache.c
+src/ui/window.c
+src/ui/now_playing.c
+src/ui/search_page.c

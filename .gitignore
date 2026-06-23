@@ -1,0 +1,29 @@
+# Meson build dirs
+build/
+build-*/
+_build/
+builddir/
+
+# Compiled output
+*.o
+*.so
+*.a
+spotifygtk
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.clangd/
+compile_commands.json
+
+# Config / tokens (NEVER commit credentials)
+*.env
+.env
+config.local.h
+
+# OS
+.DS_Store
+Thumbs.db
