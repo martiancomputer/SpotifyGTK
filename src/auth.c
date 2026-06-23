@@ -26,7 +26,7 @@
 #endif
 
 #define REDIRECT_PORT      8888
-#define REDIRECT_URI       "http://localhost:8888/callback"
+#define REDIRECT_URI       "http://127.0.0.1:8888/callback"
 #define SPOTIFY_AUTH_URL   "https://accounts.spotify.com/authorize"
 #define SPOTIFY_TOKEN_URL  "https://accounts.spotify.com/api/token"
 
