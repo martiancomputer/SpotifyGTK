@@ -8,6 +8,7 @@ builddir/
 *.o
 *.so
 *.a
+spotifygtk
 
 # Editor
 .vscode/

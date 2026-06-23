@@ -21,6 +21,7 @@
 #include "config.h"
 #include "image_cache.h"
 
+#include <glib/gstdio.h>
 #include <libsoup/soup.h>
 #include <string.h>
 
@@ -234,25 +235,42 @@ typedef struct {
 } FetchTask;
 
 typedef struct {
-  ImageReadyCallback callback;
-  gpointer           user_data;
-  GdkTexture        *texture;   /* main thread takes ownership */
+  SpotifyImageCache  *self;
+  gchar              *url;
+  ImageReadyCallback  callback;
+  gpointer            user_data;
+  GdkTexture         *texture;   /* main thread takes ownership */
 } DeliverClosure;
 
 static gboolean
 deliver_on_main_thread (gpointer data)
 {
   DeliverClosure *dc = data;
+
+  /* L1 insertion has to happen on the main thread — the hash table
+   * and LRU queue aren't thread-safe, and this is the only place
+   * worker results re-enter the main loop. This was the actual bug
+   * the compiler's "l1_insert defined but not used" warning caught:
+   * the cache was decoding everything correctly but never actually
+   * caching it, so every request fell through to a re-fetch. */
+  if (dc->texture)
+    l1_insert (dc->self, dc->url, dc->texture);
+
   dc->callback (dc->texture, dc->user_data);
+
   g_clear_object (&dc->texture);
+  g_free (dc->url);
   g_free (dc);
   return G_SOURCE_REMOVE;
 }
 
 static void
-deliver (ImageReadyCallback callback, gpointer user_data, GdkTexture *texture)
+deliver (SpotifyImageCache *self, const gchar *url,
+        ImageReadyCallback callback, gpointer user_data, GdkTexture *texture)
 {
   DeliverClosure *dc = g_new0 (DeliverClosure, 1);
+  dc->self      = self;
+  dc->url       = g_strdup (url);
   dc->callback  = callback;
   dc->user_data = user_data;
   dc->texture   = texture ? g_object_ref (texture) : NULL;
@@ -291,14 +309,14 @@ worker_fetch_and_decode (gpointer task_data, gpointer pool_data)
     SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, task->url);
     net_bytes = soup_session_send_and_read (task->self->session, msg, NULL, NULL);
     g_object_unref (msg);
-    if (!net_bytes) { deliver (task->callback, task->user_data, NULL); goto done; }
+    if (!net_bytes) { deliver (task->self, task->url, task->callback, task->user_data, NULL); goto done; }
 
     bytes_data = g_bytes_get_data (net_bytes, &bytes_len);
     g_file_set_contents (cache_path, (const gchar *) bytes_data, (gssize) bytes_len, NULL);
   }
 
   GdkTexture *tex = decode_image (task->self, bytes_data, bytes_len);
-  deliver (task->callback, task->user_data, tex);
+  deliver (task->self, task->url, task->callback, task->user_data, tex);
   g_clear_object (&tex);
 
 done:
@@ -344,7 +362,13 @@ static void
 spotifygtk_image_cache_dispose (GObject *object)
 {
   SpotifyImageCache *self = SPOTIFYGTK_IMAGE_CACHE (object);
-  g_clear_pointer (&self->workers, g_thread_pool_free); /* NULL args via wrapper below would need immediate=FALSE */
+  if (self->workers) {
+    /* immediate=FALSE: let in-flight fetches finish their current
+     * task; wait_=TRUE: block until they do, so no worker thread is
+     * still running against this object after dispose returns. */
+    g_thread_pool_free (self->workers, FALSE, TRUE);
+    self->workers = NULL;
+  }
   g_clear_object (&self->session);
   G_OBJECT_CLASS (spotifygtk_image_cache_parent_class)->dispose (object);
 }

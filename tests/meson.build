@@ -1,5 +1,8 @@
 if get_option('tests')
   test_deps = [glib_dep, gio_dep, json_glib_dep]
+  if libsecret_dep.found()
+    test_deps += libsecret_dep
+  endif
 
   test_auth = executable('test-auth',
     'test_auth.c',
@@ -21,7 +24,7 @@ if get_option('tests')
   test_shannon = executable('test-shannon',
     'test_shannon.c',
     '../src/spotify/shannon.c',
-    include_directories: [config_inc, include_directories('../src')],
+    include_directories: [config_inc, include_directories('../src'), include_directories('../src/spotify')],
     dependencies: [test_deps],
   )
   test('shannon-cipher', test_shannon)

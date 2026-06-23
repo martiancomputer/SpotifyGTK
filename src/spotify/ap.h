@@ -16,6 +16,7 @@
 #pragma once
 
 #include <glib-object.h>
+#include <gio/gio.h>
 #include "shannon.h"
 
 G_BEGIN_DECLS

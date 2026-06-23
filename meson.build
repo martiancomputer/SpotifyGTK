@@ -45,6 +45,7 @@ openssl_dep    = dependency('openssl',       version: '>= 3.0', required: false)
 libsecret_dep  = dependency('libsecret-1',   version: '>= 0.20', required: false)
 
 cc = meson.get_compiler('c')
+m_dep = cc.find_library('m', required: false)
 
 # JPEG decode for album art — libjpeg-turbo ships as a drop-in libjpeg
 # replacement on every major distro, so we look for the plain library
@@ -61,6 +62,9 @@ if libsecret_dep.found()
 endif
 if openssl_dep.found()
   all_deps += openssl_dep
+endif
+if m_dep.found()
+  all_deps += m_dep
 endif
 if have_libjpeg_turbo
   all_deps += jpeg_lib
@@ -89,10 +93,11 @@ endif
 # PulseAudio / ALSA — always available as candidates regardless of profile,
 # since they're the universal fallback even on a nightly/PipeWire system
 # (PipeWire ships a pulse-compatible socket anyway).
-pulse_dep = dependency('libpulse',  required: false)
-alsa_dep  = dependency('alsa',      required: false)
-if pulse_dep.found()
-  all_deps += pulse_dep
+pulse_dep        = dependency('libpulse',        required: false)
+pulse_simple_dep = dependency('libpulse-simple',  required: false)
+alsa_dep         = dependency('alsa',             required: false)
+if pulse_dep.found() and pulse_simple_dep.found()
+  all_deps += [pulse_dep, pulse_simple_dep]
 endif
 if alsa_dep.found()
   all_deps += alsa_dep
@@ -122,7 +127,7 @@ conf.set10('HAVE_OPENSSL',            openssl_dep.found())
 conf.set10('HAVE_LIBJPEG_TURBO',      have_libjpeg_turbo)
 conf.set10('HAVE_VAAPI',              have_vaapi)
 conf.set10('HAVE_PIPEWIRE',           have_pipewire)
-conf.set10('HAVE_PULSE',              pulse_dep.found())
+conf.set10('HAVE_PULSE',              pulse_dep.found() and pulse_simple_dep.found())
 conf.set10('HAVE_ALSA',               alsa_dep.found())
 conf.set10('HAVE_DMABUF',             have_dmabuf)
 conf.set_quoted('DEFAULT_AUDIO_BACKEND', audio_backend)

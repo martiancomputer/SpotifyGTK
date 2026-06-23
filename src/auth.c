@@ -15,6 +15,7 @@
 #include "auth.h"
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
