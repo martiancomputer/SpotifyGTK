@@ -216,7 +216,9 @@ exchange_code (SpotifyAuth *self, const gchar *code)
 static void
 on_callback_request (SoupServer *server, SoupServerMessage *msg, const gchar *path,
                      GHashTable *query, gpointer user_data)
+                     
 {
+  g_message("CALLBACK RECEIVED");
   SpotifyAuth *self = SPOTIFYGTK_AUTH (user_data);
   if (g_strcmp0 (path, "/callback") != 0) return;
 
@@ -295,12 +297,33 @@ spotifygtk_auth_begin (SpotifyAuth *self)
   self->redirect_server = soup_server_new (NULL, NULL);
   soup_server_add_handler (self->redirect_server, "/callback", on_callback_request, self, NULL);
 
-  if (!soup_server_listen_local (self->redirect_server, REDIRECT_PORT,
-                                 SOUP_SERVER_LISTEN_IPV4_ONLY, &err)) {
-    g_warning ("Could not bind OAuth listener: %s", err->message);
-    g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
+  g_message("Creating listener...");
+
+gboolean ok = soup_server_listen_local(
+    self->redirect_server,
+    REDIRECT_PORT,
+    SOUP_SERVER_LISTEN_IPV4_ONLY,
+    &err
+);
+
+g_message("listen_local returned: %d", ok);
+
+if (!ok) {
+    g_warning("Could not bind OAuth listener: %s",
+              err ? err->message : "unknown");
     return;
-  }
+}
+GSList *uris = soup_server_get_uris(self->redirect_server);
+
+for (GSList *l = uris; l; l = l->next) {
+    GUri *uri = l->data;
+    g_autofree gchar *uri_str = g_uri_to_string(uri);
+    g_message("URI: %s", uri_str);
+}
+
+g_slist_free_full(uris, (GDestroyNotify) g_uri_unref);
+
+g_message("Listener created successfully");
 
   g_autofree gchar *url =
     g_strdup_printf ("%s?response_type=code&client_id=%s&scope=%s&redirect_uri=%s"
@@ -315,6 +338,7 @@ spotifygtk_auth_begin (SpotifyAuth *self)
 void
 spotifygtk_auth_refresh (SpotifyAuth *self)
 {
+  g_message("AUTH BEGIN");
   g_return_if_fail (SPOTIFYGTK_IS_AUTH (self));
   if (!self->refresh_token) { spotifygtk_auth_begin (self); return; }
 

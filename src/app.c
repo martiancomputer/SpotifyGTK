@@ -17,6 +17,7 @@ on_auth_completed (SpotifyAuth *auth,
                    gboolean     success,
                    gpointer     user_data)
 {
+  g_message("AUTH COMPLETED %d", success);
   SpotifyGtkApp *self = SPOTIFYGTK_APP (user_data);
 
   if (!success) {
@@ -57,6 +58,7 @@ spotifygtk_app_startup (GApplication *app)
 static void
 spotifygtk_app_dispose (GObject *object)
 {
+  g_message("APP DISPOSE");
   SpotifyGtkApp *self = SPOTIFYGTK_APP (object);
   g_clear_object (&self->auth);
   G_OBJECT_CLASS (spotifygtk_app_parent_class)->dispose (object);
