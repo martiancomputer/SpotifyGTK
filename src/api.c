@@ -184,7 +184,7 @@ void spotifygtk_api_get_saved_tracks (SpotifyApi *self, gint limit, gint offset,
 void spotifygtk_api_search (SpotifyApi *self, const gchar *query, const gchar *types, SpotifyApiCallback cb, gpointer data)
 {
   g_autofree gchar *encoded = g_uri_escape_string (query, NULL, FALSE);
-  g_autofree gchar *ep = g_strdup_printf ("/search?q=%s&type=%s&limit=20", encoded, types);
+  g_autofree gchar *ep = g_strdup_printf ("/search?q=%s&type=%s&limit=10", encoded, types);
   api_request (self, SOUP_METHOD_GET, ep, NULL, cb, data);
 }
 
