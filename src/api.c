@@ -17,6 +17,9 @@ typedef struct {
   SpotifyApi         *api;
   SpotifyApiCallback  callback;
   gpointer            user_data;
+  SoupMessage        *msg;     /* kept alive so we can read status after the read completes */
+  gchar              *method;
+  gchar              *url;
 } RequestClosure;
 
 static void
@@ -26,26 +29,67 @@ on_api_response (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError)  err  = NULL;
 
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
+
+  guint        status = soup_message_get_status (cl->msg);
+  const gchar *reason = soup_message_get_reason_phrase (cl->msg);
+
   if (!bytes) {
+    g_warning ("[api] %s %s -> transport error: %s",
+              cl->method, cl->url, err ? err->message : "unknown");
     if (cl->callback) cl->callback (cl->api, NULL, err, cl->user_data);
-    g_free (cl);
-    return;
+    goto cleanup;
   }
 
   gsize        len  = 0;
   const gchar *body = g_bytes_get_data (bytes, &len);
 
+  g_message ("[api] %s %s -> HTTP %u %s (%" G_GSIZE_FORMAT " bytes)",
+            cl->method, cl->url, status, reason ? reason : "", len);
+
   JsonObject *root = NULL;
   g_autoptr(JsonParser) parser = json_parser_new ();
-  g_message ("RAW RESPONSE: %.*s", (int) len, body);
-  if (len > 0 && json_parser_load_from_data (parser, body, (gssize) len, &err)) {
-    JsonNode *node = json_parser_get_root (parser);
-    if (node && JSON_NODE_HOLDS_OBJECT (node))
-      root = json_node_get_object (node);
+  g_autoptr(GError) parse_err = NULL;
+
+  if (len > 0) {
+    if (json_parser_load_from_data (parser, body, (gssize) len, &parse_err)) {
+      JsonNode *node = json_parser_get_root (parser);
+      if (node && JSON_NODE_HOLDS_OBJECT (node))
+        root = json_node_get_object (node);
+    } else {
+      /* Spotify doesn't always return JSON errors -- account-level
+       * restrictions (like a Premium gate) come back as plain text.
+       * Surface that clearly instead of failing to parse it silently. */
+      g_autofree gchar *snippet = g_strndup (body, MIN (len, 300));
+      g_message ("[api] non-JSON response body (HTTP %u): %s", status, snippet);
+    }
   }
 
-  if (cl->callback) cl->callback (cl->api, root, err, cl->user_data);
+  if (status >= 400) {
+    g_autofree gchar *detail = NULL;
+    if (root && json_object_has_member (root, "error")) {
+      JsonNode *enode = json_object_get_member (root, "error");
+      if (JSON_NODE_HOLDS_OBJECT (enode))
+        detail = g_strdup (json_object_get_string_member_with_default (
+                  json_node_get_object (enode), "message", NULL));
+    }
+    if (!detail) detail = g_strndup (body, MIN (len, 300));
+
+    GError *http_err = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+      "HTTP %u %s: %s", status, reason ? reason : "", detail ? detail : "(no body)");
+    g_warning ("[api] request failed: %s", http_err->message);
+    if (cl->callback) cl->callback (cl->api, root, http_err, cl->user_data);
+    g_error_free (http_err);
+    g_bytes_unref (bytes);
+    goto cleanup;
+  }
+
+  if (cl->callback) cl->callback (cl->api, root, NULL, cl->user_data);
   g_bytes_unref (bytes);
+
+cleanup:
+  g_object_unref (cl->msg);
+  g_free (cl->method);
+  g_free (cl->url);
   g_free (cl);
 }
 
@@ -56,7 +100,11 @@ api_request (SpotifyApi *self, const gchar *method, const gchar *endpoint,
   g_autofree gchar *url = g_strdup_printf ("%s%s", SPOTIFY_API_BASE, endpoint);
   SoupMessage *msg = soup_message_new (method, url);
 
-  g_autofree gchar *auth_hdr = g_strdup_printf ("Bearer %s", spotifygtk_auth_get_token (self->auth));
+  const gchar *token = spotifygtk_auth_get_token (self->auth);
+  if (!token) {
+    g_warning ("[api] %s %s attempted with no access token -- auth hasn't completed yet", method, url);
+  }
+  g_autofree gchar *auth_hdr = g_strdup_printf ("Bearer %s", token ? token : "");
   soup_message_headers_replace (soup_message_get_request_headers (msg), "Authorization", auth_hdr);
 
   if (body_json) {
@@ -65,8 +113,15 @@ api_request (SpotifyApi *self, const gchar *method, const gchar *endpoint,
     g_bytes_unref (bytes);
   }
 
+  g_message ("[api] -> %s %s%s%s", method, url, body_json ? " body=" : "", body_json ? body_json : "");
+
   RequestClosure *cl = g_new0 (RequestClosure, 1);
-  cl->api = self; cl->callback = callback; cl->user_data = user_data;
+  cl->api       = self;
+  cl->callback  = callback;
+  cl->user_data = user_data;
+  cl->msg       = g_object_ref (msg);
+  cl->method    = g_strdup (method);
+  cl->url       = g_strdup (url);
 
   soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
                                     on_api_response, cl);
