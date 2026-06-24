@@ -122,6 +122,30 @@ store_tokens (SpotifyAuth *self)
 static gboolean
 load_tokens (SpotifyAuth *self)
 {
+#ifdef HAVE_LIBSECRET
+  g_autoptr(GError) err = NULL;
+  static const SecretSchema schema = {
+    "com.github.spotifygtk.SpotifyGTK", SECRET_SCHEMA_NONE,
+    { { "type", SECRET_SCHEMA_ATTRIBUTE_STRING }, { NULL, 0 } }
+  };
+  gchar *blob = secret_password_lookup_sync (&schema, NULL, &err, "type", "tokens", NULL);
+  if (!blob) {
+    if (err) g_warning ("libsecret lookup failed: %s", err->message);
+    return FALSE;
+  }
+
+  gchar **parts = g_strsplit (g_strstrip (blob), "\n", 3);
+  secret_password_free (blob);
+  if (g_strv_length (parts) < 3) { g_strfreev (parts); return FALSE; }
+
+  g_free (self->access_token);
+  g_free (self->refresh_token);
+  self->access_token  = g_strdup (parts[0]);
+  self->refresh_token = g_strdup (parts[1]);
+  self->expires_at    = g_ascii_strtoll (parts[2], NULL, 10);
+  g_strfreev (parts);
+  return TRUE;
+#else
   g_autofree gchar *path = g_build_filename (g_get_user_config_dir (),
                                              "spotifygtk", "tokens", NULL);
   g_autofree gchar *data = NULL;
@@ -138,6 +162,7 @@ load_tokens (SpotifyAuth *self)
   self->expires_at    = g_ascii_strtoll (parts[2], NULL, 10);
   g_strfreev (parts);
   return TRUE;
+#endif
 }
 
 static void
