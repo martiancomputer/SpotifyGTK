@@ -117,6 +117,14 @@ spotifygtk_window_set_authenticated (SpotifyWindow *self, gboolean authenticated
   self->authenticated = authenticated;
 }
 
+
+void
+spotifygtk_window_set_api (SpotifyWindow *self, SpotifyApi *api)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_WINDOW (self));
+  spotifygtk_search_page_set_api (self->search_page, api);
+}
+
 static void spotifygtk_window_class_init (SpotifyWindowClass *klass)
 {
   G_OBJECT_CLASS (klass)->constructed = spotifygtk_window_constructed;

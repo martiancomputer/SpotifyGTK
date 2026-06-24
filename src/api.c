@@ -37,6 +37,7 @@ on_api_response (GObject *source, GAsyncResult *result, gpointer user_data)
 
   JsonObject *root = NULL;
   g_autoptr(JsonParser) parser = json_parser_new ();
+  g_message ("RAW RESPONSE: %.*s", (int) len, body);
   if (len > 0 && json_parser_load_from_data (parser, body, (gssize) len, &err)) {
     JsonNode *node = json_parser_get_root (parser);
     if (node && JSON_NODE_HOLDS_OBJECT (node))
@@ -78,6 +79,11 @@ void spotifygtk_api_get_playback_state (SpotifyApi *self, SpotifyApiCallback cb,
 void spotifygtk_api_play (SpotifyApi *self, const gchar *context_uri, SpotifyApiCallback cb, gpointer data)
 {
   g_autofree gchar *body = context_uri ? g_strdup_printf ("{\"context_uri\":\"%s\"}", context_uri) : NULL;
+  api_request (self, SOUP_METHOD_PUT, "/me/player/play", body, cb, data);
+}
+void spotifygtk_api_play_track (SpotifyApi *self, const gchar *track_uri, SpotifyApiCallback cb, gpointer data)
+{
+  g_autofree gchar *body = g_strdup_printf ("{\"uris\":[\"%s\"]}", track_uri);
   api_request (self, SOUP_METHOD_PUT, "/me/player/play", body, cb, data);
 }
 

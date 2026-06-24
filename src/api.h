@@ -18,6 +18,7 @@ SpotifyApi *spotifygtk_api_new (SpotifyAuth *auth);
 
 void spotifygtk_api_get_playback_state  (SpotifyApi *self, SpotifyApiCallback cb, gpointer data);
 void spotifygtk_api_play                (SpotifyApi *self, const gchar *context_uri, SpotifyApiCallback cb, gpointer data);
+void spotifygtk_api_play_track          (SpotifyApi *self, const gchar *track_uri, SpotifyApiCallback cb, gpointer data);
 void spotifygtk_api_pause               (SpotifyApi *self, SpotifyApiCallback cb, gpointer data);
 void spotifygtk_api_next                (SpotifyApi *self, SpotifyApiCallback cb, gpointer data);
 void spotifygtk_api_previous            (SpotifyApi *self, SpotifyApiCallback cb, gpointer data);
