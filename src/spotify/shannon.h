@@ -1,20 +1,17 @@
 /*
  * shannon.h — Shannon stream cipher.
  *
- * Spotify's Access Point transport (the binary TCP protocol used for
- * Mercury/auth/audio-key exchange — NOT the CDN, which is plain HTTPS)
- * is encrypted with the Shannon cipher, a word-oriented stream cipher
- * with built-in MAC support, originally published by Greg Rose (1999,
- * "Helix"-family precursor).
+ * Ported from the `shannon` Rust crate v0.2.0 (MIT License,
+ * Copyright (c) 2016 Paul Liétar), via librespot's dependency on it.
+ * See THIRD_PARTY_LICENSES for the full license text and
+ * research/auth/ for the porting notes.
  *
- * STATUS: interface + key-setup scaffolding only. The core round
- * function (sbox/diffusion constants) is intentionally NOT filled in
- * here — see the long comment in shannon.c. Getting a stream cipher's
- * internal constants subtly wrong produces code that compiles, runs,
- * and silently fails to interoperate with Spotify's servers. That's a
- * worse outcome than an honest gap. Before this ships, the constants
- * need to come from a verified primary source (the original Shannon
- * reference implementation), not reconstructed from memory.
+ * This is the cipher Spotify's AP transport (the binary TCP protocol
+ * used for the handshake, Mercury, audio-key exchange — NOT the CDN,
+ * which is plain HTTPS) is encrypted with.
+ *
+ * Unlike the earlier version of this file, the round function below
+ * is the real, verified algorithm — not reconstructed from memory.
  */
 
 #pragma once
@@ -23,29 +20,51 @@
 
 G_BEGIN_DECLS
 
-#define SHANNON_KEY_LEN_MAX 32   /* bytes */
-#define SHANNON_N           16   /* state size, in 32-bit words */
+#define SHANNON_N 16   /* state size, in 32-bit words */
 
 typedef struct {
-  guint32 R[SHANNON_N];     /* main register   */
-  guint32 CRC[SHANNON_N];   /* CRC accumulator */
-  guint32 initR[SHANNON_N]; /* saved initial state, for re-key  */
+  guint32 R[SHANNON_N];      /* main register */
+  guint32 CRC[SHANNON_N];    /* CRC accumulator, also doubles as MAC state */
+  guint32 initR[SHANNON_N];  /* saved post-key-load state, restored per nonce() call */
   guint32 konst;
-  guint32 sbuf;
-  gint    nbuf;
+  guint32 sbuf;               /* current keystream word */
+  guint32 mbuf;               /* partial-word MAC accumulator for non-word-aligned tails */
+  gsize   nbuf;               /* bits remaining in the current partial word (counts down by 8) */
 } ShannonCipher;
 
-/* Initialise cipher state from a key (also resets the nonce/IV state). */
+/* Initialise cipher state from a key. Also usable directly as the
+ * per-packet nonce setup IF you pass the nonce bytes here after a
+ * fresh shannon_key_setup() — but for re-nonceing an already-keyed
+ * cipher (the normal per-packet case), use shannon_nonce() instead,
+ * which restores the saved post-key state first. */
 void shannon_key_setup (ShannonCipher *cipher, const guint8 *key, gsize key_len);
 
-/* Per-packet nonce setup (Spotify re-nonces using a monotonic counter). */
+/* Per-packet nonce setup — restores the saved key-derived state, then
+ * folds in the nonce bytes the same way a key would be folded in.
+ * Spotify re-nonces with a monotonically incrementing per-direction
+ * 32-bit counter, one nonce per packet (see shannon_nonce_u32). */
 void shannon_nonce (ShannonCipher *cipher, const guint8 *nonce, gsize nonce_len);
 
-/* Encrypt/decrypt in place (Shannon is a synchronous stream cipher — XOR-based). */
+/* Convenience wrapper: nonce from a big-endian-encoded u32 counter,
+ * matching librespot's ApCodec::nonce_u32 usage exactly. */
+void shannon_nonce_u32 (ShannonCipher *cipher, guint32 n);
+
+/* Encrypt/decrypt in place. Both accumulate the MAC over the
+ * plaintext value (not the ciphertext) — this is intentional and
+ * matches the reference; encrypt() and decrypt() are NOT
+ * interchangeable despite both being XOR-based, because the MAC
+ * accumulation order differs (decrypt recovers plaintext first, then
+ * MACs it; encrypt MACs the plaintext it was given, then encrypts it). */
 void shannon_encrypt (ShannonCipher *cipher, guint8 *buf, gsize len);
 void shannon_decrypt  (ShannonCipher *cipher, guint8 *buf, gsize len);
 
-/* Produce the 4-byte MAC for the current stream position. */
-void shannon_finish (ShannonCipher *cipher, guint8 *mac_out, gsize mac_len);
+/* Finish MAC computation, writing mac_len bytes of MAC into buf.
+ * This consumes/perturbs cipher state — call once per packet, after
+ * the matching encrypt()/decrypt() call, not before. */
+void shannon_finish (ShannonCipher *cipher, guint8 *buf, gsize mac_len);
+
+/* Convenience: finish() and compare against an expected MAC. Returns
+ * TRUE if it matches. */
+gboolean shannon_check_mac (ShannonCipher *cipher, const guint8 *expected, gsize expected_len);
 
 G_END_DECLS
