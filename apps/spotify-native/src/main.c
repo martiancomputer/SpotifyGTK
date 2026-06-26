@@ -25,8 +25,11 @@
 static gboolean
 run_shannon_selftest (void)
 {
-  const guint8 key[16]   = "0123456789abcdef";
-  const guint8 nonce[8]  = "spotgtk!";
+  /* nonstring: these are fixed-size byte arrays for the cipher, not
+   * NUL-terminated C strings -- the string-literal initializer is
+   * just a readable way to write 16/8 arbitrary bytes. */
+  static const guint8 key[16]  __attribute__((nonstring)) = "0123456789abcdef";
+  static const guint8 nonce[8] __attribute__((nonstring)) = "spotgtk!";
   const gchar *message   = "spotify-native engine harness -- shannon round-trip check";
   gsize        msg_len   = strlen (message);
 
@@ -72,9 +75,7 @@ main (int argc, char *argv[])
   g_message ("    PulseAudio: %s", HAVE_PULSE ? "yes" : "no");
   g_message ("    ALSA: %s", HAVE_ALSA ? "yes" : "no");
   g_message ("    OpenSSL (CDN decrypt): %s", HAVE_OPENSSL ? "yes" : "no");
-  g_message ("");
   g_message ("Not a real client yet -- no AP login, no playback. See README.");
-  g_message ("");
 
   gboolean ok = run_shannon_selftest ();
 
