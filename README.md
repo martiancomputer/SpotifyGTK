@@ -11,42 +11,39 @@ stability rather than convenience.
 
 ## Project layout
 
-This is now a monorepo containing **two complementary apps** plus the research
-behind them:
+This is a monorepo containing **two independent apps** plus the research
+behind them. Each app has its own `meson.build` and is built separately.
 
 ```
 SpotifyGTK/
 ├── apps/
-│   ├── spotifygtk-remote/    Lightweight Web API control client (works today)
-│   └── spotifygtk-native/    Standalone client, own audio engine, GPU-accelerated
+│   ├── spotify-connect/      Web API control client (functional today)
+│   └── spotify-native/       Standalone engine: protocol + audio (in progress)
 │
-├── research/                 Protocol reverse-engineering notes, organized by area
-│   ├── auth/                 AP handshake, Shannon cipher
+├── research/                 Protocol reverse-engineering notes, by area
+│   ├── auth/                 AP handshake, Diffie-Hellman, Shannon cipher
 │   ├── metadata/              Mercury pub/sub
-│   ├── connect/               Spirc/dealer, device registration
+│   ├── connect/               Spirc/dealer, device registration, ad-insertion
 │   └── playback/              Audio key exchange, CDN fetch + decrypt
 │
-└── docs/                      General project documentation
+├── docs/                      General project documentation
+└── THIRD_PARTY_LICENSES       Attribution for ported/referenced code
 ```
-
-> **Migration note:** the code today still lives in a flat `src/` layout from
-> before this split. It's being reorganized into `apps/spotifygtk-remote/` —
-> functionally nothing changes, it's the same Web-API-based client described
-> below, just relocating to make room for `spotifygtk-native` alongside it.
 
 ### Why two apps
 
-The Web API control surface (`api.c`, OAuth, search, playback *control*) and
-the standalone protocol/audio engine (`spotify/`, `audio/`) turned out to have
-very different hardware requirements. The former is just HTTP + JSON — light
-enough to run on an MCU or any resource-constrained board. The latter needs a
-real audio decode pipeline and benefits from Vulkan/VA-API GPU acceleration —
-that's a desktop-class target. Splitting them lets each app be built and
-optimized for what it actually is, instead of one binary trying to be both.
+The Web API control surface (`auth.c`, `api.c`, search, playback *control*)
+and the standalone protocol/audio engine (`spotify/`, `audio/`) turned out to
+have very different hardware requirements. The former is just HTTP + JSON —
+light enough to run on an MCU or any resource-constrained board, and needs
+no audio decode libraries, no PulseAudio/ALSA, nothing audio-related at all.
+The latter needs a real decode pipeline and benefits from GPU acceleration —
+a desktop-class target. Splitting them let each app's dependency list shrink
+to only what it actually uses, instead of one binary linking everything.
 
 ---
 
-## `apps/spotifygtk-remote`
+## `apps/spotify-connect`
 
 Controls an **existing** Spotify Connect device (phone, desktop app, speaker)
 via the official Web API. Requires Spotify Premium (Spotify's Web Playback
@@ -64,14 +61,100 @@ project, and it's the part that's functional today.
 | Image cache (LRU + disk + libjpeg-turbo/stb_image) | ✅ Functional |
 | Diagnostic logging (status codes, request/response tracing) | ✅ Functional |
 
+### Building
+
+```bash
+cd apps/spotify-connect
+meson setup build --native-file build-profiles/stable.ini
+# or: meson setup build --native-file build-profiles/nightly.ini
+ninja -C build
+```
+
+### Authentication
+
+OAuth 2.0 Authorization Code + PKCE — no client secret ever stored on disk.
+
+1. Register an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+2. Add redirect URI: `http://127.0.0.1:8888/callback`
+3. Copy your **Client ID**, then:
+
+```bash
+export SPOTIFY_CLIENT_ID="your_client_id_here"
+./build/src/spotify-connect
+```
+
+Your browser opens for login; the token is captured on `127.0.0.1:8888` and
+stored via **libsecret** (or `~/.config/spotifygtk/tokens`, `chmod 600`, if
+libsecret isn't available).
+
+### Install system-wide
+
+```bash
+sudo ninja -C build install
+```
+
+### Two release tracks: Stable & Nightly
+
+| | **Stable** | **Nightly** |
+|---|---|---|
+| GTK | 4.0+ | 4.14+ |
+| Image decode | stb_image / libjpeg-turbo | + VA-API hardware decode |
+| Texture upload | `gdk_memory_texture_new()` | `GdkDmabufTexture` (zero-copy) |
+| Targets | Ubuntu 22.04+, RHEL 9, Debian 12 | Arch, Fedora, Ubuntu 24.04+ |
+
+### Prerequisites
+
+**Ubuntu / Debian (24.04+)**
+```bash
+sudo apt install \
+  meson ninja-build pkg-config \
+  libgtk-4-dev libadwaita-1-dev \
+  libsoup-3.0-dev libjson-glib-dev \
+  libsecret-1-dev libglib2.0-dev \
+  libjpeg-turbo8-dev
+# Nightly only:
+sudo apt install libva-dev libva-drm2
+```
+
+**Fedora / RHEL**
+```bash
+sudo dnf install \
+  meson ninja-build pkg-config \
+  gtk4-devel libadwaita-devel \
+  libsoup3-devel json-glib-devel \
+  libsecret-devel glib2-devel \
+  libjpeg-turbo-devel
+```
+
+**Arch Linux**
+```bash
+sudo pacman -S meson gtk4 libadwaita libsoup3 json-glib libsecret \
+  libjpeg-turbo libva
+```
+
 ---
 
-## `apps/spotifygtk-native`
+## `apps/spotify-native`
 
 The original objective: a fully standalone client that's its own Spotify
 Connect device, with its own audio decode and output pipeline — no other
 Spotify client needs to be running. GPU-accelerated where hardware allows
-(VA-API hardware JPEG decode, planned Vulkan compositing).
+(VA-API hardware JPEG decode planned; Vulkan compositing not started).
+
+**Currently a development harness, not a real client.** There's no UI, no
+AP login flow, and no playback yet — see Project status below for the exact
+breakdown. What it does have: a real Shannon cipher self-test you can
+actually run.
+
+### Building
+
+```bash
+cd apps/spotify-native
+meson setup build --native-file build-profiles/stable.ini
+# or: meson setup build --native-file build-profiles/nightly.ini
+ninja -C build
+./build/src/spotify-native-harness
+```
 
 ### Legal & ethical approach
 
@@ -98,11 +181,15 @@ The operating principles here follow directly from that contrast:
    enforced against, separate from the protocol-reimplementation question.
 3. **Playback only, never a downloader.** This is a client for content you're
    already licensed to stream, not a bulk-export/DRM-stripping tool.
-4. **`librespot`'s MIT-licensed work is primary reference material**, properly
+4. **Faithful, not selectively faithful.** Ad-insertion and feature-state
+   events for free-tier accounts get implemented along with everything else
+   (tracked in `research/connect/`) — the goal is an alternative client, not
+   an accidental ad-stripper that happens to also play music.
+5. **`librespot`'s MIT-licensed work is primary reference material**, properly
    attributed in `THIRD_PARTY_LICENSES`, rather than starting from raw packet
    captures. They already did the clean-room work; their license permits
    building on it.
-5. **Same disclaimer librespot carries:** using this to connect to Spotify's
+6. **Same disclaimer librespot carries:** using this to connect to Spotify's
    service is probably against their Terms of Service. Use at your own risk.
    This is a Terms-of-Service question, separate from the copyright/DMCA
    question above — account suspension is the realistic consequence, accepted
@@ -117,64 +204,72 @@ gap:
 
 | Module | Status |
 |---|---|
-| GTK4/libadwaita UI shell | ✅ Functional |
+| Shannon cipher (`spotify/shannon.c`) | ✅ Real algorithm, ported from the `shannon` Rust crate (MIT) librespot depends on. Self-test in `main.c` passes. |
 | Ogg/Vorbis decoder (`audio/decoder.c`) | ✅ Functional |
 | Audio output: PulseAudio, ALSA | ✅ Functional |
 | Audio output: PipeWire | 🟡 Implemented, needs validation against a running PipeWire instance |
 | Audio output: WASAPI (Windows) | ⬜ Stub only — Windows port hasn't started |
-| AP connection + packet framing (`spotify/ap.c`) | 🟡 TCP/SRV resolution real, DH handshake not implemented |
-| Shannon cipher (`spotify/shannon.c`) | 🟡 Key schedule/buffering real, round function pending port from librespot reference (see `research/auth/`) |
+| AP connection + packet framing (`spotify/ap.c`) | 🟡 TCP/SRV resolution real, DH handshake not implemented (real DH params + RSA server key now documented in `research/auth/`, not yet wired in) |
 | Mercury protocol (`spotify/mercury.c`) | 🟡 Framing implemented, unverified against live traffic |
 | Audio key exchange (`spotify/audio_key.c`) | ✅ Request/response plumbing complete |
 | CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | 🟡 HTTPS Range + decrypt real, IV seed pending confirmation against a captured stream |
-| Spotify Connect registration (`spotify/connect.c`) | 🟡 Mercury subscription real, device-state payload pending real protobuf schema |
-| Image cache VA-API hardware decode | 🟡 Probe works, decode path stubbed |
+| Spotify Connect registration (`spotify/connect.c`) | 🟡 Mercury subscription real, device-state payload pending real protobuf schema; ad-insertion events not yet researched |
+| AP login (sending credentials post-handshake) | ⬜ Not started — separate step from the DH handshake itself |
+| keyexchange.proto hand-rolled encoder | ⬜ Not started — schema documented in `research/auth/`, not yet implemented |
+| Image cache VA-API hardware decode | 🟡 Probe works, decode path stubbed (lives in `spotify-connect`, shared concept) |
 | Vulkan compositing | ⬜ Not started |
+| UI | ⬜ None yet — `main.c` is a CLI development harness |
 
-### Two release tracks: Stable & Nightly
-
-Modeled on Debian stable/sid and Arch [stable]/[testing] — one codebase, two
-build profiles, selected at `meson setup` time:
-
-| | **Stable** | **Nightly** |
-|---|---|---|
-| GTK | 4.0+ | 4.14+ |
-| Image decode | stb_image / libjpeg-turbo | + VA-API hardware decode |
-| Audio output | PulseAudio / ALSA | + native PipeWire |
-| Texture upload | `gdk_memory_texture_new()` | `GdkDmabufTexture` (zero-copy) |
-| Targets | Ubuntu 22.04+, RHEL 9, Debian 12 | Arch, Fedora, Ubuntu 24.04+ |
-| Guarantee | Works out of the box, no debugging | Best possible performance |
+### Audio backend tracks
 
 ```bash
-meson setup build --native-file build-profiles/stable.ini
-# or
-meson setup build --native-file build-profiles/nightly.ini
+meson setup build --native-file build-profiles/stable.ini   # Pulse/ALSA
+meson setup build --native-file build-profiles/nightly.ini  # + PipeWire
+```
+
+### Prerequisites
+
+**Ubuntu / Debian (24.04+)**
+```bash
+sudo apt install \
+  meson ninja-build pkg-config \
+  libglib2.0-dev libsoup-3.0-dev \
+  libogg-dev libvorbis-dev \
+  libssl-dev libpulse-dev libasound2-dev
+# Nightly only:
+sudo apt install libpipewire-0.3-dev
+```
+
+**Fedora / RHEL**
+```bash
+sudo dnf install \
+  meson ninja-build pkg-config \
+  glib2-devel libsoup3-devel \
+  libogg-devel libvorbis-devel \
+  openssl-devel pulseaudio-libs-devel alsa-lib-devel
+```
+
+**Arch Linux**
+```bash
+sudo pacman -S meson glib2 libsoup3 libogg libvorbis openssl libpulse alsa-lib pipewire
 ```
 
 ---
 
 ## `research/`
 
-Protocol documentation organized by area, each citing its upstream reference:
-
-```
-research/
-├── auth/        AP handshake, Diffie-Hellman, Shannon cipher
-│                 -> librespot: core/src/connection/, core/src/diffie_hellman.rs
-├── metadata/     Mercury pub/sub
-│                 -> librespot: core/src/mercury/
-├── connect/      Spirc/dealer protocol, device registration
-│                 -> librespot: connect/src/
-└── playback/     Audio key exchange, CDN fetch + AES-CTR decrypt
-                  -> librespot: metadata/src/audio/, core/src/audio_key.rs
-```
+Protocol documentation organized by area, each citing its upstream reference.
+See each subfolder's own README for confirmed findings and open items —
+`research/auth/` in particular already has real, verified material (the DH
+parameters, RSA server key, and protobuf schema) waiting to be wired into
+`ap.c`.
 
 Also referenced: `librespot-org/spotify-connect-resources` (protocol data
 dumps) and `librespot-java` (devgianlu) for areas where it's ahead of the Rust
 implementation.
 
-Every finding here that gets ported into `apps/spotifygtk-native/src/spotify/`
-should note which upstream file it's translated from.
+Every finding that gets ported into `apps/spotify-native/src/spotify/` should
+note which upstream file it's translated from — see `THIRD_PARTY_LICENSES`.
 
 ---
 
@@ -185,155 +280,64 @@ should note which upstream file it's translated from.
 - **Runtime probing over compile-time feature gates** — the binary works
   everywhere, it just silently takes the best available path
 
-## Architecture (`spotifygtk-native`)
+## Architecture (`spotify-native`)
 
 ```
-┌──────────────────────────────────────────────────┐
-│                  SpotifyGTK UI                    │
-│         GTK4 / libadwaita (src/ui/)               │
-└──────────┬───────────────────────┬────────────────┘
-           │                       │
-┌──────────▼──────────┐  ┌─────────▼──────────────┐
-│   Web API client     │  │   Protocol layer        │
-│   (src/api.c)         │  │   (src/spotify/)        │
-│   OAuth2 PKCE         │  │   AP connection,        │
-│   search/library/     │  │   Mercury pub/sub,      │
-│   playback control    │  │   audio key exchange,   │
-│   via api.spotify.com │  │   CDN chunk fetching     │
-└──────────────────────┘  └─────────┬──────────────┘
-                                     │
-                          ┌──────────▼──────────────┐
-                          │   Audio engine            │
-                          │   (src/audio/)            │
-                          │   Ogg/Vorbis decode,      │
-                          │   PipeWire/Pulse/ALSA/    │
-                          │   WASAPI output            │
-                          └────────────────────────────┘
-
-┌──────────────────────────────────────────────────┐
-│   Image cache (src/image_cache.c)                  │
-│   L1 in-memory LRU + L2 disk cache                 │
-│   3-tier decode: VA-API → libjpeg-turbo → stb_image│
-│   Worker thread pool, never blocks the GTK thread  │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────┐
+│         spotify-native-harness        │
+│         (src/main.c, CLI only)        │
+└───────────────┬───────────────────────┘
+                │
+┌───────────────▼───────────────────────┐
+│           Protocol layer               │
+│           (src/spotify/)               │
+│   Shannon cipher (real), AP framing,   │
+│   Mercury pub/sub, audio key exchange, │
+│   CDN chunk fetching                   │
+└───────────────┬───────────────────────┘
+                │
+┌───────────────▼───────────────────────┐
+│           Audio engine                 │
+│           (src/audio/)                 │
+│   Ogg/Vorbis decode,                   │
+│   PipeWire/Pulse/ALSA/WASAPI output    │
+└────────────────────────────────────────┘
 ```
 
----
-
-## Prerequisites
-
-| Package | Stable | Nightly |
-|---|---|---|
-| GTK4 | 4.0+ | 4.14+ |
-| libadwaita | 1.4+ | 1.4+ |
-| libsoup3 | 3.4+ | 3.4+ |
-| json-glib | 1.6+ | 1.6+ |
-| libogg / libvorbis | 1.3+ | 1.3+ |
-| OpenSSL | 3.0+ | 3.0+ |
-| libjpeg-turbo | any | any |
-| PulseAudio or ALSA | one required | one required |
-| libsecret | optional | optional |
-| libva + libva-drm | — | optional |
-| libpipewire-0.3 | — | optional |
-
-**Ubuntu / Debian (24.04+)**
-```bash
-sudo apt install \
-  meson ninja-build pkg-config \
-  libgtk-4-dev libadwaita-1-dev \
-  libsoup-3.0-dev libjson-glib-dev \
-  libsecret-1-dev libglib2.0-dev \
-  libogg-dev libvorbis-dev \
-  libssl-dev libjpeg-turbo8-dev \
-  libpulse-dev libasound2-dev
-# Nightly only:
-sudo apt install libva-dev libva-drm2 libpipewire-0.3-dev
-```
-
-**Fedora / RHEL**
-```bash
-sudo dnf install \
-  meson ninja-build pkg-config \
-  gtk4-devel libadwaita-devel \
-  libsoup3-devel json-glib-devel \
-  libsecret-devel glib2-devel \
-  libogg-devel libvorbis-devel \
-  openssl-devel libjpeg-turbo-devel \
-  pulseaudio-libs-devel alsa-lib-devel
-```
-
-**Arch Linux**
-```bash
-sudo pacman -S meson gtk4 libadwaita libsoup3 json-glib libsecret \
-  libogg libvorbis openssl libjpeg-turbo libpulse alsa-lib \
-  libva pipewire
-```
-
----
-
-## Building
-
-```bash
-git clone https://github.com/martiancomputer/SpotifyGTK.git
-cd SpotifyGTK
-
-meson setup build --native-file build-profiles/stable.ini
-# or: meson setup build --native-file build-profiles/nightly.ini
-
-ninja -C build
-./build/src/spotifygtk
-```
-
-### Install system-wide
-
-```bash
-sudo ninja -C build install
-```
-
----
-
-## Authentication
-
-OAuth 2.0 Authorization Code + PKCE — no client secret ever stored on disk.
-
-1. Register an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
-2. Add redirect URI: `http://127.0.0.1:8888/callback`
-3. Copy your **Client ID**, then:
-
-```bash
-export SPOTIFY_CLIENT_ID="your_client_id_here"
-./build/src/spotifygtk
-```
-
-Your browser opens for login; the token is captured on `127.0.0.1:8888` and
-stored via **libsecret** (or `~/.config/spotifygtk/tokens`, `chmod 600`, if
-libsecret isn't available).
+Image cache (3-tier decode: VA-API → libjpeg-turbo → stb_image, LRU + disk
+cache, worker thread pool) currently lives in `spotify-connect` since that's
+where the only UI is — `spotify-native` will need its own copy or a shared
+lib once it has one too.
 
 ---
 
 ## Running Tests
 
 ```bash
-meson test -C build --print-errorlogs
+cd apps/spotify-connect && meson test -C build --print-errorlogs
+cd apps/spotify-native  && meson test -C build --print-errorlogs
 ```
 
 ## Contributing
 
 1. Fork, branch off `main`
 2. Match existing style (2-space indent, GLib naming conventions)
-3. Run `cppcheck src/ -i src/vendor` before submitting
+3. Run `cppcheck` on the app you touched, excluding `vendor/`
 4. If touching `spotify/shannon.c` or `spotify/ap.c`: cite your source —
    `research/auth/` should already have the upstream reference; if porting
    new logic from `librespot`, add the attribution there first
 
 ### Roadmap
 
-- [ ] Reorganize `src/` into `apps/spotifygtk-remote/`
-- [ ] Scaffold `apps/spotifygtk-native/`
-- [ ] Port Shannon cipher + DH handshake from librespot (`research/auth/`)
+- [x] Reorganize into `apps/spotify-connect/` + `apps/spotify-native/`
+- [x] Port real Shannon cipher from librespot's `shannon` crate
+- [x] Document real DH params, RSA server key, keyexchange.proto schema
+- [ ] Hand-roll `keyexchange.proto` encoder, wire DH handshake into `ap.c`
+- [ ] AP login step (post-handshake credential exchange)
 - [ ] Mercury protocol validation against live traffic
+- [ ] Ad-insertion / feature-state event handling (`research/connect/`)
 - [ ] VA-API hardware JPEG decode path (probe works, decode pending)
-- [ ] Vulkan compositing for `spotifygtk-native`
+- [ ] Vulkan compositing, UI for `spotify-native`
 - [ ] MPRIS2 D-Bus interface
 - [ ] Flatpak packaging
 - [ ] Windows port (WASAPI backend, MSYS2/MinGW build)
@@ -344,9 +348,10 @@ meson test -C build --print-errorlogs
 
 **GNU General Public License v3.0** — see [LICENSE](LICENSE).
 
-Portions of `apps/spotifygtk-native` reference or port logic from
-[`librespot`](https://github.com/librespot-org/librespot) (MIT License) —
-see `THIRD_PARTY_LICENSES` once that porting begins.
+Portions of `apps/spotify-native` are ported from or reference
+[`librespot`](https://github.com/librespot-org/librespot) and the `shannon`
+crate it depends on (both MIT License) — see `THIRD_PARTY_LICENSES` for full
+attribution.
 
 SpotifyGTK is an independent open-source project, not affiliated with or
 endorsed by Spotify AB. "Spotify" is a trademark of Spotify AB. Connecting to

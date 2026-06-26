@@ -96,6 +96,13 @@ store_tokens (SpotifyAuth *self)
   g_autofree gchar *blob = g_strdup_printf ("%s\n%s\n%" G_GINT64_FORMAT,
                                             self->access_token, self->refresh_token,
                                             self->expires_at);
+  /* NOTE: schema name intentionally still says "SpotifyGTK", not
+   * "SpotifyConnect" -- this is the libsecret/keyring storage key,
+   * not a display string. Renaming it would silently invalidate
+   * every already-stored token on next launch (forcing a needless
+   * re-auth) for zero functional benefit, since nothing here is
+   * user-visible. Leave it as-is even though the app/binary name
+   * changed elsewhere. */
   static const SecretSchema schema = {
     "com.github.spotifygtk.SpotifyGTK", SECRET_SCHEMA_NONE,
     { { "type", SECRET_SCHEMA_ATTRIBUTE_STRING }, { NULL, 0 } }
@@ -256,7 +263,7 @@ on_callback_request (SoupServer *server, SoupServerMessage *msg, const gchar *pa
     "<h2>Authenticated</h2><p>You can close this tab.</p></body></html>";
   const gchar *html_err =
     "<html><body style='font-family:sans-serif;text-align:center;padding:4em'>"
-    "<h2>Authentication failed</h2><p>Check SpotifyGTK for details.</p></body></html>";
+    "<h2>Authentication failed</h2><p>Check spotify-connect for details.</p></body></html>";
 
   if (error || !code) {
     g_warning ("OAuth callback error: %s", error ? error : "no code");
@@ -306,7 +313,7 @@ spotifygtk_auth_begin (SpotifyAuth *self)
 
   const gchar *client_id = g_getenv ("SPOTIFY_CLIENT_ID");
   if (!client_id || *client_id == '\0') {
-    g_warning ("Set SPOTIFY_CLIENT_ID before launching SpotifyGTK");
+    g_warning ("Set SPOTIFY_CLIENT_ID before launching spotify-connect");
     g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
     return;
   }
@@ -430,7 +437,7 @@ spotifygtk_auth_class_init (SpotifyAuthClass *klass)
 static void
 spotifygtk_auth_init (SpotifyAuth *self)
 {
-  self->session = soup_session_new_with_options ("user-agent", "SpotifyGTK/" APP_VERSION, NULL);
+  self->session = soup_session_new_with_options ("user-agent", "SpotifyConnect/" APP_VERSION, NULL);
 }
 
 SpotifyAuth *

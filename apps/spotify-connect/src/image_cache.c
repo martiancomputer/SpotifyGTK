@@ -399,7 +399,7 @@ spotifygtk_image_cache_init (SpotifyImageCache *self)
   self->l1_lru      = g_queue_new ();
   self->l1_lru_node = g_hash_table_new (g_str_hash, g_str_equal);
 
-  self->session = soup_session_new_with_options ("user-agent", "SpotifyGTK/" APP_VERSION, NULL);
+  self->session = soup_session_new_with_options ("user-agent", "SpotifyConnect/" APP_VERSION, NULL);
   self->workers = g_thread_pool_new (worker_fetch_and_decode, NULL, WORKER_POOL_SIZE, FALSE, NULL);
 
   self->disk_cache_dir = g_build_filename (g_get_user_cache_dir (), "spotifygtk", "images", NULL);

@@ -209,7 +209,7 @@ spotifygtk_api_class_init (SpotifyApiClass *klass)
 static void
 spotifygtk_api_init (SpotifyApi *self)
 {
-  self->session = soup_session_new_with_options ("user-agent", "SpotifyGTK/" APP_VERSION, NULL);
+  self->session = soup_session_new_with_options ("user-agent", "SpotifyConnect/" APP_VERSION, NULL);
 }
 
 SpotifyApi *

@@ -1,7 +1,4 @@
-subdir('spotify')
-subdir('audio')
-
-spotifygtk_sources = files(
+spotify_connect_sources = files(
   'main.c',
   'app.c',
   'auth.c',
@@ -13,10 +10,8 @@ spotifygtk_sources = files(
   'ui/search_page.c',
 )
 
-executable('spotifygtk',
-  spotifygtk_sources,
-  spotify_proto_sources,
-  audio_engine_sources,
+executable('spotify-connect',
+  spotify_connect_sources,
   include_directories: [config_inc, include_directories('.')],
   dependencies: all_deps,
   install: true,

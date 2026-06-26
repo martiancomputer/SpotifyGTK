@@ -1,0 +1,15 @@
+option('profile',
+  type: 'combo',
+  choices: ['stable', 'nightly'],
+  value: 'stable',
+  description: 'Build track: stable (Pulse/ALSA) or nightly (+ native PipeWire)')
+
+option('enable_pipewire',
+  type: 'boolean',
+  value: false,
+  description: 'Compile native PipeWire audio output (nightly default: true). Runtime-probed regardless -- falls through to Pulse/ALSA if not actually present.')
+
+option('tests',
+  type: 'boolean',
+  value: true,
+  description: 'Build unit tests')

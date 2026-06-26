@@ -21,14 +21,6 @@ if get_option('tests')
   )
   test('api-requests', test_api)
 
-  test_shannon = executable('test-shannon',
-    'test_shannon.c',
-    '../src/spotify/shannon.c',
-    include_directories: [config_inc, include_directories('../src'), include_directories('../src/spotify')],
-    dependencies: [test_deps],
-  )
-  test('shannon-cipher', test_shannon)
-
   test_image_cache = executable('test-image-cache',
     'test_image_cache.c',
     '../src/image_cache.c',

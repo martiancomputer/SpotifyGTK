@@ -73,7 +73,7 @@ spotifygtk_window_constructed (GObject *object)
   SpotifyWindow *self = SPOTIFYGTK_WINDOW (object);
   G_OBJECT_CLASS (spotifygtk_window_parent_class)->constructed (object);
 
-  gtk_window_set_title          (GTK_WINDOW (self), "SpotifyGTK");
+  gtk_window_set_title          (GTK_WINDOW (self), "Spotify Connect");
   gtk_window_set_default_size   (GTK_WINDOW (self), 1100, 700);
   gtk_window_set_icon_name      (GTK_WINDOW (self), APP_ID);
 
@@ -81,7 +81,7 @@ spotifygtk_window_constructed (GObject *object)
 
   GtkWidget *sidebar_content = build_sidebar (self);
   AdwNavigationPage *sidebar_page = ADW_NAVIGATION_PAGE (
-    adw_navigation_page_new (sidebar_content, "SpotifyGTK"));
+    adw_navigation_page_new (sidebar_content, "Spotify Connect"));
 
   self->page_stack = GTK_STACK (gtk_stack_new ());
   gtk_stack_set_transition_type (self->page_stack, GTK_STACK_TRANSITION_TYPE_CROSSFADE);

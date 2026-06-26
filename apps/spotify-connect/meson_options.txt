@@ -19,29 +19,18 @@ option('tests',
   value: true,
   description: 'Build unit tests')
 
-# ── Optional hardware/library acceleration ──────────────────────────────────
-# All of these are runtime-probed even when enabled at compile time — if the
-# feature isn't actually present at runtime (e.g. no VA-API capable GPU),
-# SpotifyGTK falls through to the next tier silently. Disabling at compile
-# time just strips the code path entirely for minimal binary size.
+# ── Optional hardware acceleration for the image cache ──────────────────────
+# Runtime-probed even when enabled at compile time -- if VA-API isn't
+# actually present at runtime, the image cache falls through to
+# libjpeg-turbo or stb_image silently. Disabling at compile time just
+# strips the code path entirely for minimal binary size.
 
 option('enable_vaapi',
   type: 'boolean',
   value: false,
   description: 'Compile VA-API hardware JPEG decode path (nightly default: true)')
 
-option('enable_pipewire',
-  type: 'boolean',
-  value: false,
-  description: 'Compile native PipeWire audio output (nightly default: true)')
-
 option('enable_dmabuf',
   type: 'boolean',
   value: false,
   description: 'Compile GdkDmabufTexture zero-copy path, requires GTK 4.14+')
-
-option('audio_backend',
-  type: 'combo',
-  choices: ['pulse', 'alsa', 'pipewire'],
-  value: 'pulse',
-  description: 'Default Linux audio output backend (others remain available as runtime fallback)')

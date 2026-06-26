@@ -1,11 +1,11 @@
 [Desktop Entry]
-Name=SpotifyGTK
+Name=SpotifyConnect
 GenericName=Music Player
 Comment=A native GTK4 Spotify client for Linux
-Exec=spotifygtk %U
-Icon=com.github.spotifygtk.SpotifyGTK
+Exec=spotify-connect %U
+Icon=com.github.spotifygtk.SpotifyConnect
 Terminal=false
 Type=Application
 Categories=Audio;Music;Player;GTK;
 Keywords=spotify;music;streaming;player;
-StartupWMClass=spotifygtk
+StartupWMClass=spotify-connect
