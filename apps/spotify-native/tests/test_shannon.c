@@ -1,14 +1,13 @@
 /*
- * test_shannon.c — structural tests for the Shannon cipher scaffolding.
+ * test_shannon.c — tests for the real, ported Shannon cipher.
  *
- * IMPORTANT: these tests validate plumbing (key setup doesn't crash,
- * encrypt/decrypt round-trips symmetrically, buffering doesn't
- * corrupt length) given the CURRENT stub round function. They do
- * NOT validate interoperability with real Spotify servers — that
- * requires known-good test vectors from a verified reference
- * implementation, which is exactly the gap flagged in shannon.c.
- * Once the real round function lands, replace test_roundtrip_stub
- * with vectors from that reference.
+ * Previously these tested the honest-stub round function and
+ * documented that encrypt() was a no-op (ciphertext == plaintext) by
+ * design at the time. Since the real cipher landed (ported from the
+ * `shannon` crate, see THIRD_PARTY_LICENSES), that's no longer true --
+ * test_roundtrip below replaces the old test_roundtrip_stub with the
+ * actual expected behavior: encryption changes the bytes, and
+ * decrypt() on an independently-keyed receiver recovers them.
  */
 
 #include <glib.h>
@@ -27,7 +26,7 @@ test_key_setup_no_crash (void)
 }
 
 static void
-test_roundtrip_stub (void)
+test_roundtrip (void)
 {
   ShannonCipher enc, dec;
   guint8 key[16] = {0};
@@ -46,13 +45,44 @@ test_roundtrip_stub (void)
   memcpy (buf, plaintext, sizeof (buf));
 
   shannon_encrypt (&enc, buf, sizeof (buf));
+
+  /* Real encryption should change the bytes -- this is the assertion
+   * that correctly started failing once the stub was replaced, which
+   * is the intended signal, not a regression. */
+  g_assert_false (memcmp (buf, plaintext, sizeof (plaintext)) == 0);
+
+  shannon_decrypt (&dec, buf, sizeof (buf));
+
+  /* An independently-keyed-and-nonced receiver should recover the
+   * original bytes exactly. */
   g_assert_cmpmem (buf, sizeof (buf), plaintext, sizeof (plaintext));
-  /* NOTE: with the current stub round function, the "keystream" is
-   * always zero, so encrypt is presently a no-op (ciphertext ==
-   * plaintext). This assertion documents that known limitation
-   * rather than hiding it — it will correctly start failing the
-   * moment a real round function is implemented, which is the
-   * intended signal that test vectors need updating too. */
+}
+
+static void
+test_mac_agreement (void)
+{
+  /* Sender and receiver should derive identical MACs after a
+   * matching encrypt/decrypt pair, given they accumulate the MAC
+   * over the plaintext value either way (see shannon.c). */
+  ShannonCipher enc, dec;
+  guint8 key[16]  = {0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22,
+                     0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00};
+  guint8 nonce[4] = {0x01, 0x02, 0x03, 0x04};
+
+  shannon_key_setup (&enc, key, sizeof (key));
+  shannon_nonce (&enc, nonce, sizeof (nonce));
+  shannon_key_setup (&dec, key, sizeof (key));
+  shannon_nonce (&dec, nonce, sizeof (nonce));
+
+  guint8 buf[17] = "shannon test msg";  /* deliberately not a multiple of 4 */
+  shannon_encrypt (&enc, buf, sizeof (buf));
+  shannon_decrypt (&dec, buf, sizeof (buf));
+
+  guint8 mac_enc[4], mac_dec[4];
+  shannon_finish (&enc, mac_enc, sizeof (mac_enc));
+  shannon_finish (&dec, mac_dec, sizeof (mac_dec));
+
+  g_assert_cmpmem (mac_enc, sizeof (mac_enc), mac_dec, sizeof (mac_dec));
 }
 
 int
@@ -60,6 +90,7 @@ main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/shannon/key-setup-no-crash", test_key_setup_no_crash);
-  g_test_add_func ("/shannon/roundtrip-stub-is-noop", test_roundtrip_stub);
+  g_test_add_func ("/shannon/roundtrip",          test_roundtrip);
+  g_test_add_func ("/shannon/mac-agreement",      test_mac_agreement);
   return g_test_run ();
 }
