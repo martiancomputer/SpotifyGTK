@@ -209,13 +209,12 @@ gap:
 | Audio output: PulseAudio, ALSA | ✅ Functional |
 | Audio output: PipeWire | 🟡 Implemented, needs validation against a running PipeWire instance |
 | Audio output: WASAPI (Windows) | ⬜ Stub only — Windows port hasn't started |
-| AP connection + packet framing (`spotify/ap.c`) | 🟡 TCP/SRV resolution real, DH handshake not implemented (real DH params + RSA server key now documented in `research/auth/`, not yet wired in) |
+| AP handshake (`spotify/ap.c`, `dh.c`, `handshake_crypto.c`, `protobuf_min.c`) | 🟡 Fully ported from librespot's `handshake.rs` — DH exchange, RSA server-signature verification, HMAC-SHA1 key derivation, hand-rolled protobuf for `keyexchange.proto`. DH math independently verified (`test_dh.c`: two local keypairs agree on a shared secret). **Not yet tested against a live Spotify server** — this sandbox can't reach `ap.spotify.com`. |
 | Mercury protocol (`spotify/mercury.c`) | 🟡 Framing implemented, unverified against live traffic |
 | Audio key exchange (`spotify/audio_key.c`) | ✅ Request/response plumbing complete |
 | CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | 🟡 HTTPS Range + decrypt real, IV seed pending confirmation against a captured stream |
 | Spotify Connect registration (`spotify/connect.c`) | 🟡 Mercury subscription real, device-state payload pending real protobuf schema; ad-insertion events not yet researched |
 | AP login (sending credentials post-handshake) | ⬜ Not started — separate step from the DH handshake itself |
-| keyexchange.proto hand-rolled encoder | ⬜ Not started — schema documented in `research/auth/`, not yet implemented |
 | Image cache VA-API hardware decode | 🟡 Probe works, decode path stubbed (lives in `spotify-connect`, shared concept) |
 | Vulkan compositing | ⬜ Not started |
 | UI | ⬜ None yet — `main.c` is a CLI development harness |
@@ -332,7 +331,8 @@ cd apps/spotify-native  && meson test -C build --print-errorlogs
 - [x] Reorganize into `apps/spotify-connect/` + `apps/spotify-native/`
 - [x] Port real Shannon cipher from librespot's `shannon` crate
 - [x] Document real DH params, RSA server key, keyexchange.proto schema
-- [ ] Hand-roll `keyexchange.proto` encoder, wire DH handshake into `ap.c`
+- [x] Hand-roll `keyexchange.proto` encoder, wire DH handshake into `ap.c`
+- [ ] Test the handshake against a live Spotify server (sandbox can't reach `ap.spotify.com`)
 - [ ] AP login step (post-handshake credential exchange)
 - [ ] Mercury protocol validation against live traffic
 - [ ] Ad-insertion / feature-state event handling (`research/connect/`)

@@ -28,12 +28,25 @@ over the *plaintext* value, never ciphertext — this differs by direction
 in *when* (encrypt MACs before XOR-ing, decrypt MACs after recovering
 plaintext) but never *what*.
 
+**Key derivation produces 32-byte keys, not 20.** Easy to get wrong:
+`compute_keys()` derives 100 bytes total (5×20-byte HMAC-SHA1 rounds), but
+`send_key`/`recv_key` are each `data[20:52]`/`data[52:84]` — 32 bytes apiece,
+not 20. This matches `SHANNON_KEY_LEN_MAX 32` already in `shannon.h`. The
+first 20 bytes (`data[0:20]`) become the HMAC key for the client's
+"challenge" response, not part of either cipher key.
+
 ## Open items
 
-- [ ] Hand-roll the `keyexchange.proto` messages (ClientHello,
-      APResponseMessage, ClientResponsePlaintext) in C — schema is small
-      enough not to need a full protobuf-c dependency
-- [ ] HMAC-SHA1 key expansion (5 rounds → 100 bytes → send_key/recv_key
-      split) — not yet ported into `ap.c`
+- [x] Hand-roll the `keyexchange.proto` messages in C — `protobuf_min.c`,
+      tested in `tests/test_protobuf.c`
+- [x] HMAC-SHA1 key expansion — `handshake_crypto.c` (`hs_compute_keys`)
+- [x] Full handshake wired into `ap.c` (`perform_handshake`) — ported from
+      `core/src/connection/handshake.rs`, using the verified constants in
+      `handshake_constants.h` and the real Shannon cipher
+- [ ] **Not yet tested against a live Spotify server.** Everything above
+      is "should be correct per the reference," not "confirmed working" —
+      this sandbox can't reach `ap.spotify.com`. `dh.c`'s math is verified
+      independently (`test_dh.c`: two local keypairs agree on a shared
+      secret), but that doesn't prove interop with Spotify's actual servers
 - [ ] Login step itself (sending stored credentials over the now-encrypted
       AP connection) — separate from the DH handshake, not yet researched
