@@ -16,3 +16,15 @@ executable('spotify-connect',
   dependencies: all_deps,
   install: true,
 )
+
+# Small standalone tool, reuses auth.c's real token storage/lookup
+# logic rather than reimplementing it, to extract a stored OAuth
+# token for use elsewhere (e.g. testing apps/spotify-native's login
+# against a real account). Not installed -- a dev/debug utility, not
+# part of the shipped app.
+executable('print-token',
+  ['../tools/print-token.c', 'auth.c'],
+  include_directories: [config_inc, include_directories('.')],
+  dependencies: all_deps,
+  install: false,
+)

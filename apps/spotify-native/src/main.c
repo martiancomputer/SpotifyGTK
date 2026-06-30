@@ -19,8 +19,21 @@
  *      when a person with real network access sets the env var.
  *
  * Usage for step 2:
- *   export SPOTIFY_ACCESS_TOKEN="$(your already-working spotify-connect token)"
- *   ./spotify-native-harness
+ *
+ *   Getting a real token (not your registered Spotify app's Client
+ *   ID -- a different thing, and an easy mix-up): if you've already
+ *   completed the browser login in apps/spotify-connect once, its
+ *   token is sitting in your keyring. Extract it with the small
+ *   dev tool built alongside spotify-connect for exactly this:
+ *
+ *     cd ../spotify-connect && meson compile -C build
+ *     export SPOTIFY_ACCESS_TOKEN="$(./build/src/print-token)"
+ *     cd ../spotify-native
+ *     ./build/src/spotify-native-harness
+ *
+ *   (the $(...) above is a real, literal bash command substitution --
+ *   run print-token and use its output -- not a placeholder to fill
+ *   in by hand.)
  */
 
 #include "config.h"
