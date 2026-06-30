@@ -4,12 +4,12 @@
  *
  * Uses OpenSSL 3.0's EVP_MAC (HMAC) and OSSL_PARAM_BLD/EVP_PKEY_fromdata
  * (RSA public key construction) rather than the legacy HMAC_CTX_* and
- * RSA_*/EVP_PKEY_assign_RSA APIs, which OpenSSL 3.0 deprecates. Both
+ * RSA_EVP_PKEY_assign_RSA APIs, which OpenSSL 3.0 deprecates. Both
  * replacement patterns verified against OpenSSL's own documentation
  * (docs.openssl.org/EVP_MAC, EVP_PKEY-RSA) before writing this, the
  * same standard applied to the protocol constants elsewhere in this
  * codebase: don't guess at API shapes from memory when getting one
- * wrong produces code that compiles but is subtly broken.
+ * wrong produces code that compiles but is subtly broken. 
  */
 
 #include "config.h"
