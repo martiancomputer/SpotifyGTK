@@ -49,7 +49,7 @@ typedef enum {
 } PbWireType;
 
 /* Reads one field's tag + value starting at *pos, advancing *pos past
- * it. For length-delimited fields, *out_data/*out_len point directly
+ * it. For length-delimited fields, out_data and out_len point directly
  * into buf (no copy). For varints, the value lands in *out_varint.
  * Returns FALSE if there's no more data or the buffer is malformed. */
 gboolean pb_read_field (const guint8 *buf, gsize len, gsize *pos,

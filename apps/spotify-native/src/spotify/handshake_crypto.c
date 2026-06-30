@@ -1,6 +1,15 @@
 /*
  * handshake_crypto.c — HMAC key derivation + RSA signature verify.
  * See handshake_crypto.h for context.
+ *
+ * Uses OpenSSL 3.0's EVP_MAC (HMAC) and OSSL_PARAM_BLD/EVP_PKEY_fromdata
+ * (RSA public key construction) rather than the legacy HMAC_CTX_* and
+ * RSA_*/EVP_PKEY_assign_RSA APIs, which OpenSSL 3.0 deprecates. Both
+ * replacement patterns verified against OpenSSL's own documentation
+ * (docs.openssl.org/EVP_MAC, EVP_PKEY-RSA) before writing this, the
+ * same standard applied to the protocol constants elsewhere in this
+ * codebase: don't guess at API shapes from memory when getting one
+ * wrong produces code that compiles but is subtly broken.
  */
 
 #include "config.h"
@@ -8,13 +17,48 @@
 #include "handshake_constants.h"
 
 #if HAVE_OPENSSL
-#include <openssl/hmac.h>
-#include <openssl/sha.h>
 #include <openssl/evp.h>
-#include <openssl/rsa.h>
+#include <openssl/core_names.h>
+#include <openssl/param_build.h>
 #include <openssl/bn.h>
+#include <openssl/sha.h>
 #endif
 #include <string.h>
+
+#if HAVE_OPENSSL
+/* Single round of HMAC-SHA1 via the EVP_MAC interface. Returns TRUE
+ * and writes exactly 20 bytes to out on success. */
+static gboolean
+hmac_sha1 (const guint8 *key, gsize key_len,
+          const guint8 *data1, gsize data1_len,
+          const guint8 *data2, gsize data2_len,  /* optional second chunk, may be NULL/0 */
+          guint8 *out /* 20 bytes */)
+{
+  gboolean ok = FALSE;
+  EVP_MAC *mac = EVP_MAC_fetch (NULL, "HMAC", NULL);
+  if (!mac) return FALSE;
+
+  EVP_MAC_CTX *ctx = EVP_MAC_CTX_new (mac);
+  if (!ctx) { EVP_MAC_free (mac); return FALSE; }
+
+  OSSL_PARAM params[] = {
+    OSSL_PARAM_construct_utf8_string (OSSL_MAC_PARAM_DIGEST, "SHA1", 0),
+    OSSL_PARAM_construct_end (),
+  };
+
+  if (EVP_MAC_init (ctx, key, key_len, params) == 1 &&
+      EVP_MAC_update (ctx, data1, data1_len) == 1 &&
+      (data2 == NULL || data2_len == 0 || EVP_MAC_update (ctx, data2, data2_len) == 1)) {
+    gsize outlen = 0;
+    if (EVP_MAC_final (ctx, out, &outlen, SHA_DIGEST_LENGTH) == 1 && outlen == SHA_DIGEST_LENGTH)
+      ok = TRUE;
+  }
+
+  EVP_MAC_CTX_free (ctx);
+  EVP_MAC_free (mac);
+  return ok;
+}
+#endif
 
 gboolean
 hs_compute_keys (const guint8 *shared_secret, gsize shared_secret_len,
@@ -23,30 +67,18 @@ hs_compute_keys (const guint8 *shared_secret, gsize shared_secret_len,
 {
 #if HAVE_OPENSSL
   guint8 data[100];  /* 5 rounds x 20-byte SHA-1 HMAC output */
-  unsigned int hmac_len = 0;
 
   for (int i = 1; i <= 5; i++) {
     guint8 counter = (guint8) i;
-    HMAC_CTX *ctx = HMAC_CTX_new ();
-    if (!ctx) return FALSE;
-
-    HMAC_Init_ex (ctx, shared_secret, (int) shared_secret_len, EVP_sha1 (), NULL);
-    HMAC_Update (ctx, packets, packets_len);
-    HMAC_Update (ctx, &counter, 1);
-    HMAC_Final (ctx, data + (i - 1) * 20, &hmac_len);
-    HMAC_CTX_free (ctx);
-
-    if (hmac_len != 20) return FALSE;
+    if (!hmac_sha1 (shared_secret, shared_secret_len,
+                    packets, packets_len, &counter, 1,
+                    data + (i - 1) * 20))
+      return FALSE;
   }
 
   /* challenge = HMAC-SHA1(key = data[0:20], message = packets) */
-  HMAC_CTX *ctx2 = HMAC_CTX_new ();
-  if (!ctx2) return FALSE;
-  HMAC_Init_ex (ctx2, data, 20, EVP_sha1 (), NULL);
-  HMAC_Update (ctx2, packets, packets_len);
-  HMAC_Final (ctx2, out_challenge, &hmac_len);
-  HMAC_CTX_free (ctx2);
-  if (hmac_len != HS_CHALLENGE_LEN) return FALSE;
+  if (!hmac_sha1 (data, 20, packets, packets_len, NULL, 0, out_challenge))
+    return FALSE;
 
   memcpy (out_send_key, data + 20, HS_SEND_KEY_LEN);
   memcpy (out_recv_key, data + 52, HS_RECV_KEY_LEN);
@@ -67,29 +99,51 @@ hs_verify_server_signature (const guint8 *server_dh_pubkey, gsize server_dh_pubk
   guint8 hash[SHA_DIGEST_LENGTH];
   SHA1 (server_dh_pubkey, server_dh_pubkey_len, hash);
 
+  gboolean ok = FALSE;
+
   BIGNUM *n = BN_bin2bn (AP_SERVER_KEY, sizeof (AP_SERVER_KEY), NULL);
   BIGNUM *e = BN_new ();
-  BN_set_word (e, RSA_EXPONENT);
-
-  RSA *rsa = RSA_new ();
-  if (!rsa || !n || !e || RSA_set0_key (rsa, n, e, NULL) != 1) {
-    g_warning ("handshake_crypto: failed to construct RSA key from AP_SERVER_KEY");
-    if (rsa) RSA_free (rsa); else { BN_free (n); BN_free (e); }
+  if (!n || !e || BN_set_word (e, RSA_EXPONENT) != 1) {
+    g_warning ("handshake_crypto: failed to construct BIGNUMs for AP_SERVER_KEY");
+    if (n) BN_free (n);
+    if (e) BN_free (e);
     return FALSE;
   }
-  /* RSA_set0_key took ownership of n and e on success; don't free separately. */
 
-  EVP_PKEY *pkey = EVP_PKEY_new ();
-  if (!pkey || EVP_PKEY_assign_RSA (pkey, rsa) != 1) {
-    g_warning ("handshake_crypto: failed to wrap RSA key in EVP_PKEY");
-    RSA_free (rsa);
-    if (pkey) EVP_PKEY_free (pkey);
+  /* Build an EVP_PKEY from raw modulus+exponent bytes via the
+   * OpenSSL 3.0+ OSSL_PARAM_BLD path -- this is the modern
+   * replacement for RSA_new()+RSA_set0_key()+EVP_PKEY_assign_RSA(),
+   * all of which OpenSSL 3.0 deprecates. */
+  EVP_PKEY_CTX *build_ctx = EVP_PKEY_CTX_new_from_name (NULL, "RSA", NULL);
+  OSSL_PARAM_BLD *param_bld = OSSL_PARAM_BLD_new ();
+  EVP_PKEY *pkey = NULL;
+
+  if (build_ctx && param_bld &&
+      OSSL_PARAM_BLD_push_BN (param_bld, OSSL_PKEY_PARAM_RSA_N, n) == 1 &&
+      OSSL_PARAM_BLD_push_BN (param_bld, OSSL_PKEY_PARAM_RSA_E, e) == 1) {
+    OSSL_PARAM *params = OSSL_PARAM_BLD_to_param (param_bld);
+    if (params) {
+      if (EVP_PKEY_fromdata_init (build_ctx) == 1 &&
+          EVP_PKEY_fromdata (build_ctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) == 1) {
+        /* pkey now holds an independent copy of n/e's values; ok so far. */
+      }
+      OSSL_PARAM_free (params);
+    }
+  } else {
+    g_warning ("handshake_crypto: failed to build OSSL_PARAM set for AP_SERVER_KEY");
+  }
+
+  if (param_bld) OSSL_PARAM_BLD_free (param_bld);
+  if (build_ctx) EVP_PKEY_CTX_free (build_ctx);
+  BN_free (n);
+  BN_free (e);
+
+  if (!pkey) {
+    g_warning ("handshake_crypto: EVP_PKEY_fromdata failed to construct the AP server key");
     return FALSE;
   }
-  /* pkey now owns rsa. */
 
   EVP_PKEY_CTX *vctx = EVP_PKEY_CTX_new (pkey, NULL);
-  gboolean ok = FALSE;
   if (vctx &&
       EVP_PKEY_verify_init (vctx) == 1 &&
       EVP_PKEY_CTX_set_signature_md (vctx, EVP_sha1 ()) == 1 &&

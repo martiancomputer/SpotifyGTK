@@ -114,4 +114,21 @@ void spotifygtk_ap_session_login (SpotifyApSession *self,
 
 void spotifygtk_ap_session_disconnect (SpotifyApSession *self);
 
+/*
+ * Signal: "disconnected" (GError *error)
+ *
+ * Fires whenever the receive loop terminates unexpectedly (the
+ * remote end closed the connection, a read failed, or a MAC check
+ * failed) -- error describes why. Distinct from a normal, caller-
+ * initiated spotifygtk_ap_session_disconnect(), which does not emit
+ * this. Any pending operation waiting on a receive-loop-delivered
+ * response (currently: login) listens for this to fail fast rather
+ * than silently waiting out a caller-side timeout for something that
+ * already, observably, isn't coming.
+ *
+ * error is only valid for the duration of this emission (passed as
+ * G_TYPE_POINTER, not a boxed/copied type) -- handlers needing it
+ * past that point must copy it themselves.
+ */
+
 G_END_DECLS

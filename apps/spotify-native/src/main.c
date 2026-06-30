@@ -78,6 +78,7 @@ run_shannon_selftest (void)
 typedef struct {
   GMainLoop *loop;
   gboolean   ok;
+  gboolean   timed_out;
 } LiveTestState;
 
 static void
@@ -126,10 +127,11 @@ on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
 static gboolean
 on_live_test_timeout (gpointer user_data)
 {
-  GMainLoop *loop = user_data;
+  LiveTestState *state = user_data;
   g_warning ("[live-test] timed out after 15s waiting for a response -- "
             "check network reachability to ap.spotify.com, or a firewall/proxy issue");
-  g_main_loop_quit (loop);
+  state->timed_out = TRUE;
+  g_main_loop_quit (state->loop);
   return G_SOURCE_REMOVE;
 }
 
@@ -145,13 +147,17 @@ run_live_test (void)
 
   SpotifyApSession *session = spotifygtk_ap_session_new ();
   GMainLoop *loop = g_main_loop_new (NULL, FALSE);
-  LiveTestState state = { .loop = loop, .ok = FALSE };
+  LiveTestState state = { .loop = loop, .ok = FALSE, .timed_out = FALSE };
 
   spotifygtk_ap_session_connect (session, token, on_connected, &state);
 
   /* Bound how long we'll wait -- a hang here (e.g. SRV resolution
    * stalling, or a firewalled outbound connection) should fail
-   * loudly rather than block forever.
+   * loudly rather than block forever. This is now mostly a true
+   * network-hang detector: a clean rejection (bad token, etc.) fails
+   * fast via ap.c's "disconnected" signal rather than waiting out
+   * this timeout, so reaching it specifically suggests a stuck
+   * connection, not a normal login rejection.
    *
    * KNOWN LIMITATION, not fixed here: if this timeout fires, we tear
    * down `session` and return while an async GIO operation may still
@@ -164,13 +170,21 @@ run_live_test (void)
    * the stale callback) -- but this exact pattern would be a real
    * use-after-free if reused inside a long-running app. Properly
    * fixing it means threading a GCancellable through every async hop
-   * in ap.c (resolve, connect, handshake reads, receive loop) -- real
+   * in ap.c (resolve, connect, handshake reads, receive loop): real
    * follow-up work, tracked rather than silently patched over here. */
-  guint timeout_id = g_timeout_add_seconds (15, on_live_test_timeout, loop);
+  guint timeout_id = g_timeout_add_seconds (15, on_live_test_timeout, &state);
 
   g_main_loop_run (loop);
 
-  g_source_remove (timeout_id);
+  /* on_live_test_timeout() returns G_SOURCE_REMOVE, which tells GLib
+   * to auto-remove that source the moment it fires -- calling
+   * g_source_remove() again here unconditionally was a real bug
+   * (GLib-CRITICAL: "Source ID N was not found") whenever the
+   * timeout was what ended the loop. Only remove it ourselves when
+   * something else (success or failure callback) ended the loop
+   * first, leaving the timeout source still pending. */
+  if (!state.timed_out)
+    g_source_remove (timeout_id);
   g_main_loop_unref (loop);
   g_object_unref (session);
 

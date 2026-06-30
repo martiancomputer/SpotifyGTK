@@ -1,14 +1,14 @@
 /*
  * ap.c — Access Point connection implementation.
  *
- * STATUS: SRV resolution, TCP connect, packet framing, AND the
- * Diffie-Hellman handshake are all real now. The handshake (see
- * perform_handshake() below) was ported from librespot's
- * core/src/connection/handshake.rs against the verified constants in
- * handshake_constants.h -- not yet tested against a live Spotify
- * server (this sandbox can't reach ap.spotify.com), so treat it as
- * "should be correct per the reference" rather than "confirmed
- * working" until run for real.
+ * STATUS: SRV resolution, TCP connect, packet framing, the
+ * Diffie-Hellman handshake, the post-handshake receive loop, and
+ * login are all real now, and the handshake has been confirmed
+ * working against a live Spotify server (DH exchange, RSA signature
+ * verification, and HMAC key derivation all checked out). Login
+ * itself is implemented and sends correctly, but hasn't yet produced
+ * a confirmed APWelcome — see research/auth/ for the current status
+ * of that specific gap.
  */
 
 #include "config.h"
@@ -43,6 +43,12 @@ struct _SpotifyApSession {
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyApSession, spotifygtk_ap_session, G_TYPE_OBJECT)
+
+enum {
+  SIG_DISCONNECTED,
+  N_SIGNALS
+};
+static guint signals[N_SIGNALS];
 
 /* ── DNS SRV resolution ──────────────────────────────────────────────────
  * Spotify publishes AP hosts via _spotify-client._tcp SRV records.
@@ -463,11 +469,18 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
 
   GBytes *header_bytes = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &err);
   if (!header_bytes || g_bytes_get_size (header_bytes) < 3) {
-    if (err)
+    g_autoptr(GError) close_err = NULL;
+    if (err) {
       g_warning ("ap.c: receive loop header read failed: %s", err->message);
-    else
+      close_err = g_error_copy (err);
+    } else {
       g_message ("ap.c: AP connection closed by remote end");
+      close_err = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CLOSED,
+                                       "AP connection closed by remote end");
+    }
     g_clear_pointer (&header_bytes, g_bytes_unref);
+    spotifygtk_ap_session_disconnect (self);
+    g_signal_emit (self, signals[SIG_DISCONNECTED], 0, close_err);
     g_object_unref (self);  /* matches the ref taken in start_next_read() */
     return;  /* loop stops -- no automatic reconnect at this layer */
   }
@@ -491,6 +504,9 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
   if (!g_input_stream_read_all (in, payload_and_mac, (gsize) pay_len + 4, NULL, NULL, &err)) {
     g_warning ("ap.c: receive loop payload read failed: %s", err ? err->message : "unknown");
     spotifygtk_ap_session_disconnect (self);
+    g_autoptr(GError) payload_err = err ? g_error_copy (err) :
+      g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "receive loop payload read failed");
+    g_signal_emit (self, signals[SIG_DISCONNECTED], 0, payload_err);
     g_object_unref (self);
     return;
   }
@@ -504,6 +520,9 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
     g_warning ("ap.c: MAC verification failed on incoming packet (cmd=0x%02x) -- "
               "dropping connection, this should never happen on a correct wire", cmd);
     spotifygtk_ap_session_disconnect (self);
+    g_autoptr(GError) mac_err = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                             "MAC verification failed on incoming packet (cmd=0x%02x)", cmd);
+    g_signal_emit (self, signals[SIG_DISCONNECTED], 0, mac_err);
     g_object_unref (self);
     return;
   }
@@ -556,7 +575,23 @@ typedef struct {
   SpotifyApSession *session;
   ApLoginCallback   callback;
   gpointer          user_data;
+  gulong            disconnect_handler_id;
 } LoginClosure;
+
+static void
+login_closure_finish (LoginClosure *lc, SpotifyApSession *session)
+{
+  /* Common cleanup shared by all three ways a pending login can
+   * resolve (APWelcome, AuthFailure, or the connection dropping
+   * before either arrives) -- unregister both packet handlers and
+   * the "disconnected" listener, then free the closure. Centralized
+   * here so a future fourth resolution path can't forget a step. */
+  spotifygtk_ap_session_set_handler (session, AP_CMD_APWELCOME, NULL, NULL);
+  spotifygtk_ap_session_set_handler (session, AP_CMD_AUTH_FAILURE, NULL, NULL);
+  if (lc->disconnect_handler_id)
+    g_signal_handler_disconnect (session, lc->disconnect_handler_id);
+  g_free (lc);
+}
 
 static void
 on_apwelcome (SpotifyApSession *session, ApCommandId cmd,
@@ -576,9 +611,7 @@ on_apwelcome (SpotifyApSession *session, ApCommandId cmd,
 
   if (lc->callback) lc->callback (TRUE, username, NULL, lc->user_data);
 
-  spotifygtk_ap_session_set_handler (session, AP_CMD_APWELCOME, NULL, NULL);
-  spotifygtk_ap_session_set_handler (session, AP_CMD_AUTH_FAILURE, NULL, NULL);
-  g_free (lc);
+  login_closure_finish (lc, session);
 }
 
 static void
@@ -591,7 +624,7 @@ on_auth_failure (SpotifyApSession *session, ApCommandId cmd,
   guint64 error_code = 0;
   pb_find_varint_field (payload, len, 10, &error_code);  /* APLoginFailed.error_code */
 
-  /* Values per keyexchange.proto's ErrorCode enum -- see research/auth/. */
+  /* Values per keyexchange.proto's ErrorCode enum, see research/auth/. */
   const gchar *desc = "unknown error";
   switch (error_code) {
     case 0x0:  desc = "ProtocolError"; break;
@@ -615,9 +648,37 @@ on_auth_failure (SpotifyApSession *session, ApCommandId cmd,
   if (lc->callback) lc->callback (FALSE, NULL, err, lc->user_data);
   g_error_free (err);
 
-  spotifygtk_ap_session_set_handler (session, AP_CMD_APWELCOME, NULL, NULL);
-  spotifygtk_ap_session_set_handler (session, AP_CMD_AUTH_FAILURE, NULL, NULL);
-  g_free (lc);
+  login_closure_finish (lc, session);
+}
+
+static void
+on_session_disconnected_during_login (SpotifyApSession *session, GError *error, gpointer user_data)
+{
+  LoginClosure *lc = user_data;
+
+  /* The connection dropped (closed, read failure, or MAC failure)
+   * before either APWelcome or AuthFailure arrived. Spotify's AP
+   * service doesn't always send a structured AuthFailure for a
+   * rejected login (a clearly invalid token, for instance, can just
+   * get the raw connection closed) -- this is what lets that case
+   * fail fast as a login failure, instead of the caller waiting out
+   * its own timeout for a structured response that was never coming. */
+  GError *login_err = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                   "AP connection dropped before login completed%s%s",
+                                   error ? ": " : "", error ? error->message : "");
+  g_warning ("ap.c: %s", login_err->message);
+
+  if (lc->callback) lc->callback (FALSE, NULL, login_err, lc->user_data);
+  g_error_free (login_err);
+
+  /* The "disconnected" signal already fired (we're a handler for it
+   * right now) and the session already called disconnect() before
+   * emitting -- don't try to disconnect our own handler ID from
+   * inside its own emission, that's a g_signal_handler_disconnect()
+   * misuse. login_closure_finish() below skips that step since
+   * lc->disconnect_handler_id gets zeroed first. */
+  lc->disconnect_handler_id = 0;
+  login_closure_finish (lc, session);
 }
 
 void
@@ -661,6 +722,8 @@ spotifygtk_ap_session_login (SpotifyApSession *self, const gchar *spotify_userna
 
   spotifygtk_ap_session_set_handler (self, AP_CMD_APWELCOME,    on_apwelcome,    lc);
   spotifygtk_ap_session_set_handler (self, AP_CMD_AUTH_FAILURE, on_auth_failure, lc);
+  lc->disconnect_handler_id = g_signal_connect (self, "disconnected",
+                                                G_CALLBACK (on_session_disconnected_during_login), lc);
 
   spotifygtk_ap_session_send (self, AP_CMD_LOGIN, client_response->data, client_response->len);
 }
@@ -691,6 +754,10 @@ static void
 spotifygtk_ap_session_class_init (SpotifyApSessionClass *klass)
 {
   G_OBJECT_CLASS (klass)->dispose = spotifygtk_ap_session_dispose;
+
+  signals[SIG_DISCONNECTED] =
+    g_signal_new ("disconnected", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_POINTER);
 }
 
 static void
