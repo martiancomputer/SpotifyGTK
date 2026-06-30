@@ -48,5 +48,14 @@ first 20 bytes (`data[0:20]`) become the HMAC key for the client's
       this sandbox can't reach `ap.spotify.com`. `dh.c`'s math is verified
       independently (`test_dh.c`: two local keypairs agree on a shared
       secret), but that doesn't prove interop with Spotify's actual servers
-- [ ] Login step itself (sending stored credentials over the now-encrypted
-      AP connection) — separate from the DH handshake, not yet researched
+- [x] Login step (`ap.c`: `spotifygtk_ap_session_login()`, ported from
+      `authentication.rs`'s `AUTHENTICATION_SPOTIFY_TOKEN` path -- reuses
+      the OAuth token rather than needing a raw username/password). Needs
+      a working post-handshake receive loop to deliver the result, which
+      didn't exist before this either -- both landed together.
+- [ ] **GCancellable plumbing.** None of ap.c's async calls (SRV resolve,
+      TCP connect, handshake reads, receive loop reads) currently accept a
+      cancellable -- hardcoded NULL throughout. Harmless in short-lived CLI
+      usage (main.c's live-test path documents why), but a real
+      use-after-free risk once this code is driven by a long-running app
+      that might need to abort a stuck connection attempt.

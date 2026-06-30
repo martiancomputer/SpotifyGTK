@@ -15,6 +15,14 @@ if get_option('tests')
   )
   test('protobuf-wire-format', test_protobuf)
 
+  test_login_encoding = executable('test-login-encoding',
+    'test_login_encoding.c',
+    '../src/spotify/protobuf_min.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep],
+  )
+  test('login-message-encoding', test_login_encoding)
+
   test_dh = executable('test-dh',
     'test_dh.c',
     '../src/spotify/dh.c',

@@ -96,6 +96,14 @@ spotifygtk_ap_session_send (SpotifyApSession *self, ApCommandId cmd,
     return;
   }
 
+  /* librespot's ApCodec re-nonces from the per-direction counter
+   * before every single packet (see codec.rs) -- this was previously
+   * missing here: send_nonce incremented but was never fed back into
+   * the cipher, so every packet after the very first (which inherited
+   * the handshake's initial nonce-0 state) would have used stale
+   * keystream/MAC state and corrupted the connection. */
+  shannon_nonce_u32 (&self->send_cipher, self->send_nonce);
+
   guint8 header[3];
   header[0] = (guint8) cmd;
   header[1] = (guint8) ((len >> 8) & 0xff);
@@ -427,6 +435,234 @@ gboolean
 spotifygtk_ap_session_connect_finish (SpotifyApSession *self, GAsyncResult *result, GError **error)
 {
   return g_task_propagate_boolean (G_TASK (result), error);
+}
+
+/* ── Post-handshake receive loop ─────────────────────────────────────────────
+ * Ported against codec.rs's decode path: read a 3-byte header, Shannon-
+ * decrypt it (re-nonced from recv_nonce first, same as the send side),
+ * pull cmd+len out, read that many payload bytes + the trailing 4-byte
+ * MAC, decrypt the payload (continuing the same per-packet keystream
+ * the header started), then verify the MAC before dispatching to a
+ * handler.
+ *
+ * The header read is async (so this doesn't block waiting for the
+ * *next* packet to arrive at all); the payload+MAC read is a
+ * synchronous read_all once the header tells us how many bytes to
+ * expect, since by that point the data is either already buffered or
+ * arriving imminently as part of the same logical packet -- avoids
+ * threading a second GAsyncResult through for what's normally a tiny,
+ * already-in-flight read. */
+
+static void start_next_read (SpotifyApSession *self);
+
+static void
+on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  SpotifyApSession *self = user_data;
+  g_autoptr(GError) err = NULL;
+
+  GBytes *header_bytes = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &err);
+  if (!header_bytes || g_bytes_get_size (header_bytes) < 3) {
+    if (err)
+      g_warning ("ap.c: receive loop header read failed: %s", err->message);
+    else
+      g_message ("ap.c: AP connection closed by remote end");
+    g_clear_pointer (&header_bytes, g_bytes_unref);
+    g_object_unref (self);  /* matches the ref taken in start_next_read() */
+    return;  /* loop stops -- no automatic reconnect at this layer */
+  }
+
+  shannon_nonce_u32 (&self->recv_cipher, self->recv_nonce);
+
+  gsize hlen = 0;
+  const guint8 *hdata = g_bytes_get_data (header_bytes, &hlen);
+  guint8 header[3];
+  memcpy (header, hdata, 3);
+  g_bytes_unref (header_bytes);
+
+  shannon_decrypt (&self->recv_cipher, header, 3);
+
+  ApCommandId cmd     = (ApCommandId) header[0];
+  guint16     pay_len = (guint16) ((header[1] << 8) | header[2]);
+
+  GInputStream *in = g_io_stream_get_input_stream (G_IO_STREAM (self->connection));
+
+  g_autofree guint8 *payload_and_mac = g_malloc ((gsize) pay_len + 4);
+  if (!g_input_stream_read_all (in, payload_and_mac, (gsize) pay_len + 4, NULL, NULL, &err)) {
+    g_warning ("ap.c: receive loop payload read failed: %s", err ? err->message : "unknown");
+    spotifygtk_ap_session_disconnect (self);
+    g_object_unref (self);
+    return;
+  }
+
+  guint8 *payload_ptr = payload_and_mac;
+  if (pay_len > 0)
+    shannon_decrypt (&self->recv_cipher, payload_ptr, pay_len);
+
+  const guint8 *expected_mac = payload_and_mac + pay_len;
+  if (!shannon_check_mac (&self->recv_cipher, expected_mac, 4)) {
+    g_warning ("ap.c: MAC verification failed on incoming packet (cmd=0x%02x) -- "
+              "dropping connection, this should never happen on a correct wire", cmd);
+    spotifygtk_ap_session_disconnect (self);
+    g_object_unref (self);
+    return;
+  }
+
+  ApPacketHandler handler = g_hash_table_lookup (self->handlers, GUINT_TO_POINTER (cmd));
+  if (handler) {
+    gpointer hdata2 = g_hash_table_lookup (self->handler_data, GUINT_TO_POINTER (cmd));
+    handler (self, cmd, payload_ptr, pay_len, hdata2);
+  } else {
+    g_message ("ap.c: no handler registered for incoming cmd=0x%02x (%u bytes), ignoring",
+              cmd, pay_len);
+  }
+
+  self->recv_nonce++;
+
+  /* start_next_read() below takes its own fresh ref for the next
+   * iteration; drop the one this callback was holding regardless of
+   * which order these two happen in (single-threaded GMainLoop
+   * context, so there's no window where the refcount could hit zero
+   * between them even if it did matter). */
+  start_next_read (self);
+  g_object_unref (self);
+}
+
+static void
+start_next_read (SpotifyApSession *self)
+{
+  if (!self->connected || !self->connection) return;
+
+  /* Ref held across the async gap -- released in on_header_read() on
+   * every exit path. Without this, disposing the session while a
+   * read is in flight would leave the callback firing on a freed
+   * object. */
+  g_object_ref (self);
+
+  GInputStream *in = g_io_stream_get_input_stream (G_IO_STREAM (self->connection));
+  g_input_stream_read_bytes_async (in, 3, G_PRIORITY_DEFAULT, NULL, on_header_read, self);
+}
+
+void
+spotifygtk_ap_session_start_receiving (SpotifyApSession *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_AP_SESSION (self));
+  start_next_read (self);
+}
+
+/* ── Login ────────────────────────────────────────────────────────────────── */
+
+typedef struct {
+  SpotifyApSession *session;
+  ApLoginCallback   callback;
+  gpointer          user_data;
+} LoginClosure;
+
+static void
+on_apwelcome (SpotifyApSession *session, ApCommandId cmd,
+             const guint8 *payload, gsize len, gpointer user_data)
+{
+  (void) cmd;
+  LoginClosure *lc = user_data;
+
+  const guint8 *username_data = NULL; gsize username_len = 0;
+  /* APWelcome.canonical_username, field 0x14 per authentication.proto */
+  pb_find_bytes_field (payload, len, 0x14, &username_data, &username_len);
+
+  g_autofree gchar *username = username_data
+    ? g_strndup ((const gchar *) username_data, username_len) : NULL;
+
+  g_message ("ap.c: login succeeded%s%s", username ? " as " : "", username ? username : "");
+
+  if (lc->callback) lc->callback (TRUE, username, NULL, lc->user_data);
+
+  spotifygtk_ap_session_set_handler (session, AP_CMD_APWELCOME, NULL, NULL);
+  spotifygtk_ap_session_set_handler (session, AP_CMD_AUTH_FAILURE, NULL, NULL);
+  g_free (lc);
+}
+
+static void
+on_auth_failure (SpotifyApSession *session, ApCommandId cmd,
+                 const guint8 *payload, gsize len, gpointer user_data)
+{
+  (void) cmd;
+  LoginClosure *lc = user_data;
+
+  guint64 error_code = 0;
+  pb_find_varint_field (payload, len, 10, &error_code);  /* APLoginFailed.error_code */
+
+  /* Values per keyexchange.proto's ErrorCode enum -- see research/auth/. */
+  const gchar *desc = "unknown error";
+  switch (error_code) {
+    case 0x0:  desc = "ProtocolError"; break;
+    case 0x2:  desc = "TryAnotherAP"; break;
+    case 0x5:  desc = "BadConnectionId"; break;
+    case 0x9:  desc = "TravelRestriction"; break;
+    case 0xb:  desc = "PremiumAccountRequired"; break;
+    case 0xc:  desc = "BadCredentials"; break;
+    case 0xd:  desc = "CouldNotValidateCredentials"; break;
+    case 0xe:  desc = "AccountExists"; break;
+    case 0xf:  desc = "ExtraVerificationRequired"; break;
+    case 0x10: desc = "InvalidAppKey"; break;
+    case 0x11: desc = "ApplicationBanned"; break;
+  }
+
+  GError *err = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                             "AP login failed: %s (code 0x%" G_GINT64_MODIFIER "x)",
+                             desc, error_code);
+  g_warning ("ap.c: %s", err->message);
+
+  if (lc->callback) lc->callback (FALSE, NULL, err, lc->user_data);
+  g_error_free (err);
+
+  spotifygtk_ap_session_set_handler (session, AP_CMD_APWELCOME, NULL, NULL);
+  spotifygtk_ap_session_set_handler (session, AP_CMD_AUTH_FAILURE, NULL, NULL);
+  g_free (lc);
+}
+
+void
+spotifygtk_ap_session_login (SpotifyApSession *self, const gchar *spotify_username,
+                             const gchar *oauth_access_token,
+                             ApLoginCallback callback, gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_AP_SESSION (self));
+
+  if (!self->connected) {
+    GError *err = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                       "login attempted before handshake completed");
+    if (callback) callback (FALSE, NULL, err, user_data);
+    g_error_free (err);
+    return;
+  }
+
+  /* LoginCredentials: username (field 0x0a), typ (0x14, enum
+   * AuthenticationType -- AUTHENTICATION_SPOTIFY_TOKEN = 8 per
+   * authentication.proto), auth_data (0x1e, the raw token bytes). */
+  g_autoptr(GByteArray) login_credentials = g_byte_array_new ();
+  if (spotify_username && *spotify_username)
+    pb_write_bytes_field (login_credentials, 0x0a,
+                          (const guint8 *) spotify_username, strlen (spotify_username));
+  pb_write_varint_field (login_credentials, 0x14, 8);  /* AUTHENTICATION_SPOTIFY_TOKEN */
+  pb_write_bytes_field  (login_credentials, 0x1e,
+                        (const guint8 *) oauth_access_token, strlen (oauth_access_token));
+
+  /* ClientResponseEncrypted: login_credentials (0x0a), system_info
+   * (0x14, required -- but its own sub-fields are all optional, so
+   * an empty embedded message is acceptable here), version_string
+   * (0x1e, optional). */
+  g_autoptr(GByteArray) client_response = g_byte_array_new ();
+  pb_write_message_field (client_response, 0x0a, login_credentials->data, login_credentials->len);
+  pb_write_message_field (client_response, 0x14, NULL, 0);  /* SystemInfo, all-default */
+
+  LoginClosure *lc = g_new0 (LoginClosure, 1);
+  lc->session   = self;
+  lc->callback  = callback;
+  lc->user_data = user_data;
+
+  spotifygtk_ap_session_set_handler (self, AP_CMD_APWELCOME,    on_apwelcome,    lc);
+  spotifygtk_ap_session_set_handler (self, AP_CMD_AUTH_FAILURE, on_auth_failure, lc);
+
+  spotifygtk_ap_session_send (self, AP_CMD_LOGIN, client_response->data, client_response->len);
 }
 
 void
