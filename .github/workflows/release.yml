@@ -1,5 +1,10 @@
 name: Release
 
+# Builds a release tarball for spotify-connect only -- spotify-native
+# isn't a shippable client yet (no UI, no playback, login only just
+# started working against a real server), so there's nothing
+# meaningful to release from it until that changes.
+
 on:
   push:
     tags:
@@ -24,12 +29,11 @@ jobs:
             libgtk-4-dev libadwaita-1-dev \
             libsoup-3.0-dev libjson-glib-dev \
             libsecret-1-dev libglib2.0-dev \
-            libogg-dev libvorbis-dev \
-            libssl-dev libjpeg-turbo8-dev \
-            libpulse-dev libasound2-dev \
-            libva-dev libva-drm2 libpipewire-0.3-dev
+            libjpeg-turbo8-dev \
+            libva-dev libva-drm2
 
       - name: Configure & dist
+        working-directory: apps/spotify-connect
         run: |
           meson setup build --native-file build-profiles/${{ matrix.profile }}.ini
           ninja -C build dist
@@ -37,6 +41,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/meson-dist/*.tar.xz
+          files: apps/spotify-connect/build/meson-dist/*.tar.xz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -209,7 +209,8 @@ gap:
 | Audio output: PulseAudio, ALSA | ✅ Functional |
 | Audio output: PipeWire | 🟡 Implemented, needs validation against a running PipeWire instance |
 | Audio output: WASAPI (Windows) | ⬜ Stub only — Windows port hasn't started |
-| AP handshake (`spotify/ap.c`, `dh.c`, `handshake_crypto.c`, `protobuf_min.c`) | 🟡 Fully ported from librespot's `handshake.rs` — DH exchange, RSA server-signature verification, HMAC-SHA1 key derivation, hand-rolled protobuf for `keyexchange.proto`. DH math independently verified (`test_dh.c`: two local keypairs agree on a shared secret). **Not yet tested against a live Spotify server** — this sandbox can't reach `ap.spotify.com`. |
+| AP handshake (`spotify/ap.c`, `dh.c`, `handshake_crypto.c`, `protobuf_min.c`) | ✅ Confirmed working against a real Spotify server — DH exchange, RSA server-signature verification, and HMAC-SHA1 key derivation all checked out. |
+| AP login (`spotify/native_auth.c`) | 🟡 Message encoding confirmed correct against a live server; needed its own OAuth flow with Spotify's internal client_id and a specific scope list (see `research/auth/`) rather than a Web API token — that's now wired in, next live run is the real test |
 | Mercury protocol (`spotify/mercury.c`) | 🟡 Framing implemented, unverified against live traffic |
 | Audio key exchange (`spotify/audio_key.c`) | ✅ Request/response plumbing complete |
 | CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | 🟡 HTTPS Range + decrypt real, IV seed pending confirmation against a captured stream |
@@ -332,8 +333,8 @@ cd apps/spotify-native  && meson test -C build --print-errorlogs
 - [x] Port real Shannon cipher from librespot's `shannon` crate
 - [x] Document real DH params, RSA server key, keyexchange.proto schema
 - [x] Hand-roll `keyexchange.proto` encoder, wire DH handshake into `ap.c`
-- [ ] Test the handshake against a live Spotify server (sandbox can't reach `ap.spotify.com`)
-- [ ] AP login step (post-handshake credential exchange)
+- [x] Test the handshake against a live Spotify server
+- [ ] Confirm AP login succeeds end-to-end with the corrected native_auth token
 - [ ] Mercury protocol validation against live traffic
 - [ ] Ad-insertion / feature-state event handling (`research/connect/`)
 - [ ] VA-API hardware JPEG decode path (probe works, decode pending)

@@ -7,8 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
-    name: Build & Test (${{ matrix.profile }}, ${{ matrix.os }})
+  spotify-connect:
+    name: spotify-connect (${{ matrix.profile }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -22,8 +22,7 @@ jobs:
             os: ubuntu-24.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
@@ -33,33 +32,73 @@ jobs:
             libgtk-4-dev libadwaita-1-dev \
             libsoup-3.0-dev libjson-glib-dev \
             libsecret-1-dev libglib2.0-dev \
-            libogg-dev libvorbis-dev \
-            libssl-dev libjpeg-turbo8-dev \
-            libpulse-dev libasound2-dev
+            libjpeg-turbo8-dev
 
       - name: Install nightly-only dependencies
         if: matrix.profile == 'nightly'
-        run: |
-          sudo apt-get install -y libva-dev libva-drm2 libpipewire-0.3-dev
+        run: sudo apt-get install -y libva-dev libva-drm2
 
       - name: Configure (Meson)
-        run: |
-          meson setup build \
-            --native-file build-profiles/${{ matrix.profile }}.ini \
-            -Dtests=true
+        working-directory: apps/spotify-connect
+        run: meson setup build --native-file build-profiles/${{ matrix.profile }}.ini -Dtests=true
 
       - name: Build
+        working-directory: apps/spotify-connect
         run: ninja -C build
 
       - name: Run tests
+        working-directory: apps/spotify-connect
         run: meson test -C build --print-errorlogs
 
       - name: Upload build artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: meson-logs-${{ matrix.profile }}-${{ matrix.os }}
-          path: build/meson-logs/
+          name: spotify-connect-logs-${{ matrix.profile }}-${{ matrix.os }}
+          path: apps/spotify-connect/build/meson-logs/
+
+  spotify-native:
+    name: spotify-native (${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [stable, nightly]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            meson ninja-build pkg-config \
+            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev \
+            libogg-dev libvorbis-dev \
+            libssl-dev libpulse-dev libasound2-dev
+
+      - name: Install nightly-only dependencies
+        if: matrix.profile == 'nightly'
+        run: sudo apt-get install -y libpipewire-0.3-dev
+
+      - name: Configure (Meson)
+        working-directory: apps/spotify-native
+        run: meson setup build --native-file build-profiles/${{ matrix.profile }}.ini -Dtests=true
+
+      - name: Build
+        working-directory: apps/spotify-native
+        run: ninja -C build
+
+      - name: Run tests
+        working-directory: apps/spotify-native
+        run: meson test -C build --print-errorlogs
+
+      - name: Upload build artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotify-native-logs-${{ matrix.profile }}
+          path: apps/spotify-native/build/meson-logs/
 
   lint:
     name: Lint (cppcheck)
@@ -78,5 +117,5 @@ jobs:
             --error-exitcode=1 \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
-            -i src/vendor \
-            src/
+            -i apps/spotify-connect/src/vendor \
+            apps/spotify-connect/src apps/spotify-native/src

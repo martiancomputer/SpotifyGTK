@@ -19,7 +19,8 @@ enable_pipewire = get_option('enable_pipewire')
 # ── Core dependencies ────────────────────────────────────────────────────────
 glib_dep       = dependency('glib-2.0',      version: '>= 2.76')
 gio_dep        = dependency('gio-2.0',       version: '>= 2.76')
-soup_dep       = dependency('libsoup-3.0',   version: '>= 3.4')  # cdn.c HTTPS Range fetch
+soup_dep       = dependency('libsoup-3.0',   version: '>= 3.4')  # cdn.c HTTPS Range fetch, native_auth.c OAuth
+json_glib_dep  = dependency('json-glib-1.0', version: '>= 1.6')  # native_auth.c token response parsing
 
 # Audio decode -- libogg/libvorbis are 20+ year old, ABI-frozen, pure C.
 ogg_dep        = dependency('ogg',           version: '>= 1.3')
@@ -31,7 +32,7 @@ vorbisfile_dep = dependency('vorbisfile',    version: '>= 1.3')
 openssl_dep    = dependency('openssl',       version: '>= 3.0', required: false)
 
 all_deps = [
-  glib_dep, gio_dep, soup_dep,
+  glib_dep, gio_dep, soup_dep, json_glib_dep,
   ogg_dep, vorbis_dep, vorbisfile_dep,
 ]
 if openssl_dep.found()

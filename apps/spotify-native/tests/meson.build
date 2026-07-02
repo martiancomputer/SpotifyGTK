@@ -23,6 +23,14 @@ if get_option('tests')
   )
   test('login-message-encoding', test_login_encoding)
 
+  test_native_auth = executable('test-native-auth',
+    'test_native_auth.c',
+    '../src/spotify/native_auth.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
+  )
+  test('native-auth-constants', test_native_auth)
+
   test_dh = executable('test-dh',
     'test_dh.c',
     '../src/spotify/dh.c',

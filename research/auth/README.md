@@ -35,6 +35,22 @@ not 20. This matches `SHANNON_KEY_LEN_MAX 32` already in `shannon.h`. The
 first 20 bytes (`data[0:20]`) become the HMAC key for the client's
 "challenge" response, not part of either cipher key.
 
+**AP login needs a specific client_id and scope list, not any OAuth token.**
+Confirmed the hard way: a token from `spotify-connect`'s dashboard-registered
+Client ID (standard Web API scopes) was tested against
+`AUTHENTICATION_SPOTIFY_TOKEN` login and rejected in ~100ms, no structured
+error, just a closed connection. Checked against librespot's real source
+(`src/main.rs`, the `--enable-oauth` path) rather than guessed at further:
+their client uses `KEYMASTER_CLIENT_ID = "65b708073fc0480ea92a077233ca87bd"`
+(`core/src/config.rs`) — Spotify's own internal client_id, not a
+dashboard-registered one — with a specific 26-entry scope list
+(`OAUTH_SCOPES` in `src/main.rs`). Redirect URI confirmed against
+`librespot-oauth`'s own worked example
+(`oauth/examples/oauth_sync.rs`): `http://127.0.0.1:8898/login`. All three
+values transcribed and cross-checked (a full `diff` against the source, not
+just eyeballed) into `apps/spotify-native/src/spotify/native_auth.h` —
+see that file for the complete scope list and reasoning.
+
 ## Open items
 
 - [x] Hand-roll the `keyexchange.proto` messages in C — `protobuf_min.c`,
@@ -43,11 +59,15 @@ first 20 bytes (`data[0:20]`) become the HMAC key for the client's
 - [x] Full handshake wired into `ap.c` (`perform_handshake`) — ported from
       `core/src/connection/handshake.rs`, using the verified constants in
       `handshake_constants.h` and the real Shannon cipher
-- [ ] **Not yet tested against a live Spotify server.** Everything above
-      is "should be correct per the reference," not "confirmed working" —
-      this sandbox can't reach `ap.spotify.com`. `dh.c`'s math is verified
-      independently (`test_dh.c`: two local keypairs agree on a shared
-      secret), but that doesn't prove interop with Spotify's actual servers
+- [x] **Handshake confirmed against a live Spotify server.** DH exchange,
+      RSA signature verification, and HMAC key derivation all checked out.
+- [ ] **Login: message encoding confirmed correct, credential itself was
+      wrong on the first live attempt.** The `AUTHENTICATION_SPOTIFY_TOKEN`
+      login packet went out fine and the connection accepted it long enough
+      to reach credential validation — it was the token's client_id/scopes
+      that got rejected, not the message shape. `native_auth.c` now requests
+      a token against the correct client_id (see the finding above); next
+      live run is the actual test of whether that closes the loop.
 - [x] Login step (`ap.c`: `spotifygtk_ap_session_login()`, ported from
       `authentication.rs`'s `AUTHENTICATION_SPOTIFY_TOKEN` path -- reuses
       the OAuth token rather than needing a raw username/password). Needs
