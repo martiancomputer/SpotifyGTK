@@ -210,12 +210,11 @@ gap:
 | Audio output: PipeWire | 🟡 Implemented, needs validation against a running PipeWire instance |
 | Audio output: WASAPI (Windows) | ⬜ Stub only — Windows port hasn't started |
 | AP handshake (`spotify/ap.c`, `dh.c`, `handshake_crypto.c`, `protobuf_min.c`) | ✅ Confirmed working against a real Spotify server — DH exchange, RSA server-signature verification, and HMAC-SHA1 key derivation all checked out. |
-| AP login (`spotify/native_auth.c`) | 🟡 Message encoding confirmed correct against a live server; needed its own OAuth flow with Spotify's internal client_id and a specific scope list (see `research/auth/`) rather than a Web API token — that's now wired in, next live run is the real test |
+| AP login (`spotify/ap.c`, `spotify/native_auth.c`) | 🟡 Two real bugs found and fixed on the way here: wrong client_id/scopes (needed Spotify's internal keymaster client_id, not a Web API token — see `research/auth/`), then a wrong protobuf field number plus two missing required fields in the login message itself, caught because a live server rejected it, not by the tests that existed at the time. Both fixed; not yet confirmed accepted by a live server. |
 | Mercury protocol (`spotify/mercury.c`) | 🟡 Framing implemented, unverified against live traffic |
 | Audio key exchange (`spotify/audio_key.c`) | ✅ Request/response plumbing complete |
 | CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | 🟡 HTTPS Range + decrypt real, IV seed pending confirmation against a captured stream |
 | Spotify Connect registration (`spotify/connect.c`) | 🟡 Mercury subscription real, device-state payload pending real protobuf schema; ad-insertion events not yet researched |
-| AP login (sending credentials post-handshake) | ⬜ Not started — separate step from the DH handshake itself |
 | Image cache VA-API hardware decode | 🟡 Probe works, decode path stubbed (lives in `spotify-connect`, shared concept) |
 | Vulkan compositing | ⬜ Not started |
 | UI | ⬜ None yet — `main.c` is a CLI development harness |

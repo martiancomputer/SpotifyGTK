@@ -707,13 +707,43 @@ spotifygtk_ap_session_login (SpotifyApSession *self, const gchar *spotify_userna
   pb_write_bytes_field  (login_credentials, 0x1e,
                         (const guint8 *) oauth_access_token, strlen (oauth_access_token));
 
-  /* ClientResponseEncrypted: login_credentials (0x0a), system_info
-   * (0x14, required -- but its own sub-fields are all optional, so
-   * an empty embedded message is acceptable here), version_string
-   * (0x1e, optional). */
+  /* SystemInfo (authentication.proto): cpu_family (0x0a, REQUIRED)
+   * and os (0x3c, REQUIRED) -- a previous version of this function
+   * sent SystemInfo entirely empty, which is invalid proto2 (both
+   * fields lack defaults) and is the most likely reason a live login
+   * attempt got a fast, silent connection close instead of a
+   * structured AuthFailure: a strict server-side parser is entitled
+   * to hard-reject a message missing required fields rather than
+   * respond gracefully. Values below match librespot's own
+   * connection/mod.rs construction for a Linux x86_64 build:
+   * CPU_X86_64 = 0x2, OS_LINUX = 0x5 (both per authentication.proto's
+   * enums, re-verified against the source, not reused from memory of
+   * an earlier pass in this file). system_information_string (0x5a)
+   * and device_id (0x64) are optional but included for parity with
+   * librespot's real client, which always sends them. */
+  g_autoptr(GByteArray) system_info = g_byte_array_new ();
+  pb_write_varint_field (system_info, 0x0a, 0x2);  /* cpu_family = CPU_X86_64 */
+  pb_write_varint_field (system_info, 0x3c, 0x5);  /* os = OS_LINUX */
+  {
+    g_autofree gchar *sysinfo_str = g_strdup_printf ("spotify-native-%s", APP_VERSION);
+    pb_write_bytes_field (system_info, 0x5a, (const guint8 *) sysinfo_str, strlen (sysinfo_str));
+  }
+  pb_write_bytes_field (system_info, 0x64, (const guint8 *) "spotifygtk-native", 17);
+
+  /* ClientResponseEncrypted: login_credentials (0x0a, required),
+   * system_info (0x32, required -- NOT 0x14, which is actually
+   * account_creation on this message; a prior version of this
+   * function used 0x14 by mistake, meaning even a correctly-built
+   * SystemInfo would have landed in the wrong field entirely).
+   * version_string (0x46, optional) included for parity with
+   * librespot's real client. */
   g_autoptr(GByteArray) client_response = g_byte_array_new ();
   pb_write_message_field (client_response, 0x0a, login_credentials->data, login_credentials->len);
-  pb_write_message_field (client_response, 0x14, NULL, 0);  /* SystemInfo, all-default */
+  pb_write_message_field (client_response, 0x32, system_info->data, system_info->len);
+  {
+    const gchar *version_str = "spotify-native " APP_VERSION;
+    pb_write_bytes_field (client_response, 0x46, (const guint8 *) version_str, strlen (version_str));
+  }
 
   LoginClosure *lc = g_new0 (LoginClosure, 1);
   lc->session   = self;

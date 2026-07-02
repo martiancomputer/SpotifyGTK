@@ -51,6 +51,30 @@ values transcribed and cross-checked (a full `diff` against the source, not
 just eyeballed) into `apps/spotify-native/src/spotify/native_auth.h` —
 see that file for the complete scope list and reasoning.
 
+**`SystemInfo` has two `required` (proto2) fields — sending it empty is
+invalid, not just incomplete.** Even after fixing the client_id/scopes
+above, a live login attempt with a correctly-obtained token still failed
+identically (~90ms silent close). Root cause was a second, independent bug
+in the login message itself: `system_info` was written under field tag
+`0x14`, but `authentication.proto`'s real field number is `0x32` — `0x14`
+on `ClientResponseEncrypted` is actually `account_creation`, a different
+field entirely, and the wrong number was most likely a transcription slip
+from `LoginCredentials.typ`, which genuinely is `0x14` two lines above it
+in the same function. Separately, even the right field number wouldn't
+have been enough: `SystemInfo.cpu_family` and `SystemInfo.os` are both
+`required`, and the message was sent completely empty. A strict proto2
+parser is entitled to hard-reject a message missing required fields rather
+than respond gracefully, which matches the observed failure signature
+exactly. Fixed against librespot's own real construction
+(`core/src/connection/mod.rs`'s `authenticate()`), not just the schema in
+isolation — `cpu_family=CPU_X86_64(0x2)`, `os=OS_LINUX(0x5)`, plus
+`system_information_string` and `device_id` for parity with what a real
+client actually sends. The test that was supposed to catch this
+(`test_login_encoding.c`) had re-implemented the same wrong field number
+independently and asserted against itself, so it passed the whole time —
+rewritten to check against the schema's real values instead of mirroring
+whatever the implementation happened to do.
+
 ## Open items
 
 - [x] Hand-roll the `keyexchange.proto` messages in C — `protobuf_min.c`,
@@ -61,13 +85,16 @@ see that file for the complete scope list and reasoning.
       `handshake_constants.h` and the real Shannon cipher
 - [x] **Handshake confirmed against a live Spotify server.** DH exchange,
       RSA signature verification, and HMAC key derivation all checked out.
-- [ ] **Login: message encoding confirmed correct, credential itself was
-      wrong on the first live attempt.** The `AUTHENTICATION_SPOTIFY_TOKEN`
-      login packet went out fine and the connection accepted it long enough
-      to reach credential validation — it was the token's client_id/scopes
-      that got rejected, not the message shape. `native_auth.c` now requests
-      a token against the correct client_id (see the finding above); next
-      live run is the actual test of whether that closes the loop.
+- [x] **native_auth wired up and confirmed reaching Spotify's real consent
+      screen** (Spotify's own "Spotify for Desktop" branded page rendered,
+      confirming the keymaster client_id is genuinely recognized server-side).
+- [x] **Two login-message bugs found and fixed**: wrong `system_info` field
+      number (`0x14` instead of `0x32`), and `SystemInfo`'s two required
+      fields sent empty. See the finding above.
+- [ ] **Next live run is the real test** of whether the fixed message
+      actually gets accepted — everything above narrows the search space
+      but a passing offline test only proves the message now matches the
+      schema, not that Spotify's server accepts it.
 - [x] Login step (`ap.c`: `spotifygtk_ap_session_login()`, ported from
       `authentication.rs`'s `AUTHENTICATION_SPOTIFY_TOKEN` path -- reuses
       the OAuth token rather than needing a raw username/password). Needs
