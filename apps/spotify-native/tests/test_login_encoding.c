@@ -36,7 +36,7 @@ build_client_response_encrypted (const gchar *username, const gchar *oauth_token
   GByteArray *login_credentials = g_byte_array_new ();
   if (username && *username)
     pb_write_bytes_field (login_credentials, 0x0a, (const guint8 *) username, strlen (username));
-  pb_write_varint_field (login_credentials, 0x14, 8);  /* AUTHENTICATION_SPOTIFY_TOKEN */
+  pb_write_varint_field (login_credentials, 0x14, 3);  /* AUTHENTICATION_SPOTIFY_TOKEN (0x3 per authentication.proto) */
   pb_write_bytes_field  (login_credentials, 0x1e, (const guint8 *) oauth_token, strlen (oauth_token));
 
   /* SystemInfo: cpu_family (0x0a, REQUIRED) and os (0x3c, REQUIRED)
@@ -75,11 +75,11 @@ test_login_with_token_only (void)
 
   guint64 auth_type = 0;
   g_assert_true (pb_find_varint_field (creds_data, creds_len, 0x14, &auth_type));
-  g_assert_cmpuint (auth_type, ==, 8);  /* AUTHENTICATION_SPOTIFY_TOKEN */
+  g_assert_cmpuint (auth_type, ==, 3);  /* AUTHENTICATION_SPOTIFY_TOKEN (0x3 per authentication.proto) */
 
   const guint8 *auth_data = NULL; gsize auth_data_len = 0;
   g_assert_true (pb_find_bytes_field (creds_data, creds_len, 0x1e, &auth_data, &auth_data_len));
-  g_assert_cmpmem (auth_data, auth_data_len, "fake-oauth-token-for-test", 26);
+  g_assert_cmpmem (auth_data, auth_data_len, "fake-oauth-token-for-test", 25);
 
   g_byte_array_free (msg, TRUE);
 }

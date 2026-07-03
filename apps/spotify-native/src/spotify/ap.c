@@ -703,7 +703,7 @@ spotifygtk_ap_session_login (SpotifyApSession *self, const gchar *spotify_userna
   if (spotify_username && *spotify_username)
     pb_write_bytes_field (login_credentials, 0x0a,
                           (const guint8 *) spotify_username, strlen (spotify_username));
-  pb_write_varint_field (login_credentials, 0x14, 8);  /* AUTHENTICATION_SPOTIFY_TOKEN */
+  pb_write_varint_field (login_credentials, 0x14, 3);  /* AUTHENTICATION_SPOTIFY_TOKEN (0x3 per authentication.proto) */
   pb_write_bytes_field  (login_credentials, 0x1e,
                         (const guint8 *) oauth_access_token, strlen (oauth_access_token));
 
