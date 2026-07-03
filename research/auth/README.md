@@ -75,6 +75,39 @@ independently and asserted against itself, so it passed the whole time —
 rewritten to check against the schema's real values instead of mirroring
 whatever the implementation happened to do.
 
+**The actual root cause of every login failure: `sbox1`/`sbox2` used XOR
+where the reference uses OR.** Fixing the SystemInfo bug above didn't
+change the failure at all — same login-message content fix, same ~90ms
+silent close as before, which was the real tell that the problem was
+upstream of the protobuf content entirely. Traced Rust's operator
+precedence explicitly this time rather than eyeballing it: `w << 5 | w >>
+27 | (w << 7 | w >> 25)` has `<<`/`>>` binding tighter than `|`, so the
+whole expression is a flat OR-chain across all four rotated terms —
+`ROTL(w,5) | ROTL(w,7)`, no XOR anywhere in it. The C port had used
+`rotl(w,5) ^ rotl(w,7)` in both `sbox1` and `sbox2`. Since these two
+functions fire on every single `cycle()` call — which runs constantly
+through key/nonce loading and every encrypt/decrypt/finish — this changes
+the cipher's entire keystream from the first cycle onward, while leaving
+our own encrypt and decrypt symmetric with each other (both used the same
+wrong function), which is exactly why `tests/test_shannon.c`'s internal
+round-trip check kept passing the whole time: it can't detect a systematic
+deviation applied identically in both directions. The DH handshake
+succeeding proved nothing about this either, since that's pure OpenSSL
+BIGNUM/HMAC/RSA and never touches Shannon at all — the cipher is first
+actually exercised on the very first real packet sent after the handshake,
+which is login, decrypting to garbage server-side regardless of payload
+content, hence the identical failure before and after the SystemInfo fix.
+
+Confirmed the fix by installing a real Rust toolchain in the dev
+environment and compiling and running the actual, unmodified `shannon`
+crate to generate genuine ground-truth test vectors (whole-word-only,
+non-word-aligned, `nonce()` and `nonce_u32()` paths, zero and nonzero
+nonce values) — not read from source and reasoned about by hand a third
+time, which is exactly the process that had already produced two
+transcription-adjacent mistakes earlier in this same investigation. Every
+vector matches the fixed C port exactly. Baked into
+`tests/test_shannon.c` permanently.
+
 ## Open items
 
 - [x] Hand-roll the `keyexchange.proto` messages in C — `protobuf_min.c`,
@@ -88,13 +121,18 @@ whatever the implementation happened to do.
 - [x] **native_auth wired up and confirmed reaching Spotify's real consent
       screen** (Spotify's own "Spotify for Desktop" branded page rendered,
       confirming the keymaster client_id is genuinely recognized server-side).
-- [x] **Two login-message bugs found and fixed**: wrong `system_info` field
-      number (`0x14` instead of `0x32`), and `SystemInfo`'s two required
-      fields sent empty. See the finding above.
-- [ ] **Next live run is the real test** of whether the fixed message
-      actually gets accepted — everything above narrows the search space
-      but a passing offline test only proves the message now matches the
-      schema, not that Spotify's server accepts it.
+- [x] **Three real bugs found and fixed**, in order of discovery: wrong
+      client_id/scopes, wrong `system_info` field number plus missing
+      required fields, and — the actual root cause underneath both of
+      those — `sbox1`/`sbox2` using XOR instead of OR, breaking every
+      Shannon-encrypted packet regardless of what was inside it. All
+      confirmed against real ground truth (a live server for the first
+      two; a compiled-and-run copy of the actual reference crate for the
+      third) rather than assumed fixed.
+- [ ] **Next live run is the real test** of whether login now succeeds
+      end to end. High confidence given the cipher is now verified against
+      real reference vectors, but nothing offline can prove server
+      acceptance — that's what an actual run against `ap.spotify.com` is for.
 - [x] Login step (`ap.c`: `spotifygtk_ap_session_login()`, ported from
       `authentication.rs`'s `AUTHENTICATION_SPOTIFY_TOKEN` path -- reuses
       the OAuth token rather than needing a raw username/password). Needs

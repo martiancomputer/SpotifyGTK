@@ -204,13 +204,13 @@ gap:
 
 | Module | Status |
 |---|---|
-| Shannon cipher (`spotify/shannon.c`) | ✅ Real algorithm, ported from the `shannon` Rust crate (MIT) librespot depends on. Self-test in `main.c` passes. |
+| Shannon cipher (`spotify/shannon.c`) | ✅ Confirmed against real ground-truth test vectors (a compiled-and-run copy of the actual reference crate, not read-and-reasoned-about). Note: the internal round-trip self-test alone had passed for a while despite a real bug (`sbox1`/`sbox2` used XOR where the reference uses OR) — that class of test can't catch a deviation applied symmetrically to both encrypt and decrypt. See `research/auth/` for the full writeup. |
 | Ogg/Vorbis decoder (`audio/decoder.c`) | ✅ Functional |
 | Audio output: PulseAudio, ALSA | ✅ Functional |
 | Audio output: PipeWire | 🟡 Implemented, needs validation against a running PipeWire instance |
 | Audio output: WASAPI (Windows) | ⬜ Stub only — Windows port hasn't started |
 | AP handshake (`spotify/ap.c`, `dh.c`, `handshake_crypto.c`, `protobuf_min.c`) | ✅ Confirmed working against a real Spotify server — DH exchange, RSA server-signature verification, and HMAC-SHA1 key derivation all checked out. |
-| AP login (`spotify/ap.c`, `spotify/native_auth.c`) | 🟡 Two real bugs found and fixed on the way here: wrong client_id/scopes (needed Spotify's internal keymaster client_id, not a Web API token — see `research/auth/`), then a wrong protobuf field number plus two missing required fields in the login message itself, caught because a live server rejected it, not by the tests that existed at the time. Both fixed; not yet confirmed accepted by a live server. |
+| AP login (`spotify/ap.c`, `spotify/native_auth.c`) | 🟡 Three real bugs found on the way here, each caught because a live server rejected the previous fix rather than by any test that existed at the time: wrong client_id/scopes, then a wrong protobuf field number plus missing required fields in the login message, then — the actual root cause underneath both — a Shannon cipher bug that broke every encrypted packet regardless of content. All three fixed and the cipher now verified against real reference vectors; login itself not yet confirmed accepted by a live server. |
 | Mercury protocol (`spotify/mercury.c`) | 🟡 Framing implemented, unverified against live traffic |
 | Audio key exchange (`spotify/audio_key.c`) | ✅ Request/response plumbing complete |
 | CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | 🟡 HTTPS Range + decrypt real, IV seed pending confirmation against a captured stream |

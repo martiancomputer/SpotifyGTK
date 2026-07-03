@@ -37,19 +37,47 @@ rotl (guint32 w, guint32 x)
   return (w << x) | (w >> (32 - x));
 }
 
+/*
+ * sbox1/sbox2 — the cipher's nonlinear feedback boxes.
+ *
+ * CORRECTED: an earlier version of this file used XOR (^) to combine
+ * the two rotated terms in each line below. The actual reference
+ * (Rust) uses OR (|) -- traced explicitly through Rust's operator
+ * precedence rather than assumed, since this is exactly the kind of
+ * thing that's easy to get quietly wrong: `w << 5 | w >> 27 | (w <<
+ * 7 | w >> 25)` has `<<`/`>>` binding tighter than `|`, so the whole
+ * expression is a flat OR-chain across all four rotated terms, i.e.
+ * ROTL(w,5) | ROTL(w,7) -- not an XOR anywhere in it. That single
+ * swapped operator changes the cipher's entire keystream from the
+ * very first cycle() call onward, while still leaving our own
+ * encrypt/decrypt symmetric with each other (both sides used the
+ * same wrong function), which is exactly why the internal round-trip
+ * self-test in tests/test_shannon.c kept passing throughout -- it
+ * can't detect a systematic deviation that's applied identically in
+ * both directions. Only interop with something using the *real*
+ * algorithm (a live Spotify server) would ever surface this, which
+ * is what happened: the handshake worked fine (it doesn't touch
+ * Shannon at all, that's pure DH/RSA/HMAC via OpenSSL), but the
+ * first real Shannon-encrypted packet -- login -- decrypted to
+ * garbage server-side and got the connection dropped immediately,
+ * unaffected by two rounds of otherwise-correct protobuf-content
+ * fixes because the ciphertext itself was never going to be valid
+ * regardless of what was inside it.
+ */
+
 static guint32
 sbox1 (guint32 w)
 {
-  w ^= rotl (w, 5) ^ rotl (w, 7);
-  w ^= rotl (w, 19) ^ rotl (w, 22);
+  w ^= rotl (w, 5) | rotl (w, 7);
+  w ^= rotl (w, 19) | rotl (w, 22);
   return w;
 }
 
 static guint32
 sbox2 (guint32 w)
 {
-  w ^= rotl (w, 7) ^ rotl (w, 22);
-  w ^= rotl (w, 5) ^ rotl (w, 19);
+  w ^= rotl (w, 7) | rotl (w, 22);
+  w ^= rotl (w, 5) | rotl (w, 19);
   return w;
 }
 
