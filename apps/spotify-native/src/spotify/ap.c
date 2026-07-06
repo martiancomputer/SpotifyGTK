@@ -40,6 +40,16 @@ struct _SpotifyApSession {
   GHashTable      *handler_data;
 
   gboolean         connected;
+
+  /* Captured from APWelcome on successful login -- this is what
+   * feeds login5's StoredCredential, NOT the original OAuth token.
+   * See research/playback/ for why this exists: login5 mints the
+   * bearer token spclient's HTTPS API actually needs, and it wants
+   * this reusable credential, not the AP-login OAuth token. */
+  gchar           *welcome_username;
+  guint8          *reusable_creds;
+  gsize            reusable_creds_len;
+  guint64          reusable_creds_type;  /* AuthenticationType enum value */
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyApSession, spotifygtk_ap_session, G_TYPE_OBJECT)
@@ -600,16 +610,39 @@ on_apwelcome (SpotifyApSession *session, ApCommandId cmd,
   (void) cmd;
   LoginClosure *lc = user_data;
 
+  /* Field numbers per authentication.proto's APWelcome, re-verified
+   * against the schema directly rather than trusted from an earlier
+   * pass in this file -- canonical_username is 0xa, NOT 0x14 (that's
+   * account_type_logged_in, a varint enum). The earlier wrong number
+   * meant a length-delimited lookup at 0x14 correctly found nothing,
+   * which is exactly why login succeeded but no username ever
+   * printed: this went unnoticed because login itself still worked,
+   * only the username extraction was silently broken. */
   const guint8 *username_data = NULL; gsize username_len = 0;
-  /* APWelcome.canonical_username, field 0x14 per authentication.proto */
-  pb_find_bytes_field (payload, len, 0x14, &username_data, &username_len);
+  pb_find_bytes_field (payload, len, 0xa, &username_data, &username_len);
 
-  g_autofree gchar *username = username_data
+  g_free (session->welcome_username);
+  session->welcome_username = username_data
     ? g_strndup ((const gchar *) username_data, username_len) : NULL;
 
-  g_message ("ap.c: login succeeded%s%s", username ? " as " : "", username ? username : "");
+  /* reusable_auth_credentials (0x28) + its type (0x1e, varint enum) --
+   * this is what login5's StoredCredential needs downstream (NOT the
+   * original OAuth token from native_auth). See research/playback/. */
+  const guint8 *creds_data = NULL; gsize creds_len = 0;
+  if (pb_find_bytes_field (payload, len, 0x28, &creds_data, &creds_len)) {
+    g_free (session->reusable_creds);
+    session->reusable_creds = g_memdup2 (creds_data, creds_len);
+    session->reusable_creds_len = creds_len;
+  } else {
+    g_warning ("ap.c: APWelcome missing reusable_auth_credentials -- "
+              "login5/spclient calls will not be possible");
+  }
+  pb_find_varint_field (payload, len, 0x1e, &session->reusable_creds_type);
 
-  if (lc->callback) lc->callback (TRUE, username, NULL, lc->user_data);
+  g_message ("ap.c: login succeeded%s%s", session->welcome_username ? " as " : "",
+            session->welcome_username ? session->welcome_username : "");
+
+  if (lc->callback) lc->callback (TRUE, session->welcome_username, NULL, lc->user_data);
 
   login_closure_finish (lc, session);
 }
@@ -758,6 +791,28 @@ spotifygtk_ap_session_login (SpotifyApSession *self, const gchar *spotify_userna
   spotifygtk_ap_session_send (self, AP_CMD_LOGIN, client_response->data, client_response->len);
 }
 
+const gchar *
+spotifygtk_ap_session_get_username (SpotifyApSession *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_AP_SESSION (self), NULL);
+  return self->welcome_username;
+}
+
+const guint8 *
+spotifygtk_ap_session_get_reusable_creds (SpotifyApSession *self, gsize *out_len)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_AP_SESSION (self), NULL);
+  if (out_len) *out_len = self->reusable_creds_len;
+  return self->reusable_creds;
+}
+
+guint64
+spotifygtk_ap_session_get_reusable_creds_type (SpotifyApSession *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_AP_SESSION (self), 0);
+  return self->reusable_creds_type;
+}
+
 void
 spotifygtk_ap_session_disconnect (SpotifyApSession *self)
 {
@@ -781,9 +836,19 @@ spotifygtk_ap_session_dispose (GObject *object)
 }
 
 static void
+spotifygtk_ap_session_finalize (GObject *object)
+{
+  SpotifyApSession *self = SPOTIFYGTK_AP_SESSION (object);
+  g_free (self->welcome_username);
+  g_free (self->reusable_creds);
+  G_OBJECT_CLASS (spotifygtk_ap_session_parent_class)->finalize (object);
+}
+
+static void
 spotifygtk_ap_session_class_init (SpotifyApSessionClass *klass)
 {
-  G_OBJECT_CLASS (klass)->dispose = spotifygtk_ap_session_dispose;
+  G_OBJECT_CLASS (klass)->dispose  = spotifygtk_ap_session_dispose;
+  G_OBJECT_CLASS (klass)->finalize = spotifygtk_ap_session_finalize;
 
   signals[SIG_DISCONNECTED] =
     g_signal_new ("disconnected", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,

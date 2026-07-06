@@ -13,6 +13,15 @@
  *      shannon crate, authentication.rs) interoperates with
  *      Spotify's real servers.
  *
+ *   3. On a successful AP login: chains into the streaming auth-relay
+ *      (client-token, then login5) using the reusable credential
+ *      APWelcome handed back -- NOT the original OAuth token. This is
+ *      the piece discovered while researching actual playback: track
+ *      metadata and CDN URL resolution go through a separate HTTPS
+ *      API (spclient), which needs a login5-minted bearer token, which
+ *      itself needs this reusable credential. See spotify/login5.h
+ *      and research/playback/ for the full finding.
+ *
  * Token source for step 2, in priority order:
  *
  *   a. SPOTIFY_ACCESS_TOKEN env var, if set -- manual override, e.g.
@@ -43,6 +52,8 @@
 #include "spotify/shannon.h"
 #include "spotify/ap.h"
 #include "spotify/native_auth.h"
+#include "spotify/clienttoken.h"
+#include "spotify/login5.h"
 
 #include <glib.h>
 #include <string.h>
@@ -148,23 +159,90 @@ typedef struct {
   GMainLoop *loop;
   gboolean   ok;
   gboolean   timed_out;
+  SpotifyApSession   *session;      /* borrowed, owned by run_live_test */
+  SpotifyClientToken *client_token_client;
+  SpotifyLogin5      *login5_client;
 } LiveTestState;
+
+static void
+on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
+                  GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (access_token) {
+    g_message ("[live-test] LOGIN5 SUCCEEDED -- obtained a spclient-usable bearer token "
+              "(expires in %ds). The full streaming auth-relay chain (AP login -> "
+              "reusable credential -> client-token -> login5) is confirmed working "
+              "against real Spotify services.", expires_in_seconds);
+    state->ok = TRUE;
+  } else {
+    g_warning ("[live-test] login5 failed: %s", error ? error->message : "unknown error");
+    g_warning ("[live-test] AP login itself succeeded -- only the streaming auth-relay "
+              "chain (client-token/login5) failed. See spotify/login5.h and spotify/"
+              "clienttoken.h.");
+    state->ok = FALSE;
+  }
+
+  g_main_loop_quit (state->loop);
+}
+
+static void
+on_client_token_result (const gchar *token, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (token)
+    g_message ("[live-test] client-token obtained, proceeding to login5...");
+  else
+    g_message ("[live-test] no client-token obtained -- proceeding to login5 without one "
+              "(login5 requires one per spclient.rs; expect this to fail if so)");
+
+  const gchar *username      = spotifygtk_ap_session_get_username (state->session);
+  gsize        creds_len     = 0;
+  const guint8 *creds        = spotifygtk_ap_session_get_reusable_creds (state->session, &creds_len);
+  guint64      creds_type    = spotifygtk_ap_session_get_reusable_creds_type (state->session);
+
+  if (!creds) {
+    g_warning ("[live-test] no reusable_auth_credentials captured from APWelcome -- "
+              "cannot proceed to login5");
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  state->login5_client = spotifygtk_login5_new ();
+  spotifygtk_login5_auth_token (state->login5_client,
+                                NATIVE_AUTH_CLIENT_ID, "spotify-native-dev-harness",
+                                username, creds, creds_len, creds_type,
+                                token, on_login5_result, state);
+}
 
 static void
 on_login_result (gboolean success, const gchar *username, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
 
-  if (success) {
-    g_message ("[live-test] LOGIN SUCCEEDED%s%s -- handshake, crypto, and login all verified "
-              "against a real Spotify server.", username ? " as " : "", username ? username : "");
-    state->ok = TRUE;
-  } else {
+  if (!success) {
     g_warning ("[live-test] login failed: %s", error ? error->message : "unknown error");
     state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
   }
 
-  g_main_loop_quit (state->loop);
+  g_message ("[live-test] LOGIN SUCCEEDED%s%s -- handshake, crypto, and login all verified "
+            "against a real Spotify server.", username ? " as " : "", username ? username : "");
+
+  /* Chain into the streaming auth-relay: client-token, then login5,
+   * using the reusable credential APWelcome handed back (NOT the
+   * original native_auth OAuth token -- see spotify/login5.h). This
+   * is the next real unknown worth proving against actual Spotify
+   * services rather than just building and hoping. */
+  g_message ("[live-test] AP login confirmed -- now testing the streaming auth-relay chain "
+            "(client-token -> login5)...");
+  state->client_token_client = spotifygtk_client_token_new ();
+  spotifygtk_client_token_request (state->client_token_client, NATIVE_AUTH_CLIENT_ID,
+                                   on_client_token_result, state);
 }
 
 static void
@@ -184,6 +262,7 @@ on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   g_message ("[live-test] handshake succeeded -- DH exchange, RSA signature verification, "
             "and HMAC key derivation all checked out against a real server.");
 
+  state->session = session;
   spotifygtk_ap_session_start_receiving (session);
 
   const gchar *username = g_getenv ("SPOTIFY_USERNAME");  /* optional, may be NULL */
@@ -223,7 +302,10 @@ run_live_test (const gchar *token)
   g_object_set_data_full (G_OBJECT (session), "login-token", g_strdup (token), g_free);
 
   GMainLoop *loop = g_main_loop_new (NULL, FALSE);
-  LiveTestState state = { .loop = loop, .ok = FALSE, .timed_out = FALSE };
+  LiveTestState state = {
+    .loop = loop, .ok = FALSE, .timed_out = FALSE,
+    .session = NULL, .client_token_client = NULL, .login5_client = NULL,
+  };
 
   spotifygtk_ap_session_connect (session, NULL, on_connected, &state);
 
@@ -233,22 +315,25 @@ run_live_test (const gchar *token)
    * network-hang detector: a clean rejection (bad token, etc.) fails
    * fast via ap.c's "disconnected" signal rather than waiting out
    * this timeout, so reaching it specifically suggests a stuck
-   * connection, not a normal login rejection.
+   * connection, not a normal login rejection. Raised from 15s to 25s
+   * now that a successful AP login chains into two more real network
+   * round trips (client-token, login5) before the test concludes.
    *
    * KNOWN LIMITATION, not fixed here: if this timeout fires, we tear
-   * down `session` and return while an async GIO operation may still
-   * be in flight (none of ap.c's async calls currently accept a
-   * GCancellable -- they're hardcoded NULL throughout). That
-   * in-flight callback would reference `state`, a stack variable
-   * that's gone once this function returns. It's harmless in THIS
-   * harness specifically (the process exits immediately after,
-   * before the shared GMainContext is ever pumped again to deliver
-   * the stale callback) -- but this exact pattern would be a real
-   * use-after-free if reused inside a long-running app. Properly
-   * fixing it means threading a GCancellable through every async hop
-   * in ap.c (resolve, connect, handshake reads, receive loop): real
-   * follow-up work, tracked rather than silently patched over here. */
-  guint timeout_id = g_timeout_add_seconds (15, on_live_test_timeout, &state);
+   * down `session` (and now also client_token_client/login5_client if
+   * created) while an async GIO operation may still be in flight
+   * (none of ap.c's, clienttoken.c's, or login5.c's async calls
+   * currently accept a GCancellable -- they're hardcoded NULL
+   * throughout). That in-flight callback would reference `state`, a
+   * stack variable that's gone once this function returns. It's
+   * harmless in THIS harness specifically (the process exits
+   * immediately after, before the shared GMainContext is ever pumped
+   * again to deliver the stale callback) -- but this exact pattern
+   * would be a real use-after-free if reused inside a long-running
+   * app. Properly fixing it means threading a GCancellable through
+   * every async hop across all three files: real follow-up work,
+   * tracked rather than silently patched over here. */
+  guint timeout_id = g_timeout_add_seconds (25, on_live_test_timeout, &state);
 
   g_main_loop_run (loop);
 
@@ -262,6 +347,8 @@ run_live_test (const gchar *token)
   if (!state.timed_out)
     g_source_remove (timeout_id);
   g_main_loop_unref (loop);
+  g_clear_object (&state.client_token_client);
+  g_clear_object (&state.login5_client);
   g_object_unref (session);
 
   return state.ok;

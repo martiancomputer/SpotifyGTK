@@ -31,6 +31,14 @@ if get_option('tests')
   )
   test('native-auth-constants', test_native_auth)
 
+  test_streaming_auth = executable('test-streaming-auth',
+    'test_streaming_auth.c',
+    '../src/spotify/protobuf_min.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep],
+  )
+  test('streaming-auth-encoding', test_streaming_auth)
+
   test_dh = executable('test-dh',
     'test_dh.c',
     '../src/spotify/dh.c',

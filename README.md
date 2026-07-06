@@ -24,7 +24,7 @@ SpotifyGTK/
 │   ├── auth/                 AP handshake, Diffie-Hellman, Shannon cipher
 │   ├── metadata/              Mercury pub/sub
 │   ├── connect/               Spirc/dealer, device registration, ad-insertion
-│   └── playback/              Audio key exchange, CDN fetch + decrypt
+│   └── playback/              Audio key + CDN decrypt, streaming auth-relay chain
 │
 ├── docs/                      General project documentation
 └── THIRD_PARTY_LICENSES       Attribution for ported/referenced code
@@ -210,9 +210,10 @@ gap:
 | Audio output: PipeWire | 🟡 Implemented, needs validation against a running PipeWire instance |
 | Audio output: WASAPI (Windows) | ⬜ Stub only — Windows port hasn't started |
 | AP handshake (`spotify/ap.c`, `dh.c`, `handshake_crypto.c`, `protobuf_min.c`) | ✅ Confirmed working against a real Spotify server — DH exchange, RSA server-signature verification, and HMAC-SHA1 key derivation all checked out. |
-| AP login (`spotify/ap.c`, `spotify/native_auth.c`) | 🟡 Three real bugs found on the way here, each caught because a live server rejected the previous fix rather than by any test that existed at the time: wrong client_id/scopes, then a wrong protobuf field number plus missing required fields in the login message, then — the actual root cause underneath both — a Shannon cipher bug that broke every encrypted packet regardless of content. All three fixed and the cipher now verified against real reference vectors; login itself not yet confirmed accepted by a live server. |
+| AP login (`spotify/ap.c`, `spotify/native_auth.c`) | ✅ Confirmed working against a real Spotify server. Four real bugs found and fixed on the way here, each caught by a live server rejecting the previous fix rather than by any test that existed at the time: wrong client_id/scopes, a wrong protobuf field number plus missing required fields in the login message, a Shannon cipher bug (the actual root cause underneath both) that broke every encrypted packet regardless of content, and — found after login was already succeeding — a wrong field number for `canonical_username` that silently dropped it from every login. |
 | Mercury protocol (`spotify/mercury.c`) | 🟡 Framing implemented, unverified against live traffic |
 | Audio key exchange (`spotify/audio_key.c`) | ✅ Request/response plumbing complete |
+| Streaming auth-relay (`spotify/clienttoken.c`, `spotify/login5.c`, `spotify/spclient.c`) | 🟡 New: discovered that track metadata/CDN URLs go through a separate HTTPS API (`spclient`), not Mercury — needs a login5-minted bearer token, which needs a client-token, which needs the reusable credential APWelcome hands back on login (not the OAuth token used to log in). All three built against verified schemas; not yet confirmed against real services. `spclient.c` uses librespot's own hardcoded fallback host rather than implementing full `apresolve`. See `research/playback/`. |
 | CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | 🟡 HTTPS Range + decrypt real, IV seed pending confirmation against a captured stream |
 | Spotify Connect registration (`spotify/connect.c`) | 🟡 Mercury subscription real, device-state payload pending real protobuf schema; ad-insertion events not yet researched |
 | Image cache VA-API hardware decode | 🟡 Probe works, decode path stubbed (lives in `spotify-connect`, shared concept) |
@@ -333,7 +334,8 @@ cd apps/spotify-native  && meson test -C build --print-errorlogs
 - [x] Document real DH params, RSA server key, keyexchange.proto schema
 - [x] Hand-roll `keyexchange.proto` encoder, wire DH handshake into `ap.c`
 - [x] Test the handshake against a live Spotify server
-- [ ] Confirm AP login succeeds end-to-end with the corrected native_auth token
+- [x] Confirm AP login succeeds end-to-end with the corrected native_auth token
+- [ ] Confirm the streaming auth-relay chain (client-token → login5 → spclient) against real services
 - [ ] Mercury protocol validation against live traffic
 - [ ] Ad-insertion / feature-state event handling (`research/connect/`)
 - [ ] VA-API hardware JPEG decode path (probe works, decode pending)

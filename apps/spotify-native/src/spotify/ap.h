@@ -115,6 +115,19 @@ void spotifygtk_ap_session_login (SpotifyApSession *self,
 void spotifygtk_ap_session_disconnect (SpotifyApSession *self);
 
 /*
+ * Accessors for what APWelcome actually handed us, valid only after
+ * a successful login (ApLoginCallback fired with success=TRUE).
+ * reusable_creds_type is an AuthenticationType enum value (per
+ * authentication.proto) -- login5's StoredCredential wants both this
+ * blob and that type, not the original OAuth token used for the AP
+ * login itself. See research/playback/ for why this indirection
+ * exists.
+ */
+const gchar  *spotifygtk_ap_session_get_username           (SpotifyApSession *self);
+const guint8 *spotifygtk_ap_session_get_reusable_creds     (SpotifyApSession *self, gsize *out_len);
+guint64       spotifygtk_ap_session_get_reusable_creds_type (SpotifyApSession *self);
+
+/*
  * Signal: "disconnected" (GError *error)
  *
  * Fires whenever the receive loop terminates unexpectedly (the
