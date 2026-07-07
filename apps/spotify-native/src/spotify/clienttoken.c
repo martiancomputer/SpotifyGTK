@@ -32,7 +32,32 @@ G_DEFINE_FINAL_TYPE (SpotifyClientToken, spotifygtk_client_token, G_TYPE_OBJECT)
 typedef struct {
   ClientTokenCallback callback;
   gpointer            user_data;
+  SoupMessage        *msg;  /* kept alive to read status after the read completes */
 } RequestClosure;
+
+static gchar *
+hex_preview (const guint8 *data, gsize len, gsize max_bytes)
+{
+  gsize show = MIN (len, max_bytes);
+  GString *s = g_string_sized_new (show * 2 + 8);
+  for (gsize i = 0; i < show; i++)
+    g_string_append_printf (s, "%02x", data[i]);
+  if (len > max_bytes)
+    g_string_append_printf (s, "...(%" G_GSIZE_FORMAT " more bytes)", len - max_bytes);
+  return g_string_free (s, FALSE);
+}
+
+static const gchar *
+challenge_type_name (guint64 type)
+{
+  switch (type) {
+    case 0: return "CHALLENGE_UNKNOWN";
+    case 1: return "CHALLENGE_CLIENT_SECRET_HMAC";
+    case 2: return "CHALLENGE_EVALUATE_JS";
+    case 3: return "CHALLENGE_HASH_CASH";
+    default: return "(unrecognized challenge type value)";
+  }
+}
 
 static void
 on_response (GObject *source, GAsyncResult *result, gpointer user_data)
@@ -41,10 +66,13 @@ on_response (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError)  err = NULL;
 
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
+  guint status = soup_message_get_status (cl->msg);
+
   if (!bytes) {
-    g_warning ("clienttoken: request failed: %s -- proceeding without a client-token",
-              err ? err->message : "unknown");
+    g_warning ("clienttoken: request failed (HTTP status %u): %s -- proceeding without a client-token",
+              status, err ? err->message : "unknown");
     if (cl->callback) cl->callback (NULL, cl->user_data);
+    g_object_unref (cl->msg);
     g_free (cl);
     return;
   }
@@ -52,10 +80,12 @@ on_response (GObject *source, GAsyncResult *result, gpointer user_data)
   gsize len = 0;
   const guint8 *data = g_bytes_get_data (bytes, &len);
 
+  g_message ("clienttoken: response HTTP %u, %" G_GSIZE_FORMAT " bytes", status, len);
+
   /* ClientTokenResponse: response_type (field 1, varint), oneof
    * granted_token (field 2, embedded GrantedTokenResponse) or
-   * challenges (field 3). GrantedTokenResponse.token is field 1
-   * (string). All per clienttoken_http.proto, proto3 field numbers. */
+   * challenges (field 3, embedded ChallengesResponse). All per
+   * clienttoken_http.proto, proto3 field numbers. */
   const guint8 *granted_data = NULL; gsize granted_len = 0;
   if (pb_find_bytes_field (data, len, 2, &granted_data, &granted_len)) {
     const guint8 *token_data = NULL; gsize token_len = 0;
@@ -64,19 +94,57 @@ on_response (GObject *source, GAsyncResult *result, gpointer user_data)
       g_message ("clienttoken: obtained a client-token");
       if (cl->callback) cl->callback (token, cl->user_data);
       g_bytes_unref (bytes);
+      g_object_unref (cl->msg);
       g_free (cl);
       return;
     }
   }
 
-  /* Field 3 (challenges) or anything else unparseable -- treat as a
-   * soft failure, matching librespot's tolerance for this endpoint
-   * not being strictly required. Solving a HashCash/JS-eval/HMAC
-   * challenge is real, separate work not implemented here. */
-  g_message ("clienttoken: no granted_token in response (challenge or unknown shape) -- "
-            "proceeding without a client-token");
+  /* Distinguish a genuine ChallengesResponse (field 3) -- an actual
+   * anti-abuse proof-of-work/JS-eval/HMAC challenge, which is
+   * expected and even likely for a from-scratch client hitting this
+   * specific endpoint for the first time -- from something
+   * genuinely unparseable (wrong field number on our end, an error
+   * page, a non-protobuf body), which would instead point at a real
+   * bug in this request rather than Spotify's anti-abuse system
+   * doing its job. ChallengesResponse.challenges is field 2, repeated
+   * Challenge; Challenge.type is field 1. */
+  const guint8 *challenges_data = NULL; gsize challenges_len = 0;
+  if (pb_find_bytes_field (data, len, 3, &challenges_data, &challenges_len)) {
+    g_autofree gchar *types = g_strdup ("");
+    gsize pos = 0;
+    guint32 field_num; PbWireType wire_type;
+    const guint8 *fdata; gsize flen; guint64 fvarint;
+    guint challenge_count = 0;
+
+    while (pb_read_field (challenges_data, challenges_len, &pos, &field_num, &wire_type,
+                          &fdata, &flen, &fvarint)) {
+      if (field_num == 2 && wire_type == PB_WIRE_LENGTH_DELIMITED) {
+        challenge_count++;
+        guint64 challenge_type = 0;
+        pb_find_varint_field (fdata, flen, 1, &challenge_type);
+        g_autofree gchar *old_types = types;
+        types = g_strdup_printf ("%s%s%s", old_types, *old_types ? ", " : "",
+                                 challenge_type_name (challenge_type));
+      }
+    }
+
+    g_message ("clienttoken: server issued a real anti-abuse challenge (%u challenge(s): %s) -- "
+              "this is Spotify's proof-of-work/verification system, not a bug in the request. "
+              "Solving it (HashCash/JS-eval/HMAC) is separate, unimplemented work. "
+              "Proceeding without a client-token.", challenge_count, types);
+  } else {
+    /* Neither granted_token nor challenges parsed -- genuinely
+     * unexpected. Dump enough to actually debug rather than guess. */
+    g_autofree gchar *preview = hex_preview (data, len, 64);
+    g_warning ("clienttoken: response has neither granted_token (field 2) nor challenges "
+              "(field 3) -- HTTP %u, %" G_GSIZE_FORMAT " bytes, hex preview: %s",
+              status, len, preview);
+  }
+
   if (cl->callback) cl->callback (NULL, cl->user_data);
   g_bytes_unref (bytes);
+  g_object_unref (cl->msg);
   g_free (cl);
 }
 
@@ -111,6 +179,7 @@ spotifygtk_client_token_request (SpotifyClientToken *self, const gchar *client_i
   RequestClosure *cl = g_new0 (RequestClosure, 1);
   cl->callback  = callback;
   cl->user_data = user_data;
+  cl->msg       = g_object_ref (msg);
 
   soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
                                     on_response, cl);
