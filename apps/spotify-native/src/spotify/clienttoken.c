@@ -5,13 +5,23 @@
  * client_version is librespot's own SPOTIFY_SEMANTIC_VERSION
  * ("1.2.52.442", core/src/version.rs) -- reused verbatim rather than
  * invented, since this identifies the client to a server that may
- * validate it against known-good version strings. Skipped:
- * connectivity_sdk_data's platform/OS/kernel-version details, which
- * librespot's real client does populate -- a reasonable
- * simplification given client-token is tolerated as optional even
- * when entirely absent (confirmed in spclient.rs), so a minimal-but-
- * present request should be more than sufficient.
+ * validate it against known-good version strings.
+ *
+ * connectivity_sdk_data is now populated with device_id and Linux
+ * platform details (system_name/release/version/hardware via uname(2)),
+ * matching what librespot's spclient.rs sends for Linux. Its absence
+ * caused Spotify to return HTTP 400 with a zero-length body.
+ *
+ * Field layout (all proto3, small field numbers):
+ *   ClientTokenRequest (field 1 = request_type varint, field 2 = ClientDataRequest)
+ *   ClientDataRequest  (field 1 = client_version, field 2 = client_id,
+ *                       field 3 = ConnectivitySdkData)
+ *   ConnectivitySdkData (field 1 = PlatformSpecificData, field 2 = device_id)
+ *   PlatformSpecificData.desktop_linux (oneof field 5 = NativeDesktopLinuxData)
+ *   NativeDesktopLinuxData (field 1 = system_name, field 2 = system_release,
+ *                           field 3 = system_version, field 4 = hardware)
  */
+
 
 #include "config.h"
 #include "clienttoken.h"
@@ -19,6 +29,7 @@
 
 #include <libsoup/soup.h>
 #include <string.h>
+#include <sys/utsname.h>
 
 #define SPOTIFY_SEMANTIC_VERSION "1.2.52.442"
 
@@ -150,23 +161,65 @@ on_response (GObject *source, GAsyncResult *result, gpointer user_data)
 
 void
 spotifygtk_client_token_request (SpotifyClientToken *self, const gchar *client_id,
+                                 const gchar *device_id,
                                  ClientTokenCallback callback, gpointer user_data)
 {
   g_return_if_fail (SPOTIFYGTK_IS_CLIENT_TOKEN (self));
 
-  /* ClientDataRequest: client_version (field 1, string), client_id
-   * (field 2, string). */
-  g_autoptr(GByteArray) client_data = g_byte_array_new ();
-  pb_write_bytes_field (client_data, 1, (const guint8 *) SPOTIFY_SEMANTIC_VERSION,
-                        strlen (SPOTIFY_SEMANTIC_VERSION));
-  pb_write_bytes_field (client_data, 2, (const guint8 *) client_id, strlen (client_id));
+  /* NativeDesktopLinuxData (oneof field 5 inside PlatformSpecificData):
+   *   system_name (field 1)    — uname -s, always "Linux"
+   *   system_release (field 2) — uname -r, kernel release string
+   *   system_version (field 3) — uname -v, kernel version string
+   *   hardware (field 4)       — uname -m, machine hardware name
+   *
+   * Field numbers verified against go-librespot's connectivity.proto
+   * and librespot's spclient.rs (mut_desktop_linux() branch). */
+  struct utsname uts;
+  if (uname (&uts) != 0) {
+    /* Non-fatal: fall back to static strings librespot would also use. */
+    g_warning ("clienttoken: uname() failed, using static Linux platform fields");
+    uts.sysname[0]  = '\0'; g_strlcpy (uts.sysname,  "Linux",   sizeof (uts.sysname));
+    uts.release[0]  = '\0'; g_strlcpy (uts.release,  "0",       sizeof (uts.release));
+    uts.version[0]  = '\0'; g_strlcpy (uts.version,  "0",       sizeof (uts.version));
+    uts.machine[0]  = '\0'; g_strlcpy (uts.machine,  "x86_64",  sizeof (uts.machine));
+  }
 
-  /* ClientTokenRequest: request_type (field 1, varint,
-   * REQUEST_CLIENT_DATA_REQUEST = 1), client_data (field 2, embedded,
-   * oneof "request"). */
+  g_autoptr(GByteArray) linux_data = g_byte_array_new ();
+  pb_write_bytes_field (linux_data, 1, (const guint8 *) uts.sysname,  strlen (uts.sysname));
+  pb_write_bytes_field (linux_data, 2, (const guint8 *) uts.release,  strlen (uts.release));
+  pb_write_bytes_field (linux_data, 3, (const guint8 *) uts.version,  strlen (uts.version));
+  pb_write_bytes_field (linux_data, 4, (const guint8 *) uts.machine,  strlen (uts.machine));
+
+  /* PlatformSpecificData: oneof — desktop_linux is field 5. */
+  g_autoptr(GByteArray) platform_data = g_byte_array_new ();
+  pb_write_message_field (platform_data, 5, linux_data->data, linux_data->len);
+
+  /* ConnectivitySdkData:
+   *   platform_specific_data (field 1, embedded PlatformSpecificData)
+   *   device_id              (field 2, string) */
+  g_autoptr(GByteArray) sdk_data = g_byte_array_new ();
+  pb_write_message_field (sdk_data, 1, platform_data->data, platform_data->len);
+  pb_write_bytes_field   (sdk_data, 2, (const guint8 *) device_id, strlen (device_id));
+
+  /* ClientDataRequest:
+   *   client_version       (field 1, string)
+   *   client_id            (field 2, string)
+   *   connectivity_sdk_data (field 3, embedded ConnectivitySdkData) */
+  g_autoptr(GByteArray) client_data = g_byte_array_new ();
+  pb_write_bytes_field   (client_data, 1, (const guint8 *) SPOTIFY_SEMANTIC_VERSION,
+                          strlen (SPOTIFY_SEMANTIC_VERSION));
+  pb_write_bytes_field   (client_data, 2, (const guint8 *) client_id, strlen (client_id));
+  pb_write_message_field (client_data, 3, sdk_data->data, sdk_data->len);
+
+  /* ClientTokenRequest:
+   *   request_type (field 1, varint, REQUEST_CLIENT_DATA_REQUEST = 1)
+   *   client_data  (field 2, embedded ClientDataRequest, oneof "request") */
   g_autoptr(GByteArray) request = g_byte_array_new ();
   pb_write_varint_field  (request, 1, 1);
   pb_write_message_field (request, 2, client_data->data, client_data->len);
+
+  g_message ("clienttoken: sending request (kernel=%s arch=%s device_id=%.8s...)",
+             uts.release, uts.machine, device_id ? device_id : "(null)");
 
   SoupMessage *msg = soup_message_new (SOUP_METHOD_POST, CLIENTTOKEN_URL);
   soup_message_headers_replace (soup_message_get_request_headers (msg),

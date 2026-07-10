@@ -58,6 +58,21 @@
 #include <glib.h>
 #include <string.h>
 
+/* Generate a random 40-char hex device ID (same pattern as connect.c).
+ * Per-run is fine for a harness -- persisting it is a nice-to-have
+ * for a real client so "this device" stays recognised across restarts. */
+static gchar *
+generate_device_id (void)
+{
+  guint8 raw[20];
+  GRand *r = g_rand_new ();
+  for (int i = 0; i < 20; i++) raw[i] = (guint8) g_rand_int_range (r, 0, 256);
+  g_rand_free (r);
+  GString *hex = g_string_new (NULL);
+  for (int i = 0; i < 20; i++) g_string_append_printf (hex, "%02x", raw[i]);
+  return g_string_free (hex, FALSE);
+}
+
 static gboolean
 run_shannon_selftest (void)
 {
@@ -159,6 +174,7 @@ typedef struct {
   GMainLoop *loop;
   gboolean   ok;
   gboolean   timed_out;
+  gchar             *device_id;         /* owned, freed in run_live_test */
   SpotifyApSession   *session;      /* borrowed, owned by run_live_test */
   SpotifyClientToken *client_token_client;
   SpotifyLogin5      *login5_client;
@@ -213,7 +229,7 @@ on_client_token_result (const gchar *token, gpointer user_data)
 
   state->login5_client = spotifygtk_login5_new ();
   spotifygtk_login5_auth_token (state->login5_client,
-                                NATIVE_AUTH_CLIENT_ID, "spotify-native-dev-harness",
+                                NATIVE_AUTH_CLIENT_ID, state->device_id,
                                 username, creds, creds_len, creds_type,
                                 token, on_login5_result, state);
 }
@@ -242,6 +258,7 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
             "(client-token -> login5)...");
   state->client_token_client = spotifygtk_client_token_new ();
   spotifygtk_client_token_request (state->client_token_client, NATIVE_AUTH_CLIENT_ID,
+                                   state->device_id,
                                    on_client_token_result, state);
 }
 
@@ -304,8 +321,10 @@ run_live_test (const gchar *token)
   GMainLoop *loop = g_main_loop_new (NULL, FALSE);
   LiveTestState state = {
     .loop = loop, .ok = FALSE, .timed_out = FALSE,
+    .device_id = generate_device_id (),
     .session = NULL, .client_token_client = NULL, .login5_client = NULL,
   };
+  g_message ("[live-test] device_id for this run: %s", state.device_id);
 
   spotifygtk_ap_session_connect (session, NULL, on_connected, &state);
 
@@ -347,6 +366,7 @@ run_live_test (const gchar *token)
   if (!state.timed_out)
     g_source_remove (timeout_id);
   g_main_loop_unref (loop);
+  g_free (state.device_id);
   g_clear_object (&state.client_token_client);
   g_clear_object (&state.login5_client);
   g_object_unref (session);
