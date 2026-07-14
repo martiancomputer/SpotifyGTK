@@ -56,11 +56,15 @@ cdn.c (HTTPS Range fetch + AES-CTR decrypt, already implemented)
   the real field is `0xa`. Login had been succeeding the whole time; only
   the username extraction was silently broken, which is exactly why no
   username ever printed in earlier test runs.
-- `spotify/clienttoken.c` — ✅ implemented: `ClientDataRequest` with
-  librespot's own `client_version` (`"1.2.52.442"`, `core/src/version.rs`)
-  and the keymaster `client_id`. Treats a `ChallengesResponse` (HashCash/
+- `spotify/clienttoken.c` — ✅ implemented, and confirmed the request
+  itself is now well-formed against a live server (HTTP 400 → HTTP 200,
+  see the ConnectivitySdkData finding above). Uses librespot's own
+  `client_version` (`"1.2.52.442"`, `core/src/version.rs`) and the
+  keymaster `client_id`. Treats a genuine `ChallengesResponse` (HashCash/
   JS-eval/HMAC proof-of-work) as a soft failure rather than solved,
-  matching librespot's own tolerance for this endpoint.
+  matching librespot's own tolerance for this endpoint — distinguished
+  from a malformed-request error via dedicated diagnostics rather than
+  lumped together as "unknown failure."
 - `spotify/login5.c` — ✅ implemented: builds `LoginRequest` with
   `StoredCredential` from the AP session's captured reusable credential.
   Requires a client-token (unlike some other spclient endpoints).
@@ -75,12 +79,25 @@ cdn.c (HTTPS Range fetch + AES-CTR decrypt, already implemented)
 - `spotify/cdn.c` — 🟡 HTTPS Range fetch + AES-CTR decrypt implemented;
   IV seed and possible stream header offset still unconfirmed (see below).
 
-**Not yet tested against real services**: `clienttoken.c`, `login5.c`,
-and `spclient.c` are all new this round. `apps/spotify-native/src/main.c`'s
-live test now chains client-token → login5 automatically after a
-successful AP login, which is the next real unknown to resolve — same
-pattern as the AP handshake/login work: build against the verified
-schema, then find out what a live server actually does with it.
+**Client-token needed a real `ConnectivitySdkData` submessage, not an
+optional nicety.** First live run against the real endpoint returned
+HTTP 400 with a zero-length body — not a graceful `ChallengesResponse`,
+which is what the earlier "tolerated as optional" reading from
+`spclient.rs` would have predicted. The diagnostics added specifically to
+distinguish those two cases (real challenge vs. genuinely broken request)
+were what made this immediately diagnosable instead of another guess.
+Root cause: `ClientDataRequest.connectivity_sdk_data` (the oneof `data`
+field) needs to actually be populated — confirmed against `go-librespot`'s
+`connectivity.proto` for the message shape and librespot's
+`spclient.rs::mut_desktop_linux()` branch for what a real Linux client
+sends (device_id, OS name/version, CPU architecture via `uname(2)`). Fixed
+in `clienttoken.c`; the same `device_id` is now reused consistently across
+both the client-token request and login5's `ClientInfo.device_id`.
+
+`clienttoken.c`, `login5.c`, and `spclient.c` are otherwise still
+unconfirmed against real services beyond this one fix — the next live run
+is what actually proves the full chain (client-token → login5 → a real
+bearer token) end to end.
 
 ## Open items
 
