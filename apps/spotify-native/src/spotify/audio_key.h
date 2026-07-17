@@ -32,4 +32,10 @@ void spotifygtk_audio_key_request (SpotifyAudioKeyClient *self,
                                    const guint8 *file_id,   gsize file_id_len,
                                    AudioKeyCallback callback, gpointer user_data);
 
+void spotifygtk_audio_key_handle_response (SpotifyAudioKeyClient *self,
+                                      const guint8 *payload, gsize len);
+
+void spotifygtk_audio_key_handle_error (SpotifyAudioKeyClient *self,
+                                   const guint8 *payload, gsize len);
+
 G_END_DECLS

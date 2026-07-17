@@ -24,8 +24,8 @@
 #endif
 #include <string.h>
 
-/* TODO: confirm against a real captured file before relying on this. */
-#define STREAM_HEADER_OFFSET 0
+/* Spotify's custom Ogg packet with normalisation data is 167 bytes. */
+#define STREAM_HEADER_OFFSET 167
 
 struct _SpotifyCdnFetcher {
   GObject      parent_instance;
@@ -46,19 +46,32 @@ typedef struct {
 static GBytes *
 aes_ctr_decrypt (const guint8 *key, goffset stream_offset, const guint8 *ciphertext, gsize len)
 {
-  /* CTR mode IV = 16-byte counter, big-endian, starting block derived
-   * from stream_offset (block size 16 bytes for AES). Spotify's IV
-   * seed value itself is part of what needs confirming against a real
-   * stream — using an all-zero IV here as the structurally-correct
-   * placeholder so chunk alignment/seeking logic can be validated
-   * independently of the exact seed bytes. */
-  guint8 iv[16] = {0};
+  guint8 iv[16] = {
+    0x72, 0xe0, 0x67, 0xfb, 0xdd, 0xcb, 0xcf, 0x77,
+    0xeb, 0xe8, 0xbc, 0x64, 0x3f, 0x63, 0x0d, 0x93
+  };
+  
   guint64 block_offset = (guint64) (stream_offset / 16);
-  for (int i = 0; i < 8; i++)
-    iv[15 - i] = (guint8) (block_offset >> (8 * i));
+  guint8 intra_block_offset = stream_offset % 16;
+
+  if (block_offset > 0) {
+    guint64 carry = block_offset;
+    for (int i = 15; i >= 0 && carry > 0; i--) {
+      guint64 sum = iv[i] + (carry & 0xFF);
+      iv[i] = sum & 0xFF;
+      carry = (carry >> 8) + (sum >> 8);
+    }
+  }
 
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new ();
   EVP_DecryptInit_ex (ctx, EVP_aes_128_ctr (), NULL, key, iv);
+
+  if (intra_block_offset > 0) {
+    guint8 dummy_in[16] = {0};
+    guint8 dummy_out[16] = {0};
+    int dummy_len = 0;
+    EVP_DecryptUpdate (ctx, dummy_out, &dummy_len, dummy_in, intra_block_offset);
+  }
 
   guint8 *out = g_malloc (len);
   int outlen = 0;
@@ -109,8 +122,9 @@ spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
 
   SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, cdn_url);
 
+  goffset actual_offset = offset + STREAM_HEADER_OFFSET;
   g_autofree gchar *range = g_strdup_printf ("bytes=%" G_GOFFSET_FORMAT "-%" G_GOFFSET_FORMAT,
-                                             offset, offset + (goffset) length - 1);
+                                             actual_offset, actual_offset + (goffset) length - 1);
   soup_message_headers_replace (soup_message_get_request_headers (msg), "Range", range);
 
   FetchClosure *cl = g_new0 (FetchClosure, 1);

@@ -44,6 +44,13 @@ spotifygtk_audio_key_request (SpotifyAudioKeyClient *self,
     (guint8) (seq >> 24), (guint8) (seq >> 16), (guint8) (seq >> 8), (guint8) seq
   };
   g_byte_array_append (buf, seq_be, sizeof (seq_be));
+  
+  guint8 trailer[2] = {0x00, 0x00};
+  g_byte_array_append (buf, trailer, sizeof (trailer));
+
+  g_message ("audio-key: sending request seq=%u (file_id=%" G_GSIZE_FORMAT
+             " bytes, track_gid=%" G_GSIZE_FORMAT " bytes, wire=%u bytes)",
+             seq, file_id_len, track_gid_len, buf->len);
 
   if (callback) {
     g_hash_table_insert (self->pending,      g_memdup2 (&seq, sizeof (seq)), callback);
@@ -64,13 +71,19 @@ void
 spotifygtk_audio_key_handle_response (SpotifyAudioKeyClient *self,
                                       const guint8 *payload, gsize len)
 {
-  if (len < 4 + AUDIO_KEY_LEN) return;
+  if (len < 4 + AUDIO_KEY_LEN) {
+    g_warning ("audio-key: ignoring malformed key response (%" G_GSIZE_FORMAT
+               " bytes; need at least %u)", len, 4 + AUDIO_KEY_LEN);
+    return;
+  }
 
   guint32 seq = ((guint32) payload[0] << 24) | ((guint32) payload[1] << 16) |
                 ((guint32) payload[2] << 8)  |  (guint32) payload[3];
 
   AudioKeyCallback cb   = g_hash_table_lookup (self->pending, &seq);
   gpointer         data = g_hash_table_lookup (self->pending_data, &seq);
+  g_message ("audio-key: received key response seq=%u (%" G_GSIZE_FORMAT
+             " bytes, pending=%s)", seq, len, cb ? "yes" : "no");
   if (cb) cb (payload + 4, NULL, data);
 
   g_hash_table_remove (self->pending, &seq);
@@ -81,12 +94,18 @@ void
 spotifygtk_audio_key_handle_error (SpotifyAudioKeyClient *self,
                                    const guint8 *payload, gsize len)
 {
-  if (len < 4) return;
+  if (len < 4) {
+    g_warning ("audio-key: ignoring malformed error response (%" G_GSIZE_FORMAT
+               " bytes; need at least 4)", len);
+    return;
+  }
   guint32 seq = ((guint32) payload[0] << 24) | ((guint32) payload[1] << 16) |
                 ((guint32) payload[2] << 8)  |  (guint32) payload[3];
 
   AudioKeyCallback cb   = g_hash_table_lookup (self->pending, &seq);
   gpointer         data = g_hash_table_lookup (self->pending_data, &seq);
+  g_warning ("audio-key: received error response seq=%u (%" G_GSIZE_FORMAT
+             " bytes, pending=%s)", seq, len, cb ? "yes" : "no");
   if (cb) {
     GError *err = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Audio key request denied");
     cb (NULL, err, data);

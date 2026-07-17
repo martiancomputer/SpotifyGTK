@@ -68,16 +68,13 @@ cdn.c (HTTPS Range fetch + AES-CTR decrypt, already implemented)
 - `spotify/login5.c` — ✅ implemented: builds `LoginRequest` with
   `StoredCredential` from the AP session's captured reusable credential.
   Requires a client-token (unlike some other spclient endpoints).
-- `spotify/spclient.c` — 🟡 implemented for `get_audio_storage` only
-  (`get_track_metadata` not yet started — no real file_id to test against
-  until that exists). Host resolution uses librespot's own hardcoded
-  fallback (`spclient.wg.spotify.com:443`) directly rather than
-  implementing the full `apresolve` HTTPS flow — a deliberate, clearly-
-  scoped simplification for a first working version, not an oversight.
+- `spotify/spclient.c` — ✅ implemented: `get_track_metadata` now correctly parses the recursive protobuf structure (finding `AudioFile`s inside `Track.alternative` if they are not in the root track), picks the highest quality OGG format, and chains into `get_audio_storage`. Host resolution uses librespot's own hardcoded fallback (`spclient.wg.spotify.com:443`) directly rather than implementing the full `apresolve` HTTPS flow — a deliberate, clearly-scoped simplification for a first working version, not an oversight.
 - `spotify/audio_key.c` — ✅ request/response plumbing complete (unchanged,
   AP/Mercury-based, independent of the HTTPS chain above).
-- `spotify/cdn.c` — 🟡 HTTPS Range fetch + AES-CTR decrypt implemented;
-  IV seed and possible stream header offset still unconfirmed (see below).
+- `spotify/cdn.c` — ✅ confirmed for the first 16 KiB: the live harness
+  fetched a resolved CDN URL and decrypted it to an `OggS` header using the
+  configured IV seed and 167-byte stream-header offset. Seeking/nonzero
+  offsets still need explicit validation.
 
 **Client-token needed a real `ConnectivitySdkData` submessage, not an
 optional nicety.** First live run against the real endpoint returned
@@ -94,23 +91,19 @@ sends (device_id, OS name/version, CPU architecture via `uname(2)`). Fixed
 in `clienttoken.c`; the same `device_id` is now reused consistently across
 both the client-token request and login5's `ClientInfo.device_id`.
 
-`clienttoken.c`, `login5.c`, and `spclient.c` are otherwise still
-unconfirmed against real services beyond this one fix — the next live run
-is what actually proves the full chain (client-token → login5 → a real
-bearer token) end to end.
+**The full retrieval/decrypt proof is now live-validated.** The harness
+successfully chains client-token → login5 → track metadata (including
+alternative-track audio files) → audio storage resolution → AP audio-key
+request → CDN Range fetch → AES-CTR decrypt. The initial decrypted 16 KiB
+starts with `OggS`, confirming the stream start is valid Ogg data rather
+than merely a successful HTTP response.
 
 ## Open items
 
-- [ ] Confirm the client-token → login5 chain actually succeeds against
-      real services (main.c's live test now exercises this automatically)
 - [ ] Implement `apresolve` properly instead of the hardcoded
       `spclient.wg.spotify.com` fallback (works per librespot's own code,
       but is a simplification worth closing out)
-- [ ] `spclient_get_track_metadata` — needed to get a real file_id to test
-      `get_audio_storage` against; nothing currently produces one
-- [ ] Confirm CTR IV seed against librespot's actual AES setup for cdn.c
-- [ ] Confirm (or rule out) a stream header offset by comparing a captured
-      encrypted chunk's first bytes against expected Ogg magic bytes
-      (`OggS`) at various candidate offsets
+- [ ] Validate CTR seeking at nonzero offsets, including block-boundary and
+      intra-block offsets, against continuous decryption
 - [ ] Wire audio_key.c + cdn.c + decoder.c + output.c into an actual
-      end-to-end playback path once a real file_id is obtainable
+      end-to-end playback path now that a real file_id and CDN URLs are obtainable

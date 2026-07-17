@@ -2,14 +2,20 @@
 build/
 _build/
 builddir/
-
+# librespot reference repository (external, not part of project)
+librespot-repo/
+ 
 # Compiled output
 *.o
 *.so
 *.a
 spotifygtk
-
+# Build directories
+build/
+*-build/
+ 
 # Editor
+# IDE/Editor
 .vscode/
 .idea/
 *.swp
@@ -17,12 +23,11 @@ spotifygtk
 *~
 .clangd/
 compile_commands.json
-
+ 
 # Config / tokens (NEVER commit credentials)
 *.env
 .env
 config.local.h
-
+ 
 # OS
 .DS_Store
-Thumbs.db

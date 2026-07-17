@@ -54,6 +54,9 @@
 #include "spotify/native_auth.h"
 #include "spotify/clienttoken.h"
 #include "spotify/login5.h"
+#include "spotify/spclient.h"
+#include "spotify/audio_key.h"
+#include "spotify/cdn.h"
 
 #include <glib.h>
 #include <string.h>
@@ -178,7 +181,147 @@ typedef struct {
   SpotifyApSession   *session;      /* borrowed, owned by run_live_test */
   SpotifyClientToken *client_token_client;
   SpotifyLogin5      *login5_client;
+  SpotifySpclient    *spclient;
+  SpotifyAudioKeyClient *audio_key_client;
+  SpotifyCdnFetcher  *cdn_fetcher;
+  gchar              *bearer_token;
+  gchar              *client_token;
+  guint8              file_id[20];
+  guint8              track_gid[16];
+  gchar              *cdn_url;
 } LiveTestState;
+
+static void
+on_aes_key (SpotifyApSession *session, ApCommandId cmd, const guint8 *payload, gsize len, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  g_message ("[live-test] received AP_CMD_AES_KEY (%" G_GSIZE_FORMAT " bytes); dispatching to audio-key client", len);
+  spotifygtk_audio_key_handle_response (state->audio_key_client, payload, len);
+}
+
+static void
+on_aes_key_error (SpotifyApSession *session, ApCommandId cmd, const guint8 *payload, gsize len, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  g_warning ("[live-test] received AP_CMD_AES_KEY_ERROR (%" G_GSIZE_FORMAT " bytes); dispatching to audio-key client", len);
+  spotifygtk_audio_key_handle_error (state->audio_key_client, payload, len);
+}
+
+static void
+on_cdn_chunk_result (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (decrypted_chunk) {
+    gsize len = 0;
+    const guint8 *data = g_bytes_get_data (decrypted_chunk, &len);
+    g_message ("[live-test] CDN DECRYPT SUCCEEDED -- decrypted %" G_GSIZE_FORMAT " bytes.", len);
+    if (len >= 4) {
+      g_message ("[live-test] First 4 bytes: %02x %02x %02x %02x (expected 4f 67 67 53 for 'OggS')",
+                 data[0], data[1], data[2], data[3]);
+      if (memcmp (data, "OggS", 4) == 0) {
+        g_message ("[live-test] SUCCESS: Decrypted chunk has a valid Ogg stream header!");
+        state->ok = TRUE;
+      } else {
+        g_warning ("[live-test] FAILURE: Decrypted chunk does not start with OggS. "
+                   "AES IV/key/offset is incorrect.");
+        state->ok = FALSE;
+      }
+    } else {
+      g_warning ("[live-test] Decrypted chunk is too small.");
+      state->ok = FALSE;
+    }
+  } else {
+    g_warning ("[live-test] CDN fetch failed: %s", error ? error->message : "unknown error");
+    state->ok = FALSE;
+  }
+
+  g_main_loop_quit (state->loop);
+}
+
+static void
+on_audio_key_result (const guint8 key[AUDIO_KEY_LEN], GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (key) {
+    g_message ("[live-test] AUDIO KEY SUCCEEDED -- got 16-byte AES key.");
+    g_message ("[live-test] Fetching and decrypting CDN chunk (offset 0 -> physical 167)...");
+    spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, key,
+                                0, 16384, on_cdn_chunk_result, state);
+    return; /* Wait for CDN chunk */
+  } else {
+    g_warning ("[live-test] audio key request failed: %s", error ? error->message : "unknown error");
+    state->ok = FALSE;
+  }
+
+  g_main_loop_quit (state->loop);
+}
+
+static void
+on_audio_storage_result (SpclientCdnUrls *urls, GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (urls && urls->n_urls > 0) {
+    g_message ("[live-test] STORAGE RESOLUTION SUCCEEDED -- CDN URLs:");
+    for (guint i = 0; i < urls->n_urls; i++)
+      g_message ("  %s", urls->urls[i]);
+    
+    state->cdn_url = g_strdup (urls->urls[0]);
+    spclient_cdn_urls_free (urls);
+
+    g_message ("[live-test] Requesting audio key for the track...");
+    spotifygtk_audio_key_request (state->audio_key_client, state->track_gid, 16,
+                                  state->file_id, 20, on_audio_key_result, state);
+    return; /* Wait for AES key */
+  } else {
+    g_warning ("[live-test] get_audio_storage failed: %s", error ? error->message : "unknown error");
+    state->ok = FALSE;
+  }
+
+  g_main_loop_quit (state->loop);
+}
+
+static void
+on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (files) {
+    g_message ("[live-test] TRACK METADATA SUCCEEDED -- found %u files:", n_files);
+    gint best_idx = -1;
+    for (guint i = 0; i < n_files; i++) {
+      g_message ("  file[%u]: format=%" G_GUINT64_FORMAT, i, files[i].format);
+      
+      /* OGG_VORBIS_320 = 2, OGG_VORBIS_160 = 1, OGG_VORBIS_96 = 0 */
+      if (files[i].format == 2) best_idx = i;
+      else if (best_idx == -1 && files[i].format == 1) best_idx = i;
+      else if (best_idx == -1 && files[i].format == 0) best_idx = i;
+    }
+    
+    if (best_idx != -1) {
+      g_message ("[live-test] Selected format %" G_GUINT64_FORMAT ". Resolving CDN URLs...", files[best_idx].format);
+      
+      memcpy (state->file_id, files[best_idx].file_id, 20);
+      memcpy (state->track_gid, files[best_idx].track_gid, 16);
+      
+      spotifygtk_spclient_get_audio_storage (state->spclient,
+                                             files[best_idx].file_id, 20,
+                                             state->bearer_token, state->client_token,
+                                             on_audio_storage_result, state);
+      return; /* Wait for storage_resolve */
+    } else {
+      g_warning ("[live-test] No suitable OGG_VORBIS file found.");
+      state->ok = FALSE;
+    }
+  } else {
+    g_warning ("[live-test] get_track_metadata failed: %s", error ? error->message : "unknown error");
+    state->ok = FALSE;
+  }
+
+  g_main_loop_quit (state->loop);
+}
 
 static void
 on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
@@ -188,10 +331,17 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
 
   if (access_token) {
     g_message ("[live-test] LOGIN5 SUCCEEDED -- obtained a spclient-usable bearer token "
-              "(expires in %ds). The full streaming auth-relay chain (AP login -> "
-              "reusable credential -> client-token -> login5) is confirmed working "
-              "against real Spotify services.", expires_in_seconds);
-    state->ok = TRUE;
+              "(expires in %ds).", expires_in_seconds);
+    
+    state->bearer_token = g_strdup (access_token);
+    state->spclient = spotifygtk_spclient_new ();
+    
+    const gchar *test_track = "spotify:track:6rqhFgbbKwnb9MLmUQDhG6";
+    g_message ("[live-test] Fetching metadata for %s...", test_track);
+    spotifygtk_spclient_get_track_metadata (state->spclient, test_track,
+                                            state->bearer_token, state->client_token,
+                                            on_track_metadata_result, state);
+    return; /* Wait for track metadata */
   } else {
     g_warning ("[live-test] login5 failed: %s", error ? error->message : "unknown error");
     g_warning ("[live-test] AP login itself succeeded -- only the streaming auth-relay "
@@ -208,11 +358,13 @@ on_client_token_result (const gchar *token, gpointer user_data)
 {
   LiveTestState *state = user_data;
 
-  if (token)
+  if (token) {
     g_message ("[live-test] client-token obtained, proceeding to login5...");
-  else
+    state->client_token = g_strdup (token);
+  } else {
     g_message ("[live-test] no client-token obtained -- proceeding to login5 without one "
               "(login5 requires one per spclient.rs; expect this to fail if so)");
+  }
 
   const gchar *username      = spotifygtk_ap_session_get_username (state->session);
   gsize        creds_len     = 0;
@@ -281,6 +433,16 @@ on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
 
   state->session = session;
   spotifygtk_ap_session_start_receiving (session);
+  state->audio_key_client = spotifygtk_audio_key_client_new (session);
+  state->cdn_fetcher = spotifygtk_cdn_fetcher_new ();
+
+  /* `state` is already the LiveTestState pointer supplied by run_live_test().
+   * Passing `&state` here would instead retain a pointer to this callback's
+   * stack-local parameter; the first audio-key reply would dereference that
+   * invalid address and crash. */
+  spotifygtk_ap_session_set_handler (session, AP_CMD_AES_KEY, on_aes_key, state);
+  spotifygtk_ap_session_set_handler (session, AP_CMD_AES_KEY_ERROR, on_aes_key_error, state);
+  g_message ("[live-test] registered AP audio-key response handlers");
 
   const gchar *username = g_getenv ("SPOTIFY_USERNAME");  /* optional, may be NULL */
   const gchar *token    = g_object_get_data (G_OBJECT (session), "login-token");
@@ -323,6 +485,8 @@ run_live_test (const gchar *token)
     .loop = loop, .ok = FALSE, .timed_out = FALSE,
     .device_id = generate_device_id (),
     .session = NULL, .client_token_client = NULL, .login5_client = NULL,
+    .spclient = NULL, .audio_key_client = NULL, .cdn_fetcher = NULL,
+    .bearer_token = NULL, .client_token = NULL, .cdn_url = NULL,
   };
   g_message ("[live-test] device_id for this run: %s", state.device_id);
 
@@ -369,6 +533,12 @@ run_live_test (const gchar *token)
   g_free (state.device_id);
   g_clear_object (&state.client_token_client);
   g_clear_object (&state.login5_client);
+  g_clear_object (&state.spclient);
+  g_clear_object (&state.audio_key_client);
+  g_clear_object (&state.cdn_fetcher);
+  g_free (state.bearer_token);
+  g_free (state.client_token);
+  g_free (state.cdn_url);
   g_object_unref (session);
 
   return state.ok;
