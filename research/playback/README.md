@@ -71,10 +71,16 @@ cdn.c (HTTPS Range fetch + AES-CTR decrypt, already implemented)
 - `spotify/spclient.c` — ✅ implemented: `get_track_metadata` now correctly parses the recursive protobuf structure (finding `AudioFile`s inside `Track.alternative` if they are not in the root track), picks the highest quality OGG format, and chains into `get_audio_storage`. Host resolution uses librespot's own hardcoded fallback (`spclient.wg.spotify.com:443`) directly rather than implementing the full `apresolve` HTTPS flow — a deliberate, clearly-scoped simplification for a first working version, not an oversight.
 - `spotify/audio_key.c` — ✅ request/response plumbing complete (unchanged,
   AP/Mercury-based, independent of the HTTPS chain above).
-- `spotify/cdn.c` — ✅ confirmed for the first 16 KiB: the live harness
-  fetched a resolved CDN URL and decrypted it to an `OggS` header using the
-  configured IV seed and 167-byte stream-header offset. Seeking/nonzero
-  offsets still need explicit validation.
+- `spotify/cdn.c` — ✅ live-validated for a 64 KiB initial range and an
+  independent, non-block-aligned range at logical offset 4093. Both ranges
+  decrypt consistently with the configured IV seed and 167-byte
+  stream-header offset; the initial range starts with `OggS`.
+- `audio/decoder.c` — ✅ live-validated against that decrypted 64 KiB probe:
+  libvorbisfile opened a 44.1 kHz stereo stream and produced 86,592 PCM
+  frames.
+- `audio/output.c` + PulseAudio backend — ✅ live-validated: the harness
+  opened PulseAudio and wrote all 86,592 decoded PCM frames. This is an
+  audible finite-buffer proof, not continuous playback yet.
 
 **Client-token needed a real `ConnectivitySdkData` submessage, not an
 optional nicety.** First live run against the real endpoint returned
@@ -94,16 +100,17 @@ both the client-token request and login5's `ClientInfo.device_id`.
 **The full retrieval/decrypt proof is now live-validated.** The harness
 successfully chains client-token → login5 → track metadata (including
 alternative-track audio files) → audio storage resolution → AP audio-key
-request → CDN Range fetch → AES-CTR decrypt. The initial decrypted 16 KiB
-starts with `OggS`, confirming the stream start is valid Ogg data rather
-than merely a successful HTTP response.
+request → CDN Range fetch → AES-CTR decrypt → Ogg/Vorbis decode. The
+initial 64 KiB decrypt starts with `OggS`, produces real PCM frames, and an
+independent non-block-aligned range matches its overlapping plaintext. The
+PCM probe was then written in full to the PulseAudio backend.
 
 ## Open items
 
 - [ ] Implement `apresolve` properly instead of the hardcoded
       `spclient.wg.spotify.com` fallback (works per librespot's own code,
       but is a simplification worth closing out)
-- [ ] Validate CTR seeking at nonzero offsets, including block-boundary and
-      intra-block offsets, against continuous decryption
-- [ ] Wire audio_key.c + cdn.c + decoder.c + output.c into an actual
-      end-to-end playback path now that a real file_id and CDN URLs are obtainable
+- [x] Replace whole-file collection with incremental CDN range feeding,
+      decoder-backed PCM output, a bounded queue, and a dedicated output
+      worker with pause/resume control; the remaining scheduler work is queue
+      management and seek-aware buffering.

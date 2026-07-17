@@ -50,6 +50,7 @@ typedef void (*ApPacketHandler) (SpotifyApSession *session,
                                  gpointer          user_data);
 
 SpotifyApSession *spotifygtk_ap_session_new (void);
+void spotifygtk_ap_session_set_cancellable (SpotifyApSession *self, GCancellable *cancellable);
 
 /* Resolves an AP host via SRV lookup, connects, and performs the
  * Diffie-Hellman + Shannon handshake. Calls back on completion.

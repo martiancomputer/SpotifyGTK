@@ -23,6 +23,8 @@ typedef void (*CdnChunkCallback) (GBytes *decrypted_chunk, GError *error, gpoint
 G_DECLARE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, SPOTIFYGTK, CDN_FETCHER, GObject)
 
 SpotifyCdnFetcher *spotifygtk_cdn_fetcher_new (void);
+void spotifygtk_cdn_fetcher_set_cancellable (SpotifyCdnFetcher *self,
+                                             GCancellable *cancellable);
 
 /* Fetches byte range [offset, offset+length) from cdn_url, decrypts
  * it in place with AES-128-CTR using `key`, and the CTR counter

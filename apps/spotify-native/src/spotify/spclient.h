@@ -19,6 +19,7 @@
 #pragma once
 
 #include <glib-object.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
@@ -60,6 +61,7 @@ typedef void (*SpclientTrackCallback) (const SpclientAudioFile *files /* NULL on
 G_DECLARE_FINAL_TYPE (SpotifySpclient, spotifygtk_spclient, SPOTIFYGTK, SPCLIENT, GObject)
 
 SpotifySpclient *spotifygtk_spclient_new (void);
+void spotifygtk_spclient_set_cancellable (SpotifySpclient *, GCancellable *);
 
 /* ── API ─────────────────────────────────────────────────────────────────── */
 

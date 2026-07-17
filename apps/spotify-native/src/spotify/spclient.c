@@ -13,6 +13,7 @@
 struct _SpotifySpclient {
   GObject      parent_instance;
   SoupSession *session;
+  GCancellable *cancellable;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifySpclient, spotifygtk_spclient, G_TYPE_OBJECT)
@@ -282,7 +283,7 @@ spotifygtk_spclient_get_track_metadata (SpotifySpclient      *self,
   cl->callback  = callback;
   cl->user_data = user_data;
 
-  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, self->cancellable,
                                     on_track_response, cl);
   g_object_unref (msg);
 }
@@ -312,7 +313,7 @@ spotifygtk_spclient_get_audio_storage (SpotifySpclient *self,
   cl->callback  = callback;
   cl->user_data = user_data;
 
-  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, self->cancellable,
                                     on_response, cl);
   g_object_unref (msg);
 }
@@ -322,6 +323,7 @@ spotifygtk_spclient_dispose (GObject *object)
 {
   SpotifySpclient *self = SPOTIFYGTK_SPCLIENT (object);
   g_clear_object (&self->session);
+  g_clear_object (&self->cancellable);
   G_OBJECT_CLASS (spotifygtk_spclient_parent_class)->dispose (object);
 }
 
@@ -342,3 +344,6 @@ spotifygtk_spclient_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_SPCLIENT, NULL);
 }
+
+void spotifygtk_spclient_set_cancellable (SpotifySpclient *self, GCancellable *cancellable)
+{ g_set_object (&self->cancellable, cancellable); }

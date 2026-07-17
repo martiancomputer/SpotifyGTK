@@ -35,6 +35,7 @@ struct _SpotifyApSession {
   ShannonCipher    recv_cipher;
   guint32          send_nonce;
   guint32          recv_nonce;
+  GCancellable    *cancellable;
 
   GHashTable      *handlers;   /* ApCommandId -> ApPacketHandler */
   GHashTable      *handler_data;
@@ -88,9 +89,9 @@ on_srv_resolved (GObject *source, GAsyncResult *result, gpointer user_data)
 }
 
 static void
-resolve_ap_host (GAsyncReadyCallback callback, gpointer user_data)
+resolve_ap_host (GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
 {
-  GTask *task = g_task_new (NULL, NULL, callback, user_data);
+  GTask *task = g_task_new (NULL, cancellable, callback, user_data);
   GResolver *resolver = g_resolver_get_default ();
   g_resolver_lookup_service_async (resolver, "spotify-client", "tcp", "spotify.com",
                                    NULL, on_srv_resolved, task);
@@ -290,12 +291,14 @@ perform_handshake (SpotifyApSession *self, GError **error)
   g_byte_array_append (accumulator, hello_prefix, sizeof (hello_prefix));
   g_byte_array_append (accumulator, client_hello->data, client_hello->len);
 
-  if (!g_output_stream_write_all (out, accumulator->data, accumulator->len, NULL, NULL, error))
+  if (!g_output_stream_write_all (out, accumulator->data, accumulator->len,
+                                  NULL, self->cancellable, error))
     return FALSE;
 
   /* ── Receive APResponseMessage ── */
   guint8 resp_size_be[4];
-  if (!g_input_stream_read_all (in, resp_size_be, sizeof (resp_size_be), NULL, NULL, error))
+  if (!g_input_stream_read_all (in, resp_size_be, sizeof (resp_size_be),
+                                NULL, self->cancellable, error))
     return FALSE;
 
   guint32 resp_total = read_be32 (resp_size_be);
@@ -306,7 +309,8 @@ perform_handshake (SpotifyApSession *self, GError **error)
   }
   guint32 resp_payload_len = resp_total - 4;
   g_autofree guint8 *resp_payload = g_malloc (resp_payload_len);
-  if (!g_input_stream_read_all (in, resp_payload, resp_payload_len, NULL, NULL, error))
+  if (!g_input_stream_read_all (in, resp_payload, resp_payload_len,
+                                NULL, self->cancellable, error))
     return FALSE;
 
   g_byte_array_append (accumulator, resp_size_be, sizeof (resp_size_be));
@@ -419,7 +423,8 @@ on_host_resolved (GObject *source, GAsyncResult *result, gpointer user_data)
   guint16 port = parts[1] ? (guint16) g_ascii_strtoull (parts[1], NULL, 10) : AP_FALLBACK_PORT;
 
   cl->session->client = g_socket_client_new ();
-  g_socket_client_connect_to_host_async (cl->session->client, host, port, NULL,
+  g_socket_client_connect_to_host_async (cl->session->client, host, port,
+                                         cl->session->cancellable,
                                          on_tcp_connected, task);
   g_strfreev (parts);
   (void) source;
@@ -438,13 +443,13 @@ spotifygtk_ap_session_connect (SpotifyApSession *self, const gchar *access_token
 {
   g_return_if_fail (SPOTIFYGTK_IS_AP_SESSION (self));
 
-  GTask *task = g_task_new (self, NULL, callback, user_data);
+  GTask *task = g_task_new (self, self->cancellable, callback, user_data);
   ConnectClosure *cl = g_new0 (ConnectClosure, 1);
   cl->session = self;
   cl->access_token = g_strdup (access_token);
   g_task_set_task_data (task, cl, (GDestroyNotify) connect_closure_free);
 
-  resolve_ap_host (on_host_resolved, task);
+  resolve_ap_host (self->cancellable, on_host_resolved, task);
 }
 
 gboolean
@@ -511,7 +516,8 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
   GInputStream *in = g_io_stream_get_input_stream (G_IO_STREAM (self->connection));
 
   g_autofree guint8 *payload_and_mac = g_malloc ((gsize) pay_len + 4);
-  if (!g_input_stream_read_all (in, payload_and_mac, (gsize) pay_len + 4, NULL, NULL, &err)) {
+  if (!g_input_stream_read_all (in, payload_and_mac, (gsize) pay_len + 4,
+                                NULL, self->cancellable, &err)) {
     g_warning ("ap.c: receive loop payload read failed: %s", err ? err->message : "unknown");
     spotifygtk_ap_session_disconnect (self);
     g_autoptr(GError) payload_err = err ? g_error_copy (err) :
@@ -569,7 +575,8 @@ start_next_read (SpotifyApSession *self)
   g_object_ref (self);
 
   GInputStream *in = g_io_stream_get_input_stream (G_IO_STREAM (self->connection));
-  g_input_stream_read_bytes_async (in, 3, G_PRIORITY_DEFAULT, NULL, on_header_read, self);
+  g_input_stream_read_bytes_async (in, 3, G_PRIORITY_DEFAULT, self->cancellable,
+                                   on_header_read, self);
 }
 
 void
@@ -830,6 +837,7 @@ spotifygtk_ap_session_dispose (GObject *object)
   SpotifyApSession *self = SPOTIFYGTK_AP_SESSION (object);
   spotifygtk_ap_session_disconnect (self);
   g_clear_object (&self->client);
+  g_clear_object (&self->cancellable);
   g_clear_pointer (&self->handlers, g_hash_table_unref);
   g_clear_pointer (&self->handler_data, g_hash_table_unref);
   G_OBJECT_CLASS (spotifygtk_ap_session_parent_class)->dispose (object);
@@ -866,4 +874,11 @@ SpotifyApSession *
 spotifygtk_ap_session_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_AP_SESSION, NULL);
+}
+
+void
+spotifygtk_ap_session_set_cancellable (SpotifyApSession *self, GCancellable *cancellable)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_AP_SESSION (self));
+  g_set_object (&self->cancellable, cancellable);
 }

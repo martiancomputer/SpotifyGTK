@@ -22,6 +22,7 @@
 struct _SpotifyLogin5 {
   GObject      parent_instance;
   SoupSession *session;
+  GCancellable *cancellable;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyLogin5, spotifygtk_login5, G_TYPE_OBJECT)
@@ -134,7 +135,7 @@ spotifygtk_login5_auth_token (SpotifyLogin5 *self, const gchar *client_id, const
   cl->callback  = callback;
   cl->user_data = user_data;
 
-  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, self->cancellable,
                                     on_response, cl);
   g_object_unref (msg);
 }
@@ -144,6 +145,7 @@ spotifygtk_login5_dispose (GObject *object)
 {
   SpotifyLogin5 *self = SPOTIFYGTK_LOGIN5 (object);
   g_clear_object (&self->session);
+  g_clear_object (&self->cancellable);
   G_OBJECT_CLASS (spotifygtk_login5_parent_class)->dispose (object);
 }
 
@@ -164,3 +166,6 @@ spotifygtk_login5_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_LOGIN5, NULL);
 }
+
+void spotifygtk_login5_set_cancellable (SpotifyLogin5 *self, GCancellable *cancellable)
+{ g_set_object (&self->cancellable, cancellable); }

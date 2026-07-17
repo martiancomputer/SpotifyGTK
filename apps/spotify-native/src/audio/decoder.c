@@ -29,6 +29,13 @@ struct _SpotifyDecoder {
   gsize          ring_fill;   /* bytes currently buffered */
 
   gboolean       eof_fed;     /* caller signalled no more data coming */
+
+  /* Complete, seekable source used by the full-file playback path. This is
+   * deliberately separate from the probe ring: libvorbisfile may seek while
+   * parsing an Ogg stream, so a finished range collection needs a real
+   * random-access source rather than a best-effort forward-only buffer. */
+  GBytes         *complete_source;
+  gsize           complete_position;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyDecoder, spotifygtk_decoder, G_TYPE_OBJECT)
@@ -83,6 +90,51 @@ static const ov_callbacks RING_CALLBACKS = {
   .tell_func  = ring_tell_cb,
 };
 
+static size_t
+complete_read_cb (void *ptr, size_t size, size_t nmemb, void *datasource)
+{
+  SpotifyDecoder *self = datasource;
+  gsize source_len = 0;
+  const guint8 *source = g_bytes_get_data (self->complete_source, &source_len);
+  if (size == 0 || self->complete_position >= source_len)
+    return 0;
+
+  gsize wanted = size * nmemb;
+  gsize taken = MIN (wanted, source_len - self->complete_position);
+  memcpy (ptr, source + self->complete_position, taken);
+  self->complete_position += taken;
+  return taken / size;
+}
+
+static int
+complete_seek_cb (void *datasource, ogg_int64_t offset, int whence)
+{
+  SpotifyDecoder *self = datasource;
+  gsize source_len = 0;
+  g_bytes_get_data (self->complete_source, &source_len);
+  gint64 base = whence == SEEK_SET ? 0 :
+                whence == SEEK_CUR ? (gint64) self->complete_position :
+                whence == SEEK_END ? (gint64) source_len : -1;
+  gint64 target = base + offset;
+  if (base < 0 || target < 0 || (guint64) target > source_len)
+    return -1;
+  self->complete_position = (gsize) target;
+  return 0;
+}
+
+static long
+complete_tell_cb (void *datasource)
+{
+  return (long) SPOTIFYGTK_DECODER (datasource)->complete_position;
+}
+
+static const ov_callbacks COMPLETE_CALLBACKS = {
+  .read_func  = complete_read_cb,
+  .seek_func  = complete_seek_cb,
+  .close_func = ring_close_cb,
+  .tell_func  = complete_tell_cb,
+};
+
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 void
@@ -114,6 +166,30 @@ spotifygtk_decoder_feed (SpotifyDecoder *self, GBytes *ogg_bytes)
     /* Non-zero return just means "not enough data yet to find the
      * Vorbis headers" — caller will feed more and we retry next call. */
   }
+}
+
+gboolean
+spotifygtk_decoder_open_complete (SpotifyDecoder *self, GBytes *ogg_bytes)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_DECODER (self), FALSE);
+  g_return_val_if_fail (ogg_bytes != NULL, FALSE);
+
+  spotifygtk_decoder_reset (self);
+  g_clear_pointer (&self->complete_source, g_bytes_unref);
+  self->complete_source = g_bytes_ref (ogg_bytes);
+  self->complete_position = 0;
+
+  if (ov_open_callbacks (self, &self->vf, NULL, 0, COMPLETE_CALLBACKS) != 0) {
+    g_warning ("decoder: complete source is not a valid Ogg/Vorbis stream");
+    g_clear_pointer (&self->complete_source, g_bytes_unref);
+    return FALSE;
+  }
+
+  self->vf_open = TRUE;
+  self->info = ov_info (&self->vf, -1);
+  g_message ("decoder: opened complete seekable source (%" G_GSIZE_FORMAT " bytes)",
+             g_bytes_get_size (ogg_bytes));
+  return TRUE;
 }
 
 PcmFrame *
@@ -165,6 +241,7 @@ spotifygtk_decoder_reset (SpotifyDecoder *self)
   }
   self->ring_head = self->ring_tail = self->ring_fill = 0;
   self->eof_fed = FALSE;
+  self->complete_position = 0;
 }
 
 static void
@@ -173,6 +250,7 @@ spotifygtk_decoder_finalize (GObject *object)
   SpotifyDecoder *self = SPOTIFYGTK_DECODER (object);
   if (self->vf_open) ov_clear (&self->vf);
   g_free (self->ring);
+  g_clear_pointer (&self->complete_source, g_bytes_unref);
   G_OBJECT_CLASS (spotifygtk_decoder_parent_class)->finalize (object);
 }
 

@@ -13,3 +13,8 @@ option('tests',
   type: 'boolean',
   value: true,
   description: 'Build unit tests')
+
+option('enable_gui',
+  type: 'boolean',
+  value: true,
+  description: 'Build the GTK4 native-player shell. Disable for headless engine/harness builds.')

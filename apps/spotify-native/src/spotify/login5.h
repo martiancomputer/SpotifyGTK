@@ -21,6 +21,7 @@
 #pragma once
 
 #include <glib-object.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
@@ -35,6 +36,7 @@ typedef void (*Login5Callback) (const gchar *access_token /* nullable on failure
 G_DECLARE_FINAL_TYPE (SpotifyLogin5, spotifygtk_login5, SPOTIFYGTK, LOGIN5, GObject)
 
 SpotifyLogin5 *spotifygtk_login5_new (void);
+void spotifygtk_login5_set_cancellable (SpotifyLogin5 *, GCancellable *);
 
 /* client_id: NATIVE_AUTH_CLIENT_ID (keymaster). device_id: any stable
  * per-install identifier is fine -- librespot uses a random UUID

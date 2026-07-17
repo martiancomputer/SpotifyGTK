@@ -30,6 +30,11 @@ SpotifyDecoder *spotifygtk_decoder_new (void);
  * Internally buffered; safe to call with small chunks. */
 void spotifygtk_decoder_feed (SpotifyDecoder *self, GBytes *ogg_bytes);
 
+/* Opens a completed, seekable Ogg/Vorbis source. Use this after a range
+ * collector has assembled a whole encrypted CDN file; it is the correct
+ * input mode for full-track decode and later seek support. */
+gboolean spotifygtk_decoder_open_complete (SpotifyDecoder *self, GBytes *ogg_bytes);
+
 /* Pull the next decoded PCM frame, or NULL if more compressed data
  * is needed first (caller should feed more, then retry). */
 PcmFrame *spotifygtk_decoder_pull (SpotifyDecoder *self);

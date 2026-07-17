@@ -36,6 +36,7 @@
 struct _SpotifyClientToken {
   GObject      parent_instance;
   SoupSession *session;
+  GCancellable *cancellable;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyClientToken, spotifygtk_client_token, G_TYPE_OBJECT)
@@ -234,7 +235,7 @@ spotifygtk_client_token_request (SpotifyClientToken *self, const gchar *client_i
   cl->user_data = user_data;
   cl->msg       = g_object_ref (msg);
 
-  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, self->cancellable,
                                     on_response, cl);
   g_object_unref (msg);
 }
@@ -244,6 +245,7 @@ spotifygtk_client_token_dispose (GObject *object)
 {
   SpotifyClientToken *self = SPOTIFYGTK_CLIENT_TOKEN (object);
   g_clear_object (&self->session);
+  g_clear_object (&self->cancellable);
   G_OBJECT_CLASS (spotifygtk_client_token_parent_class)->dispose (object);
 }
 
@@ -264,3 +266,6 @@ spotifygtk_client_token_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_CLIENT_TOKEN, NULL);
 }
+
+void spotifygtk_client_token_set_cancellable (SpotifyClientToken *self, GCancellable *cancellable)
+{ g_set_object (&self->cancellable, cancellable); }

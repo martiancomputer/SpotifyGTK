@@ -15,12 +15,14 @@ project('spotify-native', 'c',
 profile         = get_option('profile')
 is_nightly      = (profile == 'nightly')
 enable_pipewire = get_option('enable_pipewire')
+enable_gui      = get_option('enable_gui')
 
 # ── Core dependencies ────────────────────────────────────────────────────────
 glib_dep       = dependency('glib-2.0',      version: '>= 2.76')
 gio_dep        = dependency('gio-2.0',       version: '>= 2.76')
 soup_dep       = dependency('libsoup-3.0',   version: '>= 3.4')  # cdn.c HTTPS Range fetch, native_auth.c OAuth
 json_glib_dep  = dependency('json-glib-1.0', version: '>= 1.6')  # native_auth.c token response parsing
+gtk4_dep       = dependency('gtk4', version: '>= 4.0', required: enable_gui)
 
 # Audio decode -- libogg/libvorbis are 20+ year old, ABI-frozen, pure C.
 ogg_dep        = dependency('ogg',           version: '>= 1.3')
@@ -74,6 +76,7 @@ add_project_arguments(
 # ── Config header ─────────────────────────────────────────────────────────────
 conf = configuration_data()
 conf.set_quoted('APP_VERSION', meson.project_version())
+conf.set_quoted('APP_ID', 'com.github.spotifygtk.SpotifyNative')
 conf.set_quoted('APP_PROFILE', profile)
 conf.set10('SPOTIFY_NATIVE_NIGHTLY', is_nightly)
 conf.set10('HAVE_OPENSSL',  openssl_dep.found())
@@ -97,4 +100,5 @@ summary({
   'PulseAudio'              : have_pulse,
   'ALSA'                    : alsa_dep.found(),
   'OpenSSL (CDN decrypt)'   : openssl_dep.found(),
+  'GTK4 native shell'       : gtk4_dep.found(),
 }, section: 'Audio backends')

@@ -141,10 +141,11 @@ Connect device, with its own audio decode and output pipeline — no other
 Spotify client needs to be running. GPU-accelerated where hardware allows
 (VA-API hardware JPEG decode planned; Vulkan compositing not started).
 
-**Currently a development harness, not a real client.** There's no UI, no
-AP login flow, and no playback yet — see Project status below for the exact
-breakdown. What it does have: a real Shannon cipher self-test you can
-actually run.
+**Currently a development engine plus a basic GTK4 shell, not a finished
+client.** The shell reports verified engine capability and deliberately keeps
+unwired playback controls disabled; the standalone harness remains the
+protocol/playback validation tool. See Project status below for the exact
+breakdown.
 
 ### Building
 
@@ -154,7 +155,15 @@ meson setup build --native-file build-profiles/stable.ini
 # or: meson setup build --native-file build-profiles/nightly.ini
 ninja -C build
 ./build/src/spotify-native-harness
+# Basic GTK4 engine shell:
+./build/src/spotify-native
 ```
+
+The GTK shell launches `spotify-native-harness` as its current playback
+bridge; both executables are installed together by `ninja -C build install`.
+
+For a headless engine/harness build, configure Meson with
+`-Denable_gui=false`.
 
 ### Legal & ethical approach
 
@@ -205,20 +214,21 @@ gap:
 | Module | Status |
 |---|---|
 | Shannon cipher (`spotify/shannon.c`) | ✅ Confirmed against real ground-truth test vectors (a compiled-and-run copy of the actual reference crate, not read-and-reasoned-about). Note: the internal round-trip self-test alone had passed for a while despite a real bug (`sbox1`/`sbox2` used XOR where the reference uses OR) — that class of test can't catch a deviation applied symmetrically to both encrypt and decrypt. See `research/auth/` for the full writeup. |
-| Ogg/Vorbis decoder (`audio/decoder.c`) | ✅ Functional |
-| Audio output: PulseAudio, ALSA | ✅ Functional |
+| Ogg/Vorbis decoder (`audio/decoder.c`) | ✅ Confirmed against a live decrypted Spotify CDN range: 44.1 kHz stereo, 86,592 PCM frames from the initial 64 KiB probe. |
+| Audio output: PulseAudio, ALSA | ✅ Functional; PulseAudio live-validated with 86,592 decoded Spotify PCM frames. |
 | Audio output: PipeWire | 🟡 Implemented, needs validation against a running PipeWire instance |
 | Audio output: WASAPI (Windows) | ⬜ Stub only — Windows port hasn't started |
 | AP handshake (`spotify/ap.c`, `dh.c`, `handshake_crypto.c`, `protobuf_min.c`) | ✅ Confirmed working against a real Spotify server — DH exchange, RSA server-signature verification, and HMAC-SHA1 key derivation all checked out. |
 | AP login (`spotify/ap.c`, `spotify/native_auth.c`) | ✅ Confirmed working against a real Spotify server. Four real bugs found and fixed on the way here, each caught by a live server rejecting the previous fix rather than by any test that existed at the time: wrong client_id/scopes, a wrong protobuf field number plus missing required fields in the login message, a Shannon cipher bug (the actual root cause underneath both) that broke every encrypted packet regardless of content, and — found after login was already succeeding — a wrong field number for `canonical_username` that silently dropped it from every login. |
 | Mercury protocol (`spotify/mercury.c`) | 🟡 Framing implemented, unverified against live traffic |
-| Audio key exchange (`spotify/audio_key.c`) | ✅ Request/response plumbing complete |
-| Streaming auth-relay (`spotify/clienttoken.c`, `spotify/login5.c`, `spotify/spclient.c`) | 🟡 New: discovered that track metadata/CDN URLs go through a separate HTTPS API (`spclient`), not Mercury — needs a login5-minted bearer token, which needs a client-token, which needs the reusable credential APWelcome hands back on login (not the OAuth token used to log in). All three built against verified schemas; not yet confirmed against real services. `spclient.c` uses librespot's own hardcoded fallback host rather than implementing full `apresolve`. See `research/playback/`. |
-| CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | 🟡 HTTPS Range + decrypt real, IV seed pending confirmation against a captured stream |
+| Audio key exchange (`spotify/audio_key.c`) | ✅ Confirmed against a live AP session; retrieves a usable 16-byte AES key. |
+| Streaming auth-relay (`spotify/clienttoken.c`, `spotify/login5.c`, `spotify/spclient.c`) | ✅ Confirmed live: reusable AP credential → client-token → login5 bearer → track metadata → CDN URL resolution. `spclient.c` still uses librespot's hardcoded fallback host rather than full `apresolve`. See `research/playback/`. |
+| CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | ✅ Confirmed live for the initial range and an independent non-block-aligned range; plaintext begins with `OggS` and decodes to PCM. |
+| Native playback worker (`native_engine.h`, `player_service.c`) | 🟡 Runs the validated pipeline off the GTK thread, reports CONNECTING/BUFFERING/PLAYING stages, feeds decrypted CDN ranges into a bounded PCM queue with a dedicated output worker, propagates cancellation, and supports pause/resume; queue and seek control are next. |
 | Spotify Connect registration (`spotify/connect.c`) | 🟡 Mercury subscription real, device-state payload pending real protobuf schema; ad-insertion events not yet researched |
 | Image cache VA-API hardware decode | 🟡 Probe works, decode path stubbed (lives in `spotify-connect`, shared concept) |
 | Vulkan compositing | ⬜ Not started |
-| UI | ⬜ None yet — `main.c` is a CLI development harness |
+| GTK4 UI shell (`gui_main.c`) | 🟡 Basic GTK4 shell built. It accepts a Spotify track URI, launches/stops the validated native playback worker, displays live connection/buffering/playing stages, and pauses/resumes output; queue and seek remain to be integrated. |
 
 ### Audio backend tracks
 

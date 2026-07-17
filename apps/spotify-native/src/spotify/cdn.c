@@ -30,16 +30,19 @@
 struct _SpotifyCdnFetcher {
   GObject      parent_instance;
   SoupSession *session;
+  GCancellable *cancellable;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, G_TYPE_OBJECT)
 
 typedef struct {
   SpotifyCdnFetcher *self;
+  SoupMessage       *message;
   CdnChunkCallback   callback;
   gpointer           user_data;
   guint8             key[AUDIO_KEY_LEN];
   goffset            offset;
+  gsize              length;
 } FetchClosure;
 
 #if HAVE_OPENSSL
@@ -91,6 +94,22 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
   if (!bytes) {
     cl->callback (NULL, err, cl->user_data);
+    g_clear_object (&cl->message);
+    g_free (cl);
+    return;
+  }
+
+  guint status = soup_message_get_status (cl->message);
+  if (status != SOUP_STATUS_PARTIAL_CONTENT) {
+    GError *status_error = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                                        "CDN range request returned HTTP %u (expected 206)", status);
+    g_warning ("cdn: logical offset %" G_GOFFSET_FORMAT ", length %" G_GSIZE_FORMAT
+               " returned HTTP %u instead of 206 Partial Content",
+               cl->offset, cl->length, status);
+    cl->callback (NULL, status_error, cl->user_data);
+    g_error_free (status_error);
+    g_bytes_unref (bytes);
+    g_clear_object (&cl->message);
     g_free (cl);
     return;
   }
@@ -98,6 +117,9 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
 #if HAVE_OPENSSL
   gsize len = 0;
   const guint8 *data = g_bytes_get_data (bytes, &len);
+  g_message ("cdn: received HTTP 206 for logical offset %" G_GOFFSET_FORMAT
+             ", requested %" G_GSIZE_FORMAT ", received %" G_GSIZE_FORMAT " bytes",
+             cl->offset, cl->length, len);
   GBytes *decrypted = aes_ctr_decrypt (cl->key, cl->offset + STREAM_HEADER_OFFSET, data, len);
   cl->callback (decrypted, NULL, cl->user_data);
   g_bytes_unref (decrypted);
@@ -110,6 +132,7 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
 #endif
 
   g_bytes_unref (bytes);
+  g_clear_object (&cl->message);
   g_free (cl);
 }
 
@@ -129,12 +152,19 @@ spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
 
   FetchClosure *cl = g_new0 (FetchClosure, 1);
   cl->self      = self;
+  cl->message   = g_object_ref (msg);
   cl->callback  = callback;
   cl->user_data = user_data;
   cl->offset    = offset;
+  cl->length    = length;
   memcpy (cl->key, key, AUDIO_KEY_LEN);
 
-  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
+  g_message ("cdn: requesting logical range %" G_GOFFSET_FORMAT "+%" G_GSIZE_FORMAT
+             " (physical range starts at %" G_GOFFSET_FORMAT ")",
+             offset, length, actual_offset);
+
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
+                                    self->cancellable,
                                     on_range_response, cl);
   g_object_unref (msg);
 }
@@ -144,6 +174,7 @@ spotifygtk_cdn_fetcher_dispose (GObject *object)
 {
   SpotifyCdnFetcher *self = SPOTIFYGTK_CDN_FETCHER (object);
   g_clear_object (&self->session);
+  g_clear_object (&self->cancellable);
   G_OBJECT_CLASS (spotifygtk_cdn_fetcher_parent_class)->dispose (object);
 }
 
@@ -163,4 +194,12 @@ SpotifyCdnFetcher *
 spotifygtk_cdn_fetcher_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_CDN_FETCHER, NULL);
+}
+
+void
+spotifygtk_cdn_fetcher_set_cancellable (SpotifyCdnFetcher *self,
+                                        GCancellable *cancellable)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_CDN_FETCHER (self));
+  g_set_object (&self->cancellable, cancellable);
 }

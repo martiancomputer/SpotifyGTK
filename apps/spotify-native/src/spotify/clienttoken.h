@@ -22,6 +22,7 @@
 #pragma once
 
 #include <glib-object.h>
+#include <gio/gio.h>
 
 G_BEGIN_DECLS
 
@@ -35,6 +36,7 @@ G_DECLARE_FINAL_TYPE (SpotifyClientToken, spotifygtk_client_token,
                       SPOTIFYGTK, CLIENT_TOKEN, GObject)
 
 SpotifyClientToken *spotifygtk_client_token_new (void);
+void spotifygtk_client_token_set_cancellable (SpotifyClientToken *, GCancellable *);
 
 /* client_id: NATIVE_AUTH_CLIENT_ID (the keymaster client_id).
  * device_id: a stable per-session hex string -- the same one used in

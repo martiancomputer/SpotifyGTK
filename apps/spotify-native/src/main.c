@@ -1,7 +1,9 @@
 /*
  * main.c — spotify-native development harness.
  *
- * Not a real client yet (no playback). What it does now:
+ * Development harness for the native playback pipeline. It now exercises
+ * authenticated CDN fetch, decryption, Ogg/Vorbis decode, and local PCM
+ * output; the GTK shell drives this same engine asynchronously.
  *
  *   1. Always: a Shannon cipher round-trip self-test (offline, no
  *      network) -- real signal that the ported algorithm is
@@ -57,9 +59,89 @@
 #include "spotify/spclient.h"
 #include "spotify/audio_key.h"
 #include "spotify/cdn.h"
+#include "audio/decoder.h"
+#include "audio/output.h"
+#include "native_engine.h"
 
 #include <glib.h>
 #include <string.h>
+
+struct _SpotifyNativeEngineControl {
+  GMutex  lock;
+  GCond   cond;
+  gboolean paused;
+};
+
+SpotifyNativeEngineControl *
+spotifygtk_native_engine_control_new (void)
+{
+  SpotifyNativeEngineControl *control = g_new0 (SpotifyNativeEngineControl, 1);
+  g_mutex_init (&control->lock);
+  g_cond_init (&control->cond);
+  return control;
+}
+
+void
+spotifygtk_native_engine_control_free (SpotifyNativeEngineControl *control)
+{
+  if (!control)
+    return;
+  spotifygtk_native_engine_control_resume (control);
+  g_mutex_clear (&control->lock);
+  g_cond_clear (&control->cond);
+  g_free (control);
+}
+
+void
+spotifygtk_native_engine_control_pause (SpotifyNativeEngineControl *control)
+{
+  if (!control)
+    return;
+  g_mutex_lock (&control->lock);
+  control->paused = TRUE;
+  g_mutex_unlock (&control->lock);
+  g_message ("engine-control: PCM output paused");
+}
+
+void
+spotifygtk_native_engine_control_resume (SpotifyNativeEngineControl *control)
+{
+  if (!control)
+    return;
+  g_mutex_lock (&control->lock);
+  control->paused = FALSE;
+  g_cond_broadcast (&control->cond);
+  g_mutex_unlock (&control->lock);
+  g_message ("engine-control: PCM output resumed");
+}
+
+gboolean
+spotifygtk_native_engine_control_is_paused (SpotifyNativeEngineControl *control)
+{
+  if (!control)
+    return FALSE;
+  g_mutex_lock (&control->lock);
+  gboolean paused = control->paused;
+  g_mutex_unlock (&control->lock);
+  return paused;
+}
+
+static gboolean
+engine_control_wait (SpotifyNativeEngineControl *control, GCancellable *cancellable)
+{
+  gboolean cancelled = cancellable && g_cancellable_is_cancelled (cancellable);
+  if (!control)
+    return !cancelled;
+
+  g_mutex_lock (&control->lock);
+  while (control->paused && !(cancellable && g_cancellable_is_cancelled (cancellable)))
+    g_cond_wait_until (&control->cond, &control->lock,
+                       g_get_monotonic_time () + 100 * G_TIME_SPAN_MILLISECOND);
+  gboolean allowed = !control->paused &&
+                     !(cancellable && g_cancellable_is_cancelled (cancellable));
+  g_mutex_unlock (&control->lock);
+  return allowed;
+}
 
 /* Generate a random 40-char hex device ID (same pattern as connect.c).
  * Per-run is fine for a harness -- persisting it is a nice-to-have
@@ -177,6 +259,7 @@ typedef struct {
   GMainLoop *loop;
   gboolean   ok;
   gboolean   timed_out;
+  GCancellable      *cancellable;   /* borrowed from the player task */
   gchar             *device_id;         /* owned, freed in run_live_test */
   SpotifyApSession   *session;      /* borrowed, owned by run_live_test */
   SpotifyClientToken *client_token_client;
@@ -188,8 +271,346 @@ typedef struct {
   gchar              *client_token;
   guint8              file_id[20];
   guint8              track_gid[16];
+  guint8              audio_key[AUDIO_KEY_LEN];
   gchar              *cdn_url;
+  const gchar         *track_uri;
+  GBytes             *initial_cdn_chunk;
+  goffset             next_download_offset;
+  SpotifyDecoder     *stream_decoder;
+  guint64             stream_frames;
+  guint64             output_frames;
+  GAsyncQueue        *pcm_queue;
+  GThread             *output_thread;
+  GMutex               queue_lock;
+  GCond                queue_cond;
+  guint64              queued_frames;
+  gboolean              output_failed;
+  gboolean              queue_initialized;
+  GSource            *timeout_source;
+  SpotifyNativeEngineControl *control;
+  SpotifyNativeEngineProgressFunc progress;
+  gpointer            progress_data;
 } LiveTestState;
+
+/* Deliberately not AES-block aligned: comparing this independently
+ * decrypted range with the same bytes from the initial range proves both
+ * counter advancement and the intra-block discard path in cdn.c. */
+#define CDN_SEEK_PROBE_OFFSET 4093
+#define CDN_SEEK_PROBE_LENGTH 8192
+#define CDN_DECODE_PROBE_LENGTH (64 * 1024)
+#define CDN_FULL_DOWNLOAD_CHUNK (64 * 1024)
+#define STREAM_QUEUE_MAX_FRAMES (44100 * 8)
+#define DEFAULT_TEST_TRACK_URI "spotify:track:6rqhFgbbKwnb9MLmUQDhG6"
+
+typedef struct {
+  PcmFrame *frame;
+  gboolean  end;
+} StreamQueueItem;
+
+static void
+report_progress (LiveTestState *state, SpotifyNativeEngineStage stage,
+                 const gchar *message)
+{
+  if (state->progress)
+    state->progress (stage, message, state->progress_data);
+}
+
+static gboolean
+decode_and_play (GBytes *ogg_bytes, gboolean complete_source,
+                 gboolean write_audio, const gchar *label)
+{
+  SpotifyDecoder *decoder = spotifygtk_decoder_new ();
+  if (complete_source) {
+    if (!spotifygtk_decoder_open_complete (decoder, ogg_bytes)) {
+      g_object_unref (decoder);
+      return FALSE;
+    }
+  } else {
+    spotifygtk_decoder_feed (decoder, ogg_bytes);
+  }
+
+  guint64 total_frames = 0;
+  guint64 written_frames = 0;
+  guint packets = 0;
+  gint sample_rate = 0;
+  gint channels = 0;
+  SpotifyAudioOutput *output = NULL;
+  PcmFrame *frame = NULL;
+  while ((frame = spotifygtk_decoder_pull (decoder)) != NULL) {
+    if (packets == 0) {
+      sample_rate = frame->sample_rate;
+      channels = frame->channels;
+      g_message ("[live-test] decoder opened Ogg/Vorbis: %d Hz, %d channel(s)",
+                 sample_rate, channels);
+      if (write_audio) {
+        output = spotifygtk_output_open (sample_rate, channels);
+        if (!output) {
+          g_warning ("[live-test] cannot complete PCM output proof: no audio backend opened.");
+          pcm_frame_free (frame);
+          g_object_unref (decoder);
+          return FALSE;
+        }
+        g_message ("[live-test] writing decoded PCM to %s for %s.",
+                   spotifygtk_output_backend_name (output->kind), label);
+      } else {
+        g_message ("[live-test] %s is decode-only; audio output will begin after full collection.",
+                   label);
+      }
+    }
+
+    if (output) {
+      gsize written = spotifygtk_output_write (output, frame->samples, frame->n_frames);
+      if (written != frame->n_frames) {
+        g_warning ("[live-test] audio output wrote %" G_GSIZE_FORMAT
+                   " of %" G_GSIZE_FORMAT " PCM frames.", written, frame->n_frames);
+        pcm_frame_free (frame);
+        spotifygtk_output_close (output);
+        g_object_unref (decoder);
+        return FALSE;
+      }
+      written_frames += written;
+    }
+    total_frames += frame->n_frames;
+    packets++;
+    pcm_frame_free (frame);
+  }
+
+  if (packets == 0) {
+    g_warning ("[live-test] decoder produced no PCM from the initial %u-byte probe.",
+               CDN_DECODE_PROBE_LENGTH);
+    g_object_unref (decoder);
+    return FALSE;
+  }
+
+  if (output) {
+    spotifygtk_output_drain (output);
+    spotifygtk_output_close (output);
+  }
+  g_message ("[live-test] %s decoder produced %" G_GUINT64_FORMAT
+             " PCM frames across %u packet(s)%s%" G_GUINT64_FORMAT " frame(s) to the audio backend.",
+             label, total_frames, packets, output ? "; wrote " : "; did not write ", written_frames);
+  g_object_unref (decoder);
+  return TRUE;
+}
+
+static void start_read_ahead (LiveTestState *state);
+
+static void
+disable_startup_watchdog (LiveTestState *state)
+{
+  if (!state->timeout_source)
+    return;
+  g_source_destroy (state->timeout_source);
+  g_source_unref (state->timeout_source);
+  state->timeout_source = NULL;
+  g_message ("[live-test] initial PCM output is active; network startup watchdog disabled");
+}
+
+static void
+mark_output_failed (LiveTestState *state)
+{
+  g_mutex_lock (&state->queue_lock);
+  state->output_failed = TRUE;
+  g_cond_broadcast (&state->queue_cond);
+  g_mutex_unlock (&state->queue_lock);
+}
+
+static gpointer
+audio_output_thread (gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  SpotifyAudioOutput *output = NULL;
+
+  for (;;) {
+    StreamQueueItem *item = g_async_queue_pop (state->pcm_queue);
+    if (item->end) {
+      g_free (item);
+      break;
+    }
+
+    PcmFrame *frame = item->frame;
+    g_free (item);
+
+    g_mutex_lock (&state->queue_lock);
+    state->queued_frames -= frame->n_frames;
+    gboolean failed = state->output_failed;
+    g_cond_broadcast (&state->queue_cond);
+    g_mutex_unlock (&state->queue_lock);
+
+    if (failed) {
+      pcm_frame_free (frame);
+      continue;
+    }
+
+    if (!output) {
+      output = spotifygtk_output_open (frame->sample_rate, frame->channels);
+      if (!output) {
+        g_warning ("[live-test] streaming decoder opened, but no PCM output backend is available");
+        mark_output_failed (state);
+        pcm_frame_free (frame);
+        continue;
+      }
+      g_message ("[live-test] streaming decoder opened Ogg/Vorbis: %d Hz, %d channel(s); output=%s",
+                 frame->sample_rate, frame->channels,
+                 spotifygtk_output_backend_name (output->kind));
+      disable_startup_watchdog (state);
+      report_progress (state, SPOTIFYGTK_ENGINE_PLAYING,
+                       "Audio started; decoding incoming CDN ranges.");
+    }
+
+    if (!engine_control_wait (state->control, state->cancellable)) {
+      g_message ("[live-test] output worker stopping current PCM frame due to cancellation");
+      mark_output_failed (state);
+      pcm_frame_free (frame);
+      continue;
+    }
+
+    gsize written = spotifygtk_output_write (output, frame->samples, frame->n_frames);
+    if (written != frame->n_frames) {
+      g_warning ("[live-test] streaming audio output wrote %" G_GSIZE_FORMAT
+                 " of %" G_GSIZE_FORMAT " PCM frames",
+                 written, frame->n_frames);
+      mark_output_failed (state);
+    } else {
+      state->output_frames += written;
+    }
+    pcm_frame_free (frame);
+  }
+
+  if (output) {
+    spotifygtk_output_drain (output);
+    spotifygtk_output_close (output);
+  }
+  return NULL;
+}
+
+static void
+stream_playback_start (LiveTestState *state)
+{
+  state->pcm_queue = g_async_queue_new ();
+  g_mutex_init (&state->queue_lock);
+  g_cond_init (&state->queue_cond);
+  state->queue_initialized = TRUE;
+  state->output_thread = g_thread_new ("spotify-native-audio", audio_output_thread, state);
+  g_message ("[live-test] audio output worker started; PCM queue limit is %u frames",
+             STREAM_QUEUE_MAX_FRAMES);
+}
+
+static gboolean
+stream_queue_frame (LiveTestState *state, PcmFrame *frame)
+{
+  g_mutex_lock (&state->queue_lock);
+  while (state->queued_frames >= STREAM_QUEUE_MAX_FRAMES &&
+         !state->output_failed &&
+         !(state->cancellable && g_cancellable_is_cancelled (state->cancellable))) {
+    g_cond_wait_until (&state->queue_cond, &state->queue_lock,
+                       g_get_monotonic_time () + 100 * G_TIME_SPAN_MILLISECOND);
+  }
+  gboolean rejected = state->output_failed ||
+                      (state->cancellable && g_cancellable_is_cancelled (state->cancellable));
+  if (!rejected)
+    state->queued_frames += frame->n_frames;
+  g_mutex_unlock (&state->queue_lock);
+
+  if (rejected) {
+    pcm_frame_free (frame);
+    return FALSE;
+  }
+
+  StreamQueueItem *item = g_new0 (StreamQueueItem, 1);
+  item->frame = frame;
+  g_async_queue_push (state->pcm_queue, item);
+  return TRUE;
+}
+
+static void
+stream_playback_stop (LiveTestState *state)
+{
+  if (!state->output_thread)
+    return;
+
+  StreamQueueItem *item = g_new0 (StreamQueueItem, 1);
+  item->end = TRUE;
+  g_async_queue_push (state->pcm_queue, item);
+  g_thread_join (state->output_thread);
+  state->output_thread = NULL;
+}
+
+static gboolean
+stream_decode_chunk (LiveTestState *state, GBytes *decrypted_chunk, gboolean final_chunk)
+{
+  spotifygtk_decoder_feed (state->stream_decoder, decrypted_chunk);
+
+  guint frames_pulled = 0;
+  PcmFrame *frame = NULL;
+  while ((frame = spotifygtk_decoder_pull (state->stream_decoder)) != NULL) {
+    gsize frame_count = frame->n_frames;
+    if (!stream_queue_frame (state, frame))
+      return FALSE;
+    state->stream_frames += frame_count;
+    frames_pulled++;
+  }
+
+  g_message ("[live-test] streaming range decoded %u PCM frame batches (%" G_GUINT64_FORMAT
+             " total frames)", frames_pulled, state->stream_frames);
+
+  if (final_chunk) {
+    stream_playback_stop (state);
+    if (state->output_failed || state->output_frames == 0) {
+      g_warning ("[live-test] final streaming range produced no PCM output");
+      return FALSE;
+    }
+    g_message ("[live-test] streaming decode complete: %" G_GUINT64_FORMAT
+               " decoded, %" G_GUINT64_FORMAT " written PCM frames",
+               state->stream_frames, state->output_frames);
+  }
+  return TRUE;
+}
+
+static void
+on_read_ahead_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  if (!decrypted_chunk) {
+    g_warning ("[live-test] read-ahead fetch failed at logical offset %" G_GOFFSET_FORMAT ": %s",
+               state->next_download_offset, error ? error->message : "unknown error");
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  gsize len = 0;
+  g_bytes_get_data (decrypted_chunk, &len);
+  state->next_download_offset += (goffset) len;
+  g_message ("[live-test] read-ahead range: supplied %" G_GSIZE_FORMAT
+             " bytes at logical offset %" G_GOFFSET_FORMAT ".",
+             len, state->next_download_offset - (goffset) len);
+
+  if (!stream_decode_chunk (state, decrypted_chunk, len != CDN_FULL_DOWNLOAD_CHUNK)) {
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  if (len == CDN_FULL_DOWNLOAD_CHUNK) {
+    start_read_ahead (state);
+    return;
+  }
+
+  g_message ("[live-test] final CDN range reached; read-ahead decoder drained.");
+  state->ok = TRUE;
+  g_main_loop_quit (state->loop);
+}
+
+static void
+start_read_ahead (LiveTestState *state)
+{
+  g_message ("[live-test] requesting next full-track range at logical offset %" G_GOFFSET_FORMAT ".",
+             state->next_download_offset);
+  spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
+                               state->next_download_offset, CDN_FULL_DOWNLOAD_CHUNK,
+                               on_read_ahead_chunk, state);
+}
 
 static void
 on_aes_key (SpotifyApSession *session, ApCommandId cmd, const guint8 *payload, gsize len, gpointer user_data)
@@ -208,35 +629,89 @@ on_aes_key_error (SpotifyApSession *session, ApCommandId cmd, const guint8 *payl
 }
 
 static void
-on_cdn_chunk_result (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+on_cdn_seek_probe_result (GBytes *decrypted_chunk, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
 
-  if (decrypted_chunk) {
-    gsize len = 0;
-    const guint8 *data = g_bytes_get_data (decrypted_chunk, &len);
-    g_message ("[live-test] CDN DECRYPT SUCCEEDED -- decrypted %" G_GSIZE_FORMAT " bytes.", len);
-    if (len >= 4) {
-      g_message ("[live-test] First 4 bytes: %02x %02x %02x %02x (expected 4f 67 67 53 for 'OggS')",
-                 data[0], data[1], data[2], data[3]);
-      if (memcmp (data, "OggS", 4) == 0) {
-        g_message ("[live-test] SUCCESS: Decrypted chunk has a valid Ogg stream header!");
-        state->ok = TRUE;
-      } else {
-        g_warning ("[live-test] FAILURE: Decrypted chunk does not start with OggS. "
-                   "AES IV/key/offset is incorrect.");
-        state->ok = FALSE;
-      }
-    } else {
-      g_warning ("[live-test] Decrypted chunk is too small.");
-      state->ok = FALSE;
-    }
-  } else {
-    g_warning ("[live-test] CDN fetch failed: %s", error ? error->message : "unknown error");
+  if (!decrypted_chunk) {
+    g_warning ("[live-test] CDN seek-probe fetch failed: %s",
+               error ? error->message : "unknown error");
     state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  gsize initial_len = 0;
+  const guint8 *initial = g_bytes_get_data (state->initial_cdn_chunk, &initial_len);
+  gsize probe_len = 0;
+  const guint8 *probe = g_bytes_get_data (decrypted_chunk, &probe_len);
+
+  g_message ("[live-test] CDN seek probe decrypted %" G_GSIZE_FORMAT
+             " bytes at logical offset %u.", probe_len, CDN_SEEK_PROBE_OFFSET);
+  if (initial_len < CDN_SEEK_PROBE_OFFSET + probe_len) {
+    g_warning ("[live-test] seek probe cannot be compared: initial range has %" G_GSIZE_FORMAT
+               " bytes, needs at least %u.", initial_len,
+               CDN_SEEK_PROBE_OFFSET + (guint) probe_len);
+    state->ok = FALSE;
+  } else if (memcmp (initial + CDN_SEEK_PROBE_OFFSET, probe, probe_len) != 0) {
+    g_warning ("[live-test] FAILURE: seek probe differs from the same bytes in the initial range. "
+               "CTR counter/offset handling is incorrect.");
+    state->ok = FALSE;
+  } else {
+    g_message ("[live-test] SUCCESS: non-block-aligned CDN seek probe matches the initial decrypt.");
+    state->stream_decoder = spotifygtk_decoder_new ();
+    stream_playback_start (state);
+    if (!stream_decode_chunk (state, state->initial_cdn_chunk, FALSE)) {
+      state->ok = FALSE;
+      g_main_loop_quit (state->loop);
+      return;
+    }
+    g_clear_pointer (&state->initial_cdn_chunk, g_bytes_unref);
+    state->next_download_offset = (goffset) initial_len;
+    g_message ("[live-test] seek validation passed; starting incremental read-ahead playback.");
+    start_read_ahead (state);
+    return;
   }
 
   g_main_loop_quit (state->loop);
+}
+
+static void
+on_cdn_initial_chunk_result (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (!decrypted_chunk) {
+    g_warning ("[live-test] CDN initial fetch failed: %s",
+               error ? error->message : "unknown error");
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  gsize len = 0;
+  const guint8 *data = g_bytes_get_data (decrypted_chunk, &len);
+  g_message ("[live-test] CDN initial decrypt succeeded -- %" G_GSIZE_FORMAT " bytes.", len);
+  if (len < 4 || memcmp (data, "OggS", 4) != 0) {
+    g_warning ("[live-test] FAILURE: initial decrypt does not start with OggS "
+               "(got %02x %02x %02x %02x).", len > 0 ? data[0] : 0,
+               len > 1 ? data[1] : 0, len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  g_message ("[live-test] initial decrypt has a valid Ogg stream header; "
+             "now validating a non-block-aligned seek range.");
+  if (!decode_and_play (decrypted_chunk, FALSE, FALSE, "initial-decode-check")) {
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+  state->initial_cdn_chunk = g_bytes_ref (decrypted_chunk);
+  spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
+                               CDN_SEEK_PROBE_OFFSET, CDN_SEEK_PROBE_LENGTH,
+                               on_cdn_seek_probe_result, state);
 }
 
 static void
@@ -246,9 +721,14 @@ on_audio_key_result (const guint8 key[AUDIO_KEY_LEN], GError *error, gpointer us
 
   if (key) {
     g_message ("[live-test] AUDIO KEY SUCCEEDED -- got 16-byte AES key.");
-    g_message ("[live-test] Fetching and decrypting CDN chunk (offset 0 -> physical 167)...");
-    spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, key,
-                                0, 16384, on_cdn_chunk_result, state);
+    memcpy (state->audio_key, key, AUDIO_KEY_LEN);
+    g_message ("[live-test] Fetching and decrypting initial CDN chunk "
+               "(logical offset 0 -> physical offset 167)...");
+    report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
+                     "Audio key received; buffering the first audio range.");
+    spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
+                                0, CDN_DECODE_PROBE_LENGTH,
+                                on_cdn_initial_chunk_result, state);
     return; /* Wait for CDN chunk */
   } else {
     g_warning ("[live-test] audio key request failed: %s", error ? error->message : "unknown error");
@@ -302,6 +782,8 @@ on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError 
     
     if (best_idx != -1) {
       g_message ("[live-test] Selected format %" G_GUINT64_FORMAT ". Resolving CDN URLs...", files[best_idx].format);
+      report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
+                       "Track metadata received; resolving audio storage.");
       
       memcpy (state->file_id, files[best_idx].file_id, 20);
       memcpy (state->track_gid, files[best_idx].track_gid, 16);
@@ -335,10 +817,12 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
     
     state->bearer_token = g_strdup (access_token);
     state->spclient = spotifygtk_spclient_new ();
+    spotifygtk_spclient_set_cancellable (state->spclient, state->cancellable);
     
-    const gchar *test_track = "spotify:track:6rqhFgbbKwnb9MLmUQDhG6";
-    g_message ("[live-test] Fetching metadata for %s...", test_track);
-    spotifygtk_spclient_get_track_metadata (state->spclient, test_track,
+    g_message ("[live-test] Fetching metadata for %s...", state->track_uri);
+    report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
+                     "Streaming token received; fetching track metadata.");
+    spotifygtk_spclient_get_track_metadata (state->spclient, state->track_uri,
                                             state->bearer_token, state->client_token,
                                             on_track_metadata_result, state);
     return; /* Wait for track metadata */
@@ -360,6 +844,8 @@ on_client_token_result (const gchar *token, gpointer user_data)
 
   if (token) {
     g_message ("[live-test] client-token obtained, proceeding to login5...");
+    report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
+                     "Client token received; authorizing the streaming session.");
     state->client_token = g_strdup (token);
   } else {
     g_message ("[live-test] no client-token obtained -- proceeding to login5 without one "
@@ -380,6 +866,7 @@ on_client_token_result (const gchar *token, gpointer user_data)
   }
 
   state->login5_client = spotifygtk_login5_new ();
+  spotifygtk_login5_set_cancellable (state->login5_client, state->cancellable);
   spotifygtk_login5_auth_token (state->login5_client,
                                 NATIVE_AUTH_CLIENT_ID, state->device_id,
                                 username, creds, creds_len, creds_type,
@@ -408,7 +895,10 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
    * services rather than just building and hoping. */
   g_message ("[live-test] AP login confirmed -- now testing the streaming auth-relay chain "
             "(client-token -> login5)...");
+  report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
+                   "Connected to Spotify; preparing the streaming session.");
   state->client_token_client = spotifygtk_client_token_new ();
+  spotifygtk_client_token_set_cancellable (state->client_token_client, state->cancellable);
   spotifygtk_client_token_request (state->client_token_client, NATIVE_AUTH_CLIENT_ID,
                                    state->device_id,
                                    on_client_token_result, state);
@@ -430,11 +920,16 @@ on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
 
   g_message ("[live-test] handshake succeeded -- DH exchange, RSA signature verification, "
             "and HMAC key derivation all checked out against a real server.");
+  report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
+                   "Secure AP channel established; signing in.");
 
   state->session = session;
   spotifygtk_ap_session_start_receiving (session);
   state->audio_key_client = spotifygtk_audio_key_client_new (session);
   state->cdn_fetcher = spotifygtk_cdn_fetcher_new ();
+  /* CDN cancellation is threaded through first; AP/auth cancellation follows
+   * the same pattern as their async APIs are widened. */
+  spotifygtk_cdn_fetcher_set_cancellable (state->cdn_fetcher, state->cancellable);
 
   /* `state` is already the LiveTestState pointer supplied by run_live_test().
    * Passing `&state` here would instead retain a pointer to this callback's
@@ -455,20 +950,33 @@ static gboolean
 on_live_test_timeout (gpointer user_data)
 {
   LiveTestState *state = user_data;
-  g_warning ("[live-test] timed out after 15s waiting for a response -- "
-            "check network reachability to ap.spotify.com, or a firewall/proxy issue");
+  g_warning ("[live-test] timed out after 25s waiting for a response -- "
+             "cancelling all in-flight AP/auth/CDN operations; check network reachability "
+             "to ap.spotify.com, or a firewall/proxy issue");
   state->timed_out = TRUE;
+  if (state->cancellable)
+    g_cancellable_cancel (state->cancellable);
   g_main_loop_quit (state->loop);
   return G_SOURCE_REMOVE;
 }
 
 static gboolean
-run_live_test (const gchar *token)
+run_live_test (const gchar *token, GCancellable *cancellable,
+               SpotifyNativeEngineProgressFunc progress,
+               gpointer progress_data,
+               SpotifyNativeEngineControl *control,
+               const gchar *track_uri)
 {
   g_message ("=== live AP connection test ===");
   g_message ("Attempting a real handshake + login against Spotify's actual AP "
             "service. This is the test that proves (or disproves) interop, "
             "which nothing offline can confirm.");
+
+  /* The engine runs in a worker owned by the GTK service. Keep all AP,
+   * libsoup, and timeout sources on a private context so they cannot acquire
+   * GTK's default context and dispatch protocol callbacks on the UI thread. */
+  GMainContext *context = g_main_context_new ();
+  g_main_context_push_thread_default (context);
 
   SpotifyApSession *session = spotifygtk_ap_session_new ();
   /* Stashed here rather than threaded through as a separate callback
@@ -480,14 +988,27 @@ run_live_test (const gchar *token)
    * inventing a wrapper struct just for this. */
   g_object_set_data_full (G_OBJECT (session), "login-token", g_strdup (token), g_free);
 
-  GMainLoop *loop = g_main_loop_new (NULL, FALSE);
+  GMainLoop *loop = g_main_loop_new (context, FALSE);
   LiveTestState state = {
     .loop = loop, .ok = FALSE, .timed_out = FALSE,
     .device_id = generate_device_id (),
     .session = NULL, .client_token_client = NULL, .login5_client = NULL,
     .spclient = NULL, .audio_key_client = NULL, .cdn_fetcher = NULL,
     .bearer_token = NULL, .client_token = NULL, .cdn_url = NULL,
+    .track_uri = track_uri,
+    .initial_cdn_chunk = NULL,
+    .next_download_offset = 0,
+    .stream_decoder = NULL, .stream_frames = 0, .output_frames = 0,
+    .pcm_queue = NULL, .output_thread = NULL, .queued_frames = 0,
+    .output_failed = FALSE, .queue_initialized = FALSE,
+    .timeout_source = NULL,
+    .control = control,
+    .progress = progress, .progress_data = progress_data,
+    .cancellable = cancellable,
   };
+  report_progress (&state, SPOTIFYGTK_ENGINE_CONNECTING,
+                   "Starting the native Spotify playback engine.");
+  spotifygtk_ap_session_set_cancellable (session, cancellable);
   g_message ("[live-test] device_id for this run: %s", state.device_id);
 
   spotifygtk_ap_session_connect (session, NULL, on_connected, &state);
@@ -498,37 +1019,41 @@ run_live_test (const gchar *token)
    * network-hang detector: a clean rejection (bad token, etc.) fails
    * fast via ap.c's "disconnected" signal rather than waiting out
    * this timeout, so reaching it specifically suggests a stuck
-   * connection, not a normal login rejection. Raised from 15s to 25s
+   * connection, not a normal login rejection. Set to 25s
    * now that a successful AP login chains into two more real network
    * round trips (client-token, login5) before the test concludes.
    *
-   * KNOWN LIMITATION, not fixed here: if this timeout fires, we tear
-   * down `session` (and now also client_token_client/login5_client if
-   * created) while an async GIO operation may still be in flight
-   * (none of ap.c's, clienttoken.c's, or login5.c's async calls
-   * currently accept a GCancellable -- they're hardcoded NULL
-   * throughout). That in-flight callback would reference `state`, a
-   * stack variable that's gone once this function returns. It's
-   * harmless in THIS harness specifically (the process exits
-   * immediately after, before the shared GMainContext is ever pumped
-   * again to deliver the stale callback) -- but this exact pattern
-   * would be a real use-after-free if reused inside a long-running
-   * app. Properly fixing it means threading a GCancellable through
-   * every async hop across all three files: real follow-up work,
-   * tracked rather than silently patched over here. */
-  guint timeout_id = g_timeout_add_seconds (25, on_live_test_timeout, &state);
+   * Cancellation is shared with every async hop. The timeout cancels before
+   * leaving the loop, so a GUI-owned engine task can safely unwind instead of
+   * leaving network callbacks attached to a stack-local LiveTestState. */
+  state.timeout_source = g_timeout_source_new_seconds (25);
+  g_source_set_callback (state.timeout_source, on_live_test_timeout, &state, NULL);
+  g_source_attach (state.timeout_source, context);
 
   g_main_loop_run (loop);
 
-  /* on_live_test_timeout() returns G_SOURCE_REMOVE, which tells GLib
-   * to auto-remove that source the moment it fires -- calling
-   * g_source_remove() again here unconditionally was a real bug
-   * (GLib-CRITICAL: "Source ID N was not found") whenever the
-   * timeout was what ended the loop. Only remove it ourselves when
-   * something else (success or failure callback) ended the loop
-   * first, leaving the timeout source still pending. */
-  if (!state.timed_out)
-    g_source_remove (timeout_id);
+  /* on_live_test_timeout() returns G_SOURCE_REMOVE, which destroys the
+   * source when it fires. For a normal success/failure exit, destroy the
+   * source directly: g_source_remove() only searches the default context,
+   * while this source belongs to the private engine context. */
+  if (state.timeout_source) {
+    if (!state.timed_out)
+      g_source_destroy (state.timeout_source);
+    g_source_unref (state.timeout_source);
+    state.timeout_source = NULL;
+  }
+
+  /* Cancellation callbacks are delivered on the private engine context. Give
+   * them a bounded drain window before releasing the stack-backed state and
+   * protocol clients, preventing a late soup/AP callback from observing freed
+   * callback data after a timeout or Stop request. */
+  if (state.timed_out) {
+    guint drained = 0;
+    while (g_main_context_pending (context) && drained++ < 64)
+      g_main_context_iteration (context, FALSE);
+    g_message ("[live-test] cancellation drain processed %u pending context iteration(s)",
+               drained);
+  }
   g_main_loop_unref (loop);
   g_free (state.device_id);
   g_clear_object (&state.client_token_client);
@@ -539,27 +1064,40 @@ run_live_test (const gchar *token)
   g_free (state.bearer_token);
   g_free (state.client_token);
   g_free (state.cdn_url);
+  g_clear_pointer (&state.initial_cdn_chunk, g_bytes_unref);
+  stream_playback_stop (&state);
+  if (state.pcm_queue)
+    g_async_queue_unref (state.pcm_queue);
+  if (state.queue_initialized) {
+    g_mutex_clear (&state.queue_lock);
+    g_cond_clear (&state.queue_cond);
+  }
+  g_clear_object (&state.stream_decoder);
   g_object_unref (session);
+  g_main_context_pop_thread_default (context);
+  g_main_context_unref (context);
 
   return state.ok;
 }
 
-int
-main (int argc, char *argv[])
+gboolean
+spotifygtk_native_engine_run (GCancellable *cancellable,
+                              SpotifyNativeEngineProgressFunc progress,
+                              gpointer progress_data,
+                              SpotifyNativeEngineControl *control,
+                              const gchar *track_uri)
 {
-  (void) argc; (void) argv;
-
   g_message ("=== spotify-native engine harness (%s build) ===", APP_PROFILE);
   g_message ("    PipeWire: %s", HAVE_PIPEWIRE ? "yes" : "no");
   g_message ("    PulseAudio: %s", HAVE_PULSE ? "yes" : "no");
   g_message ("    ALSA: %s", HAVE_ALSA ? "yes" : "no");
   g_message ("    OpenSSL (CDN decrypt): %s", HAVE_OPENSSL ? "yes" : "no");
-  g_message ("Not a real client yet -- no playback. See README.");
+  g_message ("Native playback pipeline: AP auth -> CDN decrypt -> Ogg/Vorbis -> local PCM.");
 
   gboolean shannon_ok = run_shannon_selftest ();
   if (!shannon_ok) {
     g_warning ("Shannon self-test FAILED -- see messages above");
-    return 1;
+    return FALSE;
   }
   g_message ("Shannon self-test passed.");
 
@@ -578,9 +1116,24 @@ main (int argc, char *argv[])
 
   if (!token) {
     g_warning ("Could not obtain an access token -- see messages above. Skipping live test.");
-    return 1;
+    return FALSE;
   }
 
-  gboolean live_ok = run_live_test (token);
-  return live_ok ? 0 : 1;
+  const gchar *selected_track = (track_uri && *track_uri) ? track_uri :
+                                g_getenv ("SPOTIFY_TRACK_URI");
+  if (!selected_track || !*selected_track)
+    selected_track = DEFAULT_TEST_TRACK_URI;
+  g_message ("[engine] selected track URI: %s", selected_track);
+  gboolean live_ok = run_live_test (token, cancellable, progress, progress_data,
+                                    control, selected_track);
+  return live_ok;
 }
+
+#ifndef SPOTIFYGTK_ENGINE_LIBRARY
+int
+main (int argc, char *argv[])
+{
+  (void) argc; (void) argv;
+  return spotifygtk_native_engine_run (NULL, NULL, NULL, NULL, NULL) ? 0 : 1;
+}
+#endif
