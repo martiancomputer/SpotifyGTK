@@ -10,8 +10,11 @@
 
 #include "config.h"
 #include "player_service.h"
+#include "spotify/native_auth.h"
 
 #include <gtk/gtk.h>
+#include <libsoup/soup.h>
+#include <json-glib/json-glib.h>
 #include <string.h>
 
 typedef struct {
@@ -26,6 +29,11 @@ typedef struct {
   GtkWidget   *bar_stop_button;
   GtkWidget   *bar_status;
   GtkWidget   *bar_progress;
+  GtkWidget   *search_results;
+  GtkWidget   *search_info;
+  SoupSession *search_session;
+  GCancellable *search_cancellable;
+  NativeAuth  *search_auth;
   GtkWindow   *window;          /* borrowed; owner of this runtime */
   SpotifyNativePlayerService *player;
   gboolean     close_after_stop;
@@ -34,6 +42,11 @@ typedef struct {
 static void
 gui_runtime_free (GuiRuntime *runtime)
 {
+  if (runtime->search_cancellable)
+    g_cancellable_cancel (runtime->search_cancellable);
+  g_clear_object (&runtime->search_cancellable);
+  g_clear_object (&runtime->search_session);
+  g_clear_object (&runtime->search_auth);
   g_clear_object (&runtime->player);
   g_free (runtime);
 }
@@ -93,6 +106,163 @@ on_player_state_changed (SpotifyNativePlayerService *player, gint state,
   (void) player;
 }
 
+typedef struct {
+  GWeakRef window_ref;
+  SoupMessage *message;
+} CatalogSearchClosure;
+
+static void
+catalog_search_closure_free (CatalogSearchClosure *closure)
+{
+  g_weak_ref_clear (&closure->window_ref);
+  g_clear_object (&closure->message);
+  g_free (closure);
+}
+
+static void
+clear_search_results (GuiRuntime *runtime)
+{
+  GtkWidget *child = gtk_widget_get_first_child (runtime->search_results);
+  while (child) {
+    GtkWidget *next = gtk_widget_get_next_sibling (child);
+    gtk_list_box_remove (GTK_LIST_BOX (runtime->search_results), child);
+    child = next;
+  }
+}
+
+static void
+on_search_result_clicked (GtkButton *button, gpointer user_data)
+{
+  GuiRuntime *runtime = user_data;
+  const gchar *uri = g_object_get_data (G_OBJECT (button), "track-uri");
+  if (!uri)
+    return;
+  gtk_editable_set_text (GTK_EDITABLE (runtime->track_entry), uri);
+  gtk_editable_set_text (GTK_EDITABLE (runtime->search_entry), uri);
+  set_status_message (runtime, "Track selected. Press Play to start the native engine.");
+  g_message ("gui: selected catalog result: %s", uri);
+}
+
+static void
+on_catalog_search_response (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  CatalogSearchClosure *closure = user_data;
+  g_autoptr(GError) error = NULL;
+  GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+  g_autoptr(GtkWindow) window = g_weak_ref_get (&closure->window_ref);
+  if (!window)
+    goto done;
+
+  GuiRuntime *runtime = g_object_get_data (G_OBJECT (window), "gui-runtime");
+  if (!runtime)
+    goto done;
+  clear_search_results (runtime);
+
+  if (!bytes) {
+    gtk_label_set_text (GTK_LABEL (runtime->search_info),
+                        error ? error->message : "Search request failed.");
+    goto done;
+  }
+
+  gsize length = 0;
+  const gchar *body = g_bytes_get_data (bytes, &length);
+  guint status = soup_message_get_status (closure->message);
+  if (status >= 400) {
+    gtk_label_set_text (GTK_LABEL (runtime->search_info),
+                        "Spotify rejected the search request; sign in again if needed.");
+    g_bytes_unref (bytes);
+    goto done;
+  }
+
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  if (!json_parser_load_from_data (parser, body, (gssize) length, &error)) {
+    gtk_label_set_text (GTK_LABEL (runtime->search_info), "Search returned invalid JSON.");
+    g_bytes_unref (bytes);
+    goto done;
+  }
+
+  JsonNode *root_node = json_parser_get_root (parser);
+  JsonObject *root = JSON_NODE_HOLDS_OBJECT (root_node) ? json_node_get_object (root_node) : NULL;
+  JsonObject *tracks = root && json_object_has_member (root, "tracks") ?
+                       json_object_get_object_member (root, "tracks") : NULL;
+  JsonArray *items = tracks && json_object_has_member (tracks, "items") ?
+                     json_object_get_array_member (tracks, "items") : NULL;
+  guint found = 0;
+  if (items) {
+    for (guint i = 0; i < json_array_get_length (items); i++) {
+      JsonObject *item = json_array_get_object_element (items, i);
+      if (!item) continue;
+      const gchar *uri = json_object_get_string_member_with_default (item, "uri", NULL);
+      const gchar *name = json_object_get_string_member_with_default (item, "name", "Untitled track");
+      if (!uri || !g_str_has_prefix (uri, "spotify:track:")) continue;
+
+      g_autofree gchar *artist = NULL;
+      JsonArray *artists = json_object_has_member (item, "artists") ?
+                           json_object_get_array_member (item, "artists") : NULL;
+      if (artists && json_array_get_length (artists) > 0) {
+        JsonObject *artist_obj = json_array_get_object_element (artists, 0);
+        if (artist_obj)
+          artist = g_strdup (json_object_get_string_member_with_default (artist_obj, "name", "Unknown artist"));
+      }
+      g_autofree gchar *label = g_strdup_printf ("%s — %s", name,
+                                                 artist ? artist : "Unknown artist");
+      GtkWidget *row = gtk_button_new_with_label (label);
+      gtk_widget_set_halign (row, GTK_ALIGN_FILL);
+      gtk_widget_set_hexpand (row, TRUE);
+      g_object_set_data_full (G_OBJECT (row), "track-uri", g_strdup (uri), g_free);
+      g_signal_connect (row, "clicked", G_CALLBACK (on_search_result_clicked), runtime);
+      gtk_list_box_append (GTK_LIST_BOX (runtime->search_results), row);
+      found++;
+    }
+  }
+  gtk_label_set_text (GTK_LABEL (runtime->search_info), found ?
+                      "Select a result, then press Play." : "No tracks found.");
+  g_bytes_unref (bytes);
+
+done:
+  catalog_search_closure_free (closure);
+}
+
+static void
+start_catalog_search (GuiRuntime *runtime, const gchar *query)
+{
+  if (!runtime->search_auth || !native_auth_has_valid_token (runtime->search_auth)) {
+    g_clear_object (&runtime->search_auth);
+    runtime->search_auth = native_auth_new ();
+  }
+  if (!native_auth_has_valid_token (runtime->search_auth)) {
+    gtk_label_set_text (GTK_LABEL (runtime->search_info),
+                        "Catalog search needs a valid native login. Press Play once to authenticate.");
+    return;
+  }
+
+  if (!runtime->search_session)
+    runtime->search_session = soup_session_new_with_options ("user-agent", "SpotifyGTK/" APP_VERSION, NULL);
+  if (runtime->search_cancellable) {
+    g_cancellable_cancel (runtime->search_cancellable);
+    g_clear_object (&runtime->search_cancellable);
+  }
+  runtime->search_cancellable = g_cancellable_new ();
+  clear_search_results (runtime);
+  gtk_label_set_text (GTK_LABEL (runtime->search_info), "Searching Spotify…");
+
+  g_autofree gchar *encoded = g_uri_escape_string (query, NULL, FALSE);
+  g_autofree gchar *url = g_strdup_printf (
+      "https://api.spotify.com/v1/search?q=%s&type=track&limit=10", encoded);
+  SoupMessage *message = soup_message_new (SOUP_METHOD_GET, url);
+  g_autofree gchar *auth = g_strdup_printf ("Bearer %s",
+                                            native_auth_get_token (runtime->search_auth));
+  soup_message_headers_replace (soup_message_get_request_headers (message), "Authorization", auth);
+  soup_message_headers_replace (soup_message_get_request_headers (message), "Accept", "application/json");
+  CatalogSearchClosure *closure = g_new0 (CatalogSearchClosure, 1);
+  g_weak_ref_init (&closure->window_ref, runtime->window);
+  closure->message = g_object_ref (message);
+  soup_session_send_and_read_async (runtime->search_session, message, G_PRIORITY_DEFAULT,
+                                    runtime->search_cancellable,
+                                    on_catalog_search_response, closure);
+  g_object_unref (message);
+}
+
 static void
 on_search_activated (GtkSearchEntry *entry, gpointer user_data)
 {
@@ -111,9 +281,7 @@ on_search_activated (GtkSearchEntry *entry, gpointer user_data)
   }
 
   if (!uri) {
-    set_status_message (runtime,
-                        "Search accepts a Spotify track URI or 22-character track ID.");
-    g_warning ("gui: unsupported search input; expected spotify:track:<id>");
+    start_catalog_search (runtime, text);
     return;
   }
 
@@ -234,6 +402,21 @@ build_now_playing_page (GuiRuntime *runtime)
   gtk_widget_set_hexpand (runtime->track_entry, TRUE);
   gtk_box_append (GTK_BOX (empty), runtime->track_entry);
   gtk_box_append (GTK_BOX (page), section ("Playback", empty));
+
+  GtkWidget *results_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_set_margin_start (results_box, 12);
+  gtk_widget_set_margin_end (results_box, 12);
+  gtk_widget_set_margin_top (results_box, 8);
+  gtk_widget_set_margin_bottom (results_box, 8);
+  runtime->search_info = gtk_label_new ("Search Spotify from the header to find tracks.");
+  gtk_label_set_xalign (GTK_LABEL (runtime->search_info), 0.0f);
+  gtk_widget_add_css_class (runtime->search_info, "dim-label");
+  runtime->search_results = gtk_list_box_new ();
+  gtk_list_box_set_selection_mode (GTK_LIST_BOX (runtime->search_results), GTK_SELECTION_NONE);
+  gtk_widget_set_vexpand (runtime->search_results, TRUE);
+  gtk_box_append (GTK_BOX (results_box), runtime->search_info);
+  gtk_box_append (GTK_BOX (results_box), runtime->search_results);
+  gtk_box_append (GTK_BOX (page), section ("Search results", results_box));
 
   GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *previous = gtk_button_new_with_label ("Previous");
