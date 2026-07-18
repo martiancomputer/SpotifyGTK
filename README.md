@@ -228,7 +228,7 @@ gap:
 | Spotify Connect registration (`spotify/connect.c`) | 🟡 Mercury subscription real, device-state payload pending real protobuf schema; ad-insertion events not yet researched |
 | Image cache VA-API hardware decode | 🟡 Probe works, decode path stubbed (lives in `spotify-connect`, shared concept) |
 | Vulkan compositing | ⬜ Not started |
-| GTK4 UI shell (`gui_main.c`) | 🟡 Desktop-style GTK4 shell with catalog-backed track search, persistent playback bar, URI/track-ID selection, live connection/buffering/playing stages, and pause/resume output; queue and seek remain to be integrated. |
+| GTK4 UI shell (`gui_main.c`) | 🟡 Desktop-style GTK4 shell modeled on the proven `spotify-connect` layout: SpotifyApi-backed catalog search, dedicated results page, persistent playback bar, URI/track-ID selection, live connection/buffering/playing stages, and pause/resume output; queue and seek remain to be integrated. |
 
 ### Audio backend tracks
 
