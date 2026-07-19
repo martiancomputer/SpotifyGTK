@@ -39,5 +39,16 @@
       <summary>Preferred color scheme</summary>
     </key>
 
+    <key name="theme-name" type="s">
+      <choices>
+        <choice value="milk"/>
+        <choice value="white"/>
+        <choice value="grey"/>
+        <choice value="vanta"/>
+      </choices>
+      <default>'vanta'</default>
+      <summary>Named color theme (Milk, White, Grey, or Vanta Black)</summary>
+    </key>
+
   </schema>
 </schemalist>

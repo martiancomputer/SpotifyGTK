@@ -5,6 +5,7 @@ struct _SpotifyNowPlayingBar {
   GtkBox     parent_instance;
 
   GtkImage  *album_art;
+  GtkImage  *now_playing_dot;
   GtkLabel  *track_label;
   GtkLabel  *artist_label;
   GtkButton *prev_btn;
@@ -53,7 +54,21 @@ spotifygtk_now_playing_bar_constructed (GObject *object)
   gtk_widget_add_css_class (GTK_WIDGET (self->track_label),  "title-4");
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "dim-label");
 
-  gtk_box_append (GTK_BOX (info_box), GTK_WIDGET (self->track_label));
+  /* Small symbolic dot inline with the track title, colored with the
+   * per-theme accent via .spotifygtk-now-playing-dot -- starts hidden,
+   * made visible when a track is actually playing. Using a symbolic
+   * icon rather than a plain colored widget so it scales with font
+   * size and inherits the symbolic color recoloring path. */
+  self->now_playing_dot = GTK_IMAGE (gtk_image_new_from_icon_name ("media-playback-start-symbolic"));
+  gtk_image_set_pixel_size (self->now_playing_dot, 8);
+  gtk_widget_add_css_class (GTK_WIDGET (self->now_playing_dot), "spotifygtk-now-playing-dot");
+  gtk_widget_set_visible (GTK_WIDGET (self->now_playing_dot), FALSE);
+
+  GtkWidget *title_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
+  gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->now_playing_dot));
+  gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->track_label));
+
+  gtk_box_append (GTK_BOX (info_box), title_row);
   gtk_box_append (GTK_BOX (info_box), GTK_WIDGET (self->artist_label));
   gtk_box_append (GTK_BOX (left), GTK_WIDGET (self->album_art));
   gtk_box_append (GTK_BOX (left), info_box);
@@ -80,6 +95,7 @@ spotifygtk_now_playing_bar_constructed (GObject *object)
   self->time_label = GTK_LABEL (gtk_label_new ("0:00 / 0:00"));
   gtk_widget_add_css_class (GTK_WIDGET (self->time_label), "caption");
   gtk_widget_add_css_class (GTK_WIDGET (self->time_label), "dim-label");
+  gtk_widget_add_css_class (GTK_WIDGET (self->time_label), "spotifygtk-mono");
 
   self->progress = GTK_SCALE (gtk_scale_new_with_range (GTK_ORIENTATION_HORIZONTAL, 0, 1, 0.001));
   gtk_scale_set_draw_value   (self->progress, FALSE);
@@ -116,6 +132,8 @@ spotifygtk_now_playing_bar_update (SpotifyNowPlayingBar *self, const gchar *trac
 {
   gtk_label_set_text (self->track_label,  track  ? track  : "");
   gtk_label_set_text (self->artist_label, artist ? artist : "");
+
+  gtk_widget_set_visible (GTK_WIDGET (self->now_playing_dot), is_playing);
 
   gtk_button_set_icon_name (self->play_btn,
     is_playing ? "media-playback-pause-symbolic" : "media-playback-start-symbolic");

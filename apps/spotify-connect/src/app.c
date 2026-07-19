@@ -3,6 +3,7 @@
 #include "auth.h"
 #include "api.h"
 #include "ui/window.h"
+#include "ui/theme.h"
 
 struct _SpotifyGtkApp {
   AdwApplication parent_instance;
@@ -65,6 +66,16 @@ spotifygtk_app_startup (GApplication *app)
 {
   G_APPLICATION_CLASS (spotifygtk_app_parent_class)->startup (app);
   adw_init ();
+
+  /* Applied once at startup for now -- there's no in-app settings UI
+   * yet to switch themes live, so a persistent GSettings watch isn't
+   * worth the extra lifecycle complexity until one exists. Change
+   * the theme via `gsettings set com.github.spotifygtk.SpotifyConnect
+   * theme-name '<milk|white|grey|vanta>'` and relaunch, in the
+   * meantime. */
+  g_autoptr(GSettings) settings = g_settings_new (APP_ID);
+  g_autofree gchar *theme_name = g_settings_get_string (settings, "theme-name");
+  spotifygtk_theme_apply (spotifygtk_theme_from_string (theme_name));
 }
 
 static void

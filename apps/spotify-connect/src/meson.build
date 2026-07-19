@@ -8,6 +8,7 @@ spotify_connect_sources = files(
   'ui/window.c',
   'ui/now_playing.c',
   'ui/search_page.c',
+  'ui/theme.c',
 )
 
 executable('spotify-connect',
