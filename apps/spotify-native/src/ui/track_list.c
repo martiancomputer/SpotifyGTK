@@ -67,7 +67,14 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 
+  /* Overlay scrolling floats the scrollbar on top of the rows, so it landed
+   * over the duration column. Turning it off gives the scrollbar its own
+   * gutter beside the list instead of on it. */
+  gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
+
   self->list = GTK_LIST_BOX (gtk_list_box_new ());
+  /* A little breathing room so the rows do not butt up against the gutter. */
+  gtk_widget_set_margin_end (GTK_WIDGET (self->list), 6);
   gtk_list_box_set_selection_mode (self->list, GTK_SELECTION_NONE);
   g_signal_connect (self->list, "row-activated", G_CALLBACK (on_row_activated), self);
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), GTK_WIDGET (self->list));

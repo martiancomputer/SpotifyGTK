@@ -154,24 +154,50 @@ spotifygtk_native_engine_control_get_volume (SpotifyNativeEngineControl *control
   return volume;
 }
 
-/* Push a pending volume change to the device. Called from the audio worker
- * each time round the write loop; the dirty flag keeps that to an actual
- * device call only when the value has changed. */
+/*
+ * Apply the current gain to a PCM buffer in place.
+ *
+ * Every output backend declares `.set_volume = NULL` -- Pulse, ALSA and
+ * PipeWire all leave per-stream volume as a TODO -- so routing the slider
+ * to spotifygtk_output_set_volume() reached a stub and did nothing. Scaling
+ * the samples ourselves works on every backend and needs nothing from them,
+ * which is the same "pure-C fallback" rule the rest of the project follows.
+ *
+ * The curve is cubic rather than linear. Perceived loudness is roughly
+ * logarithmic, so a linear slider spends most of its travel sounding loud
+ * and then collapses at the bottom; cubing approximates the usual
+ * fader response closely enough and costs one multiply.
+ *
+ * Samples are gint16, so the product is computed in gint32 and clamped:
+ * gain is <= 1.0 here, but clamping keeps this correct if it ever isn't.
+ */
 static void
 engine_control_apply_volume (SpotifyNativeEngineControl *control,
-                             SpotifyAudioOutput *output)
+                             gint16 *samples, gsize n_frames, gint channels)
 {
-  if (!control || !output)
+  if (!control || !samples || n_frames == 0)
     return;
 
   g_mutex_lock (&control->lock);
-  gboolean dirty = control->volume_dirty;
-  gdouble  volume = control->volume;
+  gdouble volume = control->volume;
   control->volume_dirty = FALSE;
   g_mutex_unlock (&control->lock);
 
-  if (dirty)
-    spotifygtk_output_set_volume (output, volume);
+  if (volume >= 1.0)
+    return;                       /* unity: leave the buffer untouched */
+
+  gdouble gain = volume * volume * volume;
+  gsize   n_samples = n_frames * (gsize) MAX (channels, 1);
+
+  if (gain <= 0.0) {
+    memset (samples, 0, n_samples * sizeof *samples);
+    return;
+  }
+
+  for (gsize i = 0; i < n_samples; i++) {
+    gint32 scaled = (gint32) (samples[i] * gain);
+    samples[i] = (gint16) CLAMP (scaled, G_MININT16, G_MAXINT16);
+  }
 }
 
 static gboolean
@@ -516,7 +542,8 @@ audio_output_thread (gpointer user_data)
       continue;
     }
 
-    engine_control_apply_volume (state->control, output);
+    engine_control_apply_volume (state->control, frame->samples,
+                                 frame->n_frames, frame->channels);
     gsize written = spotifygtk_output_write (output, frame->samples, frame->n_frames);
     if (written != frame->n_frames) {
       g_warning ("[live-test] streaming audio output wrote %" G_GSIZE_FORMAT

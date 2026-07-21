@@ -234,23 +234,96 @@ navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
 }
 
 /* === CSS for dark theme === */
+/*
+ * Four surface levels, darkest at the edges and lightest where content
+ * lives, so the panes read as separate without needing borders everywhere:
+ *
+ *   #101010  playback bar (deepest)
+ *   #161616  sidebar / now-playing panel
+ *   #1a1a1a  main content
+ *   #242424  cards and rows sitting on top of it
+ *
+ * The accent is Adwaita blue rather than Spotify's brand green. This is an
+ * unaffiliated client (see the trademark note in README.md), so borrowing
+ * the brand colour would imply an association that does not exist. The
+ * project's own mockup.svg already uses blue for the same reason.
+ */
 static const gchar *dark_theme_css =
-  "window { background-color: #1b1b1b; }"
-  ".header-bar { background-color: #262626; }"
-  ".sidebar { background-color: #232323; }"
-  ".sidebar-item { padding: 12px 20px; border-radius: 10px; }"
-  ".sidebar-item:hover { background-color: #2a2a2a; }"
-  ".sidebar-item:selected { background-color: #343434; }"
-  ".main-content { background-color: #1d1d1d; }"
-  ".now-playing-panel { background-color: #202225; }"
-  ".playback-bar { background-color: #171717; }"
-  ".card { background-color: #2b2b2b; border-radius: 12px; }"
-  ".list-row { background-color: #2b2b2b; border-radius: 8px; margin: 4px 0; }"
-  ".list-row:hover { background-color: #333333; }"
-  ".title-text { color: #ffffff; font-weight: 700; font-size: 34px; }"
-  ".normal-text { color: #ececec; font-size: 16px; }"
-  ".dim-text { color: #9f9f9f; font-size: 13px; }"
-  ".pinned-card { background-color: #2b2b2b; border-radius: 8px; }";
+  "window { background-color: #1a1a1a; color: #e8e8e8; }"
+
+  /* ── Structure ─────────────────────────────────────────────── */
+  ".header-bar { background-color: #101010;"
+  "  border-bottom: 1px solid #000000; }"
+  ".sidebar { background-color: #161616;"
+  "  border-right: 1px solid #0c0c0c; }"
+  ".main-content { background-color: #1a1a1a; }"
+  ".now-playing-panel { background-color: #161616;"
+  "  border-left: 1px solid #0c0c0c; }"
+  ".playback-bar { background-color: #101010;"
+  "  border-top: 1px solid #000000; }"
+
+  /* ── Sidebar navigation ────────────────────────────────────── */
+  ".sidebar list { background-color: transparent; }"
+  ".sidebar-item { border-radius: 8px; margin: 2px 8px;"
+  "  transition: background-color 120ms ease; }"
+  ".sidebar-item:hover { background-color: #232323; }"
+  ".sidebar-item:selected { background-color: #2c2c2c; }"
+  ".sidebar-item:selected label { color: #ffffff; font-weight: 600; }"
+  ".pinned-card { background-color: transparent; border-radius: 6px;"
+  "  margin: 1px 8px; }"
+  ".pinned-card:hover { background-color: #232323; }"
+
+  /* ── Typography ────────────────────────────────────────────── */
+  ".title-text { color: #ffffff; font-weight: 800; font-size: 30px;"
+  "  letter-spacing: -0.5px; }"
+  ".normal-text { color: #e8e8e8; font-size: 15px; }"
+  ".dim-text { color: #9a9a9a; font-size: 13px; }"
+  ".bar-title { color: #ffffff; font-size: 14px; font-weight: 600; }"
+  ".bar-subtitle { color: #9a9a9a; font-size: 12px; }"
+  ".time-label { color: #9a9a9a; font-size: 11px;"
+  "  font-feature-settings: 'tnum'; }"
+
+  /* ── Cards and rows ────────────────────────────────────────── */
+  ".card { background-color: #242424; border-radius: 10px; }"
+  ".list-row { background-color: transparent; border-radius: 6px;"
+  "  margin: 1px 0; transition: background-color 120ms ease; }"
+  ".list-row:hover { background-color: #242424; }"
+  ".art-thumb { background-color: #242424; border-radius: 6px;"
+  "  color: #6e6e6e; }"
+  ".art-large { background-color: #242424; border-radius: 12px;"
+  "  color: #6e6e6e; }"
+
+  /* ── Transport ─────────────────────────────────────────────── */
+  /* min-width/height must match the widget's size request or GTK's own
+   * button padding wins and the "circular" class renders an oval. */
+  ".play-button { background-color: #ffffff; color: #101010;"
+  "  min-width: 40px; min-height: 40px; padding: 0; }"
+  ".play-button:hover { background-color: #f0f0f0; }"
+  ".play-button:disabled { background-color: #3a3a3a; color: #7a7a7a; }"
+
+  /* ── Sliders ───────────────────────────────────────────────── */
+  "scale { min-height: 18px; }"
+  "scale trough { background-color: #3a3a3a; min-height: 4px;"
+  "  border-radius: 2px; }"
+  "scale highlight { background-color: #b8b8b8; border-radius: 2px; }"
+  "scale:hover highlight { background-color: #3584e4; }"
+  /* The handle keeps a constant 12px box and only becomes visible on hover.
+   * `margin: 0` is required, not cosmetic: libadwaita's own stylesheet puts
+   * a negative margin on scale sliders, which combines with a smaller
+   * min-width to produce a negative computed size and a GTK warning
+   * ("reported min width -4"). */
+  "scale slider { background-color: transparent; min-width: 12px;"
+  "  min-height: 12px; border-radius: 6px; margin: 0; }"
+  "scale:hover slider { background-color: #ffffff; }"
+  "scale:disabled highlight { background-color: #4a4a4a; }"
+
+  /* ── Scrollbars ────────────────────────────────────────────── */
+  /* Non-overlay, so it occupies a gutter beside the list rather than
+   * floating over the rows. */
+  "scrollbar { background-color: transparent; border: none; }"
+  "scrollbar slider { background-color: #3a3a3a; border-radius: 6px;"
+  "  min-width: 8px; margin: 2px; }"
+  "scrollbar slider:hover { background-color: #4e4e4e; }";
 
 static void
 load_dark_theme (void)

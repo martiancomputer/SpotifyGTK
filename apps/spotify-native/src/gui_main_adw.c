@@ -30,7 +30,17 @@ on_activate (GtkApplication *app, gpointer user_data)
 int
 main (int argc, char *argv[])
 {
-  GtkApplication *app = gtk_application_new (APP_ID, G_APPLICATION_DEFAULT_FLAGS);
+  /* Single-instance is right for users but blocks running a freshly built
+   * copy while another is already open, which makes verifying UI changes
+   * awkward. SPOTIFY_DEV_INSTANCE opts out for development. */
+  GApplicationFlags flags = G_APPLICATION_DEFAULT_FLAGS;
+  const gchar *dev_instance = g_getenv ("SPOTIFY_DEV_INSTANCE");
+  if (dev_instance && *dev_instance) {
+    flags |= G_APPLICATION_NON_UNIQUE;
+    g_message ("running as a non-unique dev instance");
+  }
+
+  GtkApplication *app = gtk_application_new (APP_ID, flags);
   g_signal_connect (app, "activate", G_CALLBACK (on_activate), NULL);
 
   int status = g_application_run (G_APPLICATION (app), argc, argv);

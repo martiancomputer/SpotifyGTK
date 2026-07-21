@@ -11,6 +11,9 @@ struct _SpotifyGtkNowPlayingPanel {
   GtkLabel *track_label;
   GtkLabel *artist_label;
   GtkListBox *queue_list;
+  GtkWidget  *art_section;   /* artwork + track info; what collapses */
+  GtkButton  *collapse_btn;
+  gboolean    collapsed;
 
   gboolean is_playing;
 };
@@ -28,6 +31,23 @@ spotifygtk_now_playing_panel_class_init (SpotifyGtkNowPlayingPanelClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   object_class->dispose = spotifygtk_now_playing_panel_dispose;
+}
+
+/* Collapsing hides the artwork and track info, leaving the header and the
+ * queue. That is what the arrow in the mockup implies and what makes the
+ * panel useful on a short window. */
+static void
+on_collapse_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkNowPlayingPanel *self = user_data;
+
+  self->collapsed = !self->collapsed;
+  gtk_widget_set_visible (self->art_section, !self->collapsed);
+  gtk_button_set_label (self->collapse_btn,
+                        self->collapsed ? "Expand ▸" : "Collapse ◂");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->collapse_btn),
+                               self->collapsed ? "Show the artwork" : "Hide the artwork");
+  (void) button;
 }
 
 static void
@@ -51,20 +71,30 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
   gtk_box_append (GTK_BOX (header), title);
 
-  GtkWidget *collapse = gtk_label_new ("Collapse ◂");
-  gtk_widget_add_css_class (collapse, "dim-text");
-  gtk_box_append (GTK_BOX (header), collapse);
+  /* This was a GtkLabel, which is why clicking it did nothing. It has to be
+   * an actual button to be activatable at all. */
+  self->collapse_btn = GTK_BUTTON (gtk_button_new_with_label ("Collapse ◂"));
+  gtk_widget_add_css_class (GTK_WIDGET (self->collapse_btn), "flat");
+  gtk_widget_add_css_class (GTK_WIDGET (self->collapse_btn), "dim-text");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->collapse_btn), "Hide the artwork");
+  g_signal_connect (self->collapse_btn, "clicked", G_CALLBACK (on_collapse_clicked), self);
+  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->collapse_btn));
 
   gtk_box_append (GTK_BOX (self), header);
 
-  /* Album art */
+  /* Artwork and track info live in one box so the collapse button has a
+   * single thing to hide. */
+  self->art_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+
   self->album_art = GTK_IMAGE (gtk_image_new_from_icon_name ("audio-x-generic-symbolic"));
+  gtk_image_set_pixel_size (self->album_art, 96);
   gtk_widget_set_size_request (GTK_WIDGET (self->album_art), 220, 220);
-  gtk_widget_add_css_class (GTK_WIDGET (self->album_art), "card");
-  gtk_widget_set_margin_start (GTK_WIDGET (self->album_art), 32);
-  gtk_widget_set_margin_end (GTK_WIDGET (self->album_art), 32);
-  gtk_widget_set_margin_top (GTK_WIDGET (self->album_art), 16);
-  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->album_art));
+  gtk_widget_add_css_class (GTK_WIDGET (self->album_art), "art-large");
+  gtk_widget_set_halign (GTK_WIDGET (self->album_art), GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_start (GTK_WIDGET (self->album_art), 24);
+  gtk_widget_set_margin_end (GTK_WIDGET (self->album_art), 24);
+  gtk_widget_set_margin_top (GTK_WIDGET (self->album_art), 8);
+  gtk_box_append (GTK_BOX (self->art_section), GTK_WIDGET (self->album_art));
 
   /* Track info */
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
@@ -82,7 +112,8 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_label_set_xalign (self->artist_label, 0.0);
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->artist_label));
 
-  gtk_box_append (GTK_BOX (self), info);
+  gtk_box_append (GTK_BOX (self->art_section), info);
+  gtk_box_append (GTK_BOX (self), self->art_section);
 
   /* Queue list */
   self->queue_list = GTK_LIST_BOX (gtk_list_box_new ());
