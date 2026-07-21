@@ -15,6 +15,8 @@ typedef void (*SpotifyApiCallback) (SpotifyApi *api, JsonObject *result,
                                     GError *error, gpointer user_data);
 
 SpotifyApi *spotifygtk_api_new (SpotifyAuth *auth);
+SpotifyApi *spotifygtk_api_new_with_bearer_token (const gchar *bearer_token);
+void        spotifygtk_api_set_bearer_token      (SpotifyApi *self, const gchar *bearer_token);
 
 void spotifygtk_api_get_playback_state  (SpotifyApi *self, SpotifyApiCallback cb, gpointer data);
 void spotifygtk_api_play                (SpotifyApi *self, const gchar *context_uri, SpotifyApiCallback cb, gpointer data);
@@ -28,6 +30,8 @@ void spotifygtk_api_seek                (SpotifyApi *self, gint64 position_ms, S
 void spotifygtk_api_get_user_playlists  (SpotifyApi *self, gint limit, gint offset, SpotifyApiCallback cb, gpointer data);
 void spotifygtk_api_get_playlist_tracks (SpotifyApi *self, const gchar *playlist_id, SpotifyApiCallback cb, gpointer data);
 void spotifygtk_api_get_saved_tracks    (SpotifyApi *self, gint limit, gint offset, SpotifyApiCallback cb, gpointer data);
+void spotifygtk_api_get_album_tracks    (SpotifyApi *self, const gchar *album_id, SpotifyApiCallback cb, gpointer data);
+void spotifygtk_api_get_artist_top_tracks (SpotifyApi *self, const gchar *artist_id, SpotifyApiCallback cb, gpointer data);
 
 void spotifygtk_api_search              (SpotifyApi *self, const gchar *query, const gchar *types, SpotifyApiCallback cb, gpointer data);
 void spotifygtk_api_get_current_user    (SpotifyApi *self, SpotifyApiCallback cb, gpointer data);

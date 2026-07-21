@@ -1,0 +1,59 @@
+/*
+ * track_list.h — Reusable scrolling list of TrackRows.
+ *
+ * Every page that shows tracks (liked songs, playlist contents, search
+ * results) needs the same three things: a scroller, rows built from a
+ * JsonArray, and a status line for empty/error/loading states. This is that,
+ * so the pages themselves only deal with which endpoint to call.
+ */
+
+#pragma once
+
+#include <adwaita.h>
+#include <json-glib/json-glib.h>
+
+#include "spotify/session.h"
+
+G_BEGIN_DECLS
+
+#define SPOTIFYGTK_TYPE_TRACK_LIST (spotifygtk_track_list_get_type ())
+G_DECLARE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list,
+                      SPOTIFYGTK, TRACK_LIST, GtkBox)
+
+SpotifyGtkTrackList *spotifygtk_track_list_new (void);
+
+/* Populate from a JsonArray of either bare track objects or wrapper objects
+ * carrying a "track" member (what /me/tracks and recently-played return).
+ * Both shapes are accepted; the wrapper is unwrapped automatically. */
+void spotifygtk_track_list_set_tracks (SpotifyGtkTrackList *self, JsonArray *items);
+
+/*
+ * Populate from the native session. `tracks` is a GPtrArray of
+ * SpotifyNativeTrack* as returned by
+ * spotifygtk_native_session_load_tracks_finish(); the list takes its own
+ * copies, so the caller may unref it immediately.
+ *
+ * Emits "track-activated" with a SpotifyNativeTrack* (not a JsonObject)
+ * when a row from this path is activated — see the signal note below.
+ */
+void spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self,
+                                              GPtrArray           *tracks);
+
+/* Show a message instead of rows (loading, empty, error). */
+void spotifygtk_track_list_set_status (SpotifyGtkTrackList *self, const gchar *message);
+
+void spotifygtk_track_list_clear (SpotifyGtkTrackList *self);
+
+/* Number rows 1..n rather than showing per-row art. */
+void spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered);
+
+/* Signals:
+ * - track-activated (gpointer track)
+ *
+ *   The payload type follows whichever setter populated the list:
+ *   JsonObject* after set_tracks(), SpotifyNativeTrack* after
+ *   set_native_tracks(). A given list is only ever filled by one of them,
+ *   so a page always knows which it is receiving.
+ */
+
+G_END_DECLS

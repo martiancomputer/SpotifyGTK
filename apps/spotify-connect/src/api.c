@@ -9,6 +9,7 @@ struct _SpotifyApi {
   GObject      parent_instance;
   SpotifyAuth *auth;
   SoupSession *session;
+  gchar       *bearer_token;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyApi, spotifygtk_api, G_TYPE_OBJECT)
@@ -66,6 +67,8 @@ on_api_response (GObject *source, GAsyncResult *result, gpointer user_data)
 
   if (status >= 400) {
     g_autofree gchar *detail = NULL;
+    const gchar *retry_after =
+      soup_message_headers_get_one (soup_message_get_response_headers (cl->msg), "Retry-After");
     if (root && json_object_has_member (root, "error")) {
       JsonNode *enode = json_object_get_member (root, "error");
       if (JSON_NODE_HOLDS_OBJECT (enode))
@@ -74,8 +77,12 @@ on_api_response (GObject *source, GAsyncResult *result, gpointer user_data)
     }
     if (!detail) detail = g_strndup (body, MIN (len, 300));
 
-    GError *http_err = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
-      "HTTP %u %s: %s", status, reason ? reason : "", detail ? detail : "(no body)");
+    GError *http_err = g_error_new (G_IO_ERROR,
+      status == 429 ? G_IO_ERROR_BUSY : G_IO_ERROR_FAILED,
+      "HTTP %u %s%s%s: %s", status, reason ? reason : "",
+      retry_after ? " Retry-After=" : "",
+      retry_after ? retry_after : "",
+      detail ? detail : "(no body)");
     g_warning ("[api] request failed: %s", http_err->message);
     if (cl->callback) cl->callback (cl->api, root, http_err, cl->user_data);
     g_error_free (http_err);
@@ -100,7 +107,8 @@ api_request (SpotifyApi *self, const gchar *method, const gchar *endpoint,
   g_autofree gchar *url = g_strdup_printf ("%s%s", SPOTIFY_API_BASE, endpoint);
   SoupMessage *msg = soup_message_new (method, url);
 
-  const gchar *token = spotifygtk_auth_get_token (self->auth);
+  const gchar *token = self->bearer_token ? self->bearer_token :
+                       self->auth ? spotifygtk_auth_get_token (self->auth) : NULL;
   if (!token) {
     g_warning ("[api] %s %s attempted with no access token -- auth hasn't completed yet", method, url);
   }
@@ -181,6 +189,18 @@ void spotifygtk_api_get_saved_tracks (SpotifyApi *self, gint limit, gint offset,
   api_request (self, SOUP_METHOD_GET, ep, NULL, cb, data);
 }
 
+void spotifygtk_api_get_album_tracks (SpotifyApi *self, const gchar *album_id, SpotifyApiCallback cb, gpointer data)
+{
+  g_autofree gchar *ep = g_strdup_printf ("/albums/%s/tracks?limit=50", album_id);
+  api_request (self, SOUP_METHOD_GET, ep, NULL, cb, data);
+}
+
+void spotifygtk_api_get_artist_top_tracks (SpotifyApi *self, const gchar *artist_id, SpotifyApiCallback cb, gpointer data)
+{
+  g_autofree gchar *ep = g_strdup_printf ("/artists/%s/top-tracks?market=from_token", artist_id);
+  api_request (self, SOUP_METHOD_GET, ep, NULL, cb, data);
+}
+
 void spotifygtk_api_search (SpotifyApi *self, const gchar *query, const gchar *types, SpotifyApiCallback cb, gpointer data)
 {
   g_autofree gchar *encoded = g_uri_escape_string (query, NULL, FALSE);
@@ -197,6 +217,7 @@ spotifygtk_api_dispose (GObject *object)
   SpotifyApi *self = SPOTIFYGTK_API (object);
   g_clear_object (&self->auth);
   g_clear_object (&self->session);
+  g_clear_pointer (&self->bearer_token, g_free);
   G_OBJECT_CLASS (spotifygtk_api_parent_class)->dispose (object);
 }
 
@@ -218,4 +239,20 @@ spotifygtk_api_new (SpotifyAuth *auth)
   SpotifyApi *self = g_object_new (SPOTIFYGTK_TYPE_API, NULL);
   self->auth = g_object_ref (auth);
   return self;
+}
+
+SpotifyApi *
+spotifygtk_api_new_with_bearer_token (const gchar *bearer_token)
+{
+  SpotifyApi *self = g_object_new (SPOTIFYGTK_TYPE_API, NULL);
+  self->bearer_token = g_strdup (bearer_token);
+  return self;
+}
+
+void
+spotifygtk_api_set_bearer_token (SpotifyApi *self, const gchar *bearer_token)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_API (self));
+  g_free (self->bearer_token);
+  self->bearer_token = g_strdup (bearer_token);
 }
