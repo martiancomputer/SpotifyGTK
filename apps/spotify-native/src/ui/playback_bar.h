@@ -31,6 +31,8 @@ void spotifygtk_playback_bar_set_progress (SpotifyGtkPlaybackBar *self,
                                            gint64 duration_ms);
 void spotifygtk_playback_bar_set_queue_count (SpotifyGtkPlaybackBar *self,
                                               gint count);
+void spotifygtk_playback_bar_set_volume       (SpotifyGtkPlaybackBar *self,
+                                               gint percent);
 
 /* Signals:
  * - play-clicked
@@ -38,6 +40,7 @@ void spotifygtk_playback_bar_set_queue_count (SpotifyGtkPlaybackBar *self,
  * - next-clicked
  * - prev-clicked
  * - seek (gint64 position_ms)
+ * - volume-changed (gint percent)
  */
 
 G_END_DECLS

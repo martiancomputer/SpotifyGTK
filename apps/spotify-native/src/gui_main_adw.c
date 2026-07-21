@@ -10,6 +10,18 @@ on_activate (GtkApplication *app, gpointer user_data)
 {
   adw_init ();
 
+  /* GtkApplication is single-instance, so launching again while one is
+   * running routes here rather than starting a new process. Building a
+   * second window each time meant a second launch silently stacked another
+   * copy of the whole UI -- including a second sign-in -- instead of
+   * raising the one already open. */
+  GtkWindow *existing = gtk_application_get_active_window (app);
+  if (existing) {
+    gtk_window_present (existing);
+    (void) user_data;
+    return;
+  }
+
   SpotifyGtkNativeWindow *win = spotifygtk_native_window_new (app);
   gtk_window_present (GTK_WINDOW (win));
   (void) user_data;

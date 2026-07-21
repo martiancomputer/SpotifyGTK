@@ -13,6 +13,8 @@
 
 #include "spotify/spclient.h"   /* build_search_uri */
 
+#include <string.h>
+
 #define SEARCH_DEBOUNCE_MS 350
 #define SEARCH_RESULT_LIMIT 40
 
@@ -38,6 +40,66 @@ typedef struct {
   GWeakRef page;
   guint64  serial;
 } SearchClosure;
+
+/*
+ * /context-resolve on a search URI does not return search *results* -- it
+ * returns a playback context, i.e. what Spotify would queue if you hit play
+ * on that search: some genuine matches followed by related popular tracks.
+ * "bohemian rhapsody" comes back with Blinding Lights at #1 and the Queen
+ * tracks at #2-4, then Hotel California and Billie Jean. librespot describes
+ * the same behaviour ("massively influenced by the provided query") and does
+ * not implement a real search endpoint.
+ *
+ * Until the actual search API is identified, keep the rows whose title or
+ * artist matches every word of the query. That drops the filler without
+ * hurting artist searches, where the query matches the artist rather than
+ * the title. If nothing survives, the unfiltered list is shown -- a wrong
+ * ordering is more useful than an empty page.
+ */
+static gboolean
+track_matches_query (const SpotifyNativeTrack *track, const gchar *const *terms)
+{
+  g_autofree gchar *haystack =
+    g_strdup_printf ("%s %s", track->name ? track->name : "",
+                              track->artists ? track->artists : "");
+  g_autofree gchar *folded = g_utf8_casefold (haystack, -1);
+
+  for (guint i = 0; terms[i]; i++) {
+    if (!strstr (folded, terms[i]))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static GPtrArray *
+filter_by_relevance (GPtrArray *tracks, const gchar *query)
+{
+  g_autofree gchar *folded_query = g_utf8_casefold (query, -1);
+  g_auto(GStrv) terms = g_strsplit_set (folded_query, " \t", -1);
+
+  /* Drop empty tokens left by runs of whitespace. */
+  GPtrArray *kept_terms = g_ptr_array_new ();
+  for (guint i = 0; terms[i]; i++) {
+    if (*terms[i])
+      g_ptr_array_add (kept_terms, terms[i]);
+  }
+  g_ptr_array_add (kept_terms, NULL);
+
+  GPtrArray *out = g_ptr_array_new ();
+  for (guint i = 0; i < tracks->len; i++) {
+    SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
+    if (track_matches_query (track, (const gchar *const *) kept_terms->pdata))
+      g_ptr_array_add (out, track);
+  }
+
+  g_ptr_array_free (kept_terms, TRUE);
+
+  if (out->len == 0) {
+    g_ptr_array_free (out, TRUE);
+    return g_ptr_array_ref (tracks);
+  }
+  return out;
+}
 
 static void
 on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_data)
@@ -76,9 +138,18 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  spotifygtk_track_list_set_native_tracks (self->results, tracks);
-  if (tracks->len == 0)
+  if (tracks->len == 0) {
+    spotifygtk_track_list_clear (self->results);
     spotifygtk_track_list_set_status (self->results, "No results.");
+    return;
+  }
+
+  const gchar *query = gtk_editable_get_text (GTK_EDITABLE (self->entry));
+  g_autoptr(GPtrArray) shown = (query && *query)
+    ? filter_by_relevance (tracks, query)
+    : g_ptr_array_ref (tracks);
+
+  spotifygtk_track_list_set_native_tracks (self->results, shown);
 }
 
 static gboolean

@@ -18,6 +18,7 @@ struct _SpotifyGtkPlaybackBar {
 
   /* Progress */
   GtkScale *progress_scale;
+  GtkScale *volume_scale;
 
   /* State */
   gboolean is_playing;
@@ -33,6 +34,7 @@ enum {
   NEXT_CLICKED,
   PREV_CLICKED,
   SEEK,
+  VOLUME_CHANGED,
   N_SIGNALS
 };
 
@@ -47,6 +49,27 @@ on_play_clicked (GtkButton *button, gpointer user_data)
   else
     g_signal_emit (self, signals[PLAY_CLICKED], 0);
   (void) button;
+}
+
+static void
+on_prev_clicked (GtkButton *button, gpointer user_data)
+{
+  g_signal_emit (user_data, signals[PREV_CLICKED], 0);
+  (void) button;
+}
+
+static void
+on_next_clicked (GtkButton *button, gpointer user_data)
+{
+  g_signal_emit (user_data, signals[NEXT_CLICKED], 0);
+  (void) button;
+}
+
+static void
+on_volume_changed (GtkRange *range, gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+  g_signal_emit (self, signals[VOLUME_CHANGED], 0, (gint) gtk_range_get_value (range));
 }
 
 static void
@@ -89,6 +112,10 @@ spotifygtk_playback_bar_class_init (SpotifyGtkPlaybackBarClass *klass)
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 0);
 
+  signals[VOLUME_CHANGED] = g_signal_new ("volume-changed",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_INT);
+
   signals[SEEK] = g_signal_new ("seek",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_INT64);
@@ -128,8 +155,7 @@ spotifygtk_playback_bar_init (SpotifyGtkPlaybackBar *self)
 
   self->prev_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("media-skip-backward-symbolic"));
   gtk_widget_add_css_class (GTK_WIDGET (self->prev_btn), "flat");
-  g_signal_connect_swapped (self->prev_btn, "clicked",
-                            G_CALLBACK (g_signal_emit_by_name), self);
+  g_signal_connect (self->prev_btn, "clicked", G_CALLBACK (on_prev_clicked), self);
   gtk_box_append (GTK_BOX (center), GTK_WIDGET (self->prev_btn));
 
   self->play_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("media-playback-start-symbolic"));
@@ -139,8 +165,7 @@ spotifygtk_playback_bar_init (SpotifyGtkPlaybackBar *self)
 
   self->next_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("media-skip-forward-symbolic"));
   gtk_widget_add_css_class (GTK_WIDGET (self->next_btn), "flat");
-  g_signal_connect_swapped (self->next_btn, "clicked",
-                            G_CALLBACK (g_signal_emit_by_name), self);
+  g_signal_connect (self->next_btn, "clicked", G_CALLBACK (on_next_clicked), self);
   gtk_box_append (GTK_BOX (center), GTK_WIDGET (self->next_btn));
 
   /* Skip needs a queue, and there is no queue yet — the window's handlers
@@ -173,6 +198,27 @@ spotifygtk_playback_bar_init (SpotifyGtkPlaybackBar *self)
                                "Seeking isn’t wired to the playback engine yet");
 
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->progress_scale));
+
+  /* === Right: Volume === */
+  GtkWidget *vol_icon = gtk_image_new_from_icon_name ("audio-volume-high-symbolic");
+  gtk_widget_set_margin_start (vol_icon, 12);
+  gtk_box_append (GTK_BOX (self), vol_icon);
+
+  self->volume_scale = GTK_SCALE (gtk_scale_new_with_range (GTK_ORIENTATION_HORIZONTAL,
+                                                            0.0, 100.0, 1.0));
+  gtk_scale_set_draw_value (self->volume_scale, FALSE);
+  gtk_range_set_value (GTK_RANGE (self->volume_scale), 100.0);
+  gtk_widget_set_size_request (GTK_WIDGET (self->volume_scale), 110, -1);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->volume_scale), "Volume");
+  g_signal_connect (self->volume_scale, "value-changed", G_CALLBACK (on_volume_changed), self);
+  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->volume_scale));
+}
+
+void
+spotifygtk_playback_bar_set_volume (SpotifyGtkPlaybackBar *self, gint percent)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  gtk_range_set_value (GTK_RANGE (self->volume_scale), CLAMP (percent, 0, 100));
 }
 
 SpotifyGtkPlaybackBar *

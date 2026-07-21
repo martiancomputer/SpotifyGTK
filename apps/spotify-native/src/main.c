@@ -71,6 +71,8 @@ struct _SpotifyNativeEngineControl {
   GMutex  lock;
   GCond   cond;
   gboolean paused;
+  gdouble  volume;         /* 0.0 - 1.0 */
+  gboolean volume_dirty;   /* set by the UI, cleared once the output applies it */
 };
 
 SpotifyNativeEngineControl *
@@ -79,6 +81,8 @@ spotifygtk_native_engine_control_new (void)
   SpotifyNativeEngineControl *control = g_new0 (SpotifyNativeEngineControl, 1);
   g_mutex_init (&control->lock);
   g_cond_init (&control->cond);
+  control->volume = 1.0;
+  control->volume_dirty = TRUE;   /* apply once as soon as the output opens */
   return control;
 }
 
@@ -125,6 +129,49 @@ spotifygtk_native_engine_control_is_paused (SpotifyNativeEngineControl *control)
   gboolean paused = control->paused;
   g_mutex_unlock (&control->lock);
   return paused;
+}
+
+void
+spotifygtk_native_engine_control_set_volume (SpotifyNativeEngineControl *control,
+                                             gdouble volume_0_to_1)
+{
+  if (!control)
+    return;
+  g_mutex_lock (&control->lock);
+  control->volume = CLAMP (volume_0_to_1, 0.0, 1.0);
+  control->volume_dirty = TRUE;
+  g_mutex_unlock (&control->lock);
+}
+
+gdouble
+spotifygtk_native_engine_control_get_volume (SpotifyNativeEngineControl *control)
+{
+  if (!control)
+    return 1.0;
+  g_mutex_lock (&control->lock);
+  gdouble volume = control->volume;
+  g_mutex_unlock (&control->lock);
+  return volume;
+}
+
+/* Push a pending volume change to the device. Called from the audio worker
+ * each time round the write loop; the dirty flag keeps that to an actual
+ * device call only when the value has changed. */
+static void
+engine_control_apply_volume (SpotifyNativeEngineControl *control,
+                             SpotifyAudioOutput *output)
+{
+  if (!control || !output)
+    return;
+
+  g_mutex_lock (&control->lock);
+  gboolean dirty = control->volume_dirty;
+  gdouble  volume = control->volume;
+  control->volume_dirty = FALSE;
+  g_mutex_unlock (&control->lock);
+
+  if (dirty)
+    spotifygtk_output_set_volume (output, volume);
 }
 
 static gboolean
@@ -360,6 +407,9 @@ decode_and_play (GBytes *ogg_bytes, gboolean complete_source,
     }
 
     if (output) {
+      /* No volume control here: this is the decode-verification path, which
+       * has no engine control to read it from. Playback goes through
+       * audio_output_thread(). */
       gsize written = spotifygtk_output_write (output, frame->samples, frame->n_frames);
       if (written != frame->n_frames) {
         g_warning ("[live-test] audio output wrote %" G_GSIZE_FORMAT
@@ -466,6 +516,7 @@ audio_output_thread (gpointer user_data)
       continue;
     }
 
+    engine_control_apply_volume (state->control, output);
     gsize written = spotifygtk_output_write (output, frame->samples, frame->n_frames);
     if (written != frame->n_frames) {
       g_warning ("[live-test] streaming audio output wrote %" G_GSIZE_FORMAT

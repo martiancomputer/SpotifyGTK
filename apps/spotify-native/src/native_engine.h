@@ -23,6 +23,13 @@ void spotifygtk_native_engine_control_pause (SpotifyNativeEngineControl *control
 void spotifygtk_native_engine_control_resume (SpotifyNativeEngineControl *control);
 gboolean spotifygtk_native_engine_control_is_paused (SpotifyNativeEngineControl *control);
 
+/* Output gain, 0.0 to 1.0. Safe to call from any thread and before the
+ * output device exists: the value is stored and applied by the audio worker
+ * once it opens, and again whenever it changes. */
+void    spotifygtk_native_engine_control_set_volume (SpotifyNativeEngineControl *control,
+                                                     gdouble volume_0_to_1);
+gdouble spotifygtk_native_engine_control_get_volume (SpotifyNativeEngineControl *control);
+
 /* Runs one complete native playback attempt. Must not be called on the GTK
  * main thread; the player service owns the worker task that invokes it. The
  * progress callback is optional and is invoked on the worker thread, so UI

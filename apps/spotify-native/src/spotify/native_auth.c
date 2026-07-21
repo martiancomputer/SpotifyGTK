@@ -163,17 +163,62 @@ on_token_response (GObject *source, GAsyncResult *result, gpointer user_data)
   JsonObject *root = json_node_get_object (json_parser_get_root (parser));
 
   if (json_object_has_member (root, "error")) {
-    g_warning ("native_auth: Spotify token error: %s",
-              json_object_get_string_member (root, "error_description"));
+    const gchar *desc = json_object_get_string_member_with_default (
+                          root, "error_description", NULL);
+    const gchar *code = json_object_get_string_member_with_default (
+                          root, "error", "unknown");
+    g_warning ("native_auth: Spotify token error: %s", desc ? desc : code);
+
+    /* A rejected refresh means the stored refresh_token is dead -- revoked,
+     * rotated, or issued to a different client. Keeping it on disk makes
+     * every subsequent run retry the same dead token and fail identically,
+     * which is why the only way out used to be deleting the file by hand.
+     * Discard it and fall through to the browser flow instead. */
+    if (self->refresh_token) {
+      g_warning ("native_auth: discarding the stored refresh token and "
+                 "restarting the login flow");
+      g_clear_pointer (&self->refresh_token, g_free);
+      g_clear_pointer (&self->access_token, g_free);
+      self->expires_at = 0;
+
+      g_autofree gchar *path = token_file_path ();
+      if (g_unlink (path) != 0 && errno != ENOENT)
+        g_warning ("native_auth: could not remove %s: %s", path, g_strerror (errno));
+
+      g_bytes_unref (bytes);
+      native_auth_begin (self);
+      return;
+    }
+
+    g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
+    g_bytes_unref (bytes);
+    return;
+  }
+
+  /* Spotify does not always return a refresh_token when refreshing -- the
+   * old one stays valid in that case. Overwriting it unconditionally wrote
+   * a literal "(null)" into the token file, which then failed to parse as a
+   * token forever after. Only replace it when one was actually sent. */
+  const gchar *new_access  = json_object_get_string_member_with_default (
+                               root, "access_token", NULL);
+  const gchar *new_refresh = json_object_get_string_member_with_default (
+                               root, "refresh_token", NULL);
+
+  if (!new_access) {
+    g_warning ("native_auth: token response contained no access_token");
     g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
     g_bytes_unref (bytes);
     return;
   }
 
   g_free (self->access_token);
-  g_free (self->refresh_token);
-  self->access_token  = g_strdup (json_object_get_string_member (root, "access_token"));
-  self->refresh_token = g_strdup (json_object_get_string_member (root, "refresh_token"));
+  self->access_token = g_strdup (new_access);
+
+  if (new_refresh) {
+    g_free (self->refresh_token);
+    self->refresh_token = g_strdup (new_refresh);
+  }
+
   gint64 expires_in   = json_object_get_int_member (root, "expires_in");
   self->expires_at    = g_get_real_time () / G_USEC_PER_SEC + expires_in - 60;
 

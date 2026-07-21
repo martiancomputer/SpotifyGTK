@@ -8,6 +8,8 @@ struct _SpotifyNativePlayerService {
   SpotifyNativeEngineControl *control;
   GMainContext *main_context;
   gchar *track_uri;
+  gchar *pending_uri;   /* track requested while another was still playing */
+  gint volume_percent;
   SpotifyNativePlayerState state;
 };
 
@@ -91,10 +93,30 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
   SpotifyNativePlayerService *self = user_data;
   g_autoptr(GError) error = NULL;
   gboolean ok = g_task_propagate_boolean (G_TASK (result), &error);
-  emit_state (self, ok ? SPOTIFYGTK_PLAYER_IDLE : SPOTIFYGTK_PLAYER_ERROR,
-              ok ? "Playback completed." : error->message);
+
   g_clear_object (&self->task);
   g_clear_pointer (&self->control, spotifygtk_native_engine_control_free);
+  g_clear_object (&self->cancellable);
+
+  /* A track queued by start_uri() while this one was still running. Start it
+   * before reporting IDLE/ERROR, so the UI never flashes "stopped" for a
+   * switch the user experiences as one continuous action. */
+  if (self->pending_uri) {
+    g_autofree gchar *next = g_steal_pointer (&self->pending_uri);
+    g_autoptr(GError) start_err = NULL;
+
+    if (spotifygtk_player_service_start_uri (self, next, &start_err)) {
+      g_object_unref (self);
+      (void) source;
+      return;
+    }
+
+    g_warning ("player-service: could not start queued track: %s",
+               start_err ? start_err->message : "unknown error");
+  }
+
+  emit_state (self, ok ? SPOTIFYGTK_PLAYER_IDLE : SPOTIFYGTK_PLAYER_ERROR,
+              ok ? "Playback completed." : error->message);
   g_object_unref (self);
   (void) source;
 }
@@ -110,14 +132,30 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
                                      const gchar *track_uri, GError **error)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self), FALSE);
+
+  /* Picking a different track while one is playing used to fail outright
+   * with "playback is already active", so the first song kept playing and
+   * clicking anything else did nothing. The engine runs one track per
+   * worker, so switching means stopping the current one and starting the
+   * new one once it has actually finished unwinding -- remember it here and
+   * let on_engine_finished pick it up. */
   if (self->task) {
-    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BUSY, "Playback is already active");
-    return FALSE;
+    g_free (self->pending_uri);
+    self->pending_uri = g_strdup (track_uri);
+
+    /* Resume first: a paused worker is blocked on the pause condition and
+     * would never observe the cancellation. */
+    spotifygtk_native_engine_control_resume (self->control);
+    spotifygtk_player_service_stop (self);
+    return TRUE;
   }
+
   g_free (self->track_uri);
   self->track_uri = g_strdup (track_uri);
   self->cancellable = g_cancellable_new ();
   self->control = spotifygtk_native_engine_control_new ();
+  spotifygtk_native_engine_control_set_volume (self->control,
+                                              self->volume_percent / 100.0);
   if (!self->main_context)
     self->main_context = g_main_context_ref_thread_default ();
   if (!self->main_context)
@@ -152,8 +190,12 @@ spotifygtk_player_service_pause (SpotifyNativePlayerService *self)
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
   if (!self->task || !self->control)
     return;
+  /* Must report PAUSED, not PLAYING. Emitting PLAYING here left the
+   * playback bar showing a pause icon while actually paused, so the next
+   * click emitted "pause" again instead of "play" -- resume was
+   * unreachable and the track appeared stuck. */
   spotifygtk_native_engine_control_pause (self->control);
-  emit_state (self, SPOTIFYGTK_PLAYER_PLAYING, "Playback paused; buffered audio is retained.");
+  emit_state (self, SPOTIFYGTK_PLAYER_PAUSED, "Playback paused; buffered audio is retained.");
 }
 
 void
@@ -198,6 +240,7 @@ spotifygtk_player_service_dispose (GObject *object)
   g_clear_object (&self->task);
   g_clear_object (&self->cancellable);
   g_clear_pointer (&self->track_uri, g_free);
+  g_clear_pointer (&self->pending_uri, g_free);
   g_clear_pointer (&self->main_context, g_main_context_unref);
   G_OBJECT_CLASS (spotifygtk_player_service_parent_class)->dispose (object);
 }
@@ -215,6 +258,28 @@ spotifygtk_player_service_class_init (SpotifyNativePlayerServiceClass *klass)
 static void spotifygtk_player_service_init (SpotifyNativePlayerService *self)
 {
   self->state = SPOTIFYGTK_PLAYER_IDLE;
+  self->volume_percent = 100;
+}
+
+void
+spotifygtk_player_service_set_volume (SpotifyNativePlayerService *self, gint percent)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+
+  self->volume_percent = CLAMP (percent, 0, 100);
+
+  /* Applies immediately when something is playing; otherwise it is picked
+   * up by the next control created in start_uri(). */
+  if (self->control)
+    spotifygtk_native_engine_control_set_volume (self->control,
+                                                 self->volume_percent / 100.0);
+}
+
+gint
+spotifygtk_player_service_get_volume (SpotifyNativePlayerService *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self), 100);
+  return self->volume_percent;
 }
 
 SpotifyNativePlayerService *

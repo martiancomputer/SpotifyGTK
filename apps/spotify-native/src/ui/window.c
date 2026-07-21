@@ -146,6 +146,14 @@ on_play_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 }
 
 static void
+on_volume_changed (SpotifyGtkPlaybackBar *bar, gint percent, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  spotifygtk_player_service_set_volume (self->player, percent);
+  (void) bar;
+}
+
+static void
 on_pause_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
@@ -378,6 +386,8 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_next_clicked), self);
   g_signal_connect (self->playback_bar, "prev-clicked",
                     G_CALLBACK (on_prev_clicked), self);
+  g_signal_connect (self->playback_bar, "volume-changed",
+                    G_CALLBACK (on_volume_changed), self);
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->playback_bar));
 
   gtk_window_set_child (GTK_WINDOW (self), GTK_WIDGET (self->root_box));
