@@ -315,6 +315,10 @@ static const gchar *dark_theme_css =
   ".bar-subtitle { color: #9a9a9a; font-size: 12px; }"
   ".time-label { color: #9a9a9a; font-size: 11px;"
   "  font-feature-settings: \'tnum\'; }"
+  ".row-number { color: #7a7a7a; font-size: 13px;"
+  "  font-feature-settings: \'tnum\'; }"
+  ".row-duration { color: #9a9a9a; font-size: 13px;"
+  "  font-feature-settings: \'tnum\'; }"
 
   /* ── Cards and rows ────────────────────────────────────────── */
   ".card { background-color: #1a1a1a; border-radius: 10px; }"
@@ -323,13 +327,17 @@ static const gchar *dark_theme_css =
   ".media-card:hover { background-color: #242424; }"
   ".media-card-title { color: #ffffff; font-size: 14px; font-weight: 600; }"
   ".media-card-subtitle { color: #9a9a9a; font-size: 12px; }"
-  ".list-row { background-color: #161616; border-radius: 8px;"
-  "  margin: 3px 0; transition: background-color 120ms ease; }"
-  ".list-row:hover { background-color: #242424; }"
-  ".art-thumb { background-color: #242424; border-radius: 6px;"
-  "  color: #6e6e6e; }"
-  ".art-large { background-color: #242424; border-radius: 12px;"
-  "  color: #6e6e6e; }"
+  /* Track rows are a continuous list, not stacked cards. Giving each row a
+   * solid fill plus a vertical margin banded the whole page. Flat with a
+   * hover highlight; `.card` stays for things that really are cards. */
+  ".list-row { background-color: transparent; border-radius: 6px;"
+  "  transition: background-color 120ms ease; }"
+  ".list-row:hover { background-color: #1c1c1c; }"
+  ".list-row:selected { background-color: #232323; }"
+  ".art-thumb { background-color: #1c1c1c; border-radius: 6px;"
+  "  color: #565656; }"
+  ".art-large { background-color: #1a1a1a; border-radius: 12px;"
+  "  color: #4a4a4a; }"
   ".pill-button { background-color: #1f1f1f; border-radius: 999px;"
   "  color: #e8e8e8; font-size: 12px; font-weight: 600;"
   "  padding: 4px 14px; min-height: 0; }"

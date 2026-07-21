@@ -111,7 +111,8 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   /* Track number / album art / playing indicator */
   self->track_num = GTK_LABEL (gtk_label_new (""));
   gtk_widget_set_size_request (GTK_WIDGET (self->track_num), 24, -1);
-  gtk_widget_add_css_class (GTK_WIDGET (self->track_num), "dim-label");
+  gtk_widget_add_css_class (GTK_WIDGET (self->track_num), "row-number");
+  gtk_label_set_xalign (self->track_num, 1.0);
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->track_num));
 
   self->album_art = GTK_IMAGE (gtk_image_new_from_icon_name ("audio-x-generic-symbolic"));
@@ -145,8 +146,7 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
 
   /* Duration */
   self->duration_label = GTK_LABEL (gtk_label_new ("0:00"));
-  gtk_widget_add_css_class (GTK_WIDGET (self->duration_label), "dim-label");
-  gtk_widget_add_css_class (GTK_WIDGET (self->duration_label), "numeric");
+  gtk_widget_add_css_class (GTK_WIDGET (self->duration_label), "row-duration");
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->duration_label));
 
   /* Actions (hidden by default, shown on hover) */
@@ -195,11 +195,15 @@ spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self, JsonObject *track_data
 
   /* Track number */
   if (track_number > 0) {
-    gchar *num_text = g_strdup_printf ("%d", track_number);
+    g_autofree gchar *num_text = g_strdup_printf ("%d", track_number);
     gtk_label_set_text (self->track_num, num_text);
-    g_free (num_text);
     gtk_widget_set_visible (GTK_WIDGET (self->track_num), TRUE);
     gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
+  } else {
+    /* No number: hide the column entirely rather than leaving a blank
+     * 24px indent, which made unnumbered lists sit further right than
+     * numbered ones. */
+    gtk_widget_set_visible (GTK_WIDGET (self->track_num), FALSE);
   }
 
   /* Artist */
@@ -259,6 +263,8 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
     gtk_label_set_text (self->track_num, num_text);
     gtk_widget_set_visible (GTK_WIDGET (self->track_num), TRUE);
     gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
+  } else {
+    gtk_widget_set_visible (GTK_WIDGET (self->track_num), FALSE);
   }
 
   gint total_secs = (gint) (track->duration_ms / 1000);

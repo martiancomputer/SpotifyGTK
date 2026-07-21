@@ -219,6 +219,8 @@ build_left_column (SpotifyGtkPlaybackBar *self)
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
   gtk_widget_set_size_request (box, SIDE_COLUMN_WIDTH, -1);
   gtk_widget_set_valign (box, GTK_ALIGN_CENTER);
+  gtk_widget_set_halign (box, GTK_ALIGN_START);
+  gtk_widget_set_hexpand (box, FALSE);
 
   /* A fixed square. The art previously had no size constraint and stretched
    * to whatever height the row happened to be, which is the misshapen
@@ -233,7 +235,11 @@ build_left_column (SpotifyGtkPlaybackBar *self)
 
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
   gtk_widget_set_valign (info, GTK_ALIGN_CENTER);
-  gtk_widget_set_hexpand (info, TRUE);
+  gtk_widget_set_hexpand (info, FALSE);
+  /* Bounded width, with the labels ellipsizing inside it. Letting this
+   * expand is what pushed the like button to the middle of the window and
+   * dragged the transport group off centre. */
+  gtk_widget_set_size_request (info, SIDE_COLUMN_WIDTH - ART_SIZE - 60, -1);
 
   self->track_label = GTK_LABEL (gtk_label_new ("Nothing playing"));
   gtk_label_set_xalign (self->track_label, 0.0);
@@ -282,7 +288,7 @@ static GtkWidget *
 build_centre_column (SpotifyGtkPlaybackBar *self)
 {
   GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
-  gtk_widget_set_hexpand (column, TRUE);
+  gtk_widget_set_hexpand (column, FALSE);
   gtk_widget_set_halign (column, GTK_ALIGN_CENTER);
   gtk_widget_set_valign (column, GTK_ALIGN_CENTER);
 
@@ -378,6 +384,7 @@ build_right_column (SpotifyGtkPlaybackBar *self)
   gtk_widget_set_size_request (box, SIDE_COLUMN_WIDTH, -1);
   gtk_widget_set_halign (box, GTK_ALIGN_END);
   gtk_widget_set_valign (box, GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand (box, FALSE);
 
   GtkWidget *icon = gtk_image_new_from_icon_name ("audio-volume-high-symbolic");
   gtk_widget_add_css_class (icon, "dim-text");
@@ -413,9 +420,16 @@ spotifygtk_playback_bar_init (SpotifyGtkPlaybackBar *self)
   gtk_widget_set_margin_top (GTK_WIDGET (self), 8);
   gtk_widget_set_margin_bottom (GTK_WIDGET (self), 8);
 
-  gtk_box_append (GTK_BOX (self), build_left_column (self));
-  gtk_box_append (GTK_BOX (self), build_centre_column (self));
-  gtk_box_append (GTK_BOX (self), build_right_column (self));
+  /* GtkCenterBox, not three boxes in a row: it centres the middle child
+   * against the whole width regardless of how wide the side children are,
+   * which is the only way the transport group stays put as the track title
+   * and window width change. */
+  GtkWidget *center_box = gtk_center_box_new ();
+  gtk_widget_set_hexpand (center_box, TRUE);
+  gtk_center_box_set_start_widget (GTK_CENTER_BOX (center_box), build_left_column (self));
+  gtk_center_box_set_center_widget (GTK_CENTER_BOX (center_box), build_centre_column (self));
+  gtk_center_box_set_end_widget (GTK_CENTER_BOX (center_box), build_right_column (self));
+  gtk_box_append (GTK_BOX (self), center_box);
 }
 
 SpotifyGtkPlaybackBar *

@@ -217,7 +217,7 @@ spotifygtk_sidebar_init (SpotifyGtkSidebar *self)
   GtkWidget *collapse_action = build_sidebar_action ("Collapse", "go-previous-symbolic");
   gtk_widget_set_margin_start (collapse_action, 10);
   gtk_widget_set_margin_end (collapse_action, 10);
-  gtk_widget_set_margin_bottom (collapse_action, 10);
+  gtk_widget_set_margin_bottom (collapse_action, 16);
   g_signal_connect (collapse_action, "clicked", G_CALLBACK (on_collapse_clicked), self);
   gtk_box_append (GTK_BOX (self), collapse_action);
 }
