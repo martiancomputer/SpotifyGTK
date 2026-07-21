@@ -7,6 +7,7 @@ spotify_proto_sources = files(
   'native_auth.c',
   'clienttoken.c',
   'login5.c',
+  'apresolve.c',
   'spclient.c',
   'session.c',
   'ap.c',

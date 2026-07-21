@@ -13,6 +13,7 @@
 
 #include "config.h"
 #include "ap.h"
+#include "apresolve.h"
 #include "dh.h"
 #include "handshake_crypto.h"
 #include "protobuf_min.h"
@@ -65,6 +66,67 @@ static guint signals[N_SIGNALS];
  * Spotify publishes AP hosts via _spotify-client._tcp SRV records.
  * GLib's GResolver exposes this directly — no custom DNS code needed. */
 
+/* Advances once per resolution so consecutive connections do not all land on
+ * the same access point.
+ *
+ * This used to take targets->data unconditionally -- the single
+ * highest-priority host -- which meant every connection this client ever
+ * made went to one AP. Spotify starts refusing new connections when they
+ * arrive too fast from one client, and because the playback engine opens a
+ * fresh connection per track, that refusal was reachable within a handful of
+ * tracks ("Could not connect to ap.single-gslb.spotify.com: Connection
+ * refused"). Spreading across the advertised hosts is what librespot does,
+ * via apresolve rather than SRV, and for the same reason.
+ *
+ * Not a substitute for opening fewer connections in the first place; see the
+ * note on session reuse in native_engine.h. */
+static guint ap_target_rotation = 0;
+
+static void resolve_via_srv (GTask *task);
+
+static void
+on_apresolve_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  GTask *task = user_data;
+  g_autoptr(GError) err = NULL;
+
+  g_auto(GStrv) hosts = spotifygtk_apresolve_get_finish (result, &err);
+  if (!hosts) {
+    g_message ("ap.c: apresolve unavailable (%s); falling back to SRV",
+               err ? err->message : "unknown");
+    resolve_via_srv (task);
+    return;
+  }
+
+  /* apresolve advertises 4070, 443 and 80. Only 4070 speaks the AP protocol
+   * directly -- 443 and 80 exist for firewall traversal and refused our raw
+   * handshake outright ("Could not connect to ap-gae2.spotify.com:443:
+   * Connection refused"), so taking them in the rotation turned a working
+   * connection into a failed one every other attempt. */
+  GPtrArray *usable = g_ptr_array_new ();
+  for (guint i = 0; hosts[i]; i++) {
+    if (g_str_has_suffix (hosts[i], ":4070"))
+      g_ptr_array_add (usable, hosts[i]);
+  }
+
+  if (usable->len == 0) {
+    g_ptr_array_free (usable, TRUE);
+    g_message ("ap.c: apresolve offered no port-4070 access points; using SRV");
+    resolve_via_srv (task);
+    return;
+  }
+
+  guint index = ap_target_rotation++ % usable->len;
+  const gchar *chosen = g_ptr_array_index (usable, index);
+
+  g_message ("ap.c: apresolve offered %u access point(s), %u usable; using %s (#%u)",
+             g_strv_length (hosts), usable->len, chosen, index);
+
+  g_task_return_pointer (task, g_strdup (chosen), g_free);
+  g_ptr_array_free (usable, TRUE);
+  (void) source;
+}
+
 static void
 on_srv_resolved (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -80,21 +142,42 @@ on_srv_resolved (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  GSrvTarget *best = targets->data;  /* GResolver already sorts by priority/weight */
+  guint n_targets = g_list_length (targets);
+  guint index = ap_target_rotation++ % n_targets;
+
+  /* GResolver has already sorted by priority and weight, so index 0 remains
+   * the preferred host; the rotation trades a little preference for not
+   * hammering one server. */
+  GSrvTarget *chosen = g_list_nth_data (targets, index);
   g_autofree gchar *result_str =
-    g_strdup_printf ("%s:%d", g_srv_target_get_hostname (best), g_srv_target_get_port (best));
+    g_strdup_printf ("%s:%d", g_srv_target_get_hostname (chosen),
+                     g_srv_target_get_port (chosen));
+
+  g_message ("ap.c: SRV returned %u access point(s); using %s (#%u)",
+             n_targets, result_str, index);
+
   g_task_return_pointer (task, g_strdup (result_str), g_free);
 
   g_resolver_free_targets (targets);
 }
 
 static void
+resolve_via_srv (GTask *task)
+{
+  GResolver *resolver = g_resolver_get_default ();
+  g_resolver_lookup_service_async (resolver, "spotify-client", "tcp", "spotify.com",
+                                   g_task_get_cancellable (task),
+                                   on_srv_resolved, task);
+}
+
+/* apresolve first, SRV second, hardcoded host last. SRV answers with a single
+ * load-balancer hostname, so on its own it gives the rotation nothing to
+ * spread across. */
+static void
 resolve_ap_host (GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
 {
   GTask *task = g_task_new (NULL, cancellable, callback, user_data);
-  GResolver *resolver = g_resolver_get_default ();
-  g_resolver_lookup_service_async (resolver, "spotify-client", "tcp", "spotify.com",
-                                   NULL, on_srv_resolved, task);
+  spotifygtk_apresolve_get_async (cancellable, on_apresolve_done, task);
 }
 
 /* ── Packet framing ──────────────────────────────────────────────────────

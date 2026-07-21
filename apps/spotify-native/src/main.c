@@ -336,6 +336,7 @@ typedef struct {
   GCancellable      *cancellable;   /* borrowed from the player task */
   gchar             *device_id;         /* owned, freed in run_live_test */
   guint              connect_attempts;  /* AP connect retries used so far */
+  SpotifyApSession  *pending_session;   /* borrowed; set before the first connect */
   SpotifyApSession   *session;      /* borrowed, owned by run_live_test */
   SpotifyClientToken *client_token_client;
   SpotifyLogin5      *login5_client;
@@ -1170,7 +1171,7 @@ static gboolean
 retry_ap_connect (gpointer user_data)
 {
   LiveTestState *state = user_data;
-  SpotifyApSession *session = g_object_get_data (G_OBJECT (state->loop), "ap-session");
+  SpotifyApSession *session = state->pending_session;
 
   if (!session) {
     state->ok = FALSE;
@@ -1307,8 +1308,10 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   g_message ("[live-test] device_id for this run: %s", state.device_id);
 
   /* retry_ap_connect() needs the session, and on_connected's user_data slot
-   * is already taken by `state`. */
-  g_object_set_data (G_OBJECT (loop), "ap-session", session);
+   * is already taken by `state`. Kept on the state itself: an earlier version
+   * stashed it on the GMainLoop, which is not a GObject, so g_object_set_data
+   * asserted and the retry could never find it. */
+  state.pending_session = session;
   spotifygtk_ap_session_connect (session, NULL, on_connected, &state);
 
   /* Bound how long we'll wait -- a hang here (e.g. SRV resolution

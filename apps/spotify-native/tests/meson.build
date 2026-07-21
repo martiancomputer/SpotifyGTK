@@ -34,6 +34,14 @@ if get_option('tests')
   )
   test('context-uri-building', test_context_uri)
 
+  test_apresolve = executable('test-apresolve',
+    'test_apresolve.c',
+    '../src/spotify/apresolve.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
+  )
+  test('apresolve-parsing', test_apresolve)
+
   test_login_encoding = executable('test-login-encoding',
     'test_login_encoding.c',
     '../src/spotify/protobuf_min.c',
