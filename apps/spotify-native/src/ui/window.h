@@ -22,6 +22,7 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window,
 SpotifyGtkNativeWindow *spotifygtk_native_window_new (GtkApplication *app);
 
 /* Navigation */
+void spotifygtk_native_window_navigate_to_settings (SpotifyGtkNativeWindow *self);
 void spotifygtk_native_window_navigate_to (SpotifyGtkNativeWindow *self,
                                            const gchar *page_name);
 

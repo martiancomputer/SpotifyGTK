@@ -6,6 +6,8 @@
 
 #include <libsoup/soup.h>
 
+#include "settings.h"
+
 #define COVER_CDN_BASE "https://i.scdn.co/image/"
 
 /* id (owned) -> GdkTexture (owned). Never evicted: covers are ~60 KiB each
@@ -121,6 +123,15 @@ spotifygtk_cover_load (const gchar          *cover_id,
                        gpointer              user_data)
 {
   g_return_if_fail (callback != NULL);
+
+  /* Text-only mode is enforced here rather than at each display site, so a
+   * new artwork consumer cannot forget to honour it -- and so the image is
+   * never fetched at all, which is the point of the setting. */
+  if (spotifygtk_settings_get_media_mode (spotifygtk_settings_get_default ())
+      == SPOTIFYGTK_MEDIA_TEXT_ONLY) {
+    callback (NULL, user_data);
+    return;
+  }
 
   ensure_initialised ();
 

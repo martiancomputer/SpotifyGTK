@@ -22,10 +22,22 @@ struct _SpotifyGtkHomePage {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkHomePage, spotifygtk_home_page, GTK_TYPE_BOX)
 
+enum { SETTINGS_REQUESTED, N_SIGNALS };
+static guint signals[N_SIGNALS];
+
 static void
 spotifygtk_home_page_class_init (SpotifyGtkHomePageClass *klass)
 {
-  (void) klass;
+  signals[SETTINGS_REQUESTED] = g_signal_new ("settings-requested",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 0);
+}
+
+static void
+on_settings_clicked (GtkButton *button, gpointer user_data)
+{
+  g_signal_emit (user_data, signals[SETTINGS_REQUESTED], 0);
+  (void) button;
 }
 
 static const gchar *
@@ -134,10 +146,9 @@ spotifygtk_home_page_init (SpotifyGtkHomePage *self)
   GtkWidget *bell = build_icon_button ("preferences-system-notifications-symbolic",
                                        "Notifications");
   GtkWidget *gear = build_icon_button ("preferences-system-symbolic", "Settings");
-  /* Neither has anywhere to go yet; a control that does nothing when
-   * clicked reads as a bug. */
+  /* Notifications have nowhere to go; the gear does now. */
   gtk_widget_set_sensitive (bell, FALSE);
-  gtk_widget_set_sensitive (gear, FALSE);
+  g_signal_connect (gear, "clicked", G_CALLBACK (on_settings_clicked), self);
   gtk_box_append (GTK_BOX (actions), bell);
   gtk_box_append (GTK_BOX (actions), gear);
   gtk_box_append (GTK_BOX (header), actions);

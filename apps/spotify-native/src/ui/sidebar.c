@@ -42,6 +42,7 @@ static const struct {
   { "search",  "Search",      "system-search-symbolic" },
   { "liked",   "Liked Songs", "emblem-favorite-symbolic" },
   { "library", "Library",     "view-list-symbolic" },
+  { "settings","Settings",    "preferences-system-symbolic" },
 };
 
 static void

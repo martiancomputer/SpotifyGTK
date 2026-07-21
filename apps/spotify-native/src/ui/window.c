@@ -27,6 +27,7 @@
 #include "search_page.h"
 #include "liked_songs_page.h"
 #include "library_page.h"
+#include "settings_page.h"
 
 #include "../player_service.h"
 #include "../spotify/session.h"
@@ -48,6 +49,7 @@ struct _SpotifyGtkNativeWindow {
   SpotifyGtkSearchPage *search_page;
   SpotifyGtkLikedSongsPage *liked_page;
   SpotifyGtkLibraryPage *library_page;
+  SpotifyGtkSettingsPage *settings_page;
 
   /* Now Playing panel (right side) */
   SpotifyGtkNowPlayingPanel *now_playing_panel;
@@ -543,11 +545,13 @@ spotifygtk_native_window_constructed (GObject *object)
   self->search_page = spotifygtk_search_page_new ();
   self->liked_page = spotifygtk_liked_songs_page_new ();
   self->library_page = spotifygtk_library_page_new ();
+  self->settings_page = spotifygtk_settings_page_new ();
 
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->home_page), "home");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->search_page), "search");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->liked_page), "liked");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->library_page), "library");
+  gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->settings_page), "settings");
 
   /* Search and Liked Songs are the two pages backed by the native session;
    * Home and Library are static until their endpoints are ported. */
@@ -654,6 +658,13 @@ spotifygtk_native_window_new (GtkApplication *app)
   return g_object_new (SPOTIFYGTK_TYPE_NATIVE_WINDOW,
                        "application", app,
                        NULL);
+}
+
+void
+spotifygtk_native_window_navigate_to_settings (SpotifyGtkNativeWindow *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_WINDOW (self));
+  navigate_to_page (self, "settings");
 }
 
 void
