@@ -27,7 +27,7 @@ if enable_gui
   if adw_dep.found()
     # New libadwaita UI - needs main.c for engine functions
     executable('spotify-native',
-      ui_sources + ['gui_main_adw.c', 'player_service.c', 'main.c'] + spotify_connect_api_sources + spotify_proto_sources + audio_engine_sources,
+      ui_sources + ['gui_main_adw.c', 'playback_probe.c', 'player_service.c', 'main.c'] + spotify_connect_api_sources + spotify_proto_sources + audio_engine_sources,
       include_directories: [config_inc, include_directories('.'), spotify_connect_inc],
       dependencies: all_deps + [gtk4_dep, adw_dep],
       c_args: ['-DSPOTIFYGTK_ENGINE_LIBRARY'],

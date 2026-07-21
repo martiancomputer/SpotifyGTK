@@ -335,6 +335,7 @@ typedef struct {
   gboolean   timed_out;
   GCancellable      *cancellable;   /* borrowed from the player task */
   gchar             *device_id;         /* owned, freed in run_live_test */
+  guint              connect_attempts;  /* AP connect retries used so far */
   SpotifyApSession   *session;      /* borrowed, owned by run_live_test */
   SpotifyClientToken *client_token_client;
   SpotifyLogin5      *login5_client;
@@ -1160,6 +1161,27 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
                                    on_client_token_result, state);
 }
 
+/* Enough to ride out a short refusal burst without masking a real outage. */
+#define AP_CONNECT_MAX_ATTEMPTS 4
+
+static void on_connected (GObject *source, GAsyncResult *result, gpointer user_data);
+
+static gboolean
+retry_ap_connect (gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  SpotifyApSession *session = g_object_get_data (G_OBJECT (state->loop), "ap-session");
+
+  if (!session) {
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return G_SOURCE_REMOVE;
+  }
+
+  spotifygtk_ap_session_connect (session, NULL, on_connected, state);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -1168,6 +1190,23 @@ on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError)  err    = NULL;
 
   if (!spotifygtk_ap_session_connect_finish (session, result, &err)) {
+    /* Spotify refuses new AP connections once a client opens them too
+     * quickly, and this engine opens a fresh one for every track — so
+     * "Connection refused" here is routine after a few switches rather than
+     * a genuine outage. Retry a few times with a rising delay before giving
+     * up; the real fix is to stop logging in per track at all (see
+     * AP_CONNECT_MAX_ATTEMPTS below and the note in run_live_test). */
+    if (state->connect_attempts < AP_CONNECT_MAX_ATTEMPTS &&
+        !(state->cancellable && g_cancellable_is_cancelled (state->cancellable))) {
+      state->connect_attempts++;
+      guint delay_ms = 400u * state->connect_attempts;
+      g_warning ("[live-test] handshake failed (%s); retry %u/%u in %ums",
+                 err ? err->message : "unknown error",
+                 state->connect_attempts, AP_CONNECT_MAX_ATTEMPTS, delay_ms);
+      g_timeout_add (delay_ms, retry_ap_connect, state);
+      return;
+    }
+
     g_warning ("[live-test] handshake failed: %s", err ? err->message : "unknown error");
     state->ok = FALSE;
     g_main_loop_quit (state->loop);
@@ -1267,6 +1306,9 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   spotifygtk_ap_session_set_cancellable (session, cancellable);
   g_message ("[live-test] device_id for this run: %s", state.device_id);
 
+  /* retry_ap_connect() needs the session, and on_connected's user_data slot
+   * is already taken by `state`. */
+  g_object_set_data (G_OBJECT (loop), "ap-session", session);
   spotifygtk_ap_session_connect (session, NULL, on_connected, &state);
 
   /* Bound how long we'll wait -- a hang here (e.g. SRV resolution

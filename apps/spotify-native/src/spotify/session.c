@@ -39,6 +39,7 @@ struct _SpotifyNativeSession {
   SpotifySpclient    *spclient;
   gchar              *device_id;
   gchar              *login_token;
+  guint               connect_attempts;
 
   /* Worker-thread only: the refresh handshake and the requests waiting on it. */
   gboolean  refreshing;
@@ -284,6 +285,26 @@ on_ap_login_result (gboolean success, const gchar *username,
                                    on_client_token_result, self);
 }
 
+/* Spotify refuses new AP connections when a client opens them too quickly.
+ * Because the playback engine still logs in per track, a listening session
+ * can burn through its allowance and leave even this sign-in refused, so a
+ * single "Connection refused" is not a reason to give up. */
+#define AP_CONNECT_MAX_ATTEMPTS 4
+
+static void on_ap_connected (GObject *source, GAsyncResult *result, gpointer user_data);
+
+static gboolean
+retry_ap_connect (gpointer user_data)
+{
+  SpotifyNativeSession *self = user_data;
+
+  if (g_cancellable_is_cancelled (self->cancellable))
+    return G_SOURCE_REMOVE;
+
+  spotifygtk_ap_session_connect (self->ap, NULL, on_ap_connected, self);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_ap_connected (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -292,6 +313,17 @@ on_ap_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError)     err  = NULL;
 
   if (!spotifygtk_ap_session_connect_finish (ap, result, &err)) {
+    if (self->connect_attempts < AP_CONNECT_MAX_ATTEMPTS &&
+        !g_cancellable_is_cancelled (self->cancellable)) {
+      self->connect_attempts++;
+      guint delay_ms = 500u * self->connect_attempts;
+      g_warning ("session: AP connect failed (%s); retry %u/%u in %ums",
+                 err ? err->message : "unknown error",
+                 self->connect_attempts, AP_CONNECT_MAX_ATTEMPTS, delay_ms);
+      g_timeout_add (delay_ms, retry_ap_connect, self);
+      return;
+    }
+
     g_autofree gchar *msg = g_strdup_printf ("AP handshake failed: %s",
       err ? err->message : "unknown error");
     fail_session (self, msg);

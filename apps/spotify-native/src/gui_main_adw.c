@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "ui/window.h"
+#include "playback_probe.h"
 
 static void
 on_activate (GtkApplication *app, gpointer user_data)
@@ -38,6 +39,14 @@ main (int argc, char *argv[])
   if (dev_instance && *dev_instance) {
     flags |= G_APPLICATION_NON_UNIQUE;
     g_message ("running as a non-unique dev instance");
+  }
+
+  /* Diagnostic path: drives player_service directly with no window, which
+   * is the only way to exercise it — it is not linked into the harness. */
+  const gchar *playback_probe = g_getenv ("SPOTIFY_PROBE_PLAYBACK");
+  if (playback_probe && *playback_probe) {
+    gtk_init ();
+    return spotifygtk_run_playback_probe (playback_probe);
   }
 
   GtkApplication *app = gtk_application_new (APP_ID, flags);

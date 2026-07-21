@@ -64,6 +64,12 @@ endif
 
 # ── Compiler flags ────────────────────────────────────────────────────────────
 cc = meson.get_compiler('c')
+
+# libm: the now-playing equaliser animates its bar heights with sin().
+m_dep = cc.find_library('m', required: false)
+if m_dep.found()
+  all_deps += m_dep
+endif
 add_project_arguments(
   cc.get_supported_arguments([
     '-Wno-unused-parameter',
