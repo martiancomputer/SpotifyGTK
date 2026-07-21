@@ -43,7 +43,6 @@ struct _SpotifyGtkPlaybackBar {
   /* Toggles */
   GtkButton *shuffle_btn;
   GtkButton *repeat_btn;
-  GtkButton *stop_btn;
   GtkButton *like_btn;
   gboolean   shuffle_on;
   gboolean   repeat_on;
@@ -63,7 +62,6 @@ enum {
   PREV_CLICKED,
   SEEK,
   VOLUME_CHANGED,
-  STOP_CLICKED,
   LIKE_TOGGLED,
   SHUFFLE_TOGGLED,
   REPEAT_TOGGLED,
@@ -139,13 +137,6 @@ on_repeat_clicked (GtkButton *button, gpointer user_data)
 }
 
 static void
-on_stop_clicked (GtkButton *button, gpointer user_data)
-{
-  g_signal_emit (user_data, signals[STOP_CLICKED], 0);
-  (void) button;
-}
-
-static void
 on_queue_clicked (GtkButton *button, gpointer user_data)
 {
   g_signal_emit (user_data, signals[QUEUE_CLICKED], 0);
@@ -198,8 +189,6 @@ spotifygtk_playback_bar_class_init (SpotifyGtkPlaybackBarClass *klass)
   signals[SEEK] = g_signal_new ("seek",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_INT64);
-  signals[STOP_CLICKED] = g_signal_new ("stop-clicked",
-    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[QUEUE_CLICKED] = g_signal_new ("queue-clicked",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[LIKE_TOGGLED] = g_signal_new ("like-toggled",
@@ -322,11 +311,6 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
     "media-skip-forward-symbolic", "Next",
     G_CALLBACK (on_next_clicked), self));
   gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->next_btn));
-
-  self->stop_btn = GTK_BUTTON (make_transport_button (
-    "media-playback-stop-symbolic", "Stop",
-    G_CALLBACK (on_stop_clicked), self));
-  gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->stop_btn));
 
   self->repeat_btn = GTK_BUTTON (make_transport_button (
     "media-playlist-repeat-symbolic", "Repeat",

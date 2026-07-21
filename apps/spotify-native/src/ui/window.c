@@ -146,14 +146,6 @@ on_play_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 }
 
 static void
-on_stop_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
-{
-  SpotifyGtkNativeWindow *self = user_data;
-  spotifygtk_player_service_stop (self->player);
-  (void) bar;
-}
-
-static void
 on_queue_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
@@ -281,6 +273,8 @@ static const gchar *dark_theme_css =
   ".sidebar { background-color: #0f0f0f;"
   "  border-right: 1px solid #000000; }"
   ".main-content { background-color: #121212; }"
+  "list, list > row, scrolledwindow, viewport"
+  "  { background-color: transparent; background-image: none; }"
   ".now-playing-panel { background-color: #0f0f0f;"
   "  border-left: 1px solid #000000; }"
   ".playback-bar { background-color: #0a0a0a;"
@@ -334,10 +328,10 @@ static const gchar *dark_theme_css =
   "  transition: background-color 120ms ease; }"
   ".list-row:hover { background-color: #1c1c1c; }"
   ".list-row:selected { background-color: #232323; }"
-  ".art-thumb { background-color: #1c1c1c; border-radius: 6px;"
-  "  color: #565656; }"
-  ".art-large { background-color: #1a1a1a; border-radius: 12px;"
-  "  color: #4a4a4a; }"
+  ".art-thumb { background-color: #151515; border-radius: 6px;"
+  "  color: #3e3e3e; }"
+  ".art-large { background-color: #151515; border-radius: 12px;"
+  "  color: #333333; }"
   ".pill-button { background-color: #1f1f1f; border-radius: 999px;"
   "  color: #e8e8e8; font-size: 12px; font-weight: 600;"
   "  padding: 4px 14px; min-height: 0; }"
@@ -497,14 +491,21 @@ spotifygtk_native_window_constructed (GObject *object)
 
   /* Set positions */
   gtk_paned_set_position (self->main_paned, 270);
-  gtk_paned_set_position (self->content_paned, 1230);
+
+  /* The content/panel divider is deliberately not given a fixed position.
+   * A hardcoded pixel value only lines up at one window width; at any other
+   * it leaves a dead strip between the track list and the Now Playing
+   * panel. With resize_end FALSE the panel takes its own size request and
+   * the content absorbs the rest, at every width. */
 
   gtk_widget_set_vexpand (GTK_WIDGET (self->main_paned), TRUE);
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->main_paned));
 
   /* Playback bar (80px) */
   self->playback_bar = spotifygtk_playback_bar_new ();
-  gtk_widget_set_size_request (GTK_WIDGET (self->playback_bar), -1, 80);
+  /* No fixed height. The bar gained a second row (progress under the
+   * transport buttons), and an 80px request clipped it against the bottom
+   * of the window -- it now sizes to its content. */
   gtk_widget_add_css_class (GTK_WIDGET (self->playback_bar), "playback-bar");
   g_signal_connect (self->playback_bar, "play-clicked",
                     G_CALLBACK (on_play_clicked), self);
@@ -516,8 +517,6 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_prev_clicked), self);
   g_signal_connect (self->playback_bar, "volume-changed",
                     G_CALLBACK (on_volume_changed), self);
-  g_signal_connect (self->playback_bar, "stop-clicked",
-                    G_CALLBACK (on_stop_clicked), self);
   g_signal_connect (self->playback_bar, "queue-clicked",
                     G_CALLBACK (on_queue_clicked), self);
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->playback_bar));

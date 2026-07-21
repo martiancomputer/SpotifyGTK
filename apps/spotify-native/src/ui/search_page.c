@@ -246,7 +246,7 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_box_set_spacing (GTK_BOX (self), 12);
   gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
-  gtk_widget_set_margin_end (GTK_WIDGET (self), 35);
+  gtk_widget_set_margin_end (GTK_WIDGET (self), 12);
   gtk_widget_set_margin_top (GTK_WIDGET (self), 24);
   gtk_widget_set_margin_bottom (GTK_WIDGET (self), 24);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);

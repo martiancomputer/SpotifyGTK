@@ -43,7 +43,6 @@ void spotifygtk_playback_bar_set_liked        (SpotifyGtkPlaybackBar *self,
  * - prev-clicked
  * - seek (gint64 position_ms)
  * - volume-changed (gint percent)
- * - stop-clicked
  * - like-toggled    (gboolean liked)
  * - shuffle-toggled (gboolean enabled)
  * - repeat-toggled  (gboolean enabled)
