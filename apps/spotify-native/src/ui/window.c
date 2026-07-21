@@ -273,8 +273,13 @@ static const gchar *dark_theme_css =
   ".sidebar { background-color: #0f0f0f;"
   "  border-right: 1px solid #000000; }"
   ".main-content { background-color: #121212; }"
-  "list, list > row, scrolledwindow, viewport"
+  /* libadwaita paints list, row, viewport and .view with a lighter "view"
+   * fill. That is the grey slab that showed through wherever a list was
+   * empty. Nothing in this UI wants a filled list surface. */
+  "list, list > row, scrolledwindow, scrolledwindow > viewport, viewport, .view"
   "  { background-color: transparent; background-image: none; }"
+  "scrolledwindow undershoot.top, scrolledwindow undershoot.bottom"
+  "  { background: none; }"
   ".now-playing-panel { background-color: #0f0f0f;"
   "  border-left: 1px solid #000000; }"
   ".playback-bar { background-color: #0a0a0a;"

@@ -276,7 +276,7 @@ make_transport_button (const gchar *icon, const gchar *tooltip,
 static GtkWidget *
 build_centre_column (SpotifyGtkPlaybackBar *self)
 {
-  GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
+  GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 9);
   gtk_widget_set_hexpand (column, FALSE);
   gtk_widget_set_halign (column, GTK_ALIGN_CENTER);
   gtk_widget_set_valign (column, GTK_ALIGN_CENTER);
@@ -401,8 +401,8 @@ spotifygtk_playback_bar_init (SpotifyGtkPlaybackBar *self)
 
   gtk_widget_set_margin_start (GTK_WIDGET (self), 16);
   gtk_widget_set_margin_end (GTK_WIDGET (self), 16);
-  gtk_widget_set_margin_top (GTK_WIDGET (self), 8);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self), 8);
+  gtk_widget_set_margin_top (GTK_WIDGET (self), 10);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (self), 12);
 
   /* GtkCenterBox, not three boxes in a row: it centres the middle child
    * against the whole width regardless of how wide the side children are,
