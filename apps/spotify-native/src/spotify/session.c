@@ -40,13 +40,23 @@ struct _SpotifyNativeSession {
   gchar              *device_id;
   gchar              *login_token;
 
+  /* Worker-thread only: the refresh handshake and the requests waiting on it. */
+  gboolean  refreshing;
+  GList    *pending_ops;
+
   /* Shared state: written by the worker, read by the main thread. */
   GMutex   lock;
   SpotifyNativeSessionState state;
   gchar   *bearer_token;
   gchar   *client_token;
   gchar   *username;
+  gint64   bearer_expires_at;   /* monotonic; 0 = unknown */
+  gboolean stopping;            /* dispose has begun; worker must not start its loop */
 };
+
+/* Re-mint this far ahead of expiry, so a request issued just under the wire
+ * does not land after it. */
+#define BEARER_REFRESH_MARGIN_US (60 * G_USEC_PER_SEC)
 
 G_DEFINE_FINAL_TYPE (SpotifyNativeSession, spotifygtk_native_session, G_TYPE_OBJECT)
 
@@ -125,15 +135,28 @@ generate_device_id (void)
   return g_string_free (hex, FALSE);
 }
 
+static void flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok);
+
 static void
 on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
                   GError *error, gpointer user_data)
 {
   SpotifyNativeSession *self = user_data;
+  gboolean was_refresh = self->refreshing;
+
+  self->refreshing = FALSE;
 
   if (!access_token) {
     g_autofree gchar *msg = g_strdup_printf ("login5 failed: %s",
       error ? error->message : "unknown error");
+    if (was_refresh) {
+      /* A failed *refresh* is not the same as a failed sign-in: the AP
+       * session is still up, so report it and let the next request retry
+       * rather than tearing the whole session down. */
+      g_warning ("session: bearer refresh failed: %s", msg);
+      flush_pending_ops (self, FALSE);
+      return;
+    }
     fail_session (self, msg);
     return;
   }
@@ -141,7 +164,18 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
   g_mutex_lock (&self->lock);
   g_free (self->bearer_token);
   self->bearer_token = g_strdup (access_token);
+  /* Track expiry so requests can re-mint before the server starts
+   * rejecting them. Without this the session keeps reporting READY while
+   * every call 401s -- a silent death about an hour in. */
+  self->bearer_expires_at = g_get_monotonic_time ()
+                          + (gint64) expires_in_seconds * G_USEC_PER_SEC;
   g_mutex_unlock (&self->lock);
+
+  if (was_refresh) {
+    g_message ("session: bearer refreshed (expires in %ds)", expires_in_seconds);
+    flush_pending_ops (self, TRUE);
+    return;
+  }
 
   /* Created on the worker thread so its SoupSession binds to the worker's
    * context, not GTK's. */
@@ -150,6 +184,42 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
 
   g_message ("session: ready (bearer expires in %ds)", expires_in_seconds);
   set_state (self, SPOTIFYGTK_SESSION_READY, "Signed in.");
+}
+
+/* Re-mint the bearer using the AP session's reusable credentials, which are
+ * still held -- this is the same login5 call the initial sign-in makes, not
+ * a fresh AP handshake. */
+static void
+start_bearer_refresh (SpotifyNativeSession *self)
+{
+  if (self->refreshing)
+    return;
+
+  gsize         creds_len  = 0;
+  const guint8 *creds      = spotifygtk_ap_session_get_reusable_creds (self->ap, &creds_len);
+  guint64       creds_type = spotifygtk_ap_session_get_reusable_creds_type (self->ap);
+  const gchar  *username   = spotifygtk_ap_session_get_username (self->ap);
+
+  if (!creds) {
+    g_warning ("session: cannot refresh bearer -- no reusable credentials");
+    flush_pending_ops (self, FALSE);
+    return;
+  }
+
+  g_mutex_lock (&self->lock);
+  g_autofree gchar *ctoken = g_strdup (self->client_token);
+  g_mutex_unlock (&self->lock);
+
+  self->refreshing = TRUE;
+  g_message ("session: bearer expired or expiring, re-minting via login5");
+
+  g_clear_object (&self->login5_client);
+  self->login5_client = spotifygtk_login5_new ();
+  spotifygtk_login5_set_cancellable (self->login5_client, self->cancellable);
+  spotifygtk_login5_auth_token (self->login5_client,
+                                NATIVE_AUTH_CLIENT_ID, self->device_id,
+                                username, creds, creds_len, creds_type,
+                                ctoken, on_login5_result, self);
 }
 
 static void
@@ -286,8 +356,22 @@ session_thread (gpointer user_data)
 
   g_main_context_invoke (self->context, begin_signin, self);
 
+  /* Publish the loop under the lock and re-check `stopping` in the same
+   * critical section. Without this, dispose() can run between "loop is
+   * still NULL, nothing to quit" and this thread entering g_main_loop_run,
+   * and then g_thread_join blocks forever on a loop nobody will ever quit. */
+  g_mutex_lock (&self->lock);
+  if (self->stopping) {
+    g_mutex_unlock (&self->lock);
+    g_main_context_pop_thread_default (self->context);
+    return NULL;
+  }
   self->loop = g_main_loop_new (self->context, FALSE);
-  g_main_loop_run (self->loop);
+  GMainLoop *loop = g_main_loop_ref (self->loop);
+  g_mutex_unlock (&self->lock);
+
+  g_main_loop_run (loop);
+  g_main_loop_unref (loop);
 
   g_main_context_pop_thread_default (self->context);
   return NULL;
@@ -434,6 +518,46 @@ on_context_resolved (JsonNode *context, GError *error, gpointer user_data)
   g_ptr_array_free (uris, TRUE);
 }
 
+/* Issue the context-resolve for an op whose bearer is known good. */
+static void
+run_load_op (LoadTracksOp *op)
+{
+  SpotifyNativeSession *self = op->session;
+
+  g_mutex_lock (&self->lock);
+  g_autofree gchar *bearer = g_strdup (self->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (self->client_token);
+  g_mutex_unlock (&self->lock);
+
+  spotifygtk_spclient_get_context (self->spclient, op->context_uri,
+                                   bearer, ctoken,
+                                   on_context_resolved, op);
+}
+
+/* Called when a refresh settles: run everything that was waiting, or fail it
+ * all if the refresh could not produce a usable bearer. */
+static void
+flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok)
+{
+  GList *ops = self->pending_ops;
+  self->pending_ops = NULL;
+
+  for (GList *l = ops; l; l = l->next) {
+    LoadTracksOp *op = l->data;
+
+    if (refresh_ok) {
+      run_load_op (op);
+    } else {
+      g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "session credentials expired and could not be renewed");
+      g_object_unref (op->task);
+      load_op_free (op);
+    }
+  }
+
+  g_list_free (ops);
+}
+
 static gboolean
 start_load_tracks (gpointer user_data)
 {
@@ -442,8 +566,7 @@ start_load_tracks (gpointer user_data)
 
   g_mutex_lock (&self->lock);
   gboolean ready = (self->state == SPOTIFYGTK_SESSION_READY);
-  g_autofree gchar *bearer = g_strdup (self->bearer_token);
-  g_autofree gchar *ctoken = g_strdup (self->client_token);
+  gint64   expires_at = self->bearer_expires_at;
   g_mutex_unlock (&self->lock);
 
   if (!ready || !self->spclient) {
@@ -454,9 +577,19 @@ start_load_tracks (gpointer user_data)
     return G_SOURCE_REMOVE;
   }
 
-  spotifygtk_spclient_get_context (self->spclient, op->context_uri,
-                                   bearer, ctoken,
-                                   on_context_resolved, op);
+  /* Re-mint before use rather than after a 401: the failure mode otherwise
+   * is a session that still says READY while every request is rejected. */
+  gboolean stale = expires_at > 0 &&
+                   g_get_monotonic_time () > expires_at - BEARER_REFRESH_MARGIN_US;
+
+  if (stale || self->refreshing) {
+    self->pending_ops = g_list_append (self->pending_ops, op);
+    if (!self->refreshing)
+      start_bearer_refresh (self);
+    return G_SOURCE_REMOVE;
+  }
+
+  run_load_op (op);
   return G_SOURCE_REMOVE;
 }
 
@@ -547,13 +680,34 @@ spotifygtk_native_session_dispose (GObject *object)
   if (self->cancellable)
     g_cancellable_cancel (self->cancellable);
 
-  if (self->loop)
-    g_main_loop_quit (self->loop);
+  /* Claim the loop under the lock so the worker cannot start one after this
+   * point — see the matching comment in session_thread(). */
+  g_mutex_lock (&self->lock);
+  self->stopping = TRUE;
+  GMainLoop *loop = self->loop ? g_main_loop_ref (self->loop) : NULL;
+  g_mutex_unlock (&self->lock);
+
+  if (loop) {
+    g_main_loop_quit (loop);
+    g_main_loop_unref (loop);
+  }
 
   if (self->thread) {
     g_thread_join (self->thread);
     self->thread = NULL;
   }
+
+  /* The worker has stopped, so anything still queued behind a refresh will
+   * never run. Fail those tasks rather than leaking them and leaving their
+   * callers waiting forever. */
+  for (GList *l = self->pending_ops; l; l = l->next) {
+    LoadTracksOp *op = l->data;
+    g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                             "session shut down");
+    g_object_unref (op->task);
+    load_op_free (op);
+  }
+  g_clear_pointer (&self->pending_ops, g_list_free);
 
   g_clear_pointer (&self->loop, g_main_loop_unref);
   g_clear_pointer (&self->context, g_main_context_unref);

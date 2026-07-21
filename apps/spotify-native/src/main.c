@@ -1385,6 +1385,33 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
  * callback landing on the wrong thread is exactly the bug this design is
  * meant to prevent.
  */
+/*
+ * Disposes a session while it is still signing in, which is the race the
+ * loop-publishing lock in session.c exists for: if dispose() sees a NULL
+ * loop and the worker then starts one, g_thread_join blocks forever. A
+ * SIGTERM cannot test this -- the process dies without running dispose --
+ * so it has to be driven explicitly. Prints and exits, or hangs on failure.
+ */
+static int
+run_session_dispose_probe (void)
+{
+  for (int i = 0; i < 5; i++) {
+    SpotifyNativeSession *session = spotifygtk_native_session_new ();
+    spotifygtk_native_session_start (session);
+
+    /* Stagger across the window between "thread spawned" and "loop running",
+     * so at least one iteration lands inside it. */
+    g_usleep ((gulong) i * 40 * 1000);
+
+    g_message ("[dispose-probe] disposing after %d ms...", i * 40);
+    g_object_unref (session);
+    g_message ("[dispose-probe] iteration %d returned cleanly", i);
+  }
+
+  g_message ("[dispose-probe] PASSED -- no deadlock");
+  return 0;
+}
+
 static int
 run_session_probe (const gchar *query)
 {
@@ -1414,8 +1441,11 @@ main (int argc, char *argv[])
   (void) argc; (void) argv;
 
   const gchar *session_probe = g_getenv ("SPOTIFY_PROBE_SESSION");
-  if (session_probe && *session_probe)
+  if (session_probe && *session_probe) {
+    if (g_strcmp0 (session_probe, "dispose") == 0)
+      return run_session_dispose_probe ();
     return run_session_probe (session_probe);
+  }
 
   return spotifygtk_native_engine_run (NULL, NULL, NULL, NULL, NULL) ? 0 : 1;
 }

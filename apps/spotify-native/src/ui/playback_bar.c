@@ -143,6 +143,14 @@ spotifygtk_playback_bar_init (SpotifyGtkPlaybackBar *self)
                             G_CALLBACK (g_signal_emit_by_name), self);
   gtk_box_append (GTK_BOX (center), GTK_WIDGET (self->next_btn));
 
+  /* Skip needs a queue, and there is no queue yet — the window's handlers
+   * for these are empty. Disabled for the same reason as the seek slider:
+   * a control that does nothing when clicked reads as a bug. */
+  gtk_widget_set_sensitive (GTK_WIDGET (self->prev_btn), FALSE);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->next_btn), FALSE);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->prev_btn), "Queue isn’t implemented yet");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->next_btn), "Queue isn’t implemented yet");
+
   gtk_box_append (GTK_BOX (self), center);
 
   /* Spacer */
@@ -155,6 +163,15 @@ spotifygtk_playback_bar_init (SpotifyGtkPlaybackBar *self)
   gtk_scale_set_draw_value (self->progress_scale, FALSE);
   gtk_widget_set_size_request (GTK_WIDGET (self->progress_scale), 400, -1);
   g_signal_connect (self->progress_scale, "value-changed", G_CALLBACK (on_seek_changed), self);
+
+  /* The "seek" signal has no receiver: neither player_service nor
+   * native_engine exposes a seek entry point yet. A draggable slider that
+   * silently snaps back is worse than an obviously inert one, so it stays
+   * insensitive until the engine can act on it. It still renders position. */
+  gtk_widget_set_sensitive (GTK_WIDGET (self->progress_scale), FALSE);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->progress_scale),
+                               "Seeking isn’t wired to the playback engine yet");
+
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->progress_scale));
 }
 
