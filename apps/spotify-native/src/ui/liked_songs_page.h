@@ -23,6 +23,10 @@ void spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
                                               SpotifyNativeSession     *session);
 void spotifygtk_liked_songs_page_refresh (SpotifyGtkLikedSongsPage *self);
 
+void spotifygtk_liked_songs_page_set_playing_uri (SpotifyGtkLikedSongsPage *self,
+                                          const gchar *uri,
+                                          gboolean playing);
+
 /* Signals:
  * - track-activated (SpotifyNativeTrack *track)
  */

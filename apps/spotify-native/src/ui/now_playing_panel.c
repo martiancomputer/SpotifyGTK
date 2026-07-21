@@ -85,6 +85,7 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   /* Artwork and track info live in one box so the collapse button has a
    * single thing to hide. */
   self->art_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_valign (self->art_section, GTK_ALIGN_START);
 
   /* A GtkAspectFrame rather than a fixed 220x220 request: the cover has to
    * stay square while tracking the panel's width, and a size request cannot
@@ -95,11 +96,14 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_image_set_pixel_size (self->album_art, 96);
   gtk_widget_add_css_class (GTK_WIDGET (self->album_art), "art-large");
   gtk_widget_set_hexpand (GTK_WIDGET (self->album_art), TRUE);
-  gtk_widget_set_vexpand (GTK_WIDGET (self->album_art), TRUE);
+  gtk_widget_set_vexpand (GTK_WIDGET (self->album_art), FALSE);
 
-  GtkWidget *art_frame = gtk_aspect_frame_new (0.5f, 0.5f, 1.0f, FALSE);
+  GtkWidget *art_frame = gtk_aspect_frame_new (0.5f, 0.0f, 1.0f, FALSE);
   gtk_aspect_frame_set_child (GTK_ASPECT_FRAME (art_frame), GTK_WIDGET (self->album_art));
   gtk_widget_set_hexpand (art_frame, TRUE);
+  /* yalign 0.0 above, and valign START here: the cover stays anchored to the
+   * top of the panel instead of floating to the middle as the panel grows. */
+  gtk_widget_set_valign (art_frame, GTK_ALIGN_START);
   gtk_widget_set_margin_start (art_frame, 20);
   gtk_widget_set_margin_end (art_frame, 20);
   gtk_widget_set_margin_top (art_frame, 8);

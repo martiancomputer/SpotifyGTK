@@ -47,6 +47,13 @@ void spotifygtk_track_list_clear (SpotifyGtkTrackList *self);
 /* Number rows 1..n rather than showing per-row art. */
 void spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered);
 
+/* Mark whichever row matches `uri` as the current track. Pass NULL to clear.
+ * `playing` false with a non-NULL uri means paused: the row keeps its
+ * indicator but stops animating. */
+void spotifygtk_track_list_set_playing_uri (SpotifyGtkTrackList *self,
+                                            const gchar *uri,
+                                            gboolean     playing);
+
 /* Signals:
  * - track-activated (gpointer track)
  *

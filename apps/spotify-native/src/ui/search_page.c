@@ -284,3 +284,10 @@ spotifygtk_search_page_set_session (SpotifyGtkSearchPage *self, SpotifyNativeSes
   g_clear_object (&self->session);
   self->session = session ? g_object_ref (session) : NULL;
 }
+
+void
+spotifygtk_search_page_set_playing_uri (SpotifyGtkSearchPage *self, const gchar *uri, gboolean playing)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SEARCH_PAGE (self));
+  spotifygtk_track_list_set_playing_uri (self->results, uri, playing);
+}

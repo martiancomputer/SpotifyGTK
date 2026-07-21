@@ -119,6 +119,27 @@ spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered
   self->numbered = numbered;
 }
 
+void
+spotifygtk_track_list_set_playing_uri (SpotifyGtkTrackList *self,
+                                       const gchar *uri,
+                                       gboolean     playing)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+
+  for (GtkWidget *child = gtk_widget_get_first_child (GTK_WIDGET (self->list));
+       child != NULL;
+       child = gtk_widget_get_next_sibling (child)) {
+    if (!SPOTIFYGTK_IS_TRACK_ROW (child))
+      continue;
+
+    SpotifyGtkTrackRow *row = SPOTIFYGTK_TRACK_ROW (child);
+    const gchar *row_uri = spotifygtk_track_row_get_uri (row);
+    gboolean is_current = uri && row_uri && g_strcmp0 (uri, row_uri) == 0;
+
+    spotifygtk_track_row_set_playing (row, is_current, is_current && !playing);
+  }
+}
+
 static SpotifyNativeTrack *
 native_track_copy (const SpotifyNativeTrack *src)
 {

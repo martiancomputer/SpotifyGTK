@@ -22,6 +22,10 @@ SpotifyGtkSearchPage *spotifygtk_search_page_new (void);
 void spotifygtk_search_page_set_session (SpotifyGtkSearchPage *self,
                                          SpotifyNativeSession *session);
 
+void spotifygtk_search_page_set_playing_uri (SpotifyGtkSearchPage *self,
+                                          const gchar *uri,
+                                          gboolean playing);
+
 /* Signals:
  * - track-activated (SpotifyNativeTrack *track)
  */

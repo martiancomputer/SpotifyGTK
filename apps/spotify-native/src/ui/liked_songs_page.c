@@ -175,3 +175,10 @@ spotifygtk_liked_songs_page_refresh (SpotifyGtkLikedSongsPage *self)
   spotifygtk_native_session_load_tracks (self->session, uri, LIKED_SONGS_LIMIT,
                                          self->in_flight, on_tracks_loaded, ref);
 }
+
+void
+spotifygtk_liked_songs_page_set_playing_uri (SpotifyGtkLikedSongsPage *self, const gchar *uri, gboolean playing)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
+  spotifygtk_track_list_set_playing_uri (self->list, uri, playing);
+}

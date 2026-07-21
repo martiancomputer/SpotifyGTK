@@ -5,6 +5,7 @@
 #include "track_row.h"
 
 #include <string.h>
+#include <math.h>
 
 struct _SpotifyGtkTrackRow {
   GtkListBoxRow parent_instance;
@@ -18,6 +19,10 @@ struct _SpotifyGtkTrackRow {
   GtkLabel *duration_label;
   GtkButton *play_btn;
   GtkBox *action_box;
+
+  /* Now-playing equaliser: three bars beside the duration. */
+  GtkWidget *eq_area;
+  guint      eq_tick_id;
 
   gboolean show_album;
   gboolean show_artists;
@@ -44,6 +49,10 @@ static void
 spotifygtk_track_row_dispose (GObject *object)
 {
   SpotifyGtkTrackRow *self = SPOTIFYGTK_TRACK_ROW (object);
+  if (self->eq_tick_id != 0 && self->eq_area) {
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self->eq_area), self->eq_tick_id);
+    self->eq_tick_id = 0;
+  }
   g_clear_pointer (&self->track_uri, g_free);
   g_clear_pointer (&self->track_id, g_free);
   G_OBJECT_CLASS (spotifygtk_track_row_parent_class)->dispose (object);
@@ -70,6 +79,76 @@ spotifygtk_track_row_class_init (SpotifyGtkTrackRowClass *klass)
   signals[ALBUM_ACTIVATED] = g_signal_new ("album-activated",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_STRING);
+}
+
+/* === Now-playing equaliser === */
+
+#define EQ_BARS       3
+#define EQ_BAR_WIDTH  2
+#define EQ_BAR_GAP    2
+#define EQ_HEIGHT    11
+#define EQ_WIDTH     (EQ_BARS * EQ_BAR_WIDTH + (EQ_BARS - 1) * EQ_BAR_GAP)
+
+/* Each bar runs on its own phase so they never move in lockstep. Periods are
+ * deliberately not integer multiples of one another, so the group does not
+ * visibly repeat on a short cycle. */
+static const gdouble EQ_PERIODS[EQ_BARS] = { 0.62, 0.43, 0.81 };
+static const gdouble EQ_PHASES[EQ_BARS]  = { 0.0,  0.5,  0.25 };
+
+static void
+eq_draw (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data)
+{
+  gdouble seconds = *(gdouble *) user_data;
+
+  /* Accent green, matching .eq-bar in the stylesheet. Drawn rather than
+   * styled because the heights change per frame. */
+  cairo_set_source_rgb (cr, 0.114, 0.725, 0.329);
+
+  for (int i = 0; i < EQ_BARS; i++) {
+    gdouble t = seconds / EQ_PERIODS[i] + EQ_PHASES[i];
+    /* sin -> 0..1, then 25%..100% of the available height. */
+    gdouble level = 0.25 + 0.75 * (0.5 + 0.5 * sin (t * 2.0 * G_PI));
+    gdouble h = level * height;
+    gdouble x = i * (EQ_BAR_WIDTH + EQ_BAR_GAP);
+
+    cairo_rectangle (cr, x, height - h, EQ_BAR_WIDTH, h);
+  }
+  cairo_fill (cr);
+
+  (void) area; (void) width;
+}
+
+static gboolean
+eq_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
+{
+  SpotifyGtkTrackRow *self = user_data;
+
+  /* Frame-clock driven, so it runs at the monitor's rate and GTK throttles
+   * it automatically when the row is not being drawn. */
+  gint64 us = gdk_frame_clock_get_frame_time (clock);
+  gdouble *seconds = g_object_get_data (G_OBJECT (self->eq_area), "eq-seconds");
+  if (seconds)
+    *seconds = (gdouble) us / (gdouble) G_USEC_PER_SEC;
+
+  gtk_widget_queue_draw (self->eq_area);
+  (void) widget;
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+eq_set_running (SpotifyGtkTrackRow *self, gboolean running)
+{
+  if (running && self->eq_tick_id == 0) {
+    self->eq_tick_id = gtk_widget_add_tick_callback (GTK_WIDGET (self->eq_area),
+                                                     eq_tick, self, NULL);
+  } else if (!running && self->eq_tick_id != 0) {
+    /* Stop outright rather than leaving a callback running for a row that is
+     * no longer playing -- with a long list that would be one animation per
+     * row forever. */
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self->eq_area), self->eq_tick_id);
+    self->eq_tick_id = 0;
+  }
+  gtk_widget_set_visible (self->eq_area, running);
 }
 
 static void
@@ -148,6 +227,20 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   self->duration_label = GTK_LABEL (gtk_label_new ("0:00"));
   gtk_widget_add_css_class (GTK_WIDGET (self->duration_label), "row-duration");
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->duration_label));
+
+  /* Equaliser, immediately right of the duration. Hidden unless this row is
+   * the one playing. */
+  self->eq_area = gtk_drawing_area_new ();
+  gtk_widget_set_size_request (self->eq_area, EQ_WIDTH, EQ_HEIGHT);
+  gtk_widget_set_valign (self->eq_area, GTK_ALIGN_CENTER);
+  gtk_widget_set_visible (self->eq_area, FALSE);
+  {
+    gdouble *seconds = g_new0 (gdouble, 1);
+    g_object_set_data_full (G_OBJECT (self->eq_area), "eq-seconds", seconds, g_free);
+    gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (self->eq_area),
+                                    eq_draw, seconds, NULL);
+  }
+  gtk_box_append (GTK_BOX (self->root_box), self->eq_area);
 
   /* Actions (hidden by default, shown on hover) */
   self->action_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4));
@@ -295,11 +388,18 @@ spotifygtk_track_row_set_playing (SpotifyGtkTrackRow *self, gboolean is_playing,
   self->is_playing = is_playing;
   self->is_paused = is_paused;
 
-  if (is_playing && !is_paused) {
+  if (is_playing) {
     gtk_widget_add_css_class (GTK_WIDGET (self->title_label), "accent");
   } else {
     gtk_widget_remove_css_class (GTK_WIDGET (self->title_label), "accent");
   }
+
+  /* Visible whenever this is the current track; animating only while it is
+   * actually advancing, so a paused row shows frozen bars. */
+  gtk_widget_set_visible (self->eq_area, is_playing);
+  eq_set_running (self, is_playing && !is_paused);
+  if (is_playing && is_paused)
+    gtk_widget_set_visible (self->eq_area, TRUE);
 }
 
 const gchar *

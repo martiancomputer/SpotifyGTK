@@ -153,13 +153,17 @@ on_queue_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
   (void) bar;
 }
 
+/* Reachable from two places on purpose: the sidebar's own Collapse action,
+ * and the header's menu button. The Collapse action disappears with the
+ * sidebar, so without an entry point outside it a collapsed sidebar could
+ * never be recovered. */
 static void
-on_sidebar_collapse_toggled (SpotifyGtkSidebar *sidebar, gpointer user_data)
+on_sidebar_collapse_toggled (gpointer source, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   gboolean visible = gtk_widget_get_visible (GTK_WIDGET (self->sidebar));
   gtk_widget_set_visible (GTK_WIDGET (self->sidebar), !visible);
-  (void) sidebar;
+  (void) source;
 }
 
 static void
@@ -204,7 +208,18 @@ on_player_state_changed (SpotifyNativePlayerService *player,
   SpotifyGtkNativeWindow *self = user_data;
 
   gboolean is_playing = (state == SPOTIFYGTK_PLAYER_PLAYING);
+  gboolean has_track   = (state == SPOTIFYGTK_PLAYER_PLAYING ||
+                          state == SPOTIFYGTK_PLAYER_PAUSED ||
+                          state == SPOTIFYGTK_PLAYER_BUFFERING ||
+                          state == SPOTIFYGTK_PLAYER_CONNECTING);
+
   spotifygtk_playback_bar_set_playing (self->playback_bar, is_playing);
+
+  /* Tell every list which row is current, so the equaliser follows the track
+   * across pages rather than only appearing on the one that started it. */
+  const gchar *uri = has_track ? self->current_track_uri : NULL;
+  spotifygtk_search_page_set_playing_uri (self->search_page, uri, is_playing);
+  spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, uri, is_playing);
 
   if (state == SPOTIFYGTK_PLAYER_ERROR) {
     g_warning ("Player error: %s", message);
@@ -233,6 +248,34 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
   }
 }
 
+/* The Now Playing panel is bounded in both directions. Below the minimum the
+ * cover and track text stop being legible; above the maximum the cover keeps
+ * growing until it dominates the window, which is the "logarithmic" feel of
+ * dragging it wide. GtkPaned exposes no max-position, so the clamp is applied
+ * whenever the position changes. */
+#define NOW_PLAYING_MIN_WIDTH 280
+#define NOW_PLAYING_MAX_WIDTH 420
+
+static void
+on_content_paned_position (GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+  GtkPaned *paned = GTK_PANED (object);
+  SpotifyGtkNativeWindow *self = user_data;
+
+  gint total = gtk_widget_get_width (GTK_WIDGET (paned));
+  if (total <= 0)
+    return;
+
+  gint position = gtk_paned_get_position (paned);
+  gint panel_width = total - position;
+  gint clamped = CLAMP (panel_width, NOW_PLAYING_MIN_WIDTH, NOW_PLAYING_MAX_WIDTH);
+
+  if (clamped != panel_width)
+    gtk_paned_set_position (paned, total - clamped);
+
+  (void) pspec; (void) self;
+}
+
 /* === Navigation === */
 static void
 navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
@@ -248,6 +291,14 @@ navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
    * refresh once it holds data. Home and Library are static for now. */
   if (g_strcmp0 (page_name, "liked") == 0)
     spotifygtk_liked_songs_page_refresh (self->liked_page);
+
+  /* A page that has just (re)built its rows does not know what is playing. */
+  gboolean is_playing =
+    spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING;
+  spotifygtk_search_page_set_playing_uri (self->search_page,
+                                          self->current_track_uri, is_playing);
+  spotifygtk_liked_songs_page_set_playing_uri (self->liked_page,
+                                               self->current_track_uri, is_playing);
 }
 
 /* === CSS for dark theme === */
@@ -373,6 +424,20 @@ static const gchar *dark_theme_css =
   "  min-height: 12px; border-radius: 6px; margin: 0; }"
   "scale:disabled slider { background-color: #6e6e6e; }"
 
+  /* ── Text selection ────────────────────────────────────────── */
+  /* One selection colour everywhere: the search entry, and any selectable
+   * label in results, playlists, liked songs or albums. */
+  "selection, ::selection, entry selection, label selection, text selection"
+  "  { background-color: #60A5FA; color: #0a0a0a; }"
+  "entry { caret-color: #60A5FA; }"
+
+  /* ── Now playing indicator ─────────────────────────────────── */
+  /* Three bars beside the duration on whichever row is playing. The
+   * animation is driven in C (track_row.c) rather than by a CSS keyframe,
+   * so the tick can be stopped outright when no row is playing instead of
+   * leaving the compositor animating an offscreen widget forever. */
+  ".eq-bar { background-color: #1db954; border-radius: 1px; }"
+
   /* ── Scrollbars ────────────────────────────────────────────── */
   /* Non-overlay, so it sits in a gutter beside the list, not over it. */
   "scrollbar { background-color: transparent; border: none; }"
@@ -428,7 +493,9 @@ spotifygtk_native_window_constructed (GObject *object)
 
   GtkWidget *menu_btn = gtk_button_new_from_icon_name ("open-menu-symbolic");
   gtk_widget_add_css_class (menu_btn, "flat");
-  gtk_widget_set_tooltip_text (menu_btn, "Menu");
+  gtk_widget_set_tooltip_text (menu_btn, "Show or hide the sidebar");
+  g_signal_connect (menu_btn, "clicked",
+                    G_CALLBACK (on_sidebar_collapse_toggled), self);
   gtk_header_bar_pack_start (GTK_HEADER_BAR (header), menu_btn);
 
   GtkWidget *title = gtk_label_new ("SpotifyGTK");
@@ -502,6 +569,9 @@ spotifygtk_native_window_constructed (GObject *object)
 
   /* Set positions */
   gtk_paned_set_position (self->main_paned, 270);
+
+  g_signal_connect (self->content_paned, "notify::position",
+                    G_CALLBACK (on_content_paned_position), self);
 
   /* The content/panel divider is deliberately not given a fixed position.
    * A hardcoded pixel value only lines up at one window width; at any other
