@@ -141,11 +141,15 @@ Connect device, with its own audio decode and output pipeline — no other
 Spotify client needs to be running. GPU-accelerated where hardware allows
 (VA-API hardware JPEG decode planned; Vulkan compositing not started).
 
-**Currently a development engine plus a basic GTK4 shell, not a finished
-client.** The shell reports verified engine capability and deliberately keeps
-unwired playback controls disabled; the standalone harness remains the
+**A working client for a narrow slice, not a finished one.** Search and Liked
+Songs load over the native protocol stack — no Web API involved — and tracks
+play, pause, resume, switch and respond to the volume slider. Everything else
+in the UI is either laid out and empty (Home, Library) or visibly disabled
+because the engine cannot back it yet (seek, queue, shuffle, repeat, like).
+Album art is a placeholder everywhere. The standalone harness remains the
 protocol/playback validation tool. See Project status below for the exact
-breakdown.
+breakdown — rows marked ✅ have been confirmed against live Spotify servers,
+not merely written.
 
 ### Building
 
@@ -164,6 +168,26 @@ bridge; both executables are installed together by `ninja -C build install`.
 
 For a headless engine/harness build, configure Meson with
 `-Denable_gui=false`.
+
+### Development switches
+
+All are environment variables, all off by default.
+
+| Variable | Applies to | Effect |
+|---|---|---|
+| `SPOTIFY_PROBE_SESSION="<query>"` | harness | Signs in via `SpotifyNativeSession` and prints the tracks a search would render. `="collection"` lists liked songs instead. |
+| `SPOTIFY_PROBE_SESSION=dispose` | harness | Tears down sessions mid-sign-in to exercise the shutdown race. Hangs on regression; SIGTERM cannot test this, since the process dies without running `dispose`. |
+| `SPOTIFY_PROBE_CONTEXT="<query>"` | harness | Runs the raw chain (AP login → client-token → login5 → context-resolve → batched metadata) and dumps the response shape. Replaces playback, so a diagnostic failure can't be confused with a pipeline failure. |
+| `SPOTIFY_PROBE_LIMIT=<n>` | harness | Caps how many URIs the batched-metadata probe resolves. |
+| `SPOTIFY_START_PAGE=<name>` | GUI | Opens straight onto `home`, `search`, `liked` or `library`. |
+| `SPOTIFY_DEV_INSTANCE=1` | GUI | Runs non-unique, so a freshly built copy can launch while another is already open. |
+
+**Verifying a build actually contains your change.** Meson/ninja has been
+seen to leave a stale object file behind, producing a binary that links an
+older translation unit while reporting a successful build — in one case the
+executable still had a removed button compiled in. A green build is not
+proof. Confirm with `strings build/src/spotify-native | grep <symbol>`, or
+`ninja -C build -t clean && ninja -C build` before any visual check.
 
 ### Legal & ethical approach
 
@@ -216,6 +240,7 @@ gap:
 | Shannon cipher (`spotify/shannon.c`) | ✅ Confirmed against real ground-truth test vectors (a compiled-and-run copy of the actual reference crate, not read-and-reasoned-about). Note: the internal round-trip self-test alone had passed for a while despite a real bug (`sbox1`/`sbox2` used XOR where the reference uses OR) — that class of test can't catch a deviation applied symmetrically to both encrypt and decrypt. See `research/auth/` for the full writeup. |
 | Ogg/Vorbis decoder (`audio/decoder.c`) | ✅ Confirmed against a live decrypted Spotify CDN range: 44.1 kHz stereo, 86,592 PCM frames from the initial 64 KiB probe. |
 | Audio output: PulseAudio, ALSA | ✅ Functional; PulseAudio live-validated with 86,592 decoded Spotify PCM frames. |
+| Output volume | ✅ Applied in software, in the audio worker. Every backend declares `.set_volume = NULL` — Pulse, ALSA and PipeWire all leave per-stream volume as a TODO — so routing the UI slider to `spotifygtk_output_set_volume()` reached a stub and silently did nothing. Scaling the PCM buffer works on every backend and needs nothing from them, which is the same pure-C fallback rule the rest of the project follows. The curve is cubic: perceived loudness is roughly logarithmic, so a linear slider sounds loud for most of its travel and then falls off a cliff. |
 | Audio output: PipeWire | 🟡 Implemented, needs validation against a running PipeWire instance |
 | Audio output: WASAPI (Windows) | ⬜ Stub only — Windows port hasn't started |
 | AP handshake (`spotify/ap.c`, `dh.c`, `handshake_crypto.c`, `protobuf_min.c`) | ✅ Confirmed working against a real Spotify server — DH exchange, RSA server-signature verification, and HMAC-SHA1 key derivation all checked out. |
@@ -224,13 +249,15 @@ gap:
 | Audio key exchange (`spotify/audio_key.c`) | ✅ Confirmed against a live AP session; retrieves a usable 16-byte AES key. |
 | Streaming auth-relay (`spotify/clienttoken.c`, `spotify/login5.c`, `spotify/spclient.c`) | ✅ Confirmed live: reusable AP credential → client-token → login5 bearer → track metadata → CDN URL resolution. `spclient.c` still uses librespot's hardcoded fallback host rather than full `apresolve`. See `research/playback/`. |
 | CDN fetch + AES-CTR decrypt (`spotify/cdn.c`) | ✅ Confirmed live for the initial range and an independent non-block-aligned range; plaintext begins with `OggS` and decodes to PCM. |
-| Native playback worker (`native_engine.h`, `player_service.c`) | 🟡 Runs the validated pipeline off the GTK thread, reports CONNECTING/BUFFERING/PLAYING stages, feeds decrypted CDN ranges into a bounded PCM queue with a dedicated output worker, propagates cancellation, and supports pause/resume; queue and seek control are next. |
+| Native playback worker (`native_engine.h`, `player_service.c`) | 🟡 Runs the validated pipeline off the GTK thread, reports CONNECTING/BUFFERING/PLAYING/PAUSED stages, feeds decrypted CDN ranges into a bounded PCM queue with a dedicated output worker, propagates cancellation, and supports pause/resume, volume, and switching tracks mid-playback. Two bugs worth remembering: `start_uri()` used to return `G_IO_ERROR_BUSY` whenever anything was already playing, so picking a second track did nothing at all; and `pause()` emitted `PLAYING`, which left the bar showing a pause icon while paused, so the next click paused again and resume was unreachable. **Queue and seek are still absent** — the engine has no seek entry point, so the UI's seek slider and skip buttons are deliberately disabled rather than inert. |
 | Spotify Connect registration (`spotify/connect.c`) | 🟡 Mercury subscription real, device-state payload pending real protobuf schema; ad-insertion events not yet researched |
 | Image cache VA-API hardware decode | 🟡 Probe works, decode path stubbed (lives in `spotify-connect`, shared concept) |
 | Vulkan compositing | ⬜ Not started |
-| GTK4 UI shell (`gui_main.c`, `ui/`) | 🟡 libadwaita shell (`ui/`, built when libadwaita ≥ 1.4 is present; `gui_main.c` remains the fallback): sidebar navigation, persistent playback bar, live connection/buffering/playing stages, pause/resume. **Search and Liked Songs run entirely on the native protocol stack** — confirmed in the running GUI, which signs in via the session and renders 100 real tracks with no Web API call. Home and Library are static explanatory pages until their endpoints are ported (see below). Queue and seek remain to be integrated. `SPOTIFY_START_PAGE=<name>` opens straight onto a page for development. |
+| GTK4 UI shell (`gui_main.c`, `ui/`) | 🟡 libadwaita shell (`ui/`, built when libadwaita ≥ 1.4 is present; `gui_main.c` remains the fallback), laid out to a supplied reference design: `GtkHeaderBar` chrome, icon sidebar with pill selection and a Pinned section, three-column playback bar with the progress row under the transport, and a Now Playing panel whose cover is aspect-locked to the panel width via `GtkAspectFrame`. **Search and Liked Songs run entirely on the native protocol stack** — confirmed in the running GUI, which signs in via the session and renders 100 real tracks with no Web API call. Home and Library are laid out but empty, with each section stating why it has no data source. Six controls are deliberately disabled rather than inert: shuffle, repeat, previous, next (all need a queue), seek (no engine entry point) and like (no library write endpoint). |
+| ⚠️ Search relevance | 🟡 Known limitation. `/context-resolve/v1/spotify:search:<q>` is **not a search-results endpoint** — it returns a *playback context*, i.e. what Spotify would queue if you hit play on that search. "bohemian rhapsody" comes back with Blinding Lights first and the Queen tracks at #2–4, then Hotel California and Billie Jean. librespot documents the same behaviour ("massively influenced by the provided query") and implements no real search. The search page applies a client-side relevance filter on title and artist as a mitigation, falling back to the unfiltered list if nothing matches. A proper fix needs Spotify's actual search API, which is not in librespot and has not been identified. |
+| ⚠️ `gui_main.c` fallback | 🔴 Still calls `api.spotify.com` with the keymaster token, so the non-libadwaita build has the shared-quota 429 problem described above. Only the `ui/` shell was migrated. |
 | ⚠️ Catalog data path | ✅ **Migrated off the Web API.** The native shell used to mint a token from the keymaster `client_id` (`native_auth.h`) and send it to `api.spotify.com`. Spotify meters the Web API per `client_id`, and that one is Spotify's own internal ID — shared by every librespot user — so every request drew on a globally-contended quota and returned `429 API rate limit exceeded`. Diagnosed by elimination: no token and a garbage token both return `401` from the same host, so a 429 required a *valid* token on a throttled `client_id`, and `Retry-After` moved independently of our own request rate. librespot never calls `api.spotify.com` at all (zero references in its repo). `apps/spotify-native/src/ui/` now contains no reference to the Web API client. |
-| Reusable native session (`spotify/session.c`) | ✅ Confirmed live. Holds the AP login → client-token → login5 chain open instead of tearing it down per playback attempt, and serves catalog queries against it. Runs its own worker thread and `GMainContext` — the same isolation `run_live_test()` uses, so protocol callbacks can never dispatch on the GTK thread — while the public API is main-thread-facing and returns results via `GTask`. `load_tracks()` does both round trips (context-resolve, then batched metadata) because neither alone yields a renderable row. Written against the existing public modules rather than by refactoring `main.c`, so the playback harness is untouched. |
+| Reusable native session (`spotify/session.c`) | ✅ Confirmed live. Holds the AP login → client-token → login5 chain open instead of tearing it down per playback attempt, and serves catalog queries against it. Runs its own worker thread and `GMainContext` — the same isolation `run_live_test()` uses, so protocol callbacks can never dispatch on the GTK thread — while the public API is main-thread-facing and returns results via `GTask`. `load_tracks()` does both round trips (context-resolve, then batched metadata) because neither alone yields a renderable row. Written against the existing public modules rather than by refactoring `main.c`, so the playback harness is untouched. Renews the login5 bearer before it expires (it lasts 3600s); without that the session kept reporting READY while every request 401'd — a silent death about an hour in. Disposing a session mid-sign-in used to deadlock, because `dispose()` found a NULL loop, skipped the quit, then blocked in `g_thread_join` while the worker went on to run one; the loop is now published and claimed under the lock. `SPOTIFY_PROBE_SESSION=dispose` exercises that race directly, since SIGTERM cannot (the process dies without running `dispose`). |
 | Track display metadata (`spotify/track_meta.c`) | ✅ Confirmed live. Extracts name/album/artist/duration/explicit from the `Track` message `spclient.c` already fetches for playback and previously discarded. Field numbers transcribed from `metadata.proto` and asserted as literals in `tests/test_track_meta.c`. **`duration` is zigzag-encoded `sint32`** — an earlier revision of this file asserted the opposite in a comment, and reading it as a plain varint returned exactly double (Rick Astley's "Never Gonna Give You Up" as 7:07 instead of 3:33). Only live data caught it; the offline round-trip test had happily agreed with the wrong encoder. Now pinned by a regression test using real track lengths. |
 | Context resolution (`spotify/spclient.c`) | ✅ Confirmed live. `/context-resolve/v1/{uri}` — the single endpoint behind search, liked songs, and playlist/album/artist listings; returns JSON, unlike the rest of spclient. Search for "never gonna give you up" returned 20 correct tracks; `spotify:user:<id>:collection` returned a 4,773-track library. **`ContextTrack` carries `uri` and nothing else** — no title, artist, or metadata map at all, so this is a URI list and every rendered row requires the batched-metadata call below. URI builders are unit-tested for escaping so a query cannot inject URI structure (`tests/test_context_uri.c`, 9 cases). |
 | Batched display metadata (`spotify/spclient.c`) | ✅ Confirmed live. `BatchedEntityRequest.entity_request` is repeated, so a whole page resolves in one round trip. Verified at 50/200/500/1000/2000 URIs; a single request for all 4,773 collection tracks fails, so the ceiling is between 2000 and 4773 — callers should page well below that anyway. Results correlate via `EntityExtensionData.entity_uri` rather than request ordering, so a partial or reordered response still lines up with the right row. |
@@ -301,17 +328,31 @@ note which upstream file it's translated from — see `THIRD_PARTY_LICENSES`.
 ## Architecture (`spotify-native`)
 
 ```
-┌──────────────────────────────────────┐
-│         spotify-native-harness        │
-│         (src/main.c, CLI only)        │
-└───────────────┬───────────────────────┘
-                │
-┌───────────────▼───────────────────────┐
+┌───────────────────┐   ┌──────────────────────────────┐
+│  spotify-native   │   │  spotify-native-harness      │
+│  (GTK4 shell,     │   │  (src/main.c, CLI + probes)  │
+│   src/ui/)        │   └──────────────┬───────────────┘
+└─────────┬─────────┘                  │
+          │                            │
+┌─────────▼──────────────┐             │
+│  SpotifyNativeSession  │             │
+│  (src/spotify/         │             │
+│   session.c)           │             │
+│  Worker thread; holds  │             │
+│  AP login → client-    │             │
+│  token → login5 open,  │             │
+│  serves catalog reads  │             │
+└─────────┬──────────────┘             │
+          │                            │
+          └────────────┬───────────────┘
+                       │
+┌──────────────────────▼────────────────┐
 │           Protocol layer               │
 │           (src/spotify/)               │
 │   Shannon cipher (real), AP framing,   │
 │   Mercury pub/sub, audio key exchange, │
-│   CDN chunk fetching                   │
+│   CDN chunk fetching, spclient         │
+│   (context-resolve + extended-metadata)│
 └───────────────┬───────────────────────┘
                 │
 ┌───────────────▼───────────────────────┐
@@ -353,11 +394,16 @@ cd apps/spotify-native  && meson test -C build --print-errorlogs
 - [x] Hand-roll `keyexchange.proto` encoder, wire DH handshake into `ap.c`
 - [x] Test the handshake against a live Spotify server
 - [x] Confirm AP login succeeds end-to-end with the corrected native_auth token
-- [ ] Confirm the streaming auth-relay chain (client-token → login5 → spclient) against real services
+- [x] Confirm the streaming auth-relay chain (client-token → login5 → spclient) against real services
 - [x] Extract the auth-relay into a reusable session object
 - [x] Move the catalog off `api.spotify.com` onto spclient context-resolve + extended-metadata
+- [x] Refactor the shell to the reference design
+- [ ] Album art end to end (cover IDs from `Track.album.cover_group` → spclient `get_image` → shared image cache)
 - [ ] Parse `playlist4_external` so the Library page can list playlists
 - [ ] Page beyond the first batch of a large collection
+- [ ] Seek and queue support in the engine, so the disabled transport controls can be enabled
+- [ ] Identify Spotify's real search endpoint; context-resolve returns a playback context, not ranked results
+- [ ] Port `gui_main.c` (the non-libadwaita fallback) off the Web API
 - [ ] Mercury protocol validation against live traffic
 - [ ] Ad-insertion / feature-state event handling (`research/connect/`)
 - [ ] VA-API hardware JPEG decode path (probe works, decode pending)
