@@ -240,20 +240,18 @@ build_left_column (SpotifyGtkPlaybackBar *self)
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
   gtk_widget_set_valign (info, GTK_ALIGN_CENTER);
   gtk_widget_set_hexpand (info, FALSE);
-  /* Bounded width, with the labels ellipsizing inside it. Letting this
-   * expand is what pushed the like button to the middle of the window and
-   * dragged the transport group off centre. */
-  gtk_widget_set_size_request (info, SIDE_COLUMN_WIDTH - ART_SIZE - 60, -1);
 
   self->track_label = GTK_LABEL (gtk_label_new ("Nothing playing"));
   gtk_label_set_xalign (self->track_label, 0.0);
   gtk_label_set_ellipsize (self->track_label, PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars (self->track_label, 18);
   gtk_widget_add_css_class (GTK_WIDGET (self->track_label), "bar-title");
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->track_label));
 
   self->artist_label = GTK_LABEL (gtk_label_new (""));
   gtk_label_set_xalign (self->artist_label, 0.0);
   gtk_label_set_ellipsize (self->artist_label, PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars (self->artist_label, 18);
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "bar-subtitle");
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->artist_label));
 
@@ -295,6 +293,8 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
   gtk_widget_set_hexpand (column, FALSE);
   gtk_widget_set_halign (column, GTK_ALIGN_CENTER);
   gtk_widget_set_valign (column, GTK_ALIGN_CENTER);
+  /* Sits the transport cluster a little lower in the bar. */
+  gtk_widget_set_margin_top (column, 6);
 
   /* --- Transport row --- */
   GtkWidget *transport = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
@@ -315,7 +315,7 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
   self->play_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("media-playback-start-symbolic"));
   gtk_widget_add_css_class (GTK_WIDGET (self->play_btn), "circular");
   gtk_widget_add_css_class (GTK_WIDGET (self->play_btn), "play-button");
-  gtk_widget_set_size_request (GTK_WIDGET (self->play_btn), 40, 40);
+  gtk_widget_set_size_request (GTK_WIDGET (self->play_btn), 34, 34);
   gtk_widget_set_halign (GTK_WIDGET (self->play_btn), GTK_ALIGN_CENTER);
   gtk_widget_set_valign (GTK_WIDGET (self->play_btn), GTK_ALIGN_CENTER);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->play_btn), "Play");

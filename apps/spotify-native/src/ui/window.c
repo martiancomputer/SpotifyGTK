@@ -408,7 +408,7 @@ static const gchar *dark_theme_css =
   /* min-width/height must match the widget size request, or GTK button
    * padding wins and the "circular" class renders an oval. */
   ".play-button { background-color: #ffffff; color: #0a0a0a;"
-  "  min-width: 44px; min-height: 44px; padding: 0; }"
+  "  min-width: 34px; min-height: 34px; padding: 0; }"
   ".play-button:hover { background-color: #f0f0f0; }"
   ".play-button:disabled { background-color: #3a3a3a; color: #7a7a7a; }"
   ".transport-button { color: #b8b8b8; min-width: 32px; min-height: 32px; }"

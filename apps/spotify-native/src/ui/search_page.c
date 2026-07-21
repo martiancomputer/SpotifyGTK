@@ -252,14 +252,15 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
 
+  /* Title and entry are centred; the results below stay left-aligned. */
   GtkWidget *title = gtk_label_new ("Search");
   gtk_widget_add_css_class (title, "title-text");
-  gtk_label_set_xalign (GTK_LABEL (title), 0.0);
+  gtk_label_set_xalign (GTK_LABEL (title), 0.5);
   gtk_box_append (GTK_BOX (self), title);
 
   self->entry = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
-  gtk_widget_set_size_request (GTK_WIDGET (self->entry), 400, -1);
-  gtk_widget_set_halign (GTK_WIDGET (self->entry), GTK_ALIGN_START);
+  gtk_widget_set_size_request (GTK_WIDGET (self->entry), 460, -1);
+  gtk_widget_set_halign (GTK_WIDGET (self->entry), GTK_ALIGN_CENTER);
   gtk_search_entry_set_placeholder_text (self->entry, "Songs, artists, albums");
   g_signal_connect (self->entry, "search-changed", G_CALLBACK (on_search_changed), self);
   g_signal_connect (self->entry, "activate", G_CALLBACK (on_search_activate), self);
