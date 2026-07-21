@@ -86,15 +86,24 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
    * single thing to hide. */
   self->art_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
 
+  /* A GtkAspectFrame rather than a fixed 220x220 request: the cover has to
+   * stay square while tracking the panel's width, and a size request cannot
+   * do both. ratio 1.0 with obey_child FALSE means "always square,
+   * whatever the child would rather be", so a non-square cover cannot
+   * stretch the box either. */
   self->album_art = GTK_IMAGE (gtk_image_new_from_icon_name ("audio-x-generic-symbolic"));
   gtk_image_set_pixel_size (self->album_art, 96);
-  gtk_widget_set_size_request (GTK_WIDGET (self->album_art), 220, 220);
   gtk_widget_add_css_class (GTK_WIDGET (self->album_art), "art-large");
-  gtk_widget_set_halign (GTK_WIDGET (self->album_art), GTK_ALIGN_CENTER);
-  gtk_widget_set_margin_start (GTK_WIDGET (self->album_art), 24);
-  gtk_widget_set_margin_end (GTK_WIDGET (self->album_art), 24);
-  gtk_widget_set_margin_top (GTK_WIDGET (self->album_art), 8);
-  gtk_box_append (GTK_BOX (self->art_section), GTK_WIDGET (self->album_art));
+  gtk_widget_set_hexpand (GTK_WIDGET (self->album_art), TRUE);
+  gtk_widget_set_vexpand (GTK_WIDGET (self->album_art), TRUE);
+
+  GtkWidget *art_frame = gtk_aspect_frame_new (0.5f, 0.5f, 1.0f, FALSE);
+  gtk_aspect_frame_set_child (GTK_ASPECT_FRAME (art_frame), GTK_WIDGET (self->album_art));
+  gtk_widget_set_hexpand (art_frame, TRUE);
+  gtk_widget_set_margin_start (art_frame, 20);
+  gtk_widget_set_margin_end (art_frame, 20);
+  gtk_widget_set_margin_top (art_frame, 8);
+  gtk_box_append (GTK_BOX (self->art_section), art_frame);
 
   /* Track info */
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);

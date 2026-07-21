@@ -264,7 +264,7 @@ navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
  *   #1db954  accent
  */
 static const gchar *dark_theme_css =
-  "window { background-color: #121212; color: #e8e8e8; }"
+  "window { background-color: #0a0a0a; color: #e8e8e8; }"
 
   /* ── Structure ─────────────────────────────────────────────── */
   "headerbar { background-color: #0a0a0a; box-shadow: none;"
@@ -282,8 +282,14 @@ static const gchar *dark_theme_css =
   "  { background: none; }"
   ".now-playing-panel { background-color: #0f0f0f;"
   "  border-left: 1px solid #000000; }"
+  /* Padding, not widget margins — see playback_bar.c. Bottom corners are
+   * rounded to follow the window's own shape instead of squaring off
+   * against it. */
   ".playback-bar { background-color: #0a0a0a;"
-  "  border-top: 1px solid #000000; }"
+  "  border-top: 1px solid #000000;"
+  "  padding: 6px 16px 8px 16px;"
+  "  border-bottom-left-radius: 12px;"
+  "  border-bottom-right-radius: 12px; }"
 
   /* ── Sidebar navigation ────────────────────────────────────── */
   ".sidebar list { background-color: transparent; }"
