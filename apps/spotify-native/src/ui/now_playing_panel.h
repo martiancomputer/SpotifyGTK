@@ -38,4 +38,6 @@ void spotifygtk_now_playing_panel_set_progress (SpotifyGtkNowPlayingPanel *self,
 void spotifygtk_now_playing_panel_set_queue (SpotifyGtkNowPlayingPanel *self,
                                              JsonArray *tracks);
 
+void spotifygtk_now_playing_panel_set_cover (SpotifyGtkNowPlayingPanel *self, const gchar *cover_id);
+
 G_END_DECLS

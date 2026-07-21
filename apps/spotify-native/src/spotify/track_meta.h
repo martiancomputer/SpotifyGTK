@@ -20,6 +20,16 @@
  *   artist = 4 (repeated Artist), number = 5, disc_number = 6,
  *   duration = 7 (sint32, milliseconds), file = 12 (repeated AudioFile)
  *
+ * Cover art, same file:
+ *
+ *   Album.cover_group = 17 (ImageGroup)
+ *   ImageGroup.image  = 1  (repeated Image)
+ *   Image.file_id     = 1 (bytes), size = 2, width = 3, height = 4
+ *
+ * NOTE: Image.width and Image.height are sint32, so they are zigzag-encoded
+ * on the wire exactly like Track.duration was. Reading them as plain varints
+ * doubles them.
+ *
  * Album and Artist are themselves messages whose own `name` is field 2,
  * per the same file.
  *
@@ -42,6 +52,14 @@ typedef struct {
   gchar   *artist_names; /* Track.artist[].name (4 → 2), ", "-joined — NULL if none */
   gint64   duration_ms;  /* Track.duration (field 7); 0 if absent */
   gboolean is_explicit;  /* Track.explicit (field 9) */
+
+  /* Album cover, as lowercase hex of the largest advertised Image.file_id
+   * in Track.album.cover_group. NULL when the album carries no artwork.
+   *
+   * Hex rather than raw bytes because that is the form the image CDN takes
+   * (https://i.scdn.co/image/<hex>), so every consumer would otherwise
+   * convert it identically. */
+  gchar   *cover_id;
 } SpotifyTrackMeta;
 
 /*

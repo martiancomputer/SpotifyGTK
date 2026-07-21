@@ -5,6 +5,7 @@ ui_sources = files(
   'sidebar.c',
   'playback_bar.c',
   'now_playing_panel.c',
+  'cover_loader.c',
   'track_row.c',
   'track_list.c',
   'home_page.c',

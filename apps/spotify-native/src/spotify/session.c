@@ -73,6 +73,7 @@ spotifygtk_native_track_free (SpotifyNativeTrack *track)
   g_free (track->name);
   g_free (track->artists);
   g_free (track->album);
+  g_free (track->cover_id);
   g_free (track);
 }
 
@@ -467,6 +468,7 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     track->album       = g_strdup (info->meta.album_name);
     track->duration_ms = info->meta.duration_ms;
     track->is_explicit = info->meta.is_explicit;
+    track->cover_id    = g_strdup (info->meta.cover_id);
 
     g_ptr_array_add (out, track);
   }

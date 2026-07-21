@@ -148,6 +148,7 @@ native_track_copy (const SpotifyNativeTrack *src)
   copy->name        = g_strdup (src->name);
   copy->artists     = g_strdup (src->artists);
   copy->album       = g_strdup (src->album);
+  copy->cover_id    = g_strdup (src->cover_id);
   copy->duration_ms = src->duration_ms;
   copy->is_explicit = src->is_explicit;
   return copy;

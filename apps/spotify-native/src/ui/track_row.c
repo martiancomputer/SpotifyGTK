@@ -7,6 +7,8 @@
 #include <string.h>
 #include <math.h>
 
+#include "cover_loader.h"
+
 struct _SpotifyGtkTrackRow {
   GtkListBoxRow parent_instance;
 
@@ -23,6 +25,10 @@ struct _SpotifyGtkTrackRow {
   /* Now-playing equaliser: three bars beside the duration. */
   GtkWidget *eq_area;
   guint      eq_tick_id;
+
+  /* Cancelled when the row is reused or destroyed, so a slow cover cannot
+   * land on a row that now shows a different track. */
+  GCancellable *cover_cancellable;
 
   gboolean show_album;
   gboolean show_artists;
@@ -49,6 +55,10 @@ static void
 spotifygtk_track_row_dispose (GObject *object)
 {
   SpotifyGtkTrackRow *self = SPOTIFYGTK_TRACK_ROW (object);
+  if (self->cover_cancellable) {
+    g_cancellable_cancel (self->cover_cancellable);
+    g_clear_object (&self->cover_cancellable);
+  }
   if (self->eq_tick_id != 0 && self->eq_area) {
     gtk_widget_remove_tick_callback (GTK_WIDGET (self->eq_area), self->eq_tick_id);
     self->eq_tick_id = 0;
@@ -149,6 +159,37 @@ eq_set_running (SpotifyGtkTrackRow *self, gboolean running)
     self->eq_tick_id = 0;
   }
   gtk_widget_set_visible (self->eq_area, running);
+}
+
+static void
+on_row_cover_loaded (GdkTexture *texture, gpointer user_data)
+{
+  SpotifyGtkTrackRow *self = user_data;
+
+  if (!texture)
+    return;   /* keep the placeholder icon */
+
+  gtk_image_set_from_paintable (self->album_art, GDK_PAINTABLE (texture));
+  gtk_widget_set_visible (GTK_WIDGET (self->album_art), TRUE);
+  gtk_widget_set_visible (GTK_WIDGET (self->track_num), FALSE);
+}
+
+/* Rows are rebuilt per listing, but a row can be re-set before its cover
+ * arrives; drop the old request first. */
+static void
+row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
+{
+  if (self->cover_cancellable) {
+    g_cancellable_cancel (self->cover_cancellable);
+    g_clear_object (&self->cover_cancellable);
+  }
+
+  if (!cover_id || !*cover_id)
+    return;
+
+  self->cover_cancellable = g_cancellable_new ();
+  spotifygtk_cover_load (cover_id, self->cover_cancellable,
+                         on_row_cover_loaded, self);
 }
 
 static void
@@ -363,6 +404,8 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
   gint total_secs = (gint) (track->duration_ms / 1000);
   g_autofree gchar *dur = g_strdup_printf ("%d:%02d", total_secs / 60, total_secs % 60);
   gtk_label_set_text (self->duration_label, dur);
+
+  row_request_cover (self, track->cover_id);
 }
 
 void

@@ -172,6 +172,71 @@ test_duration_is_zigzag_decoded (void)
   }
 }
 
+/* Cover art: Album.cover_group(17) -> ImageGroup.image(1) -> Image.file_id(1).
+ * The largest advertised image must win, and Image.width is sint32, so the
+ * encoder here zigzags it exactly as the wire does. */
+static void
+test_cover_picks_the_largest_image (void)
+{
+  GByteArray *group = g_byte_array_new ();
+
+  const struct { guint8 marker; gint32 width; } images[] = {
+    { 0x11, 64 }, { 0x22, 640 }, { 0x33, 300 },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (images); i++) {
+    GByteArray *image = g_byte_array_new ();
+    guint8 file_id[20];
+    memset (file_id, images[i].marker, sizeof file_id);
+    pb_write_bytes_field (image, 1, file_id, sizeof file_id);
+    pb_write_varint_field (image, 3, zigzag_encode (images[i].width));
+    pb_write_message_field (group, 1, image->data, image->len);
+    g_byte_array_free (image, TRUE);
+  }
+
+  GByteArray *album = g_byte_array_new ();
+  pb_write_message_field (album, 17, group->data, group->len);
+  g_byte_array_free (group, TRUE);
+
+  GByteArray *track = g_byte_array_new ();
+  pb_write_message_field (track, 3, album->data, album->len);
+  g_byte_array_free (album, TRUE);
+
+  SpotifyTrackMeta meta;
+  g_assert_true (spotifygtk_track_meta_parse (track->data, track->len, &meta));
+
+  /* 640 is the widest, so its file_id (all 0x22 bytes) must be the one. */
+  g_assert_nonnull (meta.cover_id);
+  g_assert_cmpuint (strlen (meta.cover_id), ==, 40);
+  g_assert_cmpstr (meta.cover_id, ==,
+                   "2222222222222222222222222222222222222222");
+
+  spotifygtk_track_meta_clear (&meta);
+  g_byte_array_free (track, TRUE);
+}
+
+/* An album with no cover_group must leave cover_id NULL, not empty-string:
+ * the UI distinguishes "no artwork" from "artwork not fetched yet". */
+static void
+test_album_without_cover_group (void)
+{
+  GByteArray *album = g_byte_array_new ();
+  const gchar *name = "Coverless";
+  pb_write_bytes_field (album, 2, (const guint8 *) name, strlen (name));
+
+  GByteArray *track = g_byte_array_new ();
+  pb_write_message_field (track, 3, album->data, album->len);
+  g_byte_array_free (album, TRUE);
+
+  SpotifyTrackMeta meta;
+  g_assert_true (spotifygtk_track_meta_parse (track->data, track->len, &meta));
+  g_assert_cmpstr (meta.album_name, ==, "Coverless");
+  g_assert_null (meta.cover_id);
+
+  spotifygtk_track_meta_clear (&meta);
+  g_byte_array_free (track, TRUE);
+}
+
 static void
 test_empty_and_garbage (void)
 {
@@ -198,6 +263,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/track-meta/no-display-fields", test_track_without_display_fields);
   g_test_add_func ("/track-meta/unknown-fields-skipped", test_unknown_fields_are_skipped);
   g_test_add_func ("/track-meta/duration-zigzag", test_duration_is_zigzag_decoded);
+  g_test_add_func ("/track-meta/cover-largest", test_cover_picks_the_largest_image);
+  g_test_add_func ("/track-meta/cover-absent", test_album_without_cover_group);
   g_test_add_func ("/track-meta/empty-and-garbage", test_empty_and_garbage);
 
   return g_test_run ();

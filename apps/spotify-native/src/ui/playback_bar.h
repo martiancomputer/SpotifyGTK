@@ -36,6 +36,8 @@ void spotifygtk_playback_bar_set_volume       (SpotifyGtkPlaybackBar *self,
 void spotifygtk_playback_bar_set_liked        (SpotifyGtkPlaybackBar *self,
                                                gboolean liked);
 
+void spotifygtk_playback_bar_set_cover (SpotifyGtkPlaybackBar *self, const gchar *cover_id);
+
 /* Signals:
  * - play-clicked
  * - pause-clicked

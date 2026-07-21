@@ -1,0 +1,53 @@
+/*
+ * cover_loader.h — Album artwork fetching, decoding and caching.
+ *
+ * Covers arrive as a hex image id on SpotifyNativeTrack (extracted from
+ * Track.album.cover_group by track_meta.c) and are served from Spotify's
+ * public image CDN at https://i.scdn.co/image/<id>.
+ *
+ * Why not the image cache in spotify-connect: that one is built around the
+ * Web API's JSON image URLs and carries a VA-API/libjpeg-turbo decode ladder
+ * this does not need. GTK4 already decodes JPEG into a GdkTexture, and a
+ * texture is what the widgets want, so this stays small rather than sharing
+ * a component whose extra machinery would be unused here.
+ *
+ * Caching is by image id, in memory, for the process lifetime. Album art is
+ * small, heavily repeated within a listing (every track of an album shares
+ * one), and immutable for a given id — so a plain hash table is enough, and
+ * a listing of 100 tracks typically resolves to a handful of fetches.
+ */
+
+#pragma once
+
+#include <gtk/gtk.h>
+
+G_BEGIN_DECLS
+
+/*
+ * Called with the decoded texture, or NULL if the cover could not be
+ * fetched or decoded. The texture is owned by the cache; ref it to keep it.
+ *
+ * Always invoked on the thread that made the request.
+ */
+typedef void (*SpotifyCoverCallback) (GdkTexture *texture, gpointer user_data);
+
+/*
+ * Request the cover for `cover_id` (the hex id from SpotifyNativeTrack).
+ *
+ * A cached cover invokes the callback before returning. `cover_id` NULL or
+ * empty invokes it with NULL, so callers do not need to special-case a
+ * track whose album has no artwork.
+ *
+ * Cancelling stops the callback from running, which is what list rows need:
+ * rows are recycled as results arrive, and a late callback would otherwise
+ * paint one track's artwork onto another's row.
+ */
+void spotifygtk_cover_load (const gchar          *cover_id,
+                            GCancellable         *cancellable,
+                            SpotifyCoverCallback  callback,
+                            gpointer              user_data);
+
+/* Build the CDN URL for an image id. Exposed for testing. */
+gchar *spotifygtk_cover_build_url (const gchar *cover_id);
+
+G_END_DECLS

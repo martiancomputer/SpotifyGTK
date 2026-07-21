@@ -14,6 +14,7 @@
  */
 
 #include "playback_bar.h"
+#include "cover_loader.h"
 
 /* Side columns are fixed and equal so the transport controls sit in the
  * true centre of the window regardless of how long the track name is. */
@@ -502,4 +503,26 @@ spotifygtk_playback_bar_set_liked (SpotifyGtkPlaybackBar *self, gboolean liked)
     gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "like-active");
   else
     gtk_widget_remove_css_class (GTK_WIDGET (self->like_btn), "like-active");
+}
+
+static void
+on_cover_loaded_spotifygtk_playback_bar (GdkTexture *texture, gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+
+  if (texture)
+    gtk_image_set_from_paintable (self->album_art, GDK_PAINTABLE (texture));
+  else
+    gtk_image_set_from_icon_name (self->album_art, "audio-x-generic-symbolic");
+}
+
+void
+spotifygtk_playback_bar_set_cover (SpotifyGtkPlaybackBar *self, const gchar *cover_id)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+
+  /* No cancellable: there is exactly one of these widgets, and a late cover
+   * can only ever belong to the track it was asked for or be superseded by
+   * the next call, which overwrites it anyway. */
+  spotifygtk_cover_load (cover_id, NULL, on_cover_loaded_spotifygtk_playback_bar, self);
 }

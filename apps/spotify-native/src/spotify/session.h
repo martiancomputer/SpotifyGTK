@@ -58,6 +58,7 @@ typedef struct {
   gchar   *album;
   gint64   duration_ms;
   gboolean is_explicit;
+  gchar   *cover_id;     /* hex Image.file_id; NULL if the album has no art */
 } SpotifyNativeTrack;
 
 void spotifygtk_native_track_free (SpotifyNativeTrack *track);

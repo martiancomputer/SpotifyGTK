@@ -92,6 +92,9 @@ select_and_play_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *t
   spotifygtk_playback_bar_set_track (self->playback_bar, name, artists);
   spotifygtk_now_playing_panel_set_track (self->now_playing_panel, name, artists, album);
 
+  spotifygtk_playback_bar_set_cover (self->playback_bar, track->cover_id);
+  spotifygtk_now_playing_panel_set_cover (self->now_playing_panel, track->cover_id);
+
   GError *error = NULL;
   if (!spotifygtk_player_service_start_uri (self->player, track->uri, &error)) {
     g_warning ("Playback failed: %s", error->message);
@@ -427,7 +430,10 @@ static const gchar *dark_theme_css =
   /* ── Text selection ────────────────────────────────────────── */
   /* One selection colour everywhere: the search entry, and any selectable
    * label in results, playlists, liked songs or albums. */
-  "selection, ::selection, entry selection, label selection, text selection"
+  /* GTK4 models selection as a `selection` node, not the CSS ::selection
+   * pseudo-element -- including the latter makes the whole rule fail to
+   * parse ("Unknown pseudoclass"). */
+  "selection, entry selection, label selection, text selection"
   "  { background-color: #60A5FA; color: #0a0a0a; }"
   "entry { caret-color: #60A5FA; }"
 
