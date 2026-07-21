@@ -38,12 +38,30 @@ librespot
 Source:     https://github.com/librespot-org/librespot
 Used in:    research/ notes; reference material for apps/spotify-native
             (AP handshake structure, DH parameters, RSA server key,
-            keyexchange.proto schema, packet codec framing)
+            keyexchange.proto schema, packet codec framing, the
+            client-token/login5/spclient auth-relay chain, spclient
+            endpoint paths, and the .proto schemas listed below)
 Nature:     Reference / research material. Protocol structure and
             constants cross-checked against this implementation;
             no source code copied directly except where noted above
             (the shannon crate, which librespot also depends on
             rather than implementing itself).
+
+            Schema transcriptions -- field numbers and wire types read
+            from librespot's protocol/proto/ and re-expressed as C
+            constants, not generated or copied verbatim:
+
+              metadata.proto (message Track: gid=1, name=2, album=3,
+                artist=4, duration=7, explicit=9, file=12; Album.name
+                and Artist.name both field 2)
+                -> apps/spotify-native/src/spotify/track_meta.c
+
+            Note on provenance: librespot's proto files carry the header
+            "Extracted from: Spotify 1.2.52.442 (windows)". That
+            extraction is librespot's own work, published under the MIT
+            license below. This project treats it as the upstream
+            reference rather than repeating the extraction -- see
+            principle 5 in README.md.
 
 MIT License
 

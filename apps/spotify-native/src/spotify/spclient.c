@@ -347,3 +347,317 @@ spotifygtk_spclient_new (void)
 
 void spotifygtk_spclient_set_cancellable (SpotifySpclient *self, GCancellable *cancellable)
 { g_set_object (&self->cancellable, cancellable); }
+
+/* ── Batched display metadata ────────────────────────────────────────────── */
+
+typedef struct {
+  SpclientBatchCallback callback;
+  gpointer              user_data;
+} BatchRequestClosure;
+
+/* extended_metadata.proto / entity_extension_data.proto field numbers */
+#define BER_EXTENDED_METADATA   2   /* BatchedExtensionResponse.extended_metadata (repeated) */
+#define EEDA_EXTENSION_DATA     3   /* EntityExtensionDataArray.extension_data   (repeated) */
+#define EED_ENTITY_URI          2   /* EntityExtensionData.entity_uri */
+#define EED_EXTENSION_DATA      3   /* EntityExtensionData.extension_data (google.protobuf.Any) */
+#define ANY_VALUE               2   /* google.protobuf.Any.value */
+
+static void
+on_batch_response (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  BatchRequestClosure *cl  = user_data;
+  g_autoptr(GError)    err = NULL;
+
+  GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
+  if (!bytes) {
+    if (cl->callback) cl->callback (NULL, 0, err, cl->user_data);
+    g_free (cl);
+    return;
+  }
+
+  gsize         len  = 0;
+  const guint8 *data = g_bytes_get_data (bytes, &len);
+
+  GArray *out = g_array_new (FALSE, TRUE, sizeof (SpclientTrackInfo));
+
+  /* Both extended_metadata and extension_data are repeated, so neither can
+   * use pb_find_bytes_field (first match only) -- walk them with
+   * pb_read_field. One request for N tracks comes back as one array with N
+   * entries, but a server splitting them across arrays would still parse. */
+  gsize         outer_pos = 0;
+  guint32       field_num;
+  PbWireType    wire_type;
+  const guint8 *field_data;
+  gsize         field_len;
+  guint64       field_varint;
+
+  while (pb_read_field (data, len, &outer_pos, &field_num, &wire_type,
+                        &field_data, &field_len, &field_varint)) {
+    if (field_num != BER_EXTENDED_METADATA || wire_type != PB_WIRE_LENGTH_DELIMITED)
+      continue;
+
+    const guint8 *array_data = field_data;
+    gsize         array_len  = field_len;
+
+    gsize         inner_pos = 0;
+    guint32       inner_field;
+    PbWireType    inner_wire;
+    const guint8 *inner_data;
+    gsize         inner_len;
+    guint64       inner_varint;
+
+    while (pb_read_field (array_data, array_len, &inner_pos, &inner_field, &inner_wire,
+                          &inner_data, &inner_len, &inner_varint)) {
+      if (inner_field != EEDA_EXTENSION_DATA || inner_wire != PB_WIRE_LENGTH_DELIMITED)
+        continue;
+
+      /* EntityExtensionData: entity_uri (2), extension_data (3 = Any) */
+      const guint8 *uri_data = NULL;
+      gsize         uri_len  = 0;
+      gboolean have_uri = pb_find_bytes_field (inner_data, inner_len,
+                                               EED_ENTITY_URI, &uri_data, &uri_len);
+
+      const guint8 *any_data = NULL;
+      gsize         any_len  = 0;
+      if (!pb_find_bytes_field (inner_data, inner_len, EED_EXTENSION_DATA,
+                                &any_data, &any_len))
+        continue;
+
+      const guint8 *track_data = NULL;
+      gsize         track_len  = 0;
+      if (!pb_find_bytes_field (any_data, any_len, ANY_VALUE, &track_data, &track_len))
+        continue;
+
+      SpclientTrackInfo info;
+      memset (&info, 0, sizeof info);
+
+      if (!spotifygtk_track_meta_parse (track_data, track_len, &info.meta))
+        continue;
+
+      info.entity_uri = have_uri ? g_strndup ((const gchar *) uri_data, uri_len) : NULL;
+      g_array_append_val (out, info);
+    }
+  }
+
+  if (out->len == 0) {
+    GError *empty = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
+      "extended-metadata batch response contained no parseable tracks");
+    g_warning ("spclient: %s", empty->message);
+    if (cl->callback) cl->callback (NULL, 0, empty, cl->user_data);
+    g_error_free (empty);
+  } else {
+    g_message ("spclient: batch resolved %u track(s)", out->len);
+    if (cl->callback)
+      cl->callback ((const SpclientTrackInfo *) out->data, out->len, NULL, cl->user_data);
+  }
+
+  for (guint i = 0; i < out->len; i++) {
+    SpclientTrackInfo *info = &g_array_index (out, SpclientTrackInfo, i);
+    g_free (info->entity_uri);
+    spotifygtk_track_meta_clear (&info->meta);
+  }
+  g_array_free (out, TRUE);
+
+  g_bytes_unref (bytes);
+  g_free (cl);
+}
+
+void
+spotifygtk_spclient_get_tracks_metadata (SpotifySpclient      *self,
+                                         const gchar *const   *track_uris,
+                                         guint                 n_uris,
+                                         const gchar          *bearer_token,
+                                         const gchar          *client_token,
+                                         SpclientBatchCallback callback,
+                                         gpointer              user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
+  g_return_if_fail (track_uris != NULL || n_uris == 0);
+
+  if (n_uris == 0) {
+    if (callback) {
+      GError *none = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                          "no track URIs requested");
+      callback (NULL, 0, none, user_data);
+      g_error_free (none);
+    }
+    return;
+  }
+
+  g_autofree gchar *url = g_strdup_printf ("https://%s/extended-metadata/v0/extended-metadata",
+                                           SPCLIENT_FALLBACK_HOST);
+
+  GByteArray *req_buf = g_byte_array_new ();
+
+  for (guint i = 0; i < n_uris; i++) {
+    if (!track_uris[i])
+      continue;
+
+    /* ExtensionQuery: extension_kind (1) = TRACK_V4 (10) */
+    GByteArray *query_buf = g_byte_array_new ();
+    pb_write_varint_field (query_buf, 1, 10);
+
+    /* EntityRequest: entity_uri (1), query (2) */
+    GByteArray *entity_req_buf = g_byte_array_new ();
+    pb_write_bytes_field (entity_req_buf, 1,
+                          (const guint8 *) track_uris[i], strlen (track_uris[i]));
+    pb_write_message_field (entity_req_buf, 2, query_buf->data, query_buf->len);
+
+    /* BatchedEntityRequest.entity_request (2) -- repeated, so this tag
+     * simply repeats once per track. */
+    pb_write_message_field (req_buf, 2, entity_req_buf->data, entity_req_buf->len);
+
+    g_byte_array_free (query_buf, TRUE);
+    g_byte_array_free (entity_req_buf, TRUE);
+  }
+
+  SoupMessage *msg = soup_message_new (SOUP_METHOD_POST, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
+
+  g_autofree gchar *auth_hdr = g_strdup_printf ("Bearer %s", bearer_token ? bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth_hdr);
+  soup_message_headers_replace (headers, "Content-Type", "application/x-protobuf");
+  soup_message_headers_replace (headers, "Accept", "application/x-protobuf");
+  if (client_token && *client_token)
+    soup_message_headers_replace (headers, "Client-Token", client_token);
+
+  GBytes *body_bytes = g_byte_array_free_to_bytes (req_buf);
+  soup_message_set_request_body_from_bytes (msg, "application/x-protobuf", body_bytes);
+  g_bytes_unref (body_bytes);
+
+  BatchRequestClosure *cl = g_new0 (BatchRequestClosure, 1);
+  cl->callback  = callback;
+  cl->user_data = user_data;
+
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, self->cancellable,
+                                    on_batch_response, cl);
+  g_object_unref (msg);
+}
+
+/* ── Context resolution ──────────────────────────────────────────────────── */
+
+typedef struct {
+  SpclientContextCallback callback;
+  gpointer                user_data;
+} ContextRequestClosure;
+
+gchar *
+spotifygtk_spclient_build_search_uri (const gchar *query)
+{
+  if (!query || !*query)
+    return NULL;
+
+  /* Spaces become '+' (spclient.rs: "whitespaces are replaced with +").
+   * Everything else is percent-escaped: a query is arbitrary user input
+   * and ':' or '/' left raw would change how the URI parses and how the
+   * request path is built. '+' itself must be reserved from the escape
+   * set or the separator would come back percent-encoded. */
+  g_autofree gchar *collapsed = g_strdup (query);
+  for (gchar *p = collapsed; *p; p++) {
+    if (g_ascii_isspace (*p))
+      *p = '+';
+  }
+
+  g_autofree gchar *escaped = g_uri_escape_string (collapsed, "+", FALSE);
+  return g_strdup_printf ("spotify:search:%s", escaped);
+}
+
+gchar *
+spotifygtk_spclient_build_collection_uri (const gchar *user_id)
+{
+  if (!user_id || !*user_id)
+    return NULL;
+
+  g_autofree gchar *escaped = g_uri_escape_string (user_id, NULL, FALSE);
+  return g_strdup_printf ("spotify:user:%s:collection", escaped);
+}
+
+static void
+on_context_response (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  ContextRequestClosure *cl  = user_data;
+  g_autoptr(GError)      err = NULL;
+
+  GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
+  if (!bytes) {
+    if (cl->callback) cl->callback (NULL, err, cl->user_data);
+    g_free (cl);
+    return;
+  }
+
+  gsize        len  = 0;
+  const gchar *body = g_bytes_get_data (bytes, &len);
+
+  /* An empty body is a documented outcome, not a parse failure:
+   * librespot's get_context treats it as SpClientError::NoData. */
+  if (len == 0) {
+    GError *no_data = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+      "context-resolve returned an empty body (no data for this URI)");
+    if (cl->callback) cl->callback (NULL, no_data, cl->user_data);
+    g_error_free (no_data);
+    g_bytes_unref (bytes);
+    g_free (cl);
+    return;
+  }
+
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  g_autoptr(GError) parse_err = NULL;
+
+  if (!json_parser_load_from_data (parser, body, (gssize) len, &parse_err)) {
+    /* Surface a snippet: an auth failure here arrives as an HTML or
+     * plain-text error page, and "invalid JSON" alone would hide that. */
+    g_autofree gchar *snippet = g_strndup (body, MIN (len, 200));
+    GError *bad = g_error_new (G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+      "context-resolve response was not JSON (%s): %s",
+      parse_err->message, snippet);
+    g_warning ("spclient: %s", bad->message);
+    if (cl->callback) cl->callback (NULL, bad, cl->user_data);
+    g_error_free (bad);
+    g_bytes_unref (bytes);
+    g_free (cl);
+    return;
+  }
+
+  JsonNode *root = json_parser_get_root (parser);
+  if (cl->callback)
+    cl->callback (root ? json_node_copy (root) : NULL, NULL, cl->user_data);
+
+  g_bytes_unref (bytes);
+  g_free (cl);
+}
+
+void
+spotifygtk_spclient_get_context (SpotifySpclient        *self,
+                                 const gchar            *context_uri,
+                                 const gchar            *bearer_token,
+                                 const gchar            *client_token,
+                                 SpclientContextCallback callback,
+                                 gpointer                user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
+  g_return_if_fail (context_uri != NULL);
+
+  /* The URI is a path segment, so it must be escaped as one. ':' is left
+   * unreserved because the spotify:...:... form depends on it and it is
+   * legal in a path segment per RFC 3986. */
+  g_autofree gchar *escaped_uri = g_uri_escape_string (context_uri, ":", FALSE);
+  g_autofree gchar *url = g_strdup_printf ("https://%s/context-resolve/v1/%s",
+                                           SPCLIENT_FALLBACK_HOST, escaped_uri);
+
+  SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
+
+  g_autofree gchar *auth_hdr = g_strdup_printf ("Bearer %s", bearer_token ? bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth_hdr);
+  soup_message_headers_replace (headers, "Accept", "application/json");
+  if (client_token)
+    soup_message_headers_replace (headers, "Client-Token", client_token);
+
+  ContextRequestClosure *cl = g_new0 (ContextRequestClosure, 1);
+  cl->callback  = callback;
+  cl->user_data = user_data;
+
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, self->cancellable,
+                                    on_context_response, cl);
+  g_object_unref (msg);
+}

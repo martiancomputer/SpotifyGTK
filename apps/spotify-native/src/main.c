@@ -57,6 +57,7 @@
 #include "spotify/clienttoken.h"
 #include "spotify/login5.h"
 #include "spotify/spclient.h"
+#include "spotify/session.h"
 #include "spotify/audio_key.h"
 #include "spotify/cdn.h"
 #include "audio/decoder.h"
@@ -805,6 +806,161 @@ on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError 
   g_main_loop_quit (state->loop);
 }
 
+/*
+ * Context-resolve probe.
+ *
+ * The response shape of /context-resolve/v1 for a `search` URI is not
+ * documented anywhere upstream -- librespot's own comment says only that it
+ * is "massively influenced by the provided query". The only way to learn it
+ * is to ask a real server, which is what this does.
+ *
+ * Gated behind SPOTIFY_PROBE_CONTEXT so it never runs during normal
+ * playback. When set, the probe replaces playback rather than preceding it:
+ * interleaving a diagnostic with the audio pipeline would make it unclear
+ * which one any subsequent failure came from.
+ */
+static void
+on_batch_probe_result (const SpclientTrackInfo *tracks, guint n_tracks,
+                       GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (error || !tracks) {
+    g_warning ("[probe] batched metadata FAILED: %s",
+               error ? error->message : "no tracks returned");
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  g_message ("[probe] batched metadata SUCCEEDED -- %u track(s), one round trip", n_tracks);
+  g_message ("[probe] --- what the UI would render ---");
+
+  for (guint i = 0; i < n_tracks; i++) {
+    const SpclientTrackInfo *t = &tracks[i];
+    gint secs = (gint) (t->meta.duration_ms / 1000);
+    g_message ("[probe]  %2u. %-42s %-28s %d:%02d%s",
+               i + 1,
+               t->meta.name         ? t->meta.name         : "(no name)",
+               t->meta.artist_names ? t->meta.artist_names : "(no artist)",
+               secs / 60, secs % 60,
+               t->meta.is_explicit ? "  [E]" : "");
+  }
+
+  state->ok = TRUE;
+  g_main_loop_quit (state->loop);
+}
+
+static void
+on_context_probe_result (JsonNode *context, GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (error || !context) {
+    g_warning ("[probe] context-resolve FAILED: %s",
+               error ? error->message : "no data returned");
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  g_message ("[probe] context-resolve SUCCEEDED -- dumping response shape");
+
+  /* Top-level keys, then the first page's first track, which is the part
+   * the UI actually has to consume. */
+  if (JSON_NODE_HOLDS_OBJECT (context)) {
+    JsonObject *root = json_node_get_object (context);
+    g_autoptr(GList) keys = json_object_get_members (root);
+    GString *key_list = g_string_new (NULL);
+    for (GList *l = keys; l; l = l->next) {
+      if (key_list->len) g_string_append (key_list, ", ");
+      g_string_append (key_list, (const gchar *) l->data);
+    }
+    g_message ("[probe] top-level keys: %s", key_list->str);
+    g_string_free (key_list, TRUE);
+
+    if (json_object_has_member (root, "pages")) {
+      JsonArray *pages = json_object_get_array_member (root, "pages");
+      guint n_pages = pages ? json_array_get_length (pages) : 0;
+      g_message ("[probe] pages: %u", n_pages);
+
+      if (n_pages > 0) {
+        JsonObject *page = json_array_get_object_element (pages, 0);
+        if (page && json_object_has_member (page, "tracks")) {
+          JsonArray *tracks = json_object_get_array_member (page, "tracks");
+          guint n_tracks = tracks ? json_array_get_length (tracks) : 0;
+          g_message ("[probe] page[0].tracks: %u", n_tracks);
+
+          if (n_tracks > 0) {
+            g_autoptr(JsonGenerator) gen = json_generator_new ();
+            json_generator_set_pretty (gen, TRUE);
+            json_generator_set_root (gen, json_array_get_element (tracks, 0));
+            g_autofree gchar *first = json_generator_to_data (gen, NULL);
+            g_message ("[probe] page[0].tracks[0] =\n%s", first);
+          }
+        }
+      }
+    }
+  }
+
+  /* Second half: context-resolve yields URIs only, so resolve them to
+   * display metadata in ONE batched call and print what the UI would
+   * actually render. This is the part that proves the whole catalog path,
+   * not just that the endpoint answers. */
+  GPtrArray *uris = g_ptr_array_new_with_free_func (g_free);
+  if (JSON_NODE_HOLDS_OBJECT (context)) {
+    JsonObject *root = json_node_get_object (context);
+    if (json_object_has_member (root, "pages")) {
+      JsonArray *pages = json_object_get_array_member (root, "pages");
+      for (guint p = 0; pages && p < json_array_get_length (pages); p++) {
+        JsonObject *page = json_array_get_object_element (pages, p);
+        if (!page || !json_object_has_member (page, "tracks"))
+          continue;
+        JsonArray *tracks = json_object_get_array_member (page, "tracks");
+        for (guint t = 0; tracks && t < json_array_get_length (tracks); t++) {
+          JsonObject *track = json_array_get_object_element (tracks, t);
+          if (!track || !json_object_has_member (track, "uri"))
+            continue;
+          g_ptr_array_add (uris,
+            g_strdup (json_object_get_string_member (track, "uri")));
+        }
+      }
+    }
+  }
+
+  json_node_unref (context);
+
+  if (uris->len == 0) {
+    g_warning ("[probe] no track URIs in context -- nothing to resolve");
+    g_ptr_array_free (uris, TRUE);
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  /* A real library is thousands of tracks; one request for all of them is
+   * rejected. Cap the probe so we can find the workable batch size. */
+  const gchar *limit_env = g_getenv ("SPOTIFY_PROBE_LIMIT");
+  guint limit = limit_env && *limit_env ? (guint) g_ascii_strtoull (limit_env, NULL, 10) : 50;
+  if (limit > 0 && uris->len > limit) {
+    g_message ("[probe] capping %u URIs to %u for this batch", uris->len, limit);
+    g_ptr_array_set_size (uris, limit);
+  }
+
+  g_message ("[probe] resolving %u track URIs in a single batched request...", uris->len);
+  g_ptr_array_add (uris, NULL);   /* NULL-terminate for the const gchar *const * form */
+
+  /* Stashed so the metadata callback can free it after the request. */
+  g_object_set_data_full (G_OBJECT (state->spclient), "probe-uris", uris,
+                          (GDestroyNotify) g_ptr_array_unref);
+
+  spotifygtk_spclient_get_tracks_metadata (state->spclient,
+                                           (const gchar *const *) uris->pdata,
+                                           uris->len - 1,
+                                           state->bearer_token, state->client_token,
+                                           on_batch_probe_result, state);
+}
+
 static void
 on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
                   GError *error, gpointer user_data)
@@ -814,11 +970,33 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
   if (access_token) {
     g_message ("[live-test] LOGIN5 SUCCEEDED -- obtained a spclient-usable bearer token "
               "(expires in %ds).", expires_in_seconds);
-    
+
     state->bearer_token = g_strdup (access_token);
     state->spclient = spotifygtk_spclient_new ();
     spotifygtk_spclient_set_cancellable (state->spclient, state->cancellable);
-    
+
+    const gchar *probe = g_getenv ("SPOTIFY_PROBE_CONTEXT");
+    if (probe && *probe) {
+      /* A bare word is treated as a search query; anything already in
+       * spotify:...:... form is passed through, so the same switch can
+       * probe collection/playlist/album URIs too. */
+      g_autofree gchar *probe_uri = NULL;
+      if (g_str_has_prefix (probe, "spotify:")) {
+        probe_uri = g_strdup (probe);
+      } else if (g_strcmp0 (probe, "collection") == 0) {
+        probe_uri = spotifygtk_spclient_build_collection_uri (
+                      spotifygtk_ap_session_get_username (state->session));
+      } else {
+        probe_uri = spotifygtk_spclient_build_search_uri (probe);
+      }
+
+      g_message ("[probe] resolving context: %s", probe_uri ? probe_uri : "(null)");
+      spotifygtk_spclient_get_context (state->spclient, probe_uri,
+                                       state->bearer_token, state->client_token,
+                                       on_context_probe_result, state);
+      return;
+    }
+
     g_message ("[live-test] Fetching metadata for %s...", state->track_uri);
     report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
                      "Streaming token received; fetching track metadata.");
@@ -1130,10 +1308,115 @@ spotifygtk_native_engine_run (GCancellable *cancellable,
 }
 
 #ifndef SPOTIFYGTK_ENGINE_LIBRARY
+
+/* ── Session probe ───────────────────────────────────────────────────────── */
+
+typedef struct {
+  GMainLoop *loop;
+  gboolean   ok;
+  gchar     *query;
+} SessionProbe;
+
+static void
+on_session_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  SpotifyNativeSession *session = SPOTIFYGTK_NATIVE_SESSION (source);
+  SessionProbe         *probe   = user_data;
+  g_autoptr(GError)     err     = NULL;
+
+  g_autoptr(GPtrArray) tracks =
+    spotifygtk_native_session_load_tracks_finish (session, result, &err);
+
+  if (!tracks) {
+    g_warning ("[session-probe] load_tracks FAILED: %s", err ? err->message : "unknown");
+    probe->ok = FALSE;
+    g_main_loop_quit (probe->loop);
+    return;
+  }
+
+  g_message ("[session-probe] loaded %u track(s) via the session API", tracks->len);
+  for (guint i = 0; i < tracks->len; i++) {
+    SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
+    gint secs = (gint) (t->duration_ms / 1000);
+    g_message ("[session-probe]  %2u. %-40s %-26s %d:%02d",
+               i + 1,
+               t->name    ? t->name    : "(no name)",
+               t->artists ? t->artists : "(no artist)",
+               secs / 60, secs % 60);
+  }
+
+  probe->ok = tracks->len > 0;
+  g_main_loop_quit (probe->loop);
+}
+
+static void
+on_session_state_changed (SpotifyNativeSession *session, gint state,
+                          const gchar *message, gpointer user_data)
+{
+  SessionProbe *probe = user_data;
+
+  g_message ("[session-probe] state=%d: %s", state, message ? message : "");
+
+  if (state == SPOTIFYGTK_SESSION_READY) {
+    g_autofree gchar *username = spotifygtk_native_session_dup_username (session);
+    g_message ("[session-probe] session READY (username resolved: %s)",
+               username ? "yes" : "no");
+
+    g_autofree gchar *uri = NULL;
+    if (g_strcmp0 (probe->query, "collection") == 0)
+      uri = spotifygtk_native_session_dup_collection_uri (session);
+    else
+      uri = spotifygtk_spclient_build_search_uri (probe->query);
+
+    g_message ("[session-probe] load_tracks(%s)", uri ? uri : "(null)");
+    spotifygtk_native_session_load_tracks (session, uri, 10, NULL,
+                                           on_session_tracks_loaded, probe);
+  } else if (state == SPOTIFYGTK_SESSION_FAILED) {
+    probe->ok = FALSE;
+    g_main_loop_quit (probe->loop);
+  }
+}
+
+/*
+ * Exercises SpotifyNativeSession the way the UI will: create it on the main
+ * thread, start it, wait for "state-changed", then call the async API and
+ * confirm the result arrives back on this thread. That last part is the
+ * whole point -- the protocol work happens on the session's worker, and a
+ * callback landing on the wrong thread is exactly the bug this design is
+ * meant to prevent.
+ */
+static int
+run_session_probe (const gchar *query)
+{
+  GMainLoop *loop = g_main_loop_new (NULL, FALSE);
+  SessionProbe probe = { .loop = loop, .ok = FALSE, .query = g_strdup (query) };
+
+  SpotifyNativeSession *session = spotifygtk_native_session_new ();
+  g_signal_connect (session, "state-changed",
+                    G_CALLBACK (on_session_state_changed), &probe);
+
+  g_message ("[session-probe] starting session (main thread: %p)", (void *) g_thread_self ());
+  spotifygtk_native_session_start (session);
+
+  g_main_loop_run (loop);
+
+  g_message ("[session-probe] %s", probe.ok ? "PASSED" : "FAILED");
+
+  g_object_unref (session);
+  g_main_loop_unref (loop);
+  g_free (probe.query);
+  return probe.ok ? 0 : 1;
+}
+
 int
 main (int argc, char *argv[])
 {
   (void) argc; (void) argv;
+
+  const gchar *session_probe = g_getenv ("SPOTIFY_PROBE_SESSION");
+  if (session_probe && *session_probe)
+    return run_session_probe (session_probe);
+
   return spotifygtk_native_engine_run (NULL, NULL, NULL, NULL, NULL) ? 0 : 1;
 }
 #endif

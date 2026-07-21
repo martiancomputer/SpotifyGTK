@@ -15,6 +15,25 @@ if get_option('tests')
   )
   test('protobuf-wire-format', test_protobuf)
 
+  test_track_meta = executable('test-track-meta',
+    'test_track_meta.c',
+    '../src/spotify/protobuf_min.c',
+    '../src/spotify/track_meta.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep],
+  )
+  test('track-display-metadata', test_track_meta)
+
+  test_context_uri = executable('test-context-uri',
+    'test_context_uri.c',
+    '../src/spotify/spclient.c',
+    '../src/spotify/protobuf_min.c',
+    '../src/spotify/track_meta.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
+  )
+  test('context-uri-building', test_context_uri)
+
   test_login_encoding = executable('test-login-encoding',
     'test_login_encoding.c',
     '../src/spotify/protobuf_min.c',

@@ -20,6 +20,9 @@
 
 #include <glib-object.h>
 #include <gio/gio.h>
+#include <json-glib/json-glib.h>
+
+#include "track_meta.h"
 
 G_BEGIN_DECLS
 
@@ -54,6 +57,54 @@ typedef void (*SpclientTrackCallback) (const SpclientAudioFile *files /* NULL on
                                        guint                    n_files,
                                        GError                  *error,
                                        gpointer                 user_data);
+
+/* ── Batched display metadata ────────────────────────────────────────────── */
+
+/*
+ * Display metadata for one track, correlated back to the URI that asked
+ * for it. `entity_uri` comes from EntityExtensionData.entity_uri in the
+ * response rather than from request ordering, so a partial or reordered
+ * response still lines up with the right row.
+ */
+typedef struct {
+  gchar            *entity_uri;
+  SpotifyTrackMeta  meta;
+} SpclientTrackInfo;
+
+typedef void (*SpclientBatchCallback) (const SpclientTrackInfo *tracks /* NULL on failure */,
+                                       guint                    n_tracks,
+                                       GError                  *error,
+                                       gpointer                 user_data);
+
+/* Prototype lives with the rest of the API, below the GObject declaration. */
+
+/* ── Context resolution ──────────────────────────────────────────────────── */
+
+/*
+ * /context-resolve/v1/{uri} — the single endpoint behind search, liked
+ * songs, playlist contents, album and artist track listings.
+ *
+ * Unlike everything else in this file the response is JSON, not protobuf:
+ * librespot fetches it with request_with_options and then parses the body
+ * as the JSON encoding of the Context message (spclient.rs get_context).
+ *
+ * Special URI forms, per spclient.rs's own doc comment:
+ *   - search:      spotify:search:<query>   (spaces replaced with '+')
+ *   - liked songs: spotify:user:<user_id>:collection
+ *   - anything addressable by SpotifyId: playlist, album, artist, track
+ *
+ * IMPORTANT — what this does and does not give you. The Context message
+ * (context.proto / context_page.proto / context_track.proto) carries
+ * pages[].tracks[] where each ContextTrack has uri, uid, gid and a
+ * metadata string map. That map is NOT a source of display metadata:
+ * librespot reads exactly one key from it, "is_queued". Track names,
+ * artists, album and duration come from a second call to the
+ * extended-metadata endpoint, parsed by track_meta.h. Treat this as a
+ * URI list, not a track listing.
+ */
+typedef void (*SpclientContextCallback) (JsonNode *context /* NULL on failure, owned by caller */,
+                                         GError   *error,
+                                         gpointer  user_data);
 
 /* ── GObject type ────────────────────────────────────────────────────────── */
 
@@ -98,6 +149,63 @@ void spotifygtk_spclient_get_audio_storage (SpotifySpclient *self,
                                              const gchar *client_token /* nullable */,
                                              SpclientStorageCallback callback,
                                              gpointer user_data);
+
+/*
+ * Fetch display metadata for many tracks in a single request.
+ *
+ * BatchedEntityRequest.entity_request is `repeated` (extended_metadata.proto),
+ * so a page of search results costs one round trip rather than one per row.
+ * This is the mandatory second half of context resolution: /context-resolve
+ * returns nothing but URIs, so nothing can be rendered without this call.
+ *
+ * BATCH SIZE: there is an upper bound, found by probing a real account
+ * rather than documented upstream. Confirmed working at 50, 200, 500,
+ * 1000 and 2000 URIs in one request; a 4,773-track liked-songs collection
+ * in a single request comes back unparseable. The exact ceiling sits
+ * somewhere between 2000 and 4773 and is not worth pinning down, because
+ * callers should be chunking to a page size long before that. Treat a few
+ * hundred as the comfortable working size and page the rest.
+ *
+ * The array passed to the callback is owned by the implementation and is
+ * only valid for the duration of the callback.
+ */
+void spotifygtk_spclient_get_tracks_metadata (SpotifySpclient      *self,
+                                               const gchar *const   *track_uris,
+                                               guint                 n_uris,
+                                               const gchar          *bearer_token,
+                                               const gchar          *client_token /* nullable */,
+                                               SpclientBatchCallback callback,
+                                               gpointer              user_data);
+
+/*
+ * Resolve `context_uri` (see SpclientContextCallback above for the
+ * accepted forms). On success the callback receives the parsed JSON
+ * root node, which it takes ownership of.
+ *
+ * bearer_token: login5 access_token. client_token: from clienttoken.h.
+ */
+void spotifygtk_spclient_get_context (SpotifySpclient        *self,
+                                       const gchar            *context_uri,
+                                       const gchar            *bearer_token,
+                                       const gchar            *client_token /* nullable */,
+                                       SpclientContextCallback callback,
+                                       gpointer                user_data);
+
+/*
+ * Build a `spotify:search:<query>` context URI. Spaces become '+' per
+ * spclient.rs; everything else is percent-escaped so a query containing
+ * ':' or '/' cannot alter the URI's structure or the request path.
+ *
+ * Returns a newly-allocated string, or NULL if `query` is NULL/empty.
+ */
+gchar *spotifygtk_spclient_build_search_uri (const gchar *query);
+
+/*
+ * Build a `spotify:user:<user_id>:collection` context URI — the liked
+ * songs listing. `user_id` is the canonical username from APWelcome
+ * (spotifygtk_ap_session_get_username).
+ */
+gchar *spotifygtk_spclient_build_collection_uri (const gchar *user_id);
 
 void spclient_cdn_urls_free (SpclientCdnUrls *urls);
 
