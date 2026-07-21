@@ -20,7 +20,11 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkSidebar, spotifygtk_sidebar,
 
 SpotifyGtkSidebar *spotifygtk_sidebar_new (void);
 
-/* Signal: page-activated (const gchar *page_id) */
+/* Signals:
+ * - page-activated    (const gchar *page_id)
+ * - pinned-activated  (const gchar *pinned_id)
+ * - collapse-toggled  ()
+ */
 
 /* Pin management */
 void spotifygtk_sidebar_add_pinned (SpotifyGtkSidebar *self,

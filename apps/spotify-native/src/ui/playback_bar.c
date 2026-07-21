@@ -36,8 +36,18 @@ struct _SpotifyGtkPlaybackBar {
   GtkLabel  *elapsed_label;
   GtkLabel  *duration_label;
 
-  /* Right: volume */
-  GtkScale *volume_scale;
+  /* Right: volume + queue */
+  GtkScale  *volume_scale;
+  GtkButton *queue_btn;
+
+  /* Toggles */
+  GtkButton *shuffle_btn;
+  GtkButton *repeat_btn;
+  GtkButton *stop_btn;
+  GtkButton *like_btn;
+  gboolean   shuffle_on;
+  gboolean   repeat_on;
+  gboolean   liked;
 
   gboolean is_playing;
   gint64   position_ms;
@@ -53,6 +63,11 @@ enum {
   PREV_CLICKED,
   SEEK,
   VOLUME_CHANGED,
+  STOP_CLICKED,
+  LIKE_TOGGLED,
+  SHUFFLE_TOGGLED,
+  REPEAT_TOGGLED,
+  QUEUE_CLICKED,
   N_SIGNALS
 };
 
@@ -92,6 +107,61 @@ on_next_clicked (GtkButton *button, gpointer user_data)
   (void) button;
 }
 
+/* Toggles carry their state in a CSS class so the accent colour tracks it
+ * without the button changing shape. */
+static void
+set_toggle_state (GtkButton *button, gboolean active)
+{
+  if (active)
+    gtk_widget_add_css_class (GTK_WIDGET (button), "toggle-active");
+  else
+    gtk_widget_remove_css_class (GTK_WIDGET (button), "toggle-active");
+}
+
+static void
+on_shuffle_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+  self->shuffle_on = !self->shuffle_on;
+  set_toggle_state (self->shuffle_btn, self->shuffle_on);
+  g_signal_emit (self, signals[SHUFFLE_TOGGLED], 0, self->shuffle_on);
+  (void) button;
+}
+
+static void
+on_repeat_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+  self->repeat_on = !self->repeat_on;
+  set_toggle_state (self->repeat_btn, self->repeat_on);
+  g_signal_emit (self, signals[REPEAT_TOGGLED], 0, self->repeat_on);
+  (void) button;
+}
+
+static void
+on_stop_clicked (GtkButton *button, gpointer user_data)
+{
+  g_signal_emit (user_data, signals[STOP_CLICKED], 0);
+  (void) button;
+}
+
+static void
+on_queue_clicked (GtkButton *button, gpointer user_data)
+{
+  g_signal_emit (user_data, signals[QUEUE_CLICKED], 0);
+  (void) button;
+}
+
+static void
+on_like_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+  self->liked = !self->liked;
+  spotifygtk_playback_bar_set_liked (self, self->liked);
+  g_signal_emit (self, signals[LIKE_TOGGLED], 0, self->liked);
+  (void) button;
+}
+
 static void
 on_volume_changed (GtkRange *range, gpointer user_data)
 {
@@ -128,6 +198,19 @@ spotifygtk_playback_bar_class_init (SpotifyGtkPlaybackBarClass *klass)
   signals[SEEK] = g_signal_new ("seek",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_INT64);
+  signals[STOP_CLICKED] = g_signal_new ("stop-clicked",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[QUEUE_CLICKED] = g_signal_new ("queue-clicked",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[LIKE_TOGGLED] = g_signal_new ("like-toggled",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
+  signals[SHUFFLE_TOGGLED] = g_signal_new ("shuffle-toggled",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
+  signals[REPEAT_TOGGLED] = g_signal_new ("repeat-toggled",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 }
 
 static GtkWidget *
@@ -165,7 +248,34 @@ build_left_column (SpotifyGtkPlaybackBar *self)
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->artist_label));
 
   gtk_box_append (GTK_BOX (box), info);
+
+  self->like_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("emblem-favorite-symbolic"));
+  gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "flat");
+  gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "circular");
+  gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "transport-button");
+  gtk_widget_set_valign (GTK_WIDGET (self->like_btn), GTK_ALIGN_CENTER);
+  g_signal_connect (self->like_btn, "clicked", G_CALLBACK (on_like_clicked), self);
+  /* Saving to the library needs a write endpoint the native stack does not
+   * have yet, so this would only ever change its own colour. */
+  gtk_widget_set_sensitive (GTK_WIDGET (self->like_btn), FALSE);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->like_btn),
+                               "Saving to your library isn\u2019t implemented yet");
+  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->like_btn));
+
   return box;
+}
+
+static GtkWidget *
+make_transport_button (const gchar *icon, const gchar *tooltip,
+                       GCallback handler, gpointer self)
+{
+  GtkWidget *button = gtk_button_new_from_icon_name (icon);
+  gtk_widget_add_css_class (button, "flat");
+  gtk_widget_add_css_class (button, "circular");
+  gtk_widget_add_css_class (button, "transport-button");
+  gtk_widget_set_tooltip_text (button, tooltip);
+  g_signal_connect (button, "clicked", handler, self);
+  return button;
 }
 
 static GtkWidget *
@@ -180,10 +290,14 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
   GtkWidget *transport = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
   gtk_widget_set_halign (transport, GTK_ALIGN_CENTER);
 
-  self->prev_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("media-skip-backward-symbolic"));
-  gtk_widget_add_css_class (GTK_WIDGET (self->prev_btn), "flat");
-  gtk_widget_add_css_class (GTK_WIDGET (self->prev_btn), "circular");
-  g_signal_connect (self->prev_btn, "clicked", G_CALLBACK (on_prev_clicked), self);
+  self->shuffle_btn = GTK_BUTTON (make_transport_button (
+    "media-playlist-shuffle-symbolic", "Shuffle",
+    G_CALLBACK (on_shuffle_clicked), self));
+  gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->shuffle_btn));
+
+  self->prev_btn = GTK_BUTTON (make_transport_button (
+    "media-skip-backward-symbolic", "Previous",
+    G_CALLBACK (on_prev_clicked), self));
   gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->prev_btn));
 
   /* Explicit square request: "circular" only rounds the corners, so without
@@ -198,11 +312,20 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
   g_signal_connect (self->play_btn, "clicked", G_CALLBACK (on_play_clicked), self);
   gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->play_btn));
 
-  self->next_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("media-skip-forward-symbolic"));
-  gtk_widget_add_css_class (GTK_WIDGET (self->next_btn), "flat");
-  gtk_widget_add_css_class (GTK_WIDGET (self->next_btn), "circular");
-  g_signal_connect (self->next_btn, "clicked", G_CALLBACK (on_next_clicked), self);
+  self->next_btn = GTK_BUTTON (make_transport_button (
+    "media-skip-forward-symbolic", "Next",
+    G_CALLBACK (on_next_clicked), self));
   gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->next_btn));
+
+  self->stop_btn = GTK_BUTTON (make_transport_button (
+    "media-playback-stop-symbolic", "Stop",
+    G_CALLBACK (on_stop_clicked), self));
+  gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->stop_btn));
+
+  self->repeat_btn = GTK_BUTTON (make_transport_button (
+    "media-playlist-repeat-symbolic", "Repeat",
+    G_CALLBACK (on_repeat_clicked), self));
+  gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->repeat_btn));
 
   /* Skip needs a queue, which does not exist yet — the window's handlers
    * are empty. A control that does nothing when clicked reads as a bug. */
@@ -269,6 +392,12 @@ build_right_column (SpotifyGtkPlaybackBar *self)
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->volume_scale), "Volume");
   g_signal_connect (self->volume_scale, "value-changed", G_CALLBACK (on_volume_changed), self);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->volume_scale));
+
+  self->queue_btn = GTK_BUTTON (make_transport_button (
+    "view-list-symbolic", "Show the queue",
+    G_CALLBACK (on_queue_clicked), self));
+  gtk_widget_set_margin_start (GTK_WIDGET (self->queue_btn), 6);
+  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->queue_btn));
 
   return box;
 }
@@ -361,4 +490,19 @@ spotifygtk_playback_bar_set_volume (SpotifyGtkPlaybackBar *self, gint percent)
   g_signal_handlers_block_by_func (self->volume_scale, on_volume_changed, self);
   gtk_range_set_value (GTK_RANGE (self->volume_scale), CLAMP (percent, 0, 100));
   g_signal_handlers_unblock_by_func (self->volume_scale, on_volume_changed, self);
+}
+
+void
+spotifygtk_playback_bar_set_liked (SpotifyGtkPlaybackBar *self, gboolean liked)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+
+  self->liked = liked;
+  gtk_button_set_icon_name (self->like_btn,
+                            liked ? "emblem-favorite-symbolic"
+                                  : "emblem-favorite-symbolic");
+  if (liked)
+    gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "like-active");
+  else
+    gtk_widget_remove_css_class (GTK_WIDGET (self->like_btn), "like-active");
 }

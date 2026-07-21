@@ -146,6 +146,31 @@ on_play_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 }
 
 static void
+on_stop_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  spotifygtk_player_service_stop (self->player);
+  (void) bar;
+}
+
+static void
+on_queue_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  spotifygtk_native_window_set_queue_expanded (self, !self->queue_expanded);
+  (void) bar;
+}
+
+static void
+on_sidebar_collapse_toggled (SpotifyGtkSidebar *sidebar, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  gboolean visible = gtk_widget_get_visible (GTK_WIDGET (self->sidebar));
+  gtk_widget_set_visible (GTK_WIDGET (self->sidebar), !visible);
+  (void) sidebar;
+}
+
+static void
 on_volume_changed (SpotifyGtkPlaybackBar *bar, gint percent, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
@@ -235,91 +260,108 @@ navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
 
 /* === CSS for dark theme === */
 /*
- * Four surface levels, darkest at the edges and lightest where content
- * lives, so the panes read as separate without needing borders everywhere:
+ * Styling follows the reference design: near-black chrome, a slightly
+ * lifted content area, and a green accent used only for state (selection,
+ * progress, pinned, active toggles) rather than as decoration.
  *
- *   #101010  playback bar (deepest)
- *   #161616  sidebar / now-playing panel
- *   #1a1a1a  main content
- *   #242424  cards and rows sitting on top of it
- *
- * The accent is Adwaita blue rather than Spotify's brand green. This is an
- * unaffiliated client (see the trademark note in README.md), so borrowing
- * the brand colour would imply an association that does not exist. The
- * project's own mockup.svg already uses blue for the same reason.
+ *   #0a0a0a  window chrome / playback bar (deepest)
+ *   #0f0f0f  sidebar
+ *   #121212  main content
+ *   #1a1a1a  cards and rows
+ *   #242424  hover
+ *   #1db954  accent
  */
 static const gchar *dark_theme_css =
-  "window { background-color: #1a1a1a; color: #e8e8e8; }"
+  "window { background-color: #121212; color: #e8e8e8; }"
 
   /* ── Structure ─────────────────────────────────────────────── */
-  ".header-bar { background-color: #101010;"
-  "  border-bottom: 1px solid #000000; }"
-  ".sidebar { background-color: #161616;"
-  "  border-right: 1px solid #0c0c0c; }"
-  ".main-content { background-color: #1a1a1a; }"
-  ".now-playing-panel { background-color: #161616;"
-  "  border-left: 1px solid #0c0c0c; }"
-  ".playback-bar { background-color: #101010;"
+  "headerbar { background-color: #0a0a0a; box-shadow: none;"
+  "  border-bottom: 1px solid #000000; min-height: 46px; }"
+  "headerbar label.title { font-size: 14px; font-weight: 600; color: #e8e8e8; }"
+  ".sidebar { background-color: #0f0f0f;"
+  "  border-right: 1px solid #000000; }"
+  ".main-content { background-color: #121212; }"
+  ".now-playing-panel { background-color: #0f0f0f;"
+  "  border-left: 1px solid #000000; }"
+  ".playback-bar { background-color: #0a0a0a;"
   "  border-top: 1px solid #000000; }"
 
   /* ── Sidebar navigation ────────────────────────────────────── */
   ".sidebar list { background-color: transparent; }"
-  ".sidebar-item { border-radius: 8px; margin: 2px 8px;"
+  ".sidebar-item { border-radius: 10px; margin: 2px 10px;"
   "  transition: background-color 120ms ease; }"
-  ".sidebar-item:hover { background-color: #232323; }"
-  ".sidebar-item:selected { background-color: #2c2c2c; }"
+  ".sidebar-item label { color: #b8b8b8; font-size: 15px; }"
+  ".sidebar-item image { color: #b8b8b8; }"
+  ".sidebar-item:hover { background-color: #1a1a1a; }"
+  ".sidebar-item:selected { background-color: #1f1f1f; }"
   ".sidebar-item:selected label { color: #ffffff; font-weight: 600; }"
-  ".pinned-card { background-color: transparent; border-radius: 6px;"
-  "  margin: 1px 8px; }"
-  ".pinned-card:hover { background-color: #232323; }"
+  ".sidebar-item:selected image { color: #1db954; }"
+  ".sidebar-heading { color: #7a7a7a; font-size: 12px; font-weight: 700;"
+  "  letter-spacing: 0.6px; }"
+  ".pinned-card { background-color: transparent; border-radius: 8px;"
+  "  margin: 1px 10px; }"
+  ".pinned-card:hover { background-color: #1a1a1a; }"
+  ".pin-icon { color: #1db954; }"
+  ".sidebar-action { color: #9a9a9a; font-size: 13px; }"
 
   /* ── Typography ────────────────────────────────────────────── */
   ".title-text { color: #ffffff; font-weight: 800; font-size: 30px;"
   "  letter-spacing: -0.5px; }"
+  ".greeting { color: #9a9a9a; font-size: 14px; }"
+  ".section-heading { color: #ffffff; font-size: 19px; font-weight: 700; }"
   ".normal-text { color: #e8e8e8; font-size: 15px; }"
   ".dim-text { color: #9a9a9a; font-size: 13px; }"
   ".bar-title { color: #ffffff; font-size: 14px; font-weight: 600; }"
   ".bar-subtitle { color: #9a9a9a; font-size: 12px; }"
   ".time-label { color: #9a9a9a; font-size: 11px;"
-  "  font-feature-settings: 'tnum'; }"
+  "  font-feature-settings: \'tnum\'; }"
 
   /* ── Cards and rows ────────────────────────────────────────── */
-  ".card { background-color: #242424; border-radius: 10px; }"
-  ".list-row { background-color: transparent; border-radius: 6px;"
-  "  margin: 1px 0; transition: background-color 120ms ease; }"
+  ".card { background-color: #1a1a1a; border-radius: 10px; }"
+  ".media-card { background-color: #1a1a1a; border-radius: 10px;"
+  "  padding: 0px; transition: background-color 140ms ease; }"
+  ".media-card:hover { background-color: #242424; }"
+  ".media-card-title { color: #ffffff; font-size: 14px; font-weight: 600; }"
+  ".media-card-subtitle { color: #9a9a9a; font-size: 12px; }"
+  ".list-row { background-color: #161616; border-radius: 8px;"
+  "  margin: 3px 0; transition: background-color 120ms ease; }"
   ".list-row:hover { background-color: #242424; }"
   ".art-thumb { background-color: #242424; border-radius: 6px;"
   "  color: #6e6e6e; }"
   ".art-large { background-color: #242424; border-radius: 12px;"
   "  color: #6e6e6e; }"
+  ".pill-button { background-color: #1f1f1f; border-radius: 999px;"
+  "  color: #e8e8e8; font-size: 12px; font-weight: 600;"
+  "  padding: 4px 14px; min-height: 0; }"
+  ".pill-button:hover { background-color: #2c2c2c; }"
 
   /* ── Transport ─────────────────────────────────────────────── */
-  /* min-width/height must match the widget's size request or GTK's own
-   * button padding wins and the "circular" class renders an oval. */
-  ".play-button { background-color: #ffffff; color: #101010;"
-  "  min-width: 40px; min-height: 40px; padding: 0; }"
+  /* min-width/height must match the widget size request, or GTK button
+   * padding wins and the "circular" class renders an oval. */
+  ".play-button { background-color: #ffffff; color: #0a0a0a;"
+  "  min-width: 44px; min-height: 44px; padding: 0; }"
   ".play-button:hover { background-color: #f0f0f0; }"
   ".play-button:disabled { background-color: #3a3a3a; color: #7a7a7a; }"
+  ".transport-button { color: #b8b8b8; min-width: 32px; min-height: 32px; }"
+  ".transport-button:hover { color: #ffffff; }"
+  ".toggle-active { color: #1db954; }"
+  ".like-active { color: #1db954; }"
 
   /* ── Sliders ───────────────────────────────────────────────── */
   "scale { min-height: 18px; }"
   "scale trough { background-color: #3a3a3a; min-height: 4px;"
   "  border-radius: 2px; }"
-  "scale highlight { background-color: #b8b8b8; border-radius: 2px; }"
-  "scale:hover highlight { background-color: #3584e4; }"
-  /* The handle keeps a constant 12px box and only becomes visible on hover.
-   * `margin: 0` is required, not cosmetic: libadwaita's own stylesheet puts
-   * a negative margin on scale sliders, which combines with a smaller
-   * min-width to produce a negative computed size and a GTK warning
-   * ("reported min width -4"). */
-  "scale slider { background-color: transparent; min-width: 12px;"
-  "  min-height: 12px; border-radius: 6px; margin: 0; }"
-  "scale:hover slider { background-color: #ffffff; }"
+  "scale highlight { background-color: #1db954; border-radius: 2px; }"
   "scale:disabled highlight { background-color: #4a4a4a; }"
+  /* `margin: 0` is load-bearing: libadwaita puts a negative margin on scale
+   * sliders, which combines with a smaller min-width to give a negative
+   * computed size and a stream of GTK warnings. */
+  "scale slider { background-color: #ffffff; min-width: 12px;"
+  "  min-height: 12px; border-radius: 6px; margin: 0; }"
+  "scale:disabled slider { background-color: #6e6e6e; }"
 
   /* ── Scrollbars ────────────────────────────────────────────── */
-  /* Non-overlay, so it occupies a gutter beside the list rather than
-   * floating over the rows. */
+  /* Non-overlay, so it sits in a gutter beside the list, not over it. */
   "scrollbar { background-color: transparent; border: none; }"
   "scrollbar slider { background-color: #3a3a3a; border-radius: 6px;"
   "  min-width: 8px; margin: 2px; }"
@@ -366,18 +408,21 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_set_vexpand (GTK_WIDGET (self->root_box), TRUE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->root_box), TRUE);
 
-  /* Header bar */
-  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_size_request (header, -1, 44);
-  gtk_widget_add_css_class (header, "header-bar");
+  /* Header bar. A real GtkHeaderBar rather than a plain box, so the window
+   * controls and drag-to-move come from GTK instead of being drawn on. */
+  GtkWidget *header = gtk_header_bar_new ();
+  gtk_header_bar_set_show_title_buttons (GTK_HEADER_BAR (header), TRUE);
+
+  GtkWidget *menu_btn = gtk_button_new_from_icon_name ("open-menu-symbolic");
+  gtk_widget_add_css_class (menu_btn, "flat");
+  gtk_widget_set_tooltip_text (menu_btn, "Menu");
+  gtk_header_bar_pack_start (GTK_HEADER_BAR (header), menu_btn);
 
   GtkWidget *title = gtk_label_new ("SpotifyGTK");
-  gtk_widget_add_css_class (title, "normal-text");
-  gtk_widget_set_halign (title, GTK_ALIGN_CENTER);
-  gtk_widget_set_hexpand (title, TRUE);
-  gtk_box_append (GTK_BOX (header), title);
+  gtk_widget_add_css_class (title, "title");
+  gtk_header_bar_set_title_widget (GTK_HEADER_BAR (header), title);
 
-  gtk_box_append (GTK_BOX (self->root_box), header);
+  gtk_window_set_titlebar (GTK_WINDOW (self), header);
 
   /* Horizontal paned: sidebar | (content | queue) */
   self->main_paned = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
@@ -388,6 +433,8 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_add_css_class (GTK_WIDGET (self->sidebar), "sidebar");
   g_signal_connect (self->sidebar, "page-activated",
                     G_CALLBACK (on_sidebar_page_activated), self);
+  g_signal_connect (self->sidebar, "collapse-toggled",
+                    G_CALLBACK (on_sidebar_collapse_toggled), self);
   gtk_paned_set_start_child (self->main_paned, GTK_WIDGET (self->sidebar));
   gtk_paned_set_resize_start_child (self->main_paned, FALSE);
   gtk_paned_set_shrink_start_child (self->main_paned, FALSE);
@@ -461,6 +508,10 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_prev_clicked), self);
   g_signal_connect (self->playback_bar, "volume-changed",
                     G_CALLBACK (on_volume_changed), self);
+  g_signal_connect (self->playback_bar, "stop-clicked",
+                    G_CALLBACK (on_stop_clicked), self);
+  g_signal_connect (self->playback_bar, "queue-clicked",
+                    G_CALLBACK (on_queue_clicked), self);
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->playback_bar));
 
   gtk_window_set_child (GTK_WINDOW (self), GTK_WIDGET (self->root_box));

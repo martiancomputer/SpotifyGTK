@@ -1,11 +1,23 @@
 /*
  * home_page.c — Home page implementation.
+ *
+ * Laid out to the reference design: a greeting header with quick actions,
+ * then three sections — a horizontal card shelf, a two-column recent list,
+ * and a second shelf.
+ *
+ * The sections are built but empty, and say so. None of the three has a
+ * data source on the native stack yet: listening history has no known
+ * spclient endpoint (librespot exposes none), and the playlist rootlist
+ * returns playlist4_external protobuf, which is unparsed. Populating them
+ * with invented albums to match the mockup would make the page look
+ * finished while showing things the user does not actually have.
  */
 
 #include "home_page.h"
 
 struct _SpotifyGtkHomePage {
   GtkBox parent_instance;
+  GtkLabel *greeting;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkHomePage, spotifygtk_home_page, GTK_TYPE_BOX)
@@ -16,60 +28,165 @@ spotifygtk_home_page_class_init (SpotifyGtkHomePageClass *klass)
   (void) klass;
 }
 
-static GtkWidget *
-build_pending_section (const gchar *heading, const gchar *detail)
+static const gchar *
+greeting_for_hour (gint hour)
 {
-  GtkWidget *section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
+  if (hour < 12) return "Good morning.";
+  if (hour < 18) return "Good afternoon.";
+  return "Good evening.";
+}
 
-  GtkWidget *label = gtk_label_new (heading);
-  gtk_widget_add_css_class (label, "normal-text");
+/* Section header: title on the left, optional action widget on the right. */
+static GtkWidget *
+build_section_header (const gchar *title, GtkWidget *action)
+{
+  GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  gtk_widget_set_margin_bottom (row, 12);
+
+  GtkWidget *label = gtk_label_new (title);
+  gtk_widget_add_css_class (label, "section-heading");
   gtk_label_set_xalign (GTK_LABEL (label), 0.0);
-  gtk_box_append (GTK_BOX (section), label);
+  gtk_widget_set_hexpand (label, TRUE);
+  gtk_box_append (GTK_BOX (row), label);
 
-  GtkWidget *note = gtk_label_new (detail);
-  gtk_widget_add_css_class (note, "dim-text");
-  gtk_label_set_xalign (GTK_LABEL (note), 0.0);
-  gtk_label_set_wrap (GTK_LABEL (note), TRUE);
-  gtk_label_set_max_width_chars (GTK_LABEL (note), 70);
-  gtk_box_append (GTK_BOX (section), note);
+  if (action) {
+    gtk_widget_set_valign (action, GTK_ALIGN_CENTER);
+    gtk_box_append (GTK_BOX (row), action);
+  }
 
-  return section;
+  return row;
+}
+
+/* Placeholder body for a section with no data source yet. Deliberately
+ * plain: it should read as "not built" rather than "failed to load". */
+static GtkWidget *
+build_empty_state (const gchar *detail)
+{
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_add_css_class (box, "card");
+  gtk_widget_set_margin_bottom (box, 4);
+
+  GtkWidget *label = gtk_label_new (detail);
+  gtk_widget_add_css_class (label, "dim-text");
+  gtk_label_set_xalign (GTK_LABEL (label), 0.0);
+  gtk_label_set_wrap (GTK_LABEL (label), TRUE);
+  gtk_label_set_max_width_chars (GTK_LABEL (label), 76);
+  gtk_widget_set_margin_start (label, 16);
+  gtk_widget_set_margin_end (label, 16);
+  gtk_widget_set_margin_top (label, 18);
+  gtk_widget_set_margin_bottom (label, 18);
+  gtk_box_append (GTK_BOX (box), label);
+
+  return box;
+}
+
+static GtkWidget *
+build_icon_button (const gchar *icon, const gchar *tooltip)
+{
+  GtkWidget *button = gtk_button_new_from_icon_name (icon);
+  gtk_widget_add_css_class (button, "flat");
+  gtk_widget_add_css_class (button, "circular");
+  gtk_widget_set_tooltip_text (button, tooltip);
+  gtk_widget_set_valign (button, GTK_ALIGN_CENTER);
+  return button;
 }
 
 static void
 spotifygtk_home_page_init (SpotifyGtkHomePage *self)
 {
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
-  gtk_box_set_spacing (GTK_BOX (self), 20);
-  gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
-  gtk_widget_set_margin_end (GTK_WIDGET (self), 35);
-  gtk_widget_set_margin_top (GTK_WIDGET (self), 24);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self), 24);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
+
+  GtkWidget *scroller = gtk_scrolled_window_new ();
+  gtk_widget_set_vexpand (scroller, TRUE);
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
+                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
+
+  GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 28);
+  gtk_widget_set_margin_start (content, 34);
+  gtk_widget_set_margin_end (content, 24);
+  gtk_widget_set_margin_top (content, 22);
+  gtk_widget_set_margin_bottom (content, 24);
+
+  /* --- Header: title + greeting, with quick actions on the right --- */
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+
+  GtkWidget *titles = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_set_hexpand (titles, TRUE);
 
   GtkWidget *title = gtk_label_new ("Home");
   gtk_widget_add_css_class (title, "title-text");
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
-  gtk_box_append (GTK_BOX (self), title);
+  gtk_box_append (GTK_BOX (titles), title);
 
-  GtkWidget *intro = gtk_label_new ("Search and Liked Songs run on the native "
-                                    "protocol stack. These two sections do not yet.");
-  gtk_widget_add_css_class (intro, "dim-text");
-  gtk_label_set_xalign (GTK_LABEL (intro), 0.0);
-  gtk_label_set_wrap (GTK_LABEL (intro), TRUE);
-  gtk_label_set_max_width_chars (GTK_LABEL (intro), 70);
-  gtk_box_append (GTK_BOX (self), intro);
+  g_autoptr(GDateTime) now = g_date_time_new_now_local ();
+  self->greeting = GTK_LABEL (gtk_label_new (greeting_for_hour (g_date_time_get_hour (now))));
+  gtk_widget_add_css_class (GTK_WIDGET (self->greeting), "greeting");
+  gtk_label_set_xalign (self->greeting, 0.0);
+  gtk_box_append (GTK_BOX (titles), GTK_WIDGET (self->greeting));
 
-  gtk_box_append (GTK_BOX (self),
-    build_pending_section ("Continue Listening",
-      "Needs the playlist rootlist, which comes back as playlist4_external "
-      "protobuf rather than the JSON the rest of the catalog uses."));
+  gtk_box_append (GTK_BOX (header), titles);
 
-  gtk_box_append (GTK_BOX (self),
-    build_pending_section ("Recently Played",
-      "No spclient endpoint for listening history is known — librespot "
-      "exposes none, so there is nothing to port here yet."));
+  GtkWidget *actions = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
+  gtk_widget_set_valign (actions, GTK_ALIGN_CENTER);
+  GtkWidget *bell = build_icon_button ("preferences-system-notifications-symbolic",
+                                       "Notifications");
+  GtkWidget *gear = build_icon_button ("preferences-system-symbolic", "Settings");
+  /* Neither has anywhere to go yet; a control that does nothing when
+   * clicked reads as a bug. */
+  gtk_widget_set_sensitive (bell, FALSE);
+  gtk_widget_set_sensitive (gear, FALSE);
+  gtk_box_append (GTK_BOX (actions), bell);
+  gtk_box_append (GTK_BOX (actions), gear);
+  gtk_box_append (GTK_BOX (header), actions);
+
+  gtk_box_append (GTK_BOX (content), header);
+
+  /* --- Continue Listening --- */
+  GtkWidget *shelf_nav = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
+  GtkWidget *prev = build_icon_button ("pan-start-symbolic", "Scroll left");
+  GtkWidget *next = build_icon_button ("pan-end-symbolic", "Scroll right");
+  gtk_widget_set_sensitive (prev, FALSE);
+  gtk_widget_set_sensitive (next, FALSE);
+  gtk_box_append (GTK_BOX (shelf_nav), prev);
+  gtk_box_append (GTK_BOX (shelf_nav), next);
+
+  GtkWidget *continue_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_box_append (GTK_BOX (continue_section),
+                  build_section_header ("Continue Listening", shelf_nav));
+  gtk_box_append (GTK_BOX (continue_section),
+                  build_empty_state ("Needs the playlist rootlist, which comes back as "
+                                     "playlist4_external protobuf rather than the JSON the "
+                                     "rest of the catalog uses."));
+  gtk_box_append (GTK_BOX (content), continue_section);
+
+  /* --- Recently Played --- */
+  GtkWidget *show_all = gtk_button_new_with_label ("Show all");
+  gtk_widget_add_css_class (show_all, "pill-button");
+  gtk_widget_set_sensitive (show_all, FALSE);
+
+  GtkWidget *recent_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_box_append (GTK_BOX (recent_section),
+                  build_section_header ("Recently Played", show_all));
+  gtk_box_append (GTK_BOX (recent_section),
+                  build_empty_state ("No spclient endpoint for listening history is known — "
+                                     "librespot exposes none, so there is nothing to port "
+                                     "here yet."));
+  gtk_box_append (GTK_BOX (content), recent_section);
+
+  /* --- Made For You --- */
+  GtkWidget *made_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_box_append (GTK_BOX (made_section), build_section_header ("Made For You", NULL));
+  gtk_box_append (GTK_BOX (made_section),
+                  build_empty_state ("Editorial mixes come from Spotify's recommendation "
+                                     "endpoints, which this client does not talk to yet. "
+                                     "Search and Liked Songs work today."));
+  gtk_box_append (GTK_BOX (content), made_section);
+
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
+  gtk_box_append (GTK_BOX (self), scroller);
 }
 
 SpotifyGtkHomePage *
