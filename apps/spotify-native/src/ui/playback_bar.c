@@ -25,7 +25,8 @@ struct _SpotifyGtkPlaybackBar {
   GtkBox parent_instance;
 
   /* Left: album art + track info */
-  GtkImage *album_art;
+  GtkImage   *album_art;   /* placeholder icon */
+  GtkPicture *album_pic;   /* cover, scaled to fill */
   GtkLabel *track_label;
   GtkLabel *artist_label;
 
@@ -215,13 +216,26 @@ build_left_column (SpotifyGtkPlaybackBar *self)
   /* A fixed square. The art previously had no size constraint and stretched
    * to whatever height the row happened to be, which is the misshapen
    * thumbnail in the screenshot. */
+  /* Placeholder icon beneath, cover picture over the top -- see the same
+   * arrangement in now_playing_panel.c for why GtkPicture rather than
+   * GtkImage: only Picture scales the texture to fill the thumbnail. */
   self->album_art = GTK_IMAGE (gtk_image_new_from_icon_name ("audio-x-generic-symbolic"));
   gtk_image_set_pixel_size (self->album_art, ART_SIZE / 2);
-  gtk_widget_set_size_request (GTK_WIDGET (self->album_art), ART_SIZE, ART_SIZE);
-  gtk_widget_set_halign (GTK_WIDGET (self->album_art), GTK_ALIGN_CENTER);
-  gtk_widget_set_valign (GTK_WIDGET (self->album_art), GTK_ALIGN_CENTER);
   gtk_widget_add_css_class (GTK_WIDGET (self->album_art), "art-thumb");
-  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->album_art));
+
+  self->album_pic = GTK_PICTURE (gtk_picture_new ());
+  gtk_picture_set_content_fit (self->album_pic, GTK_CONTENT_FIT_COVER);
+  gtk_picture_set_can_shrink (self->album_pic, TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->album_pic), "art-thumb");
+  gtk_widget_set_visible (GTK_WIDGET (self->album_pic), FALSE);
+
+  GtkWidget *art = gtk_overlay_new ();
+  gtk_widget_set_size_request (art, ART_SIZE, ART_SIZE);
+  gtk_widget_set_halign (art, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (art, GTK_ALIGN_CENTER);
+  gtk_overlay_set_child (GTK_OVERLAY (art), GTK_WIDGET (self->album_art));
+  gtk_overlay_add_overlay (GTK_OVERLAY (art), GTK_WIDGET (self->album_pic));
+  gtk_box_append (GTK_BOX (box), art);
 
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
   gtk_widget_set_valign (info, GTK_ALIGN_CENTER);
@@ -510,10 +524,13 @@ on_cover_loaded_spotifygtk_playback_bar (GdkTexture *texture, gpointer user_data
 {
   SpotifyGtkPlaybackBar *self = user_data;
 
-  if (texture)
-    gtk_image_set_from_paintable (self->album_art, GDK_PAINTABLE (texture));
-  else
-    gtk_image_set_from_icon_name (self->album_art, "audio-x-generic-symbolic");
+  if (texture) {
+    gtk_picture_set_paintable (self->album_pic, GDK_PAINTABLE (texture));
+    gtk_widget_set_visible (GTK_WIDGET (self->album_pic), TRUE);
+  } else {
+    gtk_picture_set_paintable (self->album_pic, NULL);
+    gtk_widget_set_visible (GTK_WIDGET (self->album_pic), FALSE);
+  }
 }
 
 void

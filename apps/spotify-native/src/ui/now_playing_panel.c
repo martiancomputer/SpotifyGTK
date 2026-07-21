@@ -8,7 +8,8 @@
 struct _SpotifyGtkNowPlayingPanel {
   GtkBox parent_instance;
 
-  GtkImage *album_art;
+  GtkImage   *album_art;    /* placeholder icon, shown when no cover */
+  GtkPicture *album_pic;    /* the cover, scaled to fill */
   GtkLabel *track_label;
   GtkLabel *artist_label;
   GtkListBox *queue_list;
@@ -93,14 +94,30 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
    * do both. ratio 1.0 with obey_child FALSE means "always square,
    * whatever the child would rather be", so a non-square cover cannot
    * stretch the box either. */
+  /* Placeholder icon and the cover picture share one overlay: the icon draws
+   * the dark box and the note glyph when there is no art, the picture fills
+   * the frame when there is. A GtkImage cannot do the filling -- it renders a
+   * paintable at a fixed pixel size, centred, which is why the cover
+   * previously sat small inside a large square. GtkPicture scales its
+   * paintable to the allocation, which is exactly what a cover wants. */
   self->album_art = GTK_IMAGE (gtk_image_new_from_icon_name ("audio-x-generic-symbolic"));
   gtk_image_set_pixel_size (self->album_art, 96);
   gtk_widget_add_css_class (GTK_WIDGET (self->album_art), "art-large");
-  gtk_widget_set_hexpand (GTK_WIDGET (self->album_art), TRUE);
-  gtk_widget_set_vexpand (GTK_WIDGET (self->album_art), FALSE);
+
+  self->album_pic = GTK_PICTURE (gtk_picture_new ());
+  gtk_picture_set_content_fit (self->album_pic, GTK_CONTENT_FIT_COVER);
+  gtk_picture_set_can_shrink (self->album_pic, TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->album_pic), "art-large");
+  gtk_widget_set_visible (GTK_WIDGET (self->album_pic), FALSE);
+
+  GtkWidget *art_overlay = gtk_overlay_new ();
+  gtk_widget_set_hexpand (art_overlay, TRUE);
+  gtk_widget_set_vexpand (art_overlay, TRUE);
+  gtk_overlay_set_child (GTK_OVERLAY (art_overlay), GTK_WIDGET (self->album_art));
+  gtk_overlay_add_overlay (GTK_OVERLAY (art_overlay), GTK_WIDGET (self->album_pic));
 
   GtkWidget *art_frame = gtk_aspect_frame_new (0.5f, 0.0f, 1.0f, FALSE);
-  gtk_aspect_frame_set_child (GTK_ASPECT_FRAME (art_frame), GTK_WIDGET (self->album_art));
+  gtk_aspect_frame_set_child (GTK_ASPECT_FRAME (art_frame), art_overlay);
   gtk_widget_set_hexpand (art_frame, TRUE);
   /* yalign 0.0 above, and valign START here: the cover stays anchored to the
    * top of the panel instead of floating to the middle as the panel grows. */
@@ -225,10 +242,13 @@ on_cover_loaded_spotifygtk_now_playing_panel (GdkTexture *texture, gpointer user
 {
   SpotifyGtkNowPlayingPanel *self = user_data;
 
-  if (texture)
-    gtk_image_set_from_paintable (self->album_art, GDK_PAINTABLE (texture));
-  else
-    gtk_image_set_from_icon_name (self->album_art, "audio-x-generic-symbolic");
+  if (texture) {
+    gtk_picture_set_paintable (self->album_pic, GDK_PAINTABLE (texture));
+    gtk_widget_set_visible (GTK_WIDGET (self->album_pic), TRUE);
+  } else {
+    gtk_picture_set_paintable (self->album_pic, NULL);
+    gtk_widget_set_visible (GTK_WIDGET (self->album_pic), FALSE);
+  }
 }
 
 void
