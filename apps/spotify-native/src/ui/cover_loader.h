@@ -32,7 +32,16 @@ G_BEGIN_DECLS
 typedef void (*SpotifyCoverCallback) (GdkTexture *texture, gpointer user_data);
 
 /*
- * Request the cover for `cover_id` (the hex id from SpotifyNativeTrack).
+ * Request the cover for `cover_id` (the hex id from SpotifyNativeTrack),
+ * decoded to at most `target_px` on its longest edge.
+ *
+ * The size matters for memory, not just crispness: a cover decoded at its
+ * native 640 square is 1.6 MB, and a full list of them doubled the process
+ * RSS. A 40px row thumbnail has no use for more than ~96px, so it asks for
+ * that and the decoded texture is ~1/40th the size. The panel, which shows
+ * the cover large, asks for a large target. Textures are cached per
+ * (id, target), so the small and large decodes of one album coexist without
+ * one clobbering the other.
  *
  * A cached cover invokes the callback before returning. `cover_id` NULL or
  * empty invokes it with NULL, so callers do not need to special-case a
@@ -43,6 +52,7 @@ typedef void (*SpotifyCoverCallback) (GdkTexture *texture, gpointer user_data);
  * paint one track's artwork onto another's row.
  */
 void spotifygtk_cover_load (const gchar          *cover_id,
+                            gint                  target_px,
                             GCancellable         *cancellable,
                             SpotifyCoverCallback  callback,
                             gpointer              user_data);

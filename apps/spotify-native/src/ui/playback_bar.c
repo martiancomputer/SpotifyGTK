@@ -541,5 +541,5 @@ spotifygtk_playback_bar_set_cover (SpotifyGtkPlaybackBar *self, const gchar *cov
   /* No cancellable: there is exactly one of these widgets, and a late cover
    * can only ever belong to the track it was asked for or be superseded by
    * the next call, which overwrites it anyway. */
-  spotifygtk_cover_load (cover_id, NULL, on_cover_loaded_spotifygtk_playback_bar, self);
+  spotifygtk_cover_load (cover_id, 96, NULL, on_cover_loaded_spotifygtk_playback_bar, self);
 }

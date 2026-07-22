@@ -188,7 +188,7 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
     return;
 
   self->cover_cancellable = g_cancellable_new ();
-  spotifygtk_cover_load (cover_id, self->cover_cancellable,
+  spotifygtk_cover_load (cover_id, 96, self->cover_cancellable,
                          on_row_cover_loaded, self);
 }
 
