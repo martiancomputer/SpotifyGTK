@@ -53,6 +53,14 @@ struct _SpotifyGtkPlaybackBar {
   gboolean is_playing;
   gint64   position_ms;
   gint64   duration_ms;
+
+  /* Seek: a drag emits many value-changed signals, so the actual seek is
+   * committed once the user pauses (debounced). While seeking — and for a
+   * grace window after, so the engine can catch up — position reports are
+   * ignored so they don't yank the slider back. */
+  gboolean user_seeking;
+  guint    seek_commit_id;
+  guint    seek_release_id;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkPlaybackBar, spotifygtk_playback_bar, GTK_TYPE_BOX)
@@ -161,22 +169,80 @@ on_volume_changed (GtkRange *range, gpointer user_data)
   g_signal_emit (user_data, signals[VOLUME_CHANGED], 0, (gint) gtk_range_get_value (range));
 }
 
+static gchar *format_time (gint64 ms);
+
+/* Grace window after committing a seek: position reports are ignored for this
+ * long so the slider does not snap back to the old position before the engine
+ * has moved. */
+#define SEEK_RELEASE_GRACE_MS 900
+/* Debounce a drag into a single seek once the user pauses moving. */
+#define SEEK_COMMIT_DELAY_MS  220
+
+static gboolean
+clear_user_seeking (gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+  self->user_seeking = FALSE;
+  self->seek_release_id = 0;
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean
+commit_seek (gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+  self->seek_commit_id = 0;
+
+  if (self->duration_ms > 0) {
+    gint64 pos = (gint64) (gtk_range_get_value (GTK_RANGE (self->progress_scale))
+                           * (gdouble) self->duration_ms);
+    g_signal_emit (self, signals[SEEK], 0, pos);
+  }
+
+  /* Keep ignoring position reports briefly so the engine can reach the new
+   * spot before the slider is handed back to it. */
+  g_clear_handle_id (&self->seek_release_id, g_source_remove);
+  self->seek_release_id = g_timeout_add (SEEK_RELEASE_GRACE_MS, clear_user_seeking, self);
+  return G_SOURCE_REMOVE;
+}
+
+/* Fires only for user-driven changes: set_progress blocks this handler around
+ * its programmatic updates. */
 static void
 on_seek_changed (GtkRange *range, gpointer user_data)
 {
   SpotifyGtkPlaybackBar *self = user_data;
+  if (self->duration_ms <= 0)
+    return;
 
-  if (self->duration_ms > 0) {
-    gint64 new_pos = (gint64) (gtk_range_get_value (range) * (gdouble) self->duration_ms);
-    g_signal_emit (self, signals[SEEK], 0, new_pos);
-  }
+  self->user_seeking = TRUE;
+
+  /* Show where the drag is pointing immediately, even though the seek itself
+   * is only committed once movement settles. */
+  gint64 dragged = (gint64) (gtk_range_get_value (range) * (gdouble) self->duration_ms);
+  g_autofree gchar *elapsed = format_time (dragged);
+  gtk_label_set_text (self->elapsed_label, elapsed);
+
+  g_clear_handle_id (&self->seek_commit_id, g_source_remove);
+  self->seek_commit_id = g_timeout_add (SEEK_COMMIT_DELAY_MS, commit_seek, self);
 }
 
 /* === Construction === */
 
 static void
+spotifygtk_playback_bar_dispose (GObject *object)
+{
+  SpotifyGtkPlaybackBar *self = SPOTIFYGTK_PLAYBACK_BAR (object);
+  g_clear_handle_id (&self->seek_commit_id, g_source_remove);
+  g_clear_handle_id (&self->seek_release_id, g_source_remove);
+  G_OBJECT_CLASS (spotifygtk_playback_bar_parent_class)->dispose (object);
+}
+
+static void
 spotifygtk_playback_bar_class_init (SpotifyGtkPlaybackBarClass *klass)
 {
+  G_OBJECT_CLASS (klass)->dispose = spotifygtk_playback_bar_dispose;
+
   signals[PLAY_CLICKED] = g_signal_new ("play-clicked",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[PAUSE_CLICKED] = g_signal_new ("pause-clicked",
@@ -332,12 +398,12 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
     G_CALLBACK (on_repeat_clicked), self));
   gtk_box_append (GTK_BOX (transport), GTK_WIDGET (self->repeat_btn));
 
-  /* Skip needs a queue, which does not exist yet — the window's handlers
-   * are empty. A control that does nothing when clicked reads as a bug. */
+  /* Skip is driven by the window's play-context and queue. Both start
+   * insensitive — nothing is playing at launch — and the window enables each
+   * as a previous/next track becomes available (see
+   * spotifygtk_playback_bar_set_skip_sensitive). */
   gtk_widget_set_sensitive (GTK_WIDGET (self->prev_btn), FALSE);
   gtk_widget_set_sensitive (GTK_WIDGET (self->next_btn), FALSE);
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->prev_btn), "Queue isn’t implemented yet");
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->next_btn), "Queue isn’t implemented yet");
 
   gtk_box_append (GTK_BOX (column), transport);
 
@@ -358,12 +424,9 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
   gtk_widget_set_valign (GTK_WIDGET (self->progress_scale), GTK_ALIGN_CENTER);
   g_signal_connect (self->progress_scale, "value-changed", G_CALLBACK (on_seek_changed), self);
 
-  /* "seek" still has no receiver: neither player_service nor native_engine
-   * exposes a seek entry point. The bar renders position, but dragging is
-   * disabled rather than silently snapping back. */
-  gtk_widget_set_sensitive (GTK_WIDGET (self->progress_scale), FALSE);
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->progress_scale),
-                               "Seeking isn’t wired to the playback engine yet");
+  /* Draggable: a drag debounces into one "seek" emission (see on_seek_changed),
+   * which the window routes to the engine's page-seek entry point. */
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->progress_scale), "Seek");
   gtk_box_append (GTK_BOX (progress_row), GTK_WIDGET (self->progress_scale));
 
   self->duration_label = GTK_LABEL (gtk_label_new ("0:00"));
@@ -468,8 +531,14 @@ spotifygtk_playback_bar_set_progress (SpotifyGtkPlaybackBar *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
 
-  self->position_ms = position_ms;
+  /* Duration is always adopted, but while the user is dragging (or in the
+   * grace window just after committing a seek) the position report is ignored
+   * so it can't yank the slider away from the user or back to the old spot. */
   self->duration_ms = duration_ms;
+  if (self->user_seeking)
+    return;
+
+  self->position_ms = position_ms;
 
   g_autofree gchar *elapsed = format_time (position_ms);
   g_autofree gchar *total   = format_time (duration_ms);
@@ -542,4 +611,14 @@ spotifygtk_playback_bar_set_cover (SpotifyGtkPlaybackBar *self, const gchar *cov
    * can only ever belong to the track it was asked for or be superseded by
    * the next call, which overwrites it anyway. */
   spotifygtk_cover_load (cover_id, 96, NULL, on_cover_loaded_spotifygtk_playback_bar, self);
+}
+
+void
+spotifygtk_playback_bar_set_skip_sensitive (SpotifyGtkPlaybackBar *self,
+                                            gboolean can_prev,
+                                            gboolean can_next)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  gtk_widget_set_sensitive (GTK_WIDGET (self->prev_btn), can_prev);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->next_btn), can_next);
 }

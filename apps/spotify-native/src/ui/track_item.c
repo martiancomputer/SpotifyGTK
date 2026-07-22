@@ -27,6 +27,8 @@ spotifygtk_track_item_finalize (GObject *object)
   g_free (self->track.artists);
   g_free (self->track.album);
   g_free (self->track.cover_id);
+  g_free (self->track.album_uri);
+  g_free (self->track.artist_uri);
   G_OBJECT_CLASS (spotifygtk_track_item_parent_class)->finalize (object);
 }
 
@@ -56,6 +58,8 @@ spotifygtk_track_item_new (const SpotifyNativeTrack *track, guint number)
   self->track.artists     = g_strdup (track->artists);
   self->track.album       = g_strdup (track->album);
   self->track.cover_id    = g_strdup (track->cover_id);
+  self->track.album_uri   = g_strdup (track->album_uri);
+  self->track.artist_uri  = g_strdup (track->artist_uri);
   self->track.duration_ms = track->duration_ms;
   self->track.is_explicit = track->is_explicit;
   return self;

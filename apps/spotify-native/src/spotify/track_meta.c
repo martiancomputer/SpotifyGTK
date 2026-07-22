@@ -17,6 +17,10 @@
 /* Album.name and Artist.name are both field 2 of their own message. */
 #define NAMED_MESSAGE_FIELD_NAME 2
 
+/* Album.gid and Artist.gid are both field 1 (bytes) of their own message —
+ * the raw 16-byte SpotifyId behind spotify:album:<id> / spotify:artist:<id>. */
+#define NAMED_MESSAGE_FIELD_GID  1
+
 /* metadata.proto: Album.cover_group -> ImageGroup.image -> Image */
 #define ALBUM_FIELD_COVER_GROUP   17
 #define IMAGE_GROUP_FIELD_IMAGE    1
@@ -103,6 +107,64 @@ dup_name_from_submessage (const guint8 *data, gsize len)
   return g_strndup ((const gchar *) name_data, name_len);
 }
 
+/*
+ * Encode a 16-byte SpotifyId gid as its canonical 22-character base62 id.
+ *
+ * The gid is a big-endian 128-bit integer; the id is that integer written in
+ * base62 (0-9 a-z A-Z, in that order), left-padded with '0' to a fixed 22
+ * digits. This mirrors librespot's SpotifyId::to_base62. Anything but a
+ * 16-byte gid is rejected — a short or long buffer is not a SpotifyId and
+ * must not be silently truncated into a plausible-looking wrong id.
+ */
+static gchar *
+gid_to_base62 (const guint8 *gid, gsize len)
+{
+  static const char ALPHABET[] =
+    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+  if (!gid || len != 16)
+    return NULL;
+
+  /* Repeated divide-by-62 of the 128-bit value held as a 16-byte big-endian
+   * buffer. Each pass produces one base62 digit (least significant first);
+   * exactly 22 digits span the range, so the loop is fixed-length. */
+  guint8 n[16];
+  memcpy (n, gid, 16);
+
+  gchar out[23];
+  out[22] = '\0';
+
+  for (int digit = 21; digit >= 0; digit--) {
+    guint remainder = 0;
+    for (int i = 0; i < 16; i++) {
+      guint acc = (remainder << 8) | n[i];
+      n[i]      = (guint8) (acc / 62);
+      remainder = acc % 62;
+    }
+    out[digit] = ALPHABET[remainder];
+  }
+
+  return g_strdup (out);
+}
+
+/* Build "spotify:<kind>:<id>" from a submessage's gid field, or NULL if the
+ * submessage carries no (valid) gid. */
+static gchar *
+dup_uri_from_submessage (const guint8 *data, gsize len, const gchar *kind)
+{
+  const guint8 *gid_data = NULL;
+  gsize         gid_len  = 0;
+
+  if (!pb_find_bytes_field (data, len, NAMED_MESSAGE_FIELD_GID, &gid_data, &gid_len))
+    return NULL;
+
+  g_autofree gchar *id = gid_to_base62 (gid_data, gid_len);
+  if (!id)
+    return NULL;
+
+  return g_strconcat ("spotify:", kind, ":", id, NULL);
+}
+
 gboolean
 spotifygtk_track_meta_parse (const guint8     *track_data,
                              gsize             track_len,
@@ -140,6 +202,8 @@ spotifygtk_track_meta_parse (const guint8     *track_data,
         out->album_name = dup_name_from_submessage (field_data, field_len);
       if (wire_type == PB_WIRE_LENGTH_DELIMITED && !out->cover_id)
         out->cover_id = dup_largest_cover_id (field_data, field_len);
+      if (wire_type == PB_WIRE_LENGTH_DELIMITED && !out->album_uri)
+        out->album_uri = dup_uri_from_submessage (field_data, field_len, "album");
       break;
 
     case TRACK_FIELD_ARTIST:
@@ -148,6 +212,9 @@ spotifygtk_track_meta_parse (const guint8     *track_data,
         gchar *artist = dup_name_from_submessage (field_data, field_len);
         if (artist)
           g_ptr_array_add (artists, artist);
+        /* "Go to Artist" navigates to the primary (first) artist only. */
+        if (!out->artist_uri)
+          out->artist_uri = dup_uri_from_submessage (field_data, field_len, "artist");
       }
       break;
 
@@ -199,6 +266,8 @@ spotifygtk_track_meta_clear (SpotifyTrackMeta *meta)
   g_clear_pointer (&meta->album_name, g_free);
   g_clear_pointer (&meta->artist_names, g_free);
   g_clear_pointer (&meta->cover_id, g_free);
+  g_clear_pointer (&meta->album_uri, g_free);
+  g_clear_pointer (&meta->artist_uri, g_free);
   meta->duration_ms = 0;
   meta->is_explicit = FALSE;
 }

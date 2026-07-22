@@ -50,6 +50,15 @@ void spotifygtk_track_list_set_playing_uri (SpotifyGtkTrackList *self,
                                             const gchar *uri,
                                             gboolean     playing);
 
+/*
+ * Snapshot the list's current tracks, in display order, as a fresh GPtrArray
+ * of SpotifyNativeTrack* (deep copies, free func set). Used as the play
+ * context so Next/Previous can walk the same ordering the user is looking at,
+ * independent of the list being later cleared or refilled. Returns an empty
+ * array (never NULL) for an empty list; unref when done.
+ */
+GPtrArray *spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self);
+
 /* Signals:
  * - track-activated (gpointer track)
  *
@@ -57,6 +66,13 @@ void spotifygtk_track_list_set_playing_uri (SpotifyGtkTrackList *self,
  *   JsonObject* after set_tracks(), SpotifyNativeTrack* after
  *   set_native_tracks(). A given list is only ever filled by one of them,
  *   so a page always knows which it is receiving.
+ *
+ * - add-to-queue (gpointer track)   — SpotifyNativeTrack*, right-click menu
+ * - go-to-album  (gpointer track)   — SpotifyNativeTrack*, right-click menu
+ * - go-to-artist (gpointer track)   — SpotifyNativeTrack*, right-click menu
+ *
+ *   For all three the payload is a SpotifyNativeTrack* that is only valid for
+ *   the duration of the emission; a handler that needs to keep it must copy.
  */
 
 G_END_DECLS

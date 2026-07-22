@@ -10,6 +10,7 @@
 #include <adwaita.h>
 
 #include "spotify/session.h"
+#include "track_list.h"
 
 G_BEGIN_DECLS
 
@@ -22,6 +23,10 @@ SpotifyGtkLikedSongsPage *spotifygtk_liked_songs_page_new (void);
 void spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
                                               SpotifyNativeSession     *session);
 void spotifygtk_liked_songs_page_refresh (SpotifyGtkLikedSongsPage *self);
+
+/* The track list, for play-context and the row context menu — see
+ * spotifygtk_search_page_get_list(). */
+SpotifyGtkTrackList *spotifygtk_liked_songs_page_get_list (SpotifyGtkLikedSongsPage *self);
 
 void spotifygtk_liked_songs_page_set_playing_uri (SpotifyGtkLikedSongsPage *self,
                                           const gchar *uri,

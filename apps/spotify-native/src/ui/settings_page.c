@@ -141,15 +141,15 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   /* ── Interface ─────────────────────────────────────────────── */
   GtkWidget *interface_group = build_group ("Interface");
 
-  static const gchar * const themes[] = { "Dark", "Light", "Milk", NULL };
+  static const gchar * const themes[] = { "Dark", "White", "Milk", NULL };
   GtkWidget *theme_dd = build_dropdown (themes,
                                         spotifygtk_settings_get_theme (self->settings),
-                                        FALSE);
+                                        TRUE);
   g_signal_connect (theme_dd, "notify::selected", G_CALLBACK (on_theme_changed), self);
   gtk_box_append (GTK_BOX (interface_group),
                   build_row ("Theme",
-                             "Only the dark theme exists so far; the choice is "
-                             "stored but does not change anything yet.",
+                             "Dark (default), White, or the warmer Milk. "
+                             "Applies immediately and is remembered.",
                              theme_dd));
 
   /* The one setting on this page that is fully wired. */

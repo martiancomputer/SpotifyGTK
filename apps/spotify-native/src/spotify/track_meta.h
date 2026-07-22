@@ -53,6 +53,14 @@ typedef struct {
   gint64   duration_ms;  /* Track.duration (field 7); 0 if absent */
   gboolean is_explicit;  /* Track.explicit (field 9) */
 
+  /* Navigation targets, as full URIs ready for /context-resolve. Both come
+   * from the `gid` (field 1) of the Album / first Artist submessage — a
+   * 16-byte value base62-encoded to Spotify's 22-char id, then prefixed.
+   * NULL when the submessage carried no gid. Used by the row context menu's
+   * "Go to Album" / "Go to Artist". */
+  gchar   *album_uri;    /* spotify:album:<id>  — NULL if absent */
+  gchar   *artist_uri;   /* spotify:artist:<id> — NULL if absent (first artist) */
+
   /* Album cover, as lowercase hex of the largest advertised Image.file_id
    * in Track.album.cover_group. NULL when the album carries no artwork.
    *

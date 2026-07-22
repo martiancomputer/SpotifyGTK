@@ -24,6 +24,4 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkHomePage, spotifygtk_home_page,
 
 SpotifyGtkHomePage *spotifygtk_home_page_new (void);
 
-/* Signal: settings-requested () — the gear in the page header. */
-
 G_END_DECLS

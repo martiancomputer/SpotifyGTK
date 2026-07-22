@@ -59,9 +59,16 @@ typedef struct {
   gint64   duration_ms;
   gboolean is_explicit;
   gchar   *cover_id;     /* hex Image.file_id; NULL if the album has no art */
+  gchar   *album_uri;    /* spotify:album:<id>;  NULL if unknown */
+  gchar   *artist_uri;   /* spotify:artist:<id> (primary); NULL if unknown */
 } SpotifyNativeTrack;
 
 void spotifygtk_native_track_free (SpotifyNativeTrack *track);
+
+/* Deep copy; free the result with spotifygtk_native_track_free(). NULL in,
+ * NULL out. The UI keeps its own play-context and queue copies of tracks,
+ * whose lifetimes are independent of the GPtrArray a load returned. */
+SpotifyNativeTrack *spotifygtk_native_track_copy (const SpotifyNativeTrack *track);
 
 #define SPOTIFYGTK_TYPE_NATIVE_SESSION (spotifygtk_native_session_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifyNativeSession, spotifygtk_native_session,

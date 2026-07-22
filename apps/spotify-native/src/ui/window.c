@@ -28,9 +28,14 @@
 #include "liked_songs_page.h"
 #include "library_page.h"
 #include "settings_page.h"
+#include "settings.h"
+#include "context_page.h"
+#include "track_list.h"
 
 #include "../player_service.h"
 #include "../spotify/session.h"
+
+#include <string.h>
 
 struct _SpotifyGtkNativeWindow {
   GtkApplicationWindow parent_instance;
@@ -50,6 +55,7 @@ struct _SpotifyGtkNativeWindow {
   SpotifyGtkLikedSongsPage *liked_page;
   SpotifyGtkLibraryPage *library_page;
   SpotifyGtkSettingsPage *settings_page;
+  SpotifyGtkContextPage *context_page;   /* album / artist target */
 
   /* Now Playing panel (right side) */
   SpotifyGtkNowPlayingPanel *now_playing_panel;
@@ -63,7 +69,18 @@ struct _SpotifyGtkNativeWindow {
 
   /* State */
   gchar *current_track_uri;
+  gint64 current_track_duration_ms;   /* for the progress bar; engine reports position only */
   gboolean queue_expanded;
+
+  /* Playback ordering. `play_context` is the ordered list the current track
+   * came from (a snapshot of whichever page was activated); `context_index`
+   * points at the current track within it. `user_queue` holds tracks the
+   * user explicitly queued, which play before the context advances. All hold
+   * owned SpotifyNativeTrack copies. The engine still plays one track at a
+   * time — this layer only decides which URI to hand it next. */
+  GPtrArray *play_context;      /* SpotifyNativeTrack*, free func set; may be NULL */
+  gint       context_index;     /* -1 when there is no context */
+  GQueue    *user_queue;        /* SpotifyNativeTrack*, freed manually */
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, GTK_TYPE_APPLICATION_WINDOW)
@@ -71,13 +88,39 @@ G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, GTK_TYPE_
 /* === Forward declarations === */
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
 
-/* === Track selection === */
+/* === Track selection, queue and play-context === */
 
-/* Adopt a track from any page: record its URI, update both display surfaces,
- * and hand it to the engine. Everything that starts playback goes through
- * here so current_track_uri can never drift from what's on screen. */
+/* Rebuild the "up next" list the panel shows, and update Prev/Next
+ * sensitivity, from the current queue and context. Called whenever either
+ * changes. The panel list borrows the track pointers, so it must be rebuilt
+ * (not retained) any time the underlying arrays are mutated. */
 static void
-select_and_play_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
+refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
+{
+  gboolean can_prev = self->play_context && self->context_index > 0;
+  gboolean can_next = !g_queue_is_empty (self->user_queue) ||
+                      (self->play_context && self->context_index >= 0 &&
+                       self->context_index + 1 < (gint) self->play_context->len);
+  spotifygtk_playback_bar_set_skip_sensitive (self->playback_bar, can_prev, can_next);
+
+  /* Up next = user-queued tracks first, then the tail of the context. */
+  GPtrArray *up_next = g_ptr_array_new ();   /* borrowed pointers, no free func */
+  for (GList *l = self->user_queue->head; l; l = l->next)
+    g_ptr_array_add (up_next, l->data);
+  if (self->play_context && self->context_index >= 0) {
+    for (guint i = self->context_index + 1; i < self->play_context->len; i++)
+      g_ptr_array_add (up_next, g_ptr_array_index (self->play_context, i));
+  }
+  spotifygtk_now_playing_panel_set_native_queue (self->now_playing_panel, up_next);
+  g_ptr_array_free (up_next, TRUE);
+}
+
+/* Show a track on both surfaces and hand its URI to the engine. This is the
+ * one place that touches the engine and current_track_uri, so they can never
+ * drift from what's on screen. It does not touch the queue or context —
+ * callers own that decision. */
+static void
+play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
 {
   if (!track || !track->uri) {
     g_warning ("Track has no URI; nothing to play");
@@ -86,6 +129,11 @@ select_and_play_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *t
 
   g_free (self->current_track_uri);
   self->current_track_uri = g_strdup (track->uri);
+  self->current_track_duration_ms = track->duration_ms;
+
+  /* Reset the bar to 0 of the new track's length immediately; the engine's
+   * position reports then advance it. */
+  spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
 
   const gchar *name    = track->name    ? track->name    : "Unknown track";
   const gchar *artists = track->artists ? track->artists : "";
@@ -102,14 +150,142 @@ select_and_play_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *t
     g_warning ("Playback failed: %s", error->message);
     g_error_free (error);
   }
+
+  refresh_transport_and_queue (self);
+}
+
+/* Play the context entry at `index`, making it the current track. */
+static void
+play_context_at (SpotifyGtkNativeWindow *self, gint index)
+{
+  if (!self->play_context || index < 0 || index >= (gint) self->play_context->len)
+    return;
+  self->context_index = index;
+  play_native_track (self, g_ptr_array_index (self->play_context, index));
+}
+
+/* Resolve and play the next track: a user-queued track first, otherwise the
+ * next context entry. Returns TRUE if something started. A queued track plays
+ * without disturbing the context cursor, so the context resumes after it. */
+static gboolean
+advance_next (SpotifyGtkNativeWindow *self)
+{
+  if (!g_queue_is_empty (self->user_queue)) {
+    SpotifyNativeTrack *track = g_queue_pop_head (self->user_queue);
+    play_native_track (self, track);
+    spotifygtk_native_track_free (track);
+    return TRUE;
+  }
+
+  if (self->play_context && self->context_index >= 0 &&
+      self->context_index + 1 < (gint) self->play_context->len) {
+    play_context_at (self, self->context_index + 1);
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+static gboolean
+advance_prev (SpotifyGtkNativeWindow *self)
+{
+  if (self->play_context && self->context_index > 0) {
+    play_context_at (self, self->context_index - 1);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/* A row was activated on `list`: adopt that list's ordering as the new play
+ * context and play the chosen track from within it, so Next/Previous walk the
+ * same list the user is looking at. */
+static void
+on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
+{
+  SpotifyGtkNativeWindow   *self  = user_data;
+  const SpotifyNativeTrack *track = track_ptr;
+  if (!track || !track->uri)
+    return;
+
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  self->play_context = spotifygtk_track_list_snapshot (list);
+  self->context_index = -1;
+
+  for (guint i = 0; i < self->play_context->len; i++) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (self->play_context, i);
+    if (g_strcmp0 (t->uri, track->uri) == 0) {
+      self->context_index = (gint) i;
+      break;
+    }
+  }
+
+  if (self->context_index >= 0)
+    play_context_at (self, self->context_index);
+  else
+    play_native_track (self, track);   /* not found in snapshot; play it alone */
 }
 
 static void
-on_page_track_activated (gpointer page, gpointer track, gpointer user_data)
+on_list_add_to_queue (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
 {
-  SpotifyGtkNativeWindow *self = user_data;
-  select_and_play_track (self, track);
-  (void) page;
+  SpotifyGtkNativeWindow   *self  = user_data;
+  const SpotifyNativeTrack *track = track_ptr;
+  if (!track || !track->uri)
+    return;
+
+  g_queue_push_tail (self->user_queue, spotifygtk_native_track_copy (track));
+  refresh_transport_and_queue (self);
+  (void) list;
+}
+
+static void
+on_list_go_to_album (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
+{
+  SpotifyGtkNativeWindow   *self  = user_data;
+  const SpotifyNativeTrack *track = track_ptr;
+  if (!track || !track->album_uri)
+    return;
+
+  spotifygtk_context_page_load (self->context_page, track->album_uri,
+                                track->album ? track->album : "Album", "Album");
+  navigate_to_page (self, "context");
+  (void) list;
+}
+
+static void
+on_list_go_to_artist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
+{
+  SpotifyGtkNativeWindow   *self  = user_data;
+  const SpotifyNativeTrack *track = track_ptr;
+  if (!track || !track->artist_uri)
+    return;
+
+  /* `artists` is ", "-joined; show just the primary for the header. */
+  g_autofree gchar *primary = NULL;
+  if (track->artists && *track->artists) {
+    const gchar *sep = strstr (track->artists, ", ");
+    primary = sep ? g_strndup (track->artists, sep - track->artists)
+                  : g_strdup (track->artists);
+  }
+
+  spotifygtk_context_page_load (self->context_page, track->artist_uri,
+                                primary ? primary : "Artist", "Artist");
+  navigate_to_page (self, "context");
+  (void) list;
+}
+
+/* Connect the window to one page's inner list: activation drives play +
+ * context, and the row context menu drives queue and album/artist nav. Every
+ * page that shows tracks routes through the same handlers. */
+static void
+wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
+{
+  if (!list)
+    return;
+  g_signal_connect (list, "track-activated", G_CALLBACK (on_list_track_activated), self);
+  g_signal_connect (list, "add-to-queue",    G_CALLBACK (on_list_add_to_queue),    self);
+  g_signal_connect (list, "go-to-album",     G_CALLBACK (on_list_go_to_album),     self);
+  g_signal_connect (list, "go-to-artist",    G_CALLBACK (on_list_go_to_artist),    self);
 }
 
 /* === Sidebar callbacks === */
@@ -188,19 +364,27 @@ on_pause_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 }
 
 static void
+on_seek_requested (SpotifyGtkPlaybackBar *bar, gint64 position_ms, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  spotifygtk_player_service_seek (self->player, position_ms);
+  (void) bar;
+}
+
+static void
 on_next_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
-  /* TODO: Queue next track */
-  (void) self; (void) bar;
+  advance_next (self);
+  (void) bar;
 }
 
 static void
 on_prev_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
-  /* TODO: Queue previous track */
-  (void) self; (void) bar;
+  advance_prev (self);
+  (void) bar;
 }
 
 /* === Player state === */
@@ -211,6 +395,15 @@ on_player_state_changed (SpotifyNativePlayerService *player,
                          gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+
+  /* A track finishing on its own reaches the window as IDLE (a user switching
+   * tracks never does — the service hands the pending URI straight to the
+   * engine without emitting IDLE). So IDLE with a track loaded means "play
+   * whatever is next". If nothing is next, fall through and clear the UI. */
+  if (state == SPOTIFYGTK_PLAYER_IDLE && self->current_track_uri) {
+    if (advance_next (self))
+      return;
+  }
 
   gboolean is_playing = (state == SPOTIFYGTK_PLAYER_PLAYING);
   gboolean has_track   = (state == SPOTIFYGTK_PLAYER_PLAYING ||
@@ -225,11 +418,22 @@ on_player_state_changed (SpotifyNativePlayerService *player,
   const gchar *uri = has_track ? self->current_track_uri : NULL;
   spotifygtk_search_page_set_playing_uri (self->search_page, uri, is_playing);
   spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, uri, is_playing);
+  spotifygtk_context_page_set_playing_uri (self->context_page, uri, is_playing);
 
   if (state == SPOTIFYGTK_PLAYER_ERROR) {
     g_warning ("Player error: %s", message);
   }
 
+  (void) player;
+}
+
+static void
+on_player_position_changed (SpotifyNativePlayerService *player,
+                            gint64 position_ms, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  spotifygtk_native_window_set_progress (self, position_ms,
+                                         self->current_track_duration_ms);
   (void) player;
 }
 
@@ -246,6 +450,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     /* Pages that gave up with "Not signed in yet" can load for real now. */
     spotifygtk_search_page_set_session (self->search_page, session);
     spotifygtk_liked_songs_page_set_session (self->liked_page, session);
+    spotifygtk_context_page_set_session (self->context_page, session);
 
     const gchar *visible = gtk_stack_get_visible_child_name (self->page_stack);
     if (visible)
@@ -304,31 +509,45 @@ navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
                                           self->current_track_uri, is_playing);
   spotifygtk_liked_songs_page_set_playing_uri (self->liked_page,
                                                self->current_track_uri, is_playing);
+  spotifygtk_context_page_set_playing_uri (self->context_page,
+                                           self->current_track_uri, is_playing);
 }
 
-/* === CSS for dark theme === */
+/* === Theming ===================================================== */
 /*
- * Styling follows the reference design: near-black chrome, a slightly
- * lifted content area, and a green accent used only for state (selection,
- * progress, pinned, active toggles) rather than as decoration.
+ * The reference design is one dark stylesheet; White and Milk are the same
+ * rules over a different palette. To stop the three from drifting, the rule
+ * body below is written once against named colours (@bg_chrome, @accent, …)
+ * and each theme supplies only the palette that defines them — so a rule
+ * added or tweaked once takes effect in all three.
  *
- *   #0a0a0a  window chrome / playback bar (deepest)
- *   #0f0f0f  sidebar
- *   #121212  main content
- *   #1a1a1a  cards and rows
- *   #242424  hover
- *   #1db954  accent
+ * Named rather than literal because several roles share a hex in one theme
+ * but invert in another: the play button and slider knob are near-white on
+ * dark chrome but near-black on a light one, so @ctrl_fill cannot just be
+ * "#ffffff". The Dark palette reproduces the exact values the design shipped
+ * with (the one deliberate exception: the .art-large placeholder glyph moves
+ * from #333333 to #3e3e3e, sharing @art_glyph with .art-thumb — an invisible
+ * shift on a barely-visible glyph).
+ *
+ *   @bg_chrome  window chrome / playback bar (deepest)
+ *   @bg_panel   sidebar / now-playing panel
+ *   @bg_content main content
+ *   @bg_card    cards and rows
+ *   @accent     green, used only for state
  */
-static const gchar *dark_theme_css =
-  "window { background-color: #0a0a0a; color: #e8e8e8; }"
+
+/* The shared rule body. Every colour is an @-name resolved by the palette
+ * prepended at load time. */
+static const gchar *theme_body =
+  "window { background-color: @bg_chrome; color: @fg; }"
 
   /* ── Structure ─────────────────────────────────────────────── */
-  "headerbar { background-color: #0a0a0a; box-shadow: none;"
-  "  border-bottom: 1px solid #000000; min-height: 46px; }"
-  "headerbar label.title { font-size: 14px; font-weight: 600; color: #e8e8e8; }"
-  ".sidebar { background-color: #0f0f0f;"
-  "  border-right: 1px solid #000000; }"
-  ".main-content { background-color: #121212; }"
+  "headerbar { background-color: @bg_chrome; box-shadow: none;"
+  "  border-bottom: 1px solid @border; min-height: 46px; }"
+  "headerbar label.title { font-size: 14px; font-weight: 600; color: @fg; }"
+  ".sidebar { background-color: @bg_panel;"
+  "  border-right: 1px solid @border; }"
+  ".main-content { background-color: @bg_content; }"
   /* libadwaita paints list, row, viewport and .view with a lighter "view"
    * fill. That is the grey slab that showed through wherever a list was
    * empty. Nothing in this UI wants a filled list surface. */
@@ -336,13 +555,13 @@ static const gchar *dark_theme_css =
   "  { background-color: transparent; background-image: none; }"
   "scrolledwindow undershoot.top, scrolledwindow undershoot.bottom"
   "  { background: none; }"
-  ".now-playing-panel { background-color: #0f0f0f;"
-  "  border-left: 1px solid #000000; }"
+  ".now-playing-panel { background-color: @bg_panel;"
+  "  border-left: 1px solid @border; }"
   /* Padding, not widget margins — see playback_bar.c. Bottom corners are
    * rounded to follow the window's own shape instead of squaring off
    * against it. */
-  ".playback-bar { background-color: #0a0a0a;"
-  "  border-top: 1px solid #000000;"
+  ".playback-bar { background-color: @bg_chrome;"
+  "  border-top: 1px solid @border;"
   "  padding: 6px 16px 8px 16px;"
   "  border-bottom-left-radius: 12px;"
   "  border-bottom-right-radius: 12px; }"
@@ -351,83 +570,83 @@ static const gchar *dark_theme_css =
   ".sidebar list { background-color: transparent; }"
   ".sidebar-item { border-radius: 10px; margin: 2px 10px;"
   "  transition: background-color 120ms ease; }"
-  ".sidebar-item label { color: #b8b8b8; font-size: 15px; }"
-  ".sidebar-item image { color: #b8b8b8; }"
-  ".sidebar-item:hover { background-color: #1a1a1a; }"
-  ".sidebar-item:selected { background-color: #1f1f1f; }"
-  ".sidebar-item:selected label { color: #ffffff; font-weight: 600; }"
-  ".sidebar-item:selected image { color: #1db954; }"
-  ".sidebar-heading { color: #7a7a7a; font-size: 12px; font-weight: 700;"
+  ".sidebar-item label { color: @fg_sidebar; font-size: 15px; }"
+  ".sidebar-item image { color: @fg_sidebar; }"
+  ".sidebar-item:hover { background-color: @bg_card; }"
+  ".sidebar-item:selected { background-color: @bg_selected; }"
+  ".sidebar-item:selected label { color: @fg_strong; font-weight: 600; }"
+  ".sidebar-item:selected image { color: @accent; }"
+  ".sidebar-heading { color: @fg_dimmer; font-size: 12px; font-weight: 700;"
   "  letter-spacing: 0.6px; }"
   ".pinned-card { background-color: transparent; border-radius: 8px;"
   "  margin: 1px 10px; }"
-  ".pinned-card:hover { background-color: #1a1a1a; }"
-  ".pin-icon { color: #1db954; }"
-  ".sidebar-action { color: #9a9a9a; font-size: 13px; }"
+  ".pinned-card:hover { background-color: @bg_card; }"
+  ".pin-icon { color: @accent; }"
+  ".sidebar-action { color: @fg_dim; font-size: 13px; }"
 
   /* ── Typography ────────────────────────────────────────────── */
-  ".title-text { color: #ffffff; font-weight: 800; font-size: 30px;"
+  ".title-text { color: @fg_strong; font-weight: 800; font-size: 30px;"
   "  letter-spacing: -0.5px; }"
-  ".greeting { color: #9a9a9a; font-size: 14px; }"
-  ".section-heading { color: #ffffff; font-size: 19px; font-weight: 700; }"
-  ".normal-text { color: #e8e8e8; font-size: 15px; }"
-  ".dim-text { color: #9a9a9a; font-size: 13px; }"
-  ".bar-title { color: #ffffff; font-size: 14px; font-weight: 600; }"
-  ".bar-subtitle { color: #9a9a9a; font-size: 12px; }"
-  ".time-label { color: #9a9a9a; font-size: 11px;"
+  ".greeting { color: @fg_dim; font-size: 14px; }"
+  ".section-heading { color: @fg_strong; font-size: 19px; font-weight: 700; }"
+  ".normal-text { color: @fg; font-size: 15px; }"
+  ".dim-text { color: @fg_dim; font-size: 13px; }"
+  ".bar-title { color: @fg_strong; font-size: 14px; font-weight: 600; }"
+  ".bar-subtitle { color: @fg_dim; font-size: 12px; }"
+  ".time-label { color: @fg_dim; font-size: 11px;"
   "  font-feature-settings: \'tnum\'; }"
-  ".row-number { color: #7a7a7a; font-size: 13px;"
+  ".row-number { color: @fg_dimmer; font-size: 13px;"
   "  font-feature-settings: \'tnum\'; }"
-  ".row-duration { color: #9a9a9a; font-size: 13px;"
+  ".row-duration { color: @fg_dim; font-size: 13px;"
   "  font-feature-settings: \'tnum\'; }"
 
   /* ── Cards and rows ────────────────────────────────────────── */
-  ".card { background-color: #1a1a1a; border-radius: 10px; }"
-  ".media-card { background-color: #1a1a1a; border-radius: 10px;"
+  ".card { background-color: @bg_card; border-radius: 10px; }"
+  ".media-card { background-color: @bg_card; border-radius: 10px;"
   "  padding: 0px; transition: background-color 140ms ease; }"
-  ".media-card:hover { background-color: #242424; }"
-  ".media-card-title { color: #ffffff; font-size: 14px; font-weight: 600; }"
-  ".media-card-subtitle { color: #9a9a9a; font-size: 12px; }"
+  ".media-card:hover { background-color: @bg_hover; }"
+  ".media-card-title { color: @fg_strong; font-size: 14px; font-weight: 600; }"
+  ".media-card-subtitle { color: @fg_dim; font-size: 12px; }"
   /* Track rows are a continuous list, not stacked cards. Giving each row a
    * solid fill plus a vertical margin banded the whole page. Flat with a
    * hover highlight; `.card` stays for things that really are cards. */
   ".list-row { background-color: transparent; border-radius: 6px;"
   "  transition: background-color 120ms ease; }"
-  ".list-row:hover { background-color: #1c1c1c; }"
-  ".list-row:selected { background-color: #232323; }"
-  ".art-thumb { background-color: #151515; border-radius: 6px;"
-  "  color: #3e3e3e; }"
-  ".art-large { background-color: #151515; border-radius: 12px;"
-  "  color: #333333; }"
-  ".pill-button { background-color: #1f1f1f; border-radius: 999px;"
-  "  color: #e8e8e8; font-size: 12px; font-weight: 600;"
+  ".list-row:hover { background-color: @bg_hover_row; }"
+  ".list-row:selected { background-color: @bg_selected_row; }"
+  ".art-thumb { background-color: @art_bg; border-radius: 6px;"
+  "  color: @art_glyph; }"
+  ".art-large { background-color: @art_bg; border-radius: 12px;"
+  "  color: @art_glyph; }"
+  ".pill-button { background-color: @bg_selected; border-radius: 999px;"
+  "  color: @fg; font-size: 12px; font-weight: 600;"
   "  padding: 4px 14px; min-height: 0; }"
-  ".pill-button:hover { background-color: #2c2c2c; }"
+  ".pill-button:hover { background-color: @pill_hover; }"
 
   /* ── Transport ─────────────────────────────────────────────── */
   /* min-width/height must match the widget size request, or GTK button
    * padding wins and the "circular" class renders an oval. */
-  ".play-button { background-color: #ffffff; color: #0a0a0a;"
+  ".play-button { background-color: @ctrl_fill; color: @ctrl_on_fill;"
   "  min-width: 34px; min-height: 34px; padding: 0; }"
-  ".play-button:hover { background-color: #f0f0f0; }"
-  ".play-button:disabled { background-color: #3a3a3a; color: #7a7a7a; }"
-  ".transport-button { color: #b8b8b8; min-width: 32px; min-height: 32px; }"
-  ".transport-button:hover { color: #ffffff; }"
-  ".toggle-active { color: #1db954; }"
-  ".like-active { color: #1db954; }"
+  ".play-button:hover { background-color: @ctrl_fill_hover; }"
+  ".play-button:disabled { background-color: @trough; color: @fg_dimmer; }"
+  ".transport-button { color: @fg_sidebar; min-width: 32px; min-height: 32px; }"
+  ".transport-button:hover { color: @fg_strong; }"
+  ".toggle-active { color: @accent; }"
+  ".like-active { color: @accent; }"
 
   /* ── Sliders ───────────────────────────────────────────────── */
   "scale { min-height: 18px; }"
-  "scale trough { background-color: #3a3a3a; min-height: 4px;"
+  "scale trough { background-color: @trough; min-height: 4px;"
   "  border-radius: 2px; }"
-  "scale highlight { background-color: #1db954; border-radius: 2px; }"
-  "scale:disabled highlight { background-color: #4a4a4a; }"
+  "scale highlight { background-color: @accent; border-radius: 2px; }"
+  "scale:disabled highlight { background-color: @trough_muted; }"
   /* `margin: 0` is load-bearing: libadwaita puts a negative margin on scale
    * sliders, which combines with a smaller min-width to give a negative
    * computed size and a stream of GTK warnings. */
-  "scale slider { background-color: #ffffff; min-width: 12px;"
+  "scale slider { background-color: @knob; min-width: 12px;"
   "  min-height: 12px; border-radius: 6px; margin: 0; }"
-  "scale:disabled slider { background-color: #6e6e6e; }"
+  "scale:disabled slider { background-color: @knob_muted; }"
 
   /* ── Text selection ────────────────────────────────────────── */
   /* One selection colour everywhere: the search entry, and any selectable
@@ -436,36 +655,127 @@ static const gchar *dark_theme_css =
    * pseudo-element -- including the latter makes the whole rule fail to
    * parse ("Unknown pseudoclass"). */
   "selection, entry selection, label selection, text selection"
-  "  { background-color: #60A5FA; color: #0a0a0a; }"
-  "entry { caret-color: #60A5FA; }"
+  "  { background-color: @selection; color: @on_accent; }"
+  "entry { caret-color: @selection; }"
 
   /* ── Now playing indicator ─────────────────────────────────── */
   /* Three bars beside the duration on whichever row is playing. The
    * animation is driven in C (track_row.c) rather than by a CSS keyframe,
    * so the tick can be stopped outright when no row is playing instead of
-   * leaving the compositor animating an offscreen widget forever. */
-  ".eq-bar { background-color: #1db954; border-radius: 1px; }"
+   * leaving the compositor animating an offscreen widget forever.
+   * NOTE: the eq bars are also drawn in Cairo with a hardcoded green in
+   * track_row.c; a non-green accent would want updating there too. */
+  ".eq-bar { background-color: @accent; border-radius: 1px; }"
 
   /* ── Scrollbars ────────────────────────────────────────────── */
   /* Non-overlay, so it sits in a gutter beside the list, not over it. */
   "scrollbar { background-color: transparent; border: none; }"
-  "scrollbar slider { background-color: #3a3a3a; border-radius: 6px;"
+  "scrollbar slider { background-color: @trough; border-radius: 6px;"
   "  min-width: 8px; margin: 2px; }"
-  "scrollbar slider:hover { background-color: #4e4e4e; }";
+  "scrollbar slider:hover { background-color: @scroll_hover; }";
+
+/* One @define-color block per theme. Dark is the shipped design, verbatim. */
+static const gchar *palette_dark =
+  "@define-color bg_chrome #0a0a0a;  @define-color bg_panel #0f0f0f;"
+  "@define-color bg_content #121212; @define-color bg_card #1a1a1a;"
+  "@define-color bg_hover #242424;   @define-color bg_hover_row #1c1c1c;"
+  "@define-color bg_selected #1f1f1f;@define-color bg_selected_row #232323;"
+  "@define-color border #000000;"
+  "@define-color fg #e8e8e8;         @define-color fg_strong #ffffff;"
+  "@define-color fg_dim #9a9a9a;     @define-color fg_dimmer #7a7a7a;"
+  "@define-color fg_sidebar #b8b8b8;"
+  "@define-color accent #1db954;     @define-color selection #60A5FA;"
+  "@define-color on_accent #0a0a0a;"
+  "@define-color ctrl_fill #ffffff;  @define-color ctrl_fill_hover #f0f0f0;"
+  "@define-color ctrl_on_fill #0a0a0a;"
+  "@define-color knob #ffffff;       @define-color knob_muted #6e6e6e;"
+  "@define-color trough #3a3a3a;     @define-color trough_muted #4a4a4a;"
+  "@define-color scroll_hover #4e4e4e;@define-color pill_hover #2c2c2c;"
+  "@define-color art_bg #151515;     @define-color art_glyph #3e3e3e;";
+
+/* Crisp white: dark ink on white, same green accent, a deeper blue selection
+ * that stays legible on light. Play button / knob invert to near-black. */
+static const gchar *palette_white =
+  "@define-color bg_chrome #ffffff;  @define-color bg_panel #f6f6f6;"
+  "@define-color bg_content #ffffff; @define-color bg_card #eeeeee;"
+  "@define-color bg_hover #e6e6e6;   @define-color bg_hover_row #f0f0f0;"
+  "@define-color bg_selected #e4e4e4;@define-color bg_selected_row #e4e4e4;"
+  "@define-color border #e2e2e2;"
+  "@define-color fg #202020;         @define-color fg_strong #0a0a0a;"
+  "@define-color fg_dim #6a6a6a;     @define-color fg_dimmer #8a8a8a;"
+  "@define-color fg_sidebar #565656;"
+  "@define-color accent #1db954;     @define-color selection #2f6fed;"
+  "@define-color on_accent #ffffff;"
+  "@define-color ctrl_fill #0a0a0a;  @define-color ctrl_fill_hover #2a2a2a;"
+  "@define-color ctrl_on_fill #ffffff;"
+  "@define-color knob #0a0a0a;       @define-color knob_muted #b4b4b4;"
+  "@define-color trough #d2d2d2;     @define-color trough_muted #dedede;"
+  "@define-color scroll_hover #b8b8b8;@define-color pill_hover #dcdcdc;"
+  "@define-color art_bg #e6e6e6;     @define-color art_glyph #bcbcbc;";
+
+/* Milk: a warm off-white. Same structure as White, cream-shifted, with warm
+ * near-black ink so it reads softer than the crisp White theme. */
+static const gchar *palette_milk =
+  "@define-color bg_chrome #f5f0e6;  @define-color bg_panel #efe9db;"
+  "@define-color bg_content #faf6ee; @define-color bg_card #ece5d5;"
+  "@define-color bg_hover #e6ddcc;   @define-color bg_hover_row #efe9db;"
+  "@define-color bg_selected #e2d8c4;@define-color bg_selected_row #e2d8c4;"
+  "@define-color border #e3daca;"
+  "@define-color fg #34302a;         @define-color fg_strong #1e1b15;"
+  "@define-color fg_dim #75695a;     @define-color fg_dimmer #9a8d78;"
+  "@define-color fg_sidebar #6a5f4f;"
+  "@define-color accent #1db954;     @define-color selection #2f6fed;"
+  "@define-color on_accent #ffffff;"
+  "@define-color ctrl_fill #2a241b;  @define-color ctrl_fill_hover #43392c;"
+  "@define-color ctrl_on_fill #f5f0e6;"
+  "@define-color knob #2a241b;       @define-color knob_muted #b3a88f;"
+  "@define-color trough #d9ceb8;     @define-color trough_muted #e2d8c4;"
+  "@define-color scroll_hover #bcae97;@define-color pill_hover #ded3bd;"
+  "@define-color art_bg #e6ddcc;     @define-color art_glyph #bcae97;";
+
+static const gchar *
+palette_for (SpotifyGtkTheme theme)
+{
+  switch (theme) {
+    case SPOTIFYGTK_THEME_LIGHT: return palette_white;
+    case SPOTIFYGTK_THEME_MILK:  return palette_milk;
+    case SPOTIFYGTK_THEME_DARK:
+    default:                     return palette_dark;
+  }
+}
+
+/*
+ * Apply a theme by reloading one provider held on the display. It is created
+ * once and its contents replaced on each switch, so a theme change restyles
+ * the running window with no restart. AdwStyleManager is steered alongside so
+ * libadwaita's own drawing (dropdown popups, entries, the context menu) picks
+ * the matching light/dark base rather than fighting the palette.
+ */
+static void
+apply_theme (SpotifyGtkTheme theme)
+{
+  static GtkCssProvider *provider = NULL;
+  if (!provider) {
+    provider = gtk_css_provider_new ();
+    gtk_style_context_add_provider_for_display (gdk_display_get_default (),
+                                                GTK_STYLE_PROVIDER (provider),
+                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  }
+
+  g_autofree gchar *css = g_strconcat (palette_for (theme), theme_body, NULL);
+  gtk_css_provider_load_from_string (provider, css);
+
+  adw_style_manager_set_color_scheme (
+    adw_style_manager_get_default (),
+    theme == SPOTIFYGTK_THEME_DARK ? ADW_COLOR_SCHEME_FORCE_DARK
+                                   : ADW_COLOR_SCHEME_FORCE_LIGHT);
+}
 
 static void
-load_dark_theme (void)
+on_settings_theme_changed (SpotifyGtkSettings *settings, gpointer user_data)
 {
-  static gboolean loaded = FALSE;
-  if (loaded) return;
-
-  GtkCssProvider *provider = gtk_css_provider_new ();
-  gtk_css_provider_load_from_string (provider, dark_theme_css);
-  gtk_style_context_add_provider_for_display (gdk_display_get_default (),
-                                              GTK_STYLE_PROVIDER (provider),
-                                              GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-  g_object_unref (provider);
-  loaded = TRUE;
+  apply_theme (spotifygtk_settings_get_theme (settings));
+  (void) user_data;
 }
 
 /* === Construction === */
@@ -475,7 +785,13 @@ spotifygtk_native_window_constructed (GObject *object)
   SpotifyGtkNativeWindow *self = SPOTIFYGTK_NATIVE_WINDOW (object);
   G_OBJECT_CLASS (spotifygtk_native_window_parent_class)->constructed (object);
 
-  load_dark_theme ();
+  /* Apply the persisted theme now, and re-apply whenever it changes — the
+   * settings page writes through the same singleton, so a dropdown change
+   * restyles the running window live. */
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  apply_theme (spotifygtk_settings_get_theme (settings));
+  g_signal_connect (settings, "changed",
+                    G_CALLBACK (on_settings_theme_changed), self);
 
   gtk_window_set_title (GTK_WINDOW (self), "SpotifyGTK");
   gtk_window_set_default_size (GTK_WINDOW (self), 1800, 900);
@@ -486,6 +802,8 @@ spotifygtk_native_window_constructed (GObject *object)
 
   g_signal_connect (self->player, "state-changed",
                     G_CALLBACK (on_player_state_changed), self);
+  g_signal_connect (self->player, "position-changed",
+                    G_CALLBACK (on_player_position_changed), self);
   g_signal_connect (self->session, "state-changed",
                     G_CALLBACK (on_session_state_changed), self);
 
@@ -546,19 +864,21 @@ spotifygtk_native_window_constructed (GObject *object)
   self->liked_page = spotifygtk_liked_songs_page_new ();
   self->library_page = spotifygtk_library_page_new ();
   self->settings_page = spotifygtk_settings_page_new ();
+  self->context_page = spotifygtk_context_page_new ();
 
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->home_page), "home");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->search_page), "search");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->liked_page), "liked");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->library_page), "library");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->settings_page), "settings");
+  gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->context_page), "context");
 
-  /* Search and Liked Songs are the two pages backed by the native session;
-   * Home and Library are static until their endpoints are ported. */
-  g_signal_connect (self->search_page, "track-activated",
-                    G_CALLBACK (on_page_track_activated), self);
-  g_signal_connect (self->liked_page, "track-activated",
-                    G_CALLBACK (on_page_track_activated), self);
+  /* Every track list — search results, liked songs, and an opened album or
+   * artist — routes activation, queueing and album/artist navigation through
+   * the window via the same handlers. Home and Library have no lists yet. */
+  wire_track_list (self, spotifygtk_search_page_get_list (self->search_page));
+  wire_track_list (self, spotifygtk_liked_songs_page_get_list (self->liked_page));
+  wire_track_list (self, spotifygtk_context_page_get_list (self->context_page));
 
   gtk_box_append (GTK_BOX (content_box), GTK_WIDGET (self->page_stack));
   gtk_paned_set_start_child (self->content_paned, content_box);
@@ -608,6 +928,8 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_prev_clicked), self);
   g_signal_connect (self->playback_bar, "volume-changed",
                     G_CALLBACK (on_volume_changed), self);
+  g_signal_connect (self->playback_bar, "seek",
+                    G_CALLBACK (on_seek_requested), self);
   g_signal_connect (self->playback_bar, "queue-clicked",
                     G_CALLBACK (on_queue_clicked), self);
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->playback_bar));
@@ -635,6 +957,11 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_object (&self->player);
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_track_uri, g_free);
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  if (self->user_queue) {
+    g_queue_free_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
+    self->user_queue = NULL;
+  }
 
   G_OBJECT_CLASS (spotifygtk_native_window_parent_class)->dispose (object);
 }
@@ -650,6 +977,8 @@ spotifygtk_native_window_class_init (SpotifyGtkNativeWindowClass *klass)
 static void
 spotifygtk_native_window_init (SpotifyGtkNativeWindow *self)
 {
+  self->context_index = -1;
+  self->user_queue = g_queue_new ();
 }
 
 SpotifyGtkNativeWindow *

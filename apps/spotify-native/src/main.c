@@ -73,6 +73,10 @@ struct _SpotifyNativeEngineControl {
   gboolean paused;
   gdouble  volume;         /* 0.0 - 1.0 */
   gboolean volume_dirty;   /* set by the UI, cleared once the output applies it */
+  guint64  played_frames;  /* cumulative PCM frames written to the device */
+  gint     sample_rate;    /* of the stream being played; 0 until known */
+  gboolean seek_requested; /* UI asked to reposition */
+  gint64   seek_target_ms; /* where to; valid while seek_requested */
 };
 
 SpotifyNativeEngineControl *
@@ -152,6 +156,74 @@ spotifygtk_native_engine_control_get_volume (SpotifyNativeEngineControl *control
   gdouble volume = control->volume;
   g_mutex_unlock (&control->lock);
   return volume;
+}
+
+void
+spotifygtk_native_engine_control_report_position (SpotifyNativeEngineControl *control,
+                                                  guint64 played_frames, gint sample_rate)
+{
+  if (!control)
+    return;
+  g_mutex_lock (&control->lock);
+  control->played_frames = played_frames;
+  control->sample_rate   = sample_rate;
+  g_mutex_unlock (&control->lock);
+}
+
+gint64
+spotifygtk_native_engine_control_get_position_ms (SpotifyNativeEngineControl *control)
+{
+  if (!control)
+    return 0;
+  g_mutex_lock (&control->lock);
+  gint64 ms = control->sample_rate > 0
+    ? (gint64) (control->played_frames * 1000u / (guint64) control->sample_rate)
+    : 0;
+  g_mutex_unlock (&control->lock);
+  return ms;
+}
+
+void
+spotifygtk_native_engine_control_request_seek (SpotifyNativeEngineControl *control,
+                                               gint64 target_ms)
+{
+  if (!control)
+    return;
+  g_mutex_lock (&control->lock);
+  control->seek_requested = TRUE;
+  control->seek_target_ms = MAX (target_ms, 0);
+  /* Wake anything blocked on the pause/queue condition so the engine notices
+   * the request promptly rather than at the next 100ms poll only. */
+  g_cond_broadcast (&control->cond);
+  g_mutex_unlock (&control->lock);
+}
+
+gboolean
+spotifygtk_native_engine_control_seek_pending (SpotifyNativeEngineControl *control)
+{
+  if (!control)
+    return FALSE;
+  g_mutex_lock (&control->lock);
+  gboolean pending = control->seek_requested;
+  g_mutex_unlock (&control->lock);
+  return pending;
+}
+
+gboolean
+spotifygtk_native_engine_control_take_seek (SpotifyNativeEngineControl *control,
+                                            gint64 *out_target_ms)
+{
+  if (!control)
+    return FALSE;
+  g_mutex_lock (&control->lock);
+  gboolean pending = control->seek_requested;
+  if (pending) {
+    if (out_target_ms)
+      *out_target_ms = control->seek_target_ms;
+    control->seek_requested = FALSE;
+  }
+  g_mutex_unlock (&control->lock);
+  return pending;
 }
 
 /*
@@ -352,6 +424,15 @@ typedef struct {
   const gchar         *track_uri;
   GBytes             *initial_cdn_chunk;
   goffset             next_download_offset;
+  /* Seek support: the Ogg header pages (id/comment/setup) cached from the
+   * start of the stream, replayed into a fresh decoder on every seek so it can
+   * decode from a mid-file page; and a generation counter that invalidates a
+   * read-ahead fetch still in flight when a seek supersedes it. */
+  guint8             *header_prefix;
+  gsize               header_prefix_len;
+  guint               playback_generation;
+  glong               bitrate_nominal;   /* for the seek byte estimate */
+  gint                stream_sample_rate;
   SpotifyDecoder     *stream_decoder;
   guint64             stream_frames;
   guint64             output_frames;
@@ -554,6 +635,12 @@ audio_output_thread (gpointer user_data)
       mark_output_failed (state);
     } else {
       state->output_frames += written;
+      /* Report position as it advances, so the UI progress bar can track it.
+       * output_frames counts only frames actually written to the device, so a
+       * paused or stalled stream holds its position rather than running on. */
+      spotifygtk_native_engine_control_report_position (state->control,
+                                                        state->output_frames,
+                                                        frame->sample_rate);
     }
     pcm_frame_free (frame);
   }
@@ -580,14 +667,19 @@ stream_playback_start (LiveTestState *state)
 static gboolean
 stream_queue_frame (LiveTestState *state, PcmFrame *frame)
 {
+  /* A pending seek breaks the wait promptly and rejects the frame, so the
+   * read-ahead chain returns to on_read_ahead_chunk and rebuilds at the new
+   * position instead of blocking here for the buffered audio to drain. */
   g_mutex_lock (&state->queue_lock);
   while (state->queued_frames >= STREAM_QUEUE_MAX_FRAMES &&
          !state->output_failed &&
+         !spotifygtk_native_engine_control_seek_pending (state->control) &&
          !(state->cancellable && g_cancellable_is_cancelled (state->cancellable))) {
     g_cond_wait_until (&state->queue_cond, &state->queue_lock,
                        g_get_monotonic_time () + 100 * G_TIME_SPAN_MILLISECOND);
   }
   gboolean rejected = state->output_failed ||
+                      spotifygtk_native_engine_control_seek_pending (state->control) ||
                       (state->cancellable && g_cancellable_is_cancelled (state->cancellable));
   if (!rejected)
     state->queued_frames += frame->n_frames;
@@ -648,6 +740,235 @@ stream_decode_chunk (LiveTestState *state, GBytes *decrypted_chunk, gboolean fin
   return TRUE;
 }
 
+/* ── Seek: Ogg page walking + header replay ──────────────────────────────── */
+
+/* Parse the Ogg page at buf[pos]. Fills *page_len (total page length) and
+ * *granulepos, returning TRUE only for a complete, well-formed page. */
+static gboolean
+ogg_page_at (const guint8 *buf, gsize len, gsize pos,
+             gsize *page_len, gint64 *granulepos)
+{
+  if (pos + 27 > len) return FALSE;
+  if (memcmp (buf + pos, "OggS", 4) != 0) return FALSE;
+  if (buf[pos + 4] != 0) return FALSE;               /* structure version 0 */
+
+  guint8 n_segments = buf[pos + 26];
+  gsize  header_len = 27 + (gsize) n_segments;
+  if (pos + header_len > len) return FALSE;
+
+  gsize body = 0;
+  for (guint8 i = 0; i < n_segments; i++)
+    body += buf[pos + 27 + i];
+
+  gsize total = header_len + body;
+  if (pos + total > len) return FALSE;
+
+  if (granulepos) {
+    guint64 g = 0;
+    for (int i = 0; i < 8; i++)
+      g |= (guint64) buf[pos + 6 + i] << (8 * i);    /* little-endian */
+    *granulepos = (gint64) g;
+  }
+  if (page_len)
+    *page_len = total;
+  return TRUE;
+}
+
+/* Length of the leading run of header pages (granulepos 0 or -1) — the Vorbis
+ * id/comment/setup headers, which carry no audio. This prefix is replayed into
+ * a fresh decoder on seek so it can decode from a mid-file page. */
+static gsize
+ogg_header_prefix_len (const guint8 *buf, gsize len)
+{
+  gsize pos = 0;
+  while (pos < len) {
+    gsize   page_len;
+    gint64  granule;
+    if (!ogg_page_at (buf, len, pos, &page_len, &granule))
+      break;
+    if (granule != 0 && granule != -1)
+      break;                       /* first audio page: stop before it */
+    pos += page_len;
+  }
+  return pos;
+}
+
+/* First audio page (granulepos > 0) at or after `from`, with its granulepos.
+ * The scan is byte-wise for the "OggS" capture pattern, so it resynchronises
+ * even though the fetched window began at an arbitrary byte offset. */
+static gboolean
+ogg_first_audio_page (const guint8 *buf, gsize len, gsize from,
+                      gsize *out_off, gint64 *out_granule)
+{
+  for (gsize pos = from; pos + 4 <= len; pos++) {
+    if (buf[pos] != 'O' || memcmp (buf + pos, "OggS", 4) != 0)
+      continue;
+    gsize   page_len;
+    gint64  granule;
+    if (!ogg_page_at (buf, len, pos, &page_len, &granule))
+      continue;
+    if (granule > 0) {
+      if (out_off)     *out_off = pos;
+      if (out_granule) *out_granule = granule;
+      return TRUE;
+    }
+    pos += page_len - 1;           /* skip the page body; loop's ++ adds one */
+  }
+  return FALSE;
+}
+
+typedef struct {
+  LiveTestState *state;
+  guint          generation;
+  gint64         target_ms;
+  goffset        request_offset;
+} SeekLanding;
+
+static void do_seek (LiveTestState *state);
+
+/* Re-arm the audio output worker after a seek teardown, reusing the existing
+ * queue and lock (only the thread and the failed/counter state are reset). */
+static void
+stream_output_restart (LiveTestState *state)
+{
+  g_mutex_lock (&state->queue_lock);
+  state->output_failed = FALSE;
+  state->queued_frames = 0;
+  g_mutex_unlock (&state->queue_lock);
+  state->output_thread = g_thread_new ("spotify-native-audio", audio_output_thread, state);
+}
+
+/* The seek window arrived: find a page, replay headers into a fresh decoder,
+ * feed from that page, and resume normal read-ahead from just past the window. */
+static void
+on_seek_landing_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+{
+  SeekLanding  *land   = user_data;
+  LiveTestState *state = land->state;
+  guint    gen        = land->generation;
+  gint64   target_ms  = land->target_ms;
+  goffset  req_off    = land->request_offset;
+  g_free (land);
+
+  /* A newer seek superseded this one: its teardown already happened, so drop
+   * this stale window rather than feeding it into the wrong decoder. */
+  if (gen != state->playback_generation)
+    return;
+
+  if (!decrypted_chunk) {
+    g_warning ("[seek] landing fetch failed: %s", error ? error->message : "unknown error");
+    state->ok = TRUE;                       /* treat as end-of-track */
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  gsize         clen  = 0;
+  const guint8 *cdata = g_bytes_get_data (decrypted_chunk, &clen);
+
+  gsize  page_off = 0;
+  gint64 granule  = 0;
+  if (!ogg_first_audio_page (cdata, clen, 0, &page_off, &granule)) {
+    g_warning ("[seek] no Ogg audio page in the landing window; treating as end");
+    state->ok = TRUE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  gint    rate          = state->stream_sample_rate > 0 ? state->stream_sample_rate : 44100;
+  guint64 landed_frames = (guint64) granule;
+  state->output_frames  = landed_frames;
+  spotifygtk_native_engine_control_report_position (state->control, landed_frames, rate);
+
+  g_message ("[seek] landed at logical byte %" G_GOFFSET_FORMAT "+%" G_GSIZE_FORMAT
+             ", granule %" G_GINT64_FORMAT " (%.1fs; target %.1fs)",
+             req_off, page_off, granule, (double) granule / rate,
+             (double) target_ms / 1000.0);
+
+  /* Replay the cached headers so the fresh decoder can open, then feed audio
+   * from the landing page onward. Feeding headers yields no PCM. */
+  GBytes *hdr = g_bytes_new_static (state->header_prefix, state->header_prefix_len);
+  gboolean ok = stream_decode_chunk (state, hdr, FALSE);
+  g_bytes_unref (hdr);
+
+  if (ok) {
+    GBytes *tail = g_bytes_new (cdata + page_off, clen - page_off);
+    ok = stream_decode_chunk (state, tail, FALSE);
+    g_bytes_unref (tail);
+  }
+
+  if (!ok) {
+    /* A seek requested during the tail decode is not a failure — honour it. */
+    if (spotifygtk_native_engine_control_seek_pending (state->control)) {
+      do_seek (state);
+      return;
+    }
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  state->next_download_offset = req_off + (goffset) clen;
+  start_read_ahead (state);
+}
+
+/*
+ * Perform a seek: tear down the current decoder and output, estimate a byte
+ * offset from the nominal bitrate, and fetch a window there. The landing
+ * callback finishes the job. Runs on the engine context.
+ */
+static void
+do_seek (LiveTestState *state)
+{
+  gint64 target_ms = 0;
+  spotifygtk_native_engine_control_take_seek (state->control, &target_ms);
+
+  if (!state->header_prefix || state->header_prefix_len == 0) {
+    g_warning ("[seek] no cached Ogg headers yet; ignoring seek");
+    start_read_ahead (state);           /* keep playing from where we were */
+    return;
+  }
+
+  g_message ("[seek] request: %" G_GINT64_FORMAT " ms", target_ms);
+
+  /* Preserve pause across the seek: resuming is only to unpark the output
+   * worker so it can observe the teardown (it waits on the pause condition,
+   * which mark_output_failed does not signal). Re-paused after the rebuild. */
+  gboolean was_paused = spotifygtk_native_engine_control_is_paused (state->control);
+
+  spotifygtk_native_engine_control_resume (state->control);
+  mark_output_failed (state);
+  stream_playback_stop (state);
+
+  g_clear_object (&state->stream_decoder);
+  state->stream_decoder = spotifygtk_decoder_new ();
+  state->stream_frames = 0;
+
+  stream_output_restart (state);
+
+  if (was_paused)
+    spotifygtk_native_engine_control_pause (state->control);
+
+  glong   bitrate = state->bitrate_nominal > 0 ? state->bitrate_nominal : 160000;
+  goffset offset  = (goffset) ((gdouble) target_ms / 1000.0 * (gdouble) bitrate / 8.0);
+  if (offset < 0)
+    offset = 0;
+
+  /* Invalidate any read-ahead fetch already in flight for the old position. */
+  state->playback_generation++;
+
+  SeekLanding *land   = g_new0 (SeekLanding, 1);
+  land->state         = state;
+  land->generation    = state->playback_generation;
+  land->target_ms     = target_ms;
+  land->request_offset = offset;
+
+  g_message ("[seek] fetching landing window at logical byte %" G_GOFFSET_FORMAT
+             " (bitrate %ld bps)", offset, bitrate);
+  spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
+                              offset, CDN_FULL_DOWNLOAD_CHUNK,
+                              on_seek_landing_chunk, land);
+}
+
 static void
 on_read_ahead_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
 {
@@ -668,8 +989,20 @@ on_read_ahead_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
              len, state->next_download_offset - (goffset) len);
 
   if (!stream_decode_chunk (state, decrypted_chunk, len != CDN_FULL_DOWNLOAD_CHUNK)) {
+    /* A pending seek is why stream_queue_frame rejected the frame — it is not
+     * an error. Rebuild at the new position instead of ending the track. */
+    if (spotifygtk_native_engine_control_seek_pending (state->control)) {
+      do_seek (state);
+      return;
+    }
     state->ok = FALSE;
     g_main_loop_quit (state->loop);
+    return;
+  }
+
+  /* A seek can also land while a chunk decoded cleanly (queue not full). */
+  if (spotifygtk_native_engine_control_seek_pending (state->control)) {
+    do_seek (state);
     return;
   }
 
@@ -747,6 +1080,24 @@ on_cdn_seek_probe_result (GBytes *decrypted_chunk, GError *error, gpointer user_
       g_main_loop_quit (state->loop);
       return;
     }
+
+    /* Cache what a later seek needs: the Vorbis header pages (replayed into a
+     * fresh decoder so it can open at a mid-file page) plus the bitrate and
+     * sample rate (to estimate the seek byte offset and label the position).
+     * The decoder has just opened on these bytes, so info is available now. */
+    state->bitrate_nominal    = spotifygtk_decoder_get_bitrate_nominal (state->stream_decoder);
+    state->stream_sample_rate = spotifygtk_decoder_get_sample_rate (state->stream_decoder);
+    gsize hlen = ogg_header_prefix_len (initial, initial_len);
+    if (hlen > 0 && hlen <= initial_len) {
+      state->header_prefix     = g_memdup2 (initial, hlen);
+      state->header_prefix_len = hlen;
+      g_message ("[live-test] cached %" G_GSIZE_FORMAT " bytes of Ogg headers for seeking "
+                 "(bitrate %ld bps, %d Hz)", hlen, state->bitrate_nominal,
+                 state->stream_sample_rate);
+    } else {
+      g_warning ("[live-test] could not locate Ogg header pages; seeking will be unavailable");
+    }
+
     g_clear_pointer (&state->initial_cdn_chunk, g_bytes_unref);
     state->next_download_offset = (goffset) initial_len;
     g_message ("[live-test] seek validation passed; starting incremental read-ahead playback.");
@@ -1294,6 +1645,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     .track_uri = track_uri,
     .initial_cdn_chunk = NULL,
     .next_download_offset = 0,
+    .header_prefix = NULL, .header_prefix_len = 0, .playback_generation = 0,
     .stream_decoder = NULL, .stream_frames = 0, .output_frames = 0,
     .pcm_queue = NULL, .output_thread = NULL, .queued_frames = 0,
     .output_failed = FALSE, .queue_initialized = FALSE,
@@ -1366,6 +1718,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   g_free (state.client_token);
   g_free (state.cdn_url);
   g_clear_pointer (&state.initial_cdn_chunk, g_bytes_unref);
+  g_clear_pointer (&state.header_prefix, g_free);
   stream_playback_stop (&state);
   if (state.pcm_queue)
     g_async_queue_unref (state.pcm_queue);
@@ -1379,6 +1732,38 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   g_main_context_unref (context);
 
   return state.ok;
+}
+
+/* ── Headless seek test (SPOTIFY_TEST_SEEK) ──────────────────────────────── */
+
+typedef struct {
+  SpotifyNativeEngineControl *control;   /* borrowed */
+  gchar                      *spec;      /* owned: "ms[,ms...]" */
+} SeekTest;
+
+/* Fire the requested seeks a few seconds apart so playback has started and, on
+ * the second seek, has run past the first landing point. Purely diagnostic. */
+static gpointer
+seek_test_thread (gpointer user_data)
+{
+  SeekTest *st = user_data;
+  g_auto(GStrv) parts = g_strsplit (st->spec, ",", -1);
+
+  /* Let auth + first-chunk decode complete before the first seek. */
+  g_usleep (7 * G_USEC_PER_SEC);
+
+  for (guint i = 0; parts[i]; i++) {
+    if (!*parts[i])
+      continue;
+    gint64 ms = g_ascii_strtoll (parts[i], NULL, 10);
+    g_message ("[seek-test] requesting seek to %" G_GINT64_FORMAT " ms", ms);
+    spotifygtk_native_engine_control_request_seek (st->control, ms);
+    g_usleep (5 * G_USEC_PER_SEC);   /* let it land and play before the next */
+  }
+
+  g_free (st->spec);
+  g_free (st);
+  return NULL;
 }
 
 gboolean
@@ -1425,8 +1810,37 @@ spotifygtk_native_engine_run (GCancellable *cancellable,
   if (!selected_track || !*selected_track)
     selected_track = DEFAULT_TEST_TRACK_URI;
   g_message ("[engine] selected track URI: %s", selected_track);
+
+  /* SPOTIFY_TEST_SEEK="<ms>[,<ms>...]" exercises the seek path from the
+   * headless harness: with no UI to drive it, a background thread fires the
+   * given seeks a few seconds apart against a fresh control, so the page-scan
+   * + header-replay path can be confirmed against live CDN data from logs.
+   * Off by default; the normal run passes the caller's control through. */
+  SpotifyNativeEngineControl *run_control = control;
+  SpotifyNativeEngineControl *test_control = NULL;
+  GThread *seek_thread = NULL;
+  const gchar *seek_env = g_getenv ("SPOTIFY_TEST_SEEK");
+  if (seek_env && *seek_env && !control) {
+    test_control = spotifygtk_native_engine_control_new ();
+    /* Silent: the full pipeline (decode, seek, device writes) still runs, so
+     * logs confirm the seek path, but nothing is audible. */
+    spotifygtk_native_engine_control_set_volume (test_control, 0.0);
+    run_control  = test_control;
+    SeekTest *st = g_new0 (SeekTest, 1);
+    st->control = test_control;
+    st->spec    = g_strdup (seek_env);
+    seek_thread = g_thread_new ("seek-test", seek_test_thread, st);
+  }
+
   gboolean live_ok = run_live_test (token, cancellable, progress, progress_data,
-                                    control, selected_track);
+                                    run_control, selected_track);
+
+  if (seek_thread) {
+    /* The test thread holds a borrowed control pointer and has finished firing
+     * by the time playback ends; join before freeing the control. */
+    g_thread_join (seek_thread);
+    spotifygtk_native_engine_control_free (test_control);
+  }
   return live_ok;
 }
 
@@ -1461,11 +1875,13 @@ on_session_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_d
   for (guint i = 0; i < tracks->len; i++) {
     SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
     gint secs = (gint) (t->duration_ms / 1000);
-    g_message ("[session-probe]  %2u. %-40s %-26s %d:%02d",
+    g_message ("[session-probe]  %2u. %-40s %-26s %d:%02d  [%s | %s]",
                i + 1,
                t->name    ? t->name    : "(no name)",
                t->artists ? t->artists : "(no artist)",
-               secs / 60, secs % 60);
+               secs / 60, secs % 60,
+               t->album_uri  ? t->album_uri  : "no-album-uri",
+               t->artist_uri ? t->artist_uri : "no-artist-uri");
   }
 
   probe->ok = tracks->len > 0;

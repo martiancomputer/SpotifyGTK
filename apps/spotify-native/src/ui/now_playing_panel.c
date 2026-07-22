@@ -12,6 +12,7 @@ struct _SpotifyGtkNowPlayingPanel {
   GtkPicture *album_pic;    /* the cover, scaled to fill */
   GtkLabel *track_label;
   GtkLabel *artist_label;
+  GtkLabel *queue_heading;    /* "Next Up"; hidden when the queue is empty */
   GtkListBox *queue_list;
   GtkWidget  *art_section;   /* artwork + track info; what collapses */
   GtkButton  *collapse_btn;
@@ -146,10 +147,29 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_box_append (GTK_BOX (self->art_section), info);
   gtk_box_append (GTK_BOX (self), self->art_section);
 
-  /* Queue list */
+  /* Queue list, under a "Next Up" heading that hides itself when empty so an
+   * idle panel is not left with a dangling label over nothing. */
+  self->queue_heading = GTK_LABEL (gtk_label_new ("Next Up"));
+  gtk_widget_add_css_class (GTK_WIDGET (self->queue_heading), "dim-text");
+  gtk_label_set_xalign (self->queue_heading, 0.0);
+  gtk_widget_set_margin_start (GTK_WIDGET (self->queue_heading), 20);
+  gtk_widget_set_margin_end (GTK_WIDGET (self->queue_heading), 16);
+  gtk_widget_set_margin_top (GTK_WIDGET (self->queue_heading), 16);
+  gtk_widget_set_visible (GTK_WIDGET (self->queue_heading), FALSE);
+  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->queue_heading));
+
+  GtkWidget *queue_scroller = gtk_scrolled_window_new ();
+  gtk_widget_set_vexpand (queue_scroller, TRUE);
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (queue_scroller),
+                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (queue_scroller), FALSE);
+
   self->queue_list = GTK_LIST_BOX (gtk_list_box_new ());
-  gtk_widget_set_margin_top (GTK_WIDGET (self->queue_list), 16);
-  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->queue_list));
+  gtk_list_box_set_selection_mode (self->queue_list, GTK_SELECTION_NONE);
+  gtk_widget_set_margin_top (GTK_WIDGET (self->queue_list), 8);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (queue_scroller),
+                                 GTK_WIDGET (self->queue_list));
+  gtk_box_append (GTK_BOX (self), queue_scroller);
 }
 
 SpotifyGtkNowPlayingPanel *
@@ -231,6 +251,53 @@ spotifygtk_now_playing_panel_set_queue (SpotifyGtkNowPlayingPanel *self, JsonArr
     gtk_widget_add_css_class (label, "normal-text");
     gtk_label_set_xalign (GTK_LABEL (label), 0.0);
     gtk_box_append (GTK_BOX (box), label);
+
+    gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), box);
+    gtk_list_box_append (self->queue_list, row);
+  }
+}
+
+void
+spotifygtk_now_playing_panel_set_native_queue (SpotifyGtkNowPlayingPanel *self,
+                                               GPtrArray *tracks)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NOW_PLAYING_PANEL (self));
+
+  GtkWidget *child;
+  while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->queue_list))))
+    gtk_list_box_remove (self->queue_list, child);
+
+  guint n = tracks ? tracks->len : 0;
+  gtk_widget_set_visible (GTK_WIDGET (self->queue_heading), n > 0);
+
+  for (guint i = 0; i < n; i++) {
+    const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
+    if (!track)
+      continue;
+
+    GtkWidget *row = gtk_list_box_row_new ();
+    gtk_widget_add_css_class (row, "list-row");
+    gtk_list_box_row_set_activatable (GTK_LIST_BOX_ROW (row), FALSE);
+
+    GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_margin_start (box, 12);
+    gtk_widget_set_margin_end (box, 12);
+    gtk_widget_set_margin_top (box, 8);
+    gtk_widget_set_margin_bottom (box, 8);
+
+    GtkWidget *name = gtk_label_new (track->name ? track->name : "Unknown track");
+    gtk_widget_add_css_class (name, "normal-text");
+    gtk_label_set_xalign (GTK_LABEL (name), 0.0);
+    gtk_label_set_ellipsize (GTK_LABEL (name), PANGO_ELLIPSIZE_END);
+    gtk_box_append (GTK_BOX (box), name);
+
+    if (track->artists && *track->artists) {
+      GtkWidget *artist = gtk_label_new (track->artists);
+      gtk_widget_add_css_class (artist, "dim-text");
+      gtk_label_set_xalign (GTK_LABEL (artist), 0.0);
+      gtk_label_set_ellipsize (GTK_LABEL (artist), PANGO_ELLIPSIZE_END);
+      gtk_box_append (GTK_BOX (box), artist);
+    }
 
     gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), box);
     gtk_list_box_append (self->queue_list, row);

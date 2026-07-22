@@ -10,6 +10,7 @@ struct _SpotifyNativePlayerService {
   gchar *track_uri;
   gchar *pending_uri;   /* track requested while another was still playing */
   gint volume_percent;
+  guint position_timer_id;   /* polls the engine control for playback position */
   SpotifyNativePlayerState state;
 };
 
@@ -21,8 +22,40 @@ typedef struct {
 
 G_DEFINE_FINAL_TYPE (SpotifyNativePlayerService, spotifygtk_player_service, G_TYPE_OBJECT)
 
-enum { STATE_CHANGED, N_SIGNALS };
+enum { STATE_CHANGED, POSITION_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+#define POSITION_POLL_MS 250
+
+/* Poll the engine control for the current position and announce it. Runs on
+ * the service's main context while a track is active; stops when the control
+ * goes away. */
+static gboolean
+poll_position (gpointer user_data)
+{
+  SpotifyNativePlayerService *self = user_data;
+  if (!self->control) {
+    self->position_timer_id = 0;
+    return G_SOURCE_REMOVE;
+  }
+  gint64 position_ms = spotifygtk_native_engine_control_get_position_ms (self->control);
+  g_signal_emit (self, signals[POSITION_CHANGED], 0, position_ms);
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+start_position_timer (SpotifyNativePlayerService *self)
+{
+  if (self->position_timer_id != 0)
+    return;
+  self->position_timer_id = g_timeout_add (POSITION_POLL_MS, poll_position, self);
+}
+
+static void
+stop_position_timer (SpotifyNativePlayerService *self)
+{
+  g_clear_handle_id (&self->position_timer_id, g_source_remove);
+}
 
 static void
 emit_state (SpotifyNativePlayerService *self, SpotifyNativePlayerState state,
@@ -115,6 +148,8 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
                start_err ? start_err->message : "unknown error");
   }
 
+  /* Playback truly ended (nothing pending): stop polling position. */
+  stop_position_timer (self);
   emit_state (self, ok ? SPOTIFYGTK_PLAYER_IDLE : SPOTIFYGTK_PLAYER_ERROR,
               ok ? "Playback completed." : error->message);
   g_object_unref (self);
@@ -167,6 +202,7 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   g_task_set_return_on_cancel (self->task, FALSE);
   emit_state (self, SPOTIFYGTK_PLAYER_CONNECTING, "Native playback engine is starting.");
   g_task_run_in_thread (self->task, run_engine_thread);
+  start_position_timer (self);
   (void) error;
   return TRUE;
 }
@@ -215,6 +251,17 @@ spotifygtk_player_service_is_paused (SpotifyNativePlayerService *self)
   return self->control && spotifygtk_native_engine_control_is_paused (self->control);
 }
 
+void
+spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 position_ms)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+  if (!self->task || !self->control)
+    return;
+  /* The engine consumes this at its next wait point and preserves pause state
+   * across the seek (see do_seek in the engine). */
+  spotifygtk_native_engine_control_request_seek (self->control, position_ms);
+}
+
 gboolean
 spotifygtk_player_service_is_active (SpotifyNativePlayerService *self)
 {
@@ -233,6 +280,7 @@ static void
 spotifygtk_player_service_dispose (GObject *object)
 {
   SpotifyNativePlayerService *self = SPOTIFYGTK_PLAYER_SERVICE (object);
+  stop_position_timer (self);
   if (self->cancellable)
     g_cancellable_cancel (self->cancellable);
   spotifygtk_native_engine_control_resume (self->control);
@@ -253,6 +301,9 @@ spotifygtk_player_service_class_init (SpotifyNativePlayerServiceClass *klass)
   signals[STATE_CHANGED] = g_signal_new ("state-changed", G_TYPE_FROM_CLASS (klass),
                                          G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
                                          G_TYPE_NONE, 2, G_TYPE_INT, G_TYPE_STRING);
+  signals[POSITION_CHANGED] = g_signal_new ("position-changed", G_TYPE_FROM_CLASS (klass),
+                                            G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+                                            G_TYPE_NONE, 1, G_TYPE_INT64);
 }
 
 static void spotifygtk_player_service_init (SpotifyNativePlayerService *self)

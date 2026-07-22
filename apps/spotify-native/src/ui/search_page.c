@@ -292,3 +292,10 @@ spotifygtk_search_page_set_playing_uri (SpotifyGtkSearchPage *self, const gchar 
   g_return_if_fail (SPOTIFYGTK_IS_SEARCH_PAGE (self));
   spotifygtk_track_list_set_playing_uri (self->results, uri, playing);
 }
+
+SpotifyGtkTrackList *
+spotifygtk_search_page_get_list (SpotifyGtkSearchPage *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SEARCH_PAGE (self), NULL);
+  return self->results;
+}

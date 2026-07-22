@@ -28,6 +28,11 @@ void     spotifygtk_player_service_pause (SpotifyNativePlayerService *self);
 void     spotifygtk_player_service_resume (SpotifyNativePlayerService *self);
 gboolean spotifygtk_player_service_is_paused (SpotifyNativePlayerService *self);
 
+/* Reposition the current track to `position_ms`. No-op if nothing is playing.
+ * The engine seeks asynchronously; position-changed will report the new spot
+ * once it lands. */
+void     spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 position_ms);
+
 /* Output gain, 0-100. Remembered across track changes: each playback
  * creates a fresh engine control, so the value has to be re-applied rather
  * than living only in the engine. */
@@ -36,6 +41,13 @@ gint spotifygtk_player_service_get_volume (SpotifyNativePlayerService *self);
 gboolean spotifygtk_player_service_is_active (SpotifyNativePlayerService *self);
 SpotifyNativePlayerState spotifygtk_player_service_get_state (SpotifyNativePlayerService *self);
 
-/* Signal: state-changed (SpotifyNativePlayerState state, const gchar *message) */
+/* Signals:
+ * - state-changed (SpotifyNativePlayerState state, const gchar *message)
+ * - position-changed (gint64 position_ms)
+ *
+ *   position-changed fires ~4x/second while a track is active, off the engine
+ *   control the audio worker updates. The service does not know the track's
+ *   duration — the UI pairs this with the duration it already has.
+ */
 
 G_END_DECLS

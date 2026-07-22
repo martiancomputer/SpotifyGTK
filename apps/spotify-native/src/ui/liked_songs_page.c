@@ -182,3 +182,10 @@ spotifygtk_liked_songs_page_set_playing_uri (SpotifyGtkLikedSongsPage *self, con
   g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
   spotifygtk_track_list_set_playing_uri (self->list, uri, playing);
 }
+
+SpotifyGtkTrackList *
+spotifygtk_liked_songs_page_get_list (SpotifyGtkLikedSongsPage *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self), NULL);
+  return self->list;
+}

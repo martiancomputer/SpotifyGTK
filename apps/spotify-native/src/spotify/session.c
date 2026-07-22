@@ -74,7 +74,28 @@ spotifygtk_native_track_free (SpotifyNativeTrack *track)
   g_free (track->artists);
   g_free (track->album);
   g_free (track->cover_id);
+  g_free (track->album_uri);
+  g_free (track->artist_uri);
   g_free (track);
+}
+
+SpotifyNativeTrack *
+spotifygtk_native_track_copy (const SpotifyNativeTrack *track)
+{
+  if (!track)
+    return NULL;
+
+  SpotifyNativeTrack *copy = g_new0 (SpotifyNativeTrack, 1);
+  copy->uri         = g_strdup (track->uri);
+  copy->name        = g_strdup (track->name);
+  copy->artists     = g_strdup (track->artists);
+  copy->album       = g_strdup (track->album);
+  copy->duration_ms = track->duration_ms;
+  copy->is_explicit = track->is_explicit;
+  copy->cover_id    = g_strdup (track->cover_id);
+  copy->album_uri   = g_strdup (track->album_uri);
+  copy->artist_uri  = g_strdup (track->artist_uri);
+  return copy;
 }
 
 /* ── State reporting ─────────────────────────────────────────────────────── */
@@ -469,6 +490,8 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     track->duration_ms = info->meta.duration_ms;
     track->is_explicit = info->meta.is_explicit;
     track->cover_id    = g_strdup (info->meta.cover_id);
+    track->album_uri   = g_strdup (info->meta.album_uri);
+    track->artist_uri  = g_strdup (info->meta.artist_uri);
 
     g_ptr_array_add (out, track);
   }

@@ -38,6 +38,13 @@ void spotifygtk_playback_bar_set_liked        (SpotifyGtkPlaybackBar *self,
 
 void spotifygtk_playback_bar_set_cover (SpotifyGtkPlaybackBar *self, const gchar *cover_id);
 
+/* Enable/disable the Previous and Next transport buttons. The window drives
+ * this from its play-context and queue: Previous when an earlier track
+ * exists, Next when a later track or a queued track exists. */
+void spotifygtk_playback_bar_set_skip_sensitive (SpotifyGtkPlaybackBar *self,
+                                                 gboolean can_prev,
+                                                 gboolean can_next);
+
 /* Signals:
  * - play-clicked
  * - pause-clicked

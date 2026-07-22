@@ -30,6 +30,31 @@ void    spotifygtk_native_engine_control_set_volume (SpotifyNativeEngineControl 
                                                      gdouble volume_0_to_1);
 gdouble spotifygtk_native_engine_control_get_volume (SpotifyNativeEngineControl *control);
 
+/* Playback position, reported by the audio worker and read by the UI.
+ *
+ * The worker calls report_position() as it writes PCM to the device, passing
+ * the cumulative frames written and the stream's sample rate; get_position_ms
+ * turns that into milliseconds. Both are lock-guarded, so the UI can poll from
+ * its own thread. Position resets naturally because each playback attempt gets
+ * a fresh control. */
+void   spotifygtk_native_engine_control_report_position (SpotifyNativeEngineControl *control,
+                                                         guint64 played_frames,
+                                                         gint    sample_rate);
+gint64 spotifygtk_native_engine_control_get_position_ms (SpotifyNativeEngineControl *control);
+
+/*
+ * Seek. The UI calls request_seek() with a target in milliseconds; the engine
+ * checks seek_pending() at its wait points and consumes the request with
+ * take_seek() when it is ready to act. Consuming clears the flag, so a request
+ * is honoured once; a newer request made before the engine acts replaces the
+ * target. Safe from any thread.
+ */
+void     spotifygtk_native_engine_control_request_seek (SpotifyNativeEngineControl *control,
+                                                        gint64 target_ms);
+gboolean spotifygtk_native_engine_control_seek_pending (SpotifyNativeEngineControl *control);
+gboolean spotifygtk_native_engine_control_take_seek (SpotifyNativeEngineControl *control,
+                                                     gint64 *out_target_ms);
+
 /* Runs one complete native playback attempt. Must not be called on the GTK
  * main thread; the player service owns the worker task that invokes it. The
  * progress callback is optional and is invoked on the worker thread, so UI

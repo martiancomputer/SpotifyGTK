@@ -223,6 +223,20 @@ spotifygtk_decoder_pull (SpotifyDecoder *self)
   return frame;
 }
 
+glong
+spotifygtk_decoder_get_bitrate_nominal (SpotifyDecoder *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_DECODER (self), 0);
+  return self->info ? self->info->bitrate_nominal : 0;
+}
+
+gint
+spotifygtk_decoder_get_sample_rate (SpotifyDecoder *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_DECODER (self), 0);
+  return self->info ? (gint) self->info->rate : 0;
+}
+
 void
 pcm_frame_free (PcmFrame *frame)
 {

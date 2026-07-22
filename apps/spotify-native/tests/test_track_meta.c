@@ -237,6 +237,76 @@ test_album_without_cover_group (void)
   g_byte_array_free (track, TRUE);
 }
 
+/*
+ * Album.gid / Artist.gid (field 1) -> spotify:album:<id> / spotify:artist:<id>.
+ *
+ * The gid is a 16-byte big-endian SpotifyId; the id is that integer in base62
+ * (0-9 a-z A-Z), left-padded to 22 chars. The expected strings below were
+ * computed by an independent big-integer implementation, not by this codec,
+ * so a wrong endianness, alphabet, or pad length fails here.
+ */
+static void
+test_album_and_artist_uris (void)
+{
+  const guint8 album_gid[16]  = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f };
+  const guint8 artist_gid[16] = { 0xd3, 0xea, 0x0e, 0x8a, 0x3f, 0x9b, 0x4c, 0x2d,
+                                  0x8e, 0x7f, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f };
+
+  /* Album = gid + name; first artist = gid + name; a second artist with no
+   * gid must not overwrite the primary artist_uri. */
+  GByteArray *album = g_byte_array_new ();
+  pb_write_bytes_field (album, 1, album_gid, sizeof album_gid);
+  pb_write_bytes_field (album, 2, (const guint8 *) "An Album", 8);
+
+  GByteArray *artist = g_byte_array_new ();
+  pb_write_bytes_field (artist, 1, artist_gid, sizeof artist_gid);
+  pb_write_bytes_field (artist, 2, (const guint8 *) "Primary", 7);
+
+  GByteArray *track = g_byte_array_new ();
+  pb_write_message_field (track, 3, album->data, album->len);
+  pb_write_message_field (track, 4, artist->data, artist->len);
+  g_byte_array_free (album, TRUE);
+  g_byte_array_free (artist, TRUE);
+
+  GByteArray *artist2 = build_named_submessage ("Featuring");   /* no gid */
+  pb_write_message_field (track, 4, artist2->data, artist2->len);
+  g_byte_array_free (artist2, TRUE);
+
+  SpotifyTrackMeta meta;
+  g_assert_true (spotifygtk_track_meta_parse (track->data, track->len, &meta));
+
+  g_assert_cmpstr (meta.album_uri,  ==, "spotify:album:000syw7rIjXKeGogUSqgWP");
+  g_assert_cmpstr (meta.artist_uri, ==, "spotify:artist:6rSlp8ANBNnZysgkI3JVSL");
+  g_assert_cmpstr (meta.artist_names, ==, "Primary, Featuring");
+
+  spotifygtk_track_meta_clear (&meta);
+  g_byte_array_free (track, TRUE);
+}
+
+/* A gid that is not exactly 16 bytes is not a SpotifyId and must yield no
+ * URI rather than a truncated, plausible-looking wrong one. */
+static void
+test_malformed_gid_yields_no_uri (void)
+{
+  GByteArray *album = g_byte_array_new ();
+  const guint8 short_gid[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+  pb_write_bytes_field (album, 1, short_gid, sizeof short_gid);
+  pb_write_bytes_field (album, 2, (const guint8 *) "Short", 5);
+
+  GByteArray *track = g_byte_array_new ();
+  pb_write_message_field (track, 3, album->data, album->len);
+  g_byte_array_free (album, TRUE);
+
+  SpotifyTrackMeta meta;
+  g_assert_true (spotifygtk_track_meta_parse (track->data, track->len, &meta));
+  g_assert_cmpstr (meta.album_name, ==, "Short");
+  g_assert_null (meta.album_uri);
+
+  spotifygtk_track_meta_clear (&meta);
+  g_byte_array_free (track, TRUE);
+}
+
 static void
 test_empty_and_garbage (void)
 {
@@ -265,6 +335,8 @@ main (int argc, char *argv[])
   g_test_add_func ("/track-meta/duration-zigzag", test_duration_is_zigzag_decoded);
   g_test_add_func ("/track-meta/cover-largest", test_cover_picks_the_largest_image);
   g_test_add_func ("/track-meta/cover-absent", test_album_without_cover_group);
+  g_test_add_func ("/track-meta/album-artist-uris", test_album_and_artist_uris);
+  g_test_add_func ("/track-meta/malformed-gid", test_malformed_gid_yields_no_uri);
   g_test_add_func ("/track-meta/empty-and-garbage", test_empty_and_garbage);
 
   return g_test_run ();

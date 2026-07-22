@@ -39,6 +39,14 @@ gboolean spotifygtk_decoder_open_complete (SpotifyDecoder *self, GBytes *ogg_byt
  * is needed first (caller should feed more, then retry). */
 PcmFrame *spotifygtk_decoder_pull (SpotifyDecoder *self);
 
+/* Nominal bitrate (bits/sec) from the Vorbis identification header, or 0 if
+ * not open / not advertised. Used to estimate a byte offset for a time seek
+ * without downloading the whole file first. */
+glong spotifygtk_decoder_get_bitrate_nominal (SpotifyDecoder *self);
+
+/* Sample rate (Hz) from the Vorbis identification header, or 0 if not open. */
+gint spotifygtk_decoder_get_sample_rate (SpotifyDecoder *self);
+
 void pcm_frame_free (PcmFrame *frame);
 
 void spotifygtk_decoder_reset (SpotifyDecoder *self);

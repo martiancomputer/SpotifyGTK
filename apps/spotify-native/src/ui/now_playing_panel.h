@@ -13,6 +13,8 @@
 #include <adwaita.h>
 #include <json-glib/json-glib.h>
 
+#include "spotify/session.h"
+
 G_BEGIN_DECLS
 
 #define SPOTIFYGTK_TYPE_NOW_PLAYING_PANEL (spotifygtk_now_playing_panel_get_type ())
@@ -37,6 +39,12 @@ void spotifygtk_now_playing_panel_set_progress (SpotifyGtkNowPlayingPanel *self,
 /* Queue */
 void spotifygtk_now_playing_panel_set_queue (SpotifyGtkNowPlayingPanel *self,
                                              JsonArray *tracks);
+
+/* Render the "Next Up" list from native tracks (the window's play-context
+ * tail plus any user-queued tracks). Pass NULL or an empty array to clear it.
+ * The list is display-only; playback is driven from the main track lists. */
+void spotifygtk_now_playing_panel_set_native_queue (SpotifyGtkNowPlayingPanel *self,
+                                                    GPtrArray *tracks);
 
 void spotifygtk_now_playing_panel_set_cover (SpotifyGtkNowPlayingPanel *self, const gchar *cover_id);
 

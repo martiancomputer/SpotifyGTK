@@ -10,6 +10,7 @@
 #include <adwaita.h>
 
 #include "spotify/session.h"
+#include "track_list.h"
 
 G_BEGIN_DECLS
 
@@ -21,6 +22,10 @@ SpotifyGtkSearchPage *spotifygtk_search_page_new (void);
 
 void spotifygtk_search_page_set_session (SpotifyGtkSearchPage *self,
                                          SpotifyNativeSession *session);
+
+/* The results list, so the window can wire play-context and the row context
+ * menu (add-to-queue / go-to-album / go-to-artist) to it directly. */
+SpotifyGtkTrackList *spotifygtk_search_page_get_list (SpotifyGtkSearchPage *self);
 
 void spotifygtk_search_page_set_playing_uri (SpotifyGtkSearchPage *self,
                                           const gchar *uri,
