@@ -16,7 +16,7 @@
 #include <string.h>
 
 #define SEARCH_DEBOUNCE_MS 350
-#define SEARCH_RESULT_LIMIT 40
+#define SEARCH_RESULT_LIMIT 100
 
 struct _SpotifyGtkSearchPage {
   GtkBox parent_instance;

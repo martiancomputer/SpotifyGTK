@@ -9,7 +9,7 @@
  * was developed against) and a single metadata batch that large is rejected
  * by the server. One screenful is what the page shows; paging the rest is a
  * follow-up. */
-#define LIKED_SONGS_LIMIT 100
+#define LIKED_SONGS_LIMIT 300
 
 /* After a failure, ignore refresh requests for this long, so revisiting the
  * page cannot turn one error into a stream of retries. */

@@ -113,8 +113,8 @@ GPtrArray *spotifygtk_native_session_load_tracks_finish (SpotifyNativeSession *s
 /* Default and ceiling for max_tracks. The server accepts batches well
  * above DEFAULT (2000 confirmed working, all 4773 of a real collection
  * rejected), but a UI page has no reason to ask for more. */
-#define SPOTIFYGTK_SESSION_DEFAULT_MAX_TRACKS 100
-#define SPOTIFYGTK_SESSION_MAX_BATCH          500
+#define SPOTIFYGTK_SESSION_DEFAULT_MAX_TRACKS 200
+#define SPOTIFYGTK_SESSION_MAX_BATCH          500  /* one server batch; confirmed working at 500/1000/2000 */
 
 /* Signal: state-changed (SpotifyNativeSessionState state, const gchar *message) */
 
