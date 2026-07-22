@@ -21,7 +21,7 @@ G_BEGIN_DECLS
 
 #define SPOTIFYGTK_TYPE_TRACK_ROW (spotifygtk_track_row_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifyGtkTrackRow, spotifygtk_track_row,
-                      SPOTIFYGTK, TRACK_ROW, GtkListBoxRow)
+                      SPOTIFYGTK, TRACK_ROW, GtkBox)
 
 SpotifyGtkTrackRow *spotifygtk_track_row_new (void);
 

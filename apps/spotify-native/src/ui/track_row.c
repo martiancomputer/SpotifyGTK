@@ -39,7 +39,7 @@ struct _SpotifyGtkTrackRow {
   gchar *track_id;
 };
 
-G_DEFINE_FINAL_TYPE (SpotifyGtkTrackRow, spotifygtk_track_row, GTK_TYPE_LIST_BOX_ROW)
+G_DEFINE_FINAL_TYPE (SpotifyGtkTrackRow, spotifygtk_track_row, GTK_TYPE_BOX)
 
 enum {
   PLAY_CLICKED,
@@ -299,7 +299,7 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   g_signal_connect (motion, "leave", G_CALLBACK (on_row_hover_leave), self);
   gtk_widget_add_controller (GTK_WIDGET (self), motion);
 
-  gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (self), GTK_WIDGET (self->root_box));
+  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->root_box));
 }
 
 SpotifyGtkTrackRow *

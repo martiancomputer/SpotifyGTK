@@ -8,6 +8,7 @@ ui_sources = files(
   'settings.c',
   'settings_page.c',
   'cover_loader.c',
+  'track_item.c',
   'track_row.c',
   'track_list.c',
   'home_page.c',
