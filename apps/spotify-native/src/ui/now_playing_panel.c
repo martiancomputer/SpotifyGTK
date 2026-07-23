@@ -3,6 +3,9 @@
  */
 
 #include "now_playing_panel.h"
+
+/* Fixed cover edge; the panel is ~300px wide, so this leaves a margin. */
+#define ART_SIZE 260
 #include "cover_loader.h"
 
 struct _SpotifyGtkNowPlayingPanel {
@@ -23,6 +26,9 @@ struct _SpotifyGtkNowPlayingPanel {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkNowPlayingPanel, spotifygtk_now_playing_panel, GTK_TYPE_BOX)
 
+enum { COLLAPSE_REQUESTED, N_SIGNALS };
+static guint signals[N_SIGNALS];
+
 static void
 spotifygtk_now_playing_panel_dispose (GObject *object)
 {
@@ -34,6 +40,10 @@ spotifygtk_now_playing_panel_class_init (SpotifyGtkNowPlayingPanelClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   object_class->dispose = spotifygtk_now_playing_panel_dispose;
+
+  signals[COLLAPSE_REQUESTED] = g_signal_new ("collapse-requested",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 0);
 }
 
 /* Collapsing hides the artwork and track info, leaving the header and the
@@ -44,12 +54,10 @@ on_collapse_clicked (GtkButton *button, gpointer user_data)
 {
   SpotifyGtkNowPlayingPanel *self = user_data;
 
-  self->collapsed = !self->collapsed;
-  gtk_widget_set_visible (self->art_section, !self->collapsed);
-  gtk_button_set_label (self->collapse_btn,
-                        self->collapsed ? "Expand ▸" : "Collapse ◂");
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->collapse_btn),
-                               self->collapsed ? "Show the artwork" : "Hide the artwork");
+  /* Collapsing the artwork alone left an empty panel; users read the button
+   * as "close this pane". It now asks the window to hide the whole Now
+   * Playing panel; the queue button in the playback bar reopens it. */
+  g_signal_emit (self, signals[COLLAPSE_REQUESTED], 0);
   (void) button;
 }
 
@@ -112,21 +120,21 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_widget_set_visible (GTK_WIDGET (self->album_pic), FALSE);
 
   GtkWidget *art_overlay = gtk_overlay_new ();
-  gtk_widget_set_hexpand (art_overlay, TRUE);
-  gtk_widget_set_vexpand (art_overlay, TRUE);
   gtk_overlay_set_child (GTK_OVERLAY (art_overlay), GTK_WIDGET (self->album_art));
   gtk_overlay_add_overlay (GTK_OVERLAY (art_overlay), GTK_WIDGET (self->album_pic));
 
-  GtkWidget *art_frame = gtk_aspect_frame_new (0.5f, 0.0f, 1.0f, FALSE);
-  gtk_aspect_frame_set_child (GTK_ASPECT_FRAME (art_frame), art_overlay);
-  gtk_widget_set_hexpand (art_frame, TRUE);
-  /* yalign 0.0 above, and valign START here: the cover stays anchored to the
-   * top of the panel instead of floating to the middle as the panel grows. */
-  gtk_widget_set_valign (art_frame, GTK_ALIGN_START);
-  gtk_widget_set_margin_start (art_frame, 20);
-  gtk_widget_set_margin_end (art_frame, 20);
-  gtk_widget_set_margin_top (art_frame, 8);
-  gtk_box_append (GTK_BOX (self->art_section), art_frame);
+  /* A fixed square, centred, that does NOT expand. GtkPicture reports its
+   * paintable's intrinsic size as its natural size, so without a hard
+   * size_request a large cover made the art (and with it the whole right
+   * pane) grow, and covers of different sizes reflowed the panel on every
+   * track change. Locking the box means the art is always ART_SIZE regardless
+   * of the cover, and it can never drive the panel width. */
+  gtk_widget_set_size_request (art_overlay, ART_SIZE, ART_SIZE);
+  gtk_widget_set_halign (art_overlay, GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand (art_overlay, FALSE);
+  gtk_widget_set_valign (art_overlay, GTK_ALIGN_START);
+  gtk_widget_set_margin_top (art_overlay, 8);
+  gtk_box_append (GTK_BOX (self->art_section), art_overlay);
 
   /* Track info */
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);

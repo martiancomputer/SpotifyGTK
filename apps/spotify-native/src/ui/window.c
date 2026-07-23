@@ -87,6 +87,7 @@ G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, GTK_TYPE_
 
 /* === Forward declarations === */
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
+static void spotifygtk_native_window_collapse_queue (SpotifyGtkNativeWindow *self);
 
 /* === Track selection, queue and play-context === */
 
@@ -667,6 +668,21 @@ static const gchar *theme_body =
    * track_row.c; a non-green accent would want updating there too. */
   ".eq-bar { background-color: @accent; border-radius: 1px; }"
 
+  /* ── Popovers / context menus ──────────────────────────────── */
+  /* libadwaita draws its own popover background from the adw color scheme,
+   * which did not match our surfaces — a right-click menu in dark mode came
+   * up noticeably lighter than everything around it. Pin the popover chrome
+   * and its menu rows to the palette so it matches. */
+  "popover > contents, popover > arrow"
+  "  { background-color: @bg_card; color: @fg;"
+  "    border: 1px solid @border; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }"
+  "popover contents { padding: 4px; border-radius: 10px; }"
+  "popover modelbutton, popover button.model"
+  "  { color: @fg; border-radius: 6px; padding: 6px 10px; }"
+  "popover modelbutton:hover, popover button.model:hover"
+  "  { background-color: @bg_hover; }"
+  "popover separator { background-color: @border; }"
+
   /* ── Scrollbars ────────────────────────────────────────────── */
   /* Non-overlay, so it sits in a gutter beside the list, not over it. */
   "scrollbar { background-color: transparent; border: none; }"
@@ -887,6 +903,8 @@ spotifygtk_native_window_constructed (GObject *object)
 
   /* Now Playing panel (300px) */
   self->now_playing_panel = spotifygtk_now_playing_panel_new ();
+  g_signal_connect_swapped (self->now_playing_panel, "collapse-requested",
+                            G_CALLBACK (spotifygtk_native_window_collapse_queue), self);
   gtk_widget_set_size_request (GTK_WIDGET (self->now_playing_panel), 300, -1);
   gtk_widget_add_css_class (GTK_WIDGET (self->now_playing_panel), "now-playing-panel");
   gtk_paned_set_end_child (self->content_paned, GTK_WIDGET (self->now_playing_panel));
@@ -1040,6 +1058,12 @@ spotifygtk_native_window_set_progress (SpotifyGtkNativeWindow *self,
   g_return_if_fail (SPOTIFYGTK_IS_NATIVE_WINDOW (self));
   spotifygtk_playback_bar_set_progress (self->playback_bar, position_ms, duration_ms);
   spotifygtk_now_playing_panel_set_progress (self->now_playing_panel, position_ms, duration_ms);
+}
+
+static void
+spotifygtk_native_window_collapse_queue (SpotifyGtkNativeWindow *self)
+{
+  spotifygtk_native_window_set_queue_expanded (self, FALSE);
 }
 
 void
