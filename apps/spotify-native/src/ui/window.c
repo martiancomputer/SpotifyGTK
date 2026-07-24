@@ -787,11 +787,23 @@ apply_theme (SpotifyGtkTheme theme)
                                    : ADW_COLOR_SCHEME_FORCE_LIGHT);
 }
 
+
+/* Push the equaliser from settings into the player service. Called on startup
+ * and whenever settings change, so a slider move applies to live audio. */
+static void
+apply_eq_from_settings (SpotifyGtkNativeWindow *self)
+{
+  SpotifyGtkSettings *s = spotifygtk_settings_get_default ();
+  spotifygtk_player_service_set_eq (self->player,
+                                    spotifygtk_settings_get_eq_gains (s),
+                                    spotifygtk_settings_get_eq_enabled (s));
+}
+
 static void
 on_settings_theme_changed (SpotifyGtkSettings *settings, gpointer user_data)
 {
   apply_theme (spotifygtk_settings_get_theme (settings));
-  (void) user_data;
+  apply_eq_from_settings (user_data);
 }
 
 /* === Construction === */
@@ -815,6 +827,10 @@ spotifygtk_native_window_constructed (GObject *object)
   /* Create core services */
   self->player = spotifygtk_player_service_new ();
   self->session = spotifygtk_native_session_new ();
+
+  /* Seed the equaliser from the persisted settings now that the player
+   * exists; later changes arrive via the settings "changed" handler. */
+  apply_eq_from_settings (self);
 
   g_signal_connect (self->player, "state-changed",
                     G_CALLBACK (on_player_state_changed), self);

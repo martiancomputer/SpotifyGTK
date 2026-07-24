@@ -5,6 +5,7 @@
 #include "settings.h"
 
 #include <glib/gstdio.h>
+#include <string.h>
 
 #define SETTINGS_GROUP "spotify-native"
 
@@ -14,6 +15,9 @@ struct _SpotifyGtkSettings {
   SpotifyGtkTheme      theme;
   SpotifyGtkMediaMode  media_mode;
   SpotifyGtkSampleRate sample_rate;
+
+  gboolean eq_enabled;
+  gdouble  eq_gains[10];   /* dB per band; matches SPOTIFYGTK_EQ_BANDS */
 
   gchar *path;
 };
@@ -48,6 +52,13 @@ load (SpotifyGtkSettings *self)
   self->sample_rate = (SpotifyGtkSampleRate)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "sample-rate", NULL);
 
+  self->eq_enabled = g_key_file_get_boolean (kf, SETTINGS_GROUP, "eq-enabled", NULL);
+  gsize n = 0;
+  g_autofree gdouble *g = g_key_file_get_double_list (kf, SETTINGS_GROUP,
+                                                      "eq-gains", &n, NULL);
+  for (gsize i = 0; g && i < n && i < 10; i++)
+    self->eq_gains[i] = CLAMP (g[i], -12.0, 12.0);
+
   /* A hand-edited or truncated file must not put the UI into a state its
    * own controls cannot represent, so anything out of range falls back. */
   if (self->theme > SPOTIFYGTK_THEME_MILK)
@@ -66,6 +77,8 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_integer (kf, SETTINGS_GROUP, "theme", self->theme);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "media-mode", self->media_mode);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "sample-rate", self->sample_rate);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "eq-enabled", self->eq_enabled);
+  g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains, 10);
 
   g_autofree gchar *dir = g_path_get_dirname (self->path);
   g_mkdir_with_parents (dir, 0700);
@@ -122,3 +135,51 @@ spotifygtk_settings_get_default (void)
 DEFINE_SETTING (theme,       SpotifyGtkTheme,      theme,       SPOTIFYGTK_THEME_MILK)
 DEFINE_SETTING (media_mode,  SpotifyGtkMediaMode,  media_mode,  SPOTIFYGTK_MEDIA_FULL)
 DEFINE_SETTING (sample_rate, SpotifyGtkSampleRate, sample_rate, SPOTIFYGTK_SAMPLE_RATE_96000)
+
+const gdouble *
+spotifygtk_settings_get_eq_gains (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), NULL);
+  return self->eq_gains;
+}
+
+gboolean
+spotifygtk_settings_get_eq_enabled (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  return self->eq_enabled;
+}
+
+void
+spotifygtk_settings_set_eq_band (SpotifyGtkSettings *self, guint band, gdouble gain_db)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (band >= 10)
+    return;
+  gdouble v = CLAMP (gain_db, -12.0, 12.0);
+  if (self->eq_gains[band] == v)
+    return;
+  self->eq_gains[band] = v;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+void
+spotifygtk_settings_set_eq_enabled (SpotifyGtkSettings *self, gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (self->eq_enabled == enabled)
+    return;
+  self->eq_enabled = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+void
+spotifygtk_settings_reset_eq (SpotifyGtkSettings *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  memset (self->eq_gains, 0, sizeof self->eq_gains);
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}

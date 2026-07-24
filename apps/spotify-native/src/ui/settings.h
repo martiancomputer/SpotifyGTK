@@ -61,6 +61,16 @@ SpotifyGtkSampleRate spotifygtk_settings_get_sample_rate (SpotifyGtkSettings *se
 void                 spotifygtk_settings_set_sample_rate (SpotifyGtkSettings *self,
                                                           SpotifyGtkSampleRate rate);
 
+#define SPOTIFYGTK_SETTINGS_EQ_BANDS 10
+
+const gdouble *spotifygtk_settings_get_eq_gains   (SpotifyGtkSettings *self);
+gboolean       spotifygtk_settings_get_eq_enabled (SpotifyGtkSettings *self);
+void           spotifygtk_settings_set_eq_band    (SpotifyGtkSettings *self,
+                                                   guint band, gdouble gain_db);
+void           spotifygtk_settings_set_eq_enabled (SpotifyGtkSettings *self,
+                                                   gboolean enabled);
+void           spotifygtk_settings_reset_eq       (SpotifyGtkSettings *self);
+
 /* Signal: changed () — emitted after any setter, once the value is stored. */
 
 G_END_DECLS

@@ -30,6 +30,11 @@ void    spotifygtk_native_engine_control_set_volume (SpotifyNativeEngineControl 
                                                      gdouble volume_0_to_1);
 gdouble spotifygtk_native_engine_control_get_volume (SpotifyNativeEngineControl *control);
 
+/* Equaliser gains, dB per band (SPOTIFYGTK_EQ_BANDS). Pushed like volume;
+ * the filter state lives in the control so it persists across buffers. */
+void    spotifygtk_native_engine_control_set_eq (SpotifyNativeEngineControl *control,
+                                                 const gdouble *gains_db, gboolean enabled);
+
 /* Playback position, reported by the audio worker and read by the UI.
  *
  * The worker calls report_position() as it writes PCM to the device, passing

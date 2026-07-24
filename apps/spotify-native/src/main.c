@@ -61,6 +61,7 @@
 #include "spotify/audio_key.h"
 #include "spotify/cdn.h"
 #include "audio/decoder.h"
+#include "audio/dsp.h"
 #include "audio/output.h"
 #include "native_engine.h"
 
@@ -77,6 +78,13 @@ struct _SpotifyNativeEngineControl {
   gint     sample_rate;    /* of the stream being played; 0 until known */
   gboolean seek_requested; /* UI asked to reposition */
   gint64   seek_target_ms; /* where to; valid while seek_requested */
+
+  /* Equaliser. Gains (dB) and enable are pushed from the UI like volume;
+   * the filter itself lives here so its state persists across buffers. */
+  SpotifyEq *eq;
+  gdouble    eq_gains[SPOTIFYGTK_EQ_BANDS];
+  gboolean   eq_enabled;
+  gboolean   eq_dirty;
 };
 
 SpotifyNativeEngineControl *
@@ -87,6 +95,7 @@ spotifygtk_native_engine_control_new (void)
   g_cond_init (&control->cond);
   control->volume = 1.0;
   control->volume_dirty = TRUE;   /* apply once as soon as the output opens */
+  control->eq = spotifygtk_eq_new ();
   return control;
 }
 
@@ -96,6 +105,7 @@ spotifygtk_native_engine_control_free (SpotifyNativeEngineControl *control)
   if (!control)
     return;
   spotifygtk_native_engine_control_resume (control);
+  spotifygtk_eq_free (control->eq);
   g_mutex_clear (&control->lock);
   g_cond_clear (&control->cond);
   g_free (control);
@@ -145,6 +155,43 @@ spotifygtk_native_engine_control_set_volume (SpotifyNativeEngineControl *control
   control->volume = CLAMP (volume_0_to_1, 0.0, 1.0);
   control->volume_dirty = TRUE;
   g_mutex_unlock (&control->lock);
+}
+
+void
+spotifygtk_native_engine_control_set_eq (SpotifyNativeEngineControl *control,
+                                         const gdouble *gains_db, gboolean enabled)
+{
+  if (!control)
+    return;
+  g_mutex_lock (&control->lock);
+  if (gains_db)
+    memcpy (control->eq_gains, gains_db, sizeof control->eq_gains);
+  control->eq_enabled = enabled;
+  control->eq_dirty = TRUE;
+  g_mutex_unlock (&control->lock);
+}
+
+/* Apply the equaliser to a PCM buffer in the audio worker, after volume.
+ * Pushes any pending gain change into the filter, then filters in place. */
+static void
+engine_control_apply_eq (SpotifyNativeEngineControl *control,
+                         gint16 *samples, gsize n_frames, gint channels, gint rate)
+{
+  if (!control || !control->eq)
+    return;
+
+  g_mutex_lock (&control->lock);
+  gboolean dirty   = control->eq_dirty;
+  gboolean enabled = control->eq_enabled;
+  gdouble  gains[SPOTIFYGTK_EQ_BANDS];
+  memcpy (gains, control->eq_gains, sizeof gains);
+  control->eq_dirty = FALSE;
+  g_mutex_unlock (&control->lock);
+
+  if (dirty)
+    spotifygtk_eq_set (control->eq, gains, enabled);
+
+  spotifygtk_eq_process (control->eq, samples, n_frames, channels, rate);
 }
 
 gdouble
@@ -627,6 +674,8 @@ audio_output_thread (gpointer user_data)
 
     engine_control_apply_volume (state->control, frame->samples,
                                  frame->n_frames, frame->channels);
+    engine_control_apply_eq (state->control, frame->samples,
+                             frame->n_frames, frame->channels, frame->sample_rate);
     gsize written = spotifygtk_output_write (output, frame->samples, frame->n_frames);
     if (written != frame->n_frames) {
       g_warning ("[live-test] streaming audio output wrote %" G_GSIZE_FORMAT

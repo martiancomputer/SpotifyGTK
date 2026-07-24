@@ -1,4 +1,6 @@
 #include "player_service.h"
+
+#include <string.h>
 #include "native_engine.h"
 
 struct _SpotifyNativePlayerService {
@@ -10,6 +12,8 @@ struct _SpotifyNativePlayerService {
   gchar *track_uri;
   gchar *pending_uri;   /* track requested while another was still playing */
   gint volume_percent;
+  gdouble  eq_gains[10];
+  gboolean eq_enabled;
   guint position_timer_id;   /* polls the engine control for playback position */
   SpotifyNativePlayerState state;
 };
@@ -191,6 +195,8 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   self->control = spotifygtk_native_engine_control_new ();
   spotifygtk_native_engine_control_set_volume (self->control,
                                               self->volume_percent / 100.0);
+  spotifygtk_native_engine_control_set_eq (self->control,
+                                           self->eq_gains, self->eq_enabled);
   if (!self->main_context)
     self->main_context = g_main_context_ref_thread_default ();
   if (!self->main_context)
@@ -324,6 +330,20 @@ spotifygtk_player_service_set_volume (SpotifyNativePlayerService *self, gint per
   if (self->control)
     spotifygtk_native_engine_control_set_volume (self->control,
                                                  self->volume_percent / 100.0);
+}
+
+void
+spotifygtk_player_service_set_eq (SpotifyNativePlayerService *self,
+                                  const gdouble *gains_db, gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+
+  if (gains_db)
+    memcpy (self->eq_gains, gains_db, sizeof self->eq_gains);
+  self->eq_enabled = enabled;
+
+  if (self->control)
+    spotifygtk_native_engine_control_set_eq (self->control, self->eq_gains, enabled);
 }
 
 gint

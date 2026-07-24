@@ -37,6 +37,8 @@ void     spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint6
  * creates a fresh engine control, so the value has to be re-applied rather
  * than living only in the engine. */
 void spotifygtk_player_service_set_volume (SpotifyNativePlayerService *self, gint percent);
+void spotifygtk_player_service_set_eq (SpotifyNativePlayerService *self,
+                                       const gdouble *gains_db, gboolean enabled);
 gint spotifygtk_player_service_get_volume (SpotifyNativePlayerService *self);
 gboolean spotifygtk_player_service_is_active (SpotifyNativePlayerService *self);
 SpotifyNativePlayerState spotifygtk_player_service_get_state (SpotifyNativePlayerService *self);
