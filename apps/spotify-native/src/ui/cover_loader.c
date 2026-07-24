@@ -105,59 +105,57 @@ typedef struct {
   gint   target_px;
 } FetchClosure;
 
+/* Runs on a worker thread: decode the JPEG at the target size and build a
+ * texture. Doing this here rather than in the soup callback is what keeps a
+ * scroll smooth -- decoding on the main thread blocked a frame per cover, so
+ * a burst of arriving covers stuttered the UI. Only data work happens here;
+ * the cache insert and delivery hop back to the main thread. */
 static void
-on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
+decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable *cancellable)
 {
-  FetchClosure *fetch = user_data;
-  g_autofree gchar *cache_key = fetch->cache_key;
-  gint target_px = fetch->target_px;
-  g_free (fetch);
-
+  GBytes *bytes = task_data;
+  gint target_px = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (task), "target-px"));
   g_autoptr(GError) error = NULL;
 
-  g_autoptr(GBytes) bytes =
-    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
-
-  if (!bytes) {
-    g_debug ("cover %s: fetch failed: %s", cache_key,
-             error ? error->message : "unknown");
-    complete_waiters (cache_key, NULL);
-    return;
-  }
-
-  /* Decode at the requested size rather than native. The bytes are the
-   * full-size JPEG, but a 40px row has no use for 640px of decoded pixels,
-   * and keeping them is what doubled the RSS. gdk-pixbuf scales during
-   * decode, so the large intermediate never exists. */
   g_autoptr(GInputStream) stream = g_memory_input_stream_new_from_bytes (bytes);
   g_autoptr(GdkPixbuf) pixbuf =
     gdk_pixbuf_new_from_stream_at_scale (stream, target_px, target_px, TRUE, NULL, &error);
   if (!pixbuf) {
+    g_task_return_error (task, g_steal_pointer (&error));
+    return;
+  }
+
+  /* GdkMemoryTexture is just data, so it is safe to build off the main
+   * thread; the GBytes copies the scaled pixels. */
+  gint     w         = gdk_pixbuf_get_width (pixbuf);
+  gint     h         = gdk_pixbuf_get_height (pixbuf);
+  gint     rowstride = gdk_pixbuf_get_rowstride (pixbuf);
+  gboolean has_alpha = gdk_pixbuf_get_has_alpha (pixbuf);
+
+  g_autoptr(GBytes) pixels =
+    g_bytes_new (gdk_pixbuf_get_pixels (pixbuf), (gsize) rowstride * h);
+  GdkTexture *texture = gdk_memory_texture_new (
+    w, h, has_alpha ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8, pixels, rowstride);
+
+  g_task_return_pointer (task, texture, g_object_unref);
+  (void) source; (void) cancellable;
+}
+
+/* Back on the main thread: cache the texture and hand it to the waiters. */
+static void
+on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  g_autofree gchar *cache_key = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GdkTexture) texture = g_task_propagate_pointer (G_TASK (result), &error);
+
+  if (!texture) {
     g_debug ("cover %s: decode failed: %s", cache_key,
              error ? error->message : "unknown");
     complete_waiters (cache_key, NULL);
     return;
   }
 
-  /* Build the texture from the scaled pixbuf's pixels rather than
-   * gdk_texture_new_for_pixbuf, which is deprecated in GTK 4.22. The GBytes
-   * takes its own copy, so it is safe once the pixbuf is freed. */
-  gint    w         = gdk_pixbuf_get_width (pixbuf);
-  gint    h         = gdk_pixbuf_get_height (pixbuf);
-  gint    rowstride = gdk_pixbuf_get_rowstride (pixbuf);
-  gboolean has_alpha = gdk_pixbuf_get_has_alpha (pixbuf);
-
-  g_autoptr(GBytes) pixels =
-    g_bytes_new (gdk_pixbuf_get_pixels (pixbuf), (gsize) rowstride * h);
-  g_autoptr(GdkTexture) texture = gdk_memory_texture_new (
-    w, h,
-    has_alpha ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8,
-    pixels, rowstride);
-
-  g_debug ("cover %s: decoded %dx%d", cache_key,
-           gdk_texture_get_width (texture), gdk_texture_get_height (texture));
-
-  /* Evict oldest until there is room for one more. */
   while (g_queue_get_length (&cover_order) >= COVER_CACHE_MAX) {
     g_autofree gchar *oldest = g_queue_pop_head (&cover_order);
     if (oldest)
@@ -168,6 +166,35 @@ on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
   g_queue_push_tail (&cover_order, g_strdup (cache_key));
 
   complete_waiters (cache_key, texture);
+  (void) source;
+}
+
+static void
+on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  FetchClosure *fetch = user_data;
+  gchar *cache_key = fetch->cache_key;   /* ownership moves to the decode task */
+  gint target_px = fetch->target_px;
+  g_free (fetch);
+
+  g_autoptr(GError) error = NULL;
+  GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+
+  if (!bytes) {
+    g_debug ("cover %s: fetch failed: %s", cache_key,
+             error ? error->message : "unknown");
+    complete_waiters (cache_key, NULL);
+    g_free (cache_key);
+    return;
+  }
+
+  /* Decode off the main thread. The bytes and target size ride along; the
+   * key is the callback's user_data. */
+  GTask *task = g_task_new (NULL, NULL, on_cover_decoded, cache_key);
+  g_object_set_data (G_OBJECT (task), "target-px", GINT_TO_POINTER (target_px));
+  g_task_set_task_data (task, bytes, (GDestroyNotify) g_bytes_unref);
+  g_task_run_in_thread (task, decode_in_thread);
+  g_object_unref (task);
 }
 
 void
