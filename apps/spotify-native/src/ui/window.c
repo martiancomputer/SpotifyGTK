@@ -104,12 +104,19 @@ refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
                        self->context_index + 1 < (gint) self->play_context->len);
   spotifygtk_playback_bar_set_skip_sensitive (self->playback_bar, can_prev, can_next);
 
-  /* Up next = user-queued tracks first, then the tail of the context. */
+  /* Up next = user-queued tracks first, then the tail of the context, capped
+   * to a small window. The Now Playing queue is a plain GtkListBox (one
+   * widget per row, not virtualised), and playing track 1 of a 500-track
+   * context used to dump ~499 rows into it — each fetching a cover — which
+   * stuttered or froze the moment a track started. A queue nobody scrolls
+   * past a few dozen entries has no need to show the whole tail. */
+  #define UP_NEXT_MAX 40
   GPtrArray *up_next = g_ptr_array_new ();   /* borrowed pointers, no free func */
-  for (GList *l = self->user_queue->head; l; l = l->next)
+  for (GList *l = self->user_queue->head; l && up_next->len < UP_NEXT_MAX; l = l->next)
     g_ptr_array_add (up_next, l->data);
   if (self->play_context && self->context_index >= 0) {
-    for (guint i = self->context_index + 1; i < self->play_context->len; i++)
+    for (guint i = self->context_index + 1;
+         i < self->play_context->len && up_next->len < UP_NEXT_MAX; i++)
       g_ptr_array_add (up_next, g_ptr_array_index (self->play_context, i));
   }
   spotifygtk_now_playing_panel_set_native_queue (self->now_playing_panel, up_next);
