@@ -282,6 +282,29 @@ on_list_go_to_artist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer us
   (void) list;
 }
 
+/* An album card was clicked, on any page's shelf or grid. Same destination as
+ * the row menu's "Go to Album": the album URI handed to the context page. */
+static void
+on_album_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
+                    const gchar *name, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  if (!uri || !*uri)
+    return;
+  spotifygtk_context_page_load (self->context_page, uri,
+                                name && *name ? name : "Album", "Album");
+  navigate_to_page (self, "context");
+  (void) grid;
+}
+
+static void
+wire_album_grid (SpotifyGtkNativeWindow *self, SpotifyGtkAlbumGrid *grid)
+{
+  if (!grid)
+    return;
+  g_signal_connect (grid, "album-activated", G_CALLBACK (on_album_activated), self);
+}
+
 /* Connect the window to one page's inner list: activation drives play +
  * context, and the row context menu drives queue and album/artist nav. Every
  * page that shows tracks routes through the same handlers. */
@@ -459,6 +482,8 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     spotifygtk_search_page_set_session (self->search_page, session);
     spotifygtk_liked_songs_page_set_session (self->liked_page, session);
     spotifygtk_context_page_set_session (self->context_page, session);
+    spotifygtk_home_page_set_session (self->home_page, session);
+    spotifygtk_library_page_set_session (self->library_page, session);
 
     const gchar *visible = gtk_stack_get_visible_child_name (self->page_stack);
     if (visible)
@@ -556,6 +581,15 @@ static const gchar *theme_body =
   ".sidebar { background-color: @bg_panel;"
   "  border-right: 1px solid @border; }"
   ".main-content { background-color: @bg_content; }"
+  /* Frosted header on the search page. The rows scroll underneath it (see the
+   * GtkOverlay in search_page.c); this gradient is what sells that -- solid at
+   * the top where the title and entry sit, then fading to fully transparent at
+   * its lower edge so a row sliding up dissolves into the page instead of being
+   * chopped by a hard line. GTK has no backdrop blur, so a soft gradient fade
+   * over the same @bg_content is the honest approximation of frosted glass. */
+  ".search-glass { background-image: linear-gradient(to bottom,"
+  "  @bg_content 0%, @bg_content 60%,"
+  "  alpha(@bg_content, 0.75) 82%, alpha(@bg_content, 0.0) 100%); }"
   /* libadwaita paints list, row, viewport and .view with a lighter "view"
    * fill. That is the grey slab that showed through wherever a list was
    * empty. Nothing in this UI wants a filled list surface. */
@@ -918,6 +952,10 @@ spotifygtk_native_window_constructed (GObject *object)
   wire_track_list (self, spotifygtk_search_page_get_list (self->search_page));
   wire_track_list (self, spotifygtk_liked_songs_page_get_list (self->liked_page));
   wire_track_list (self, spotifygtk_context_page_get_list (self->context_page));
+
+  wire_album_grid (self, spotifygtk_search_page_get_album_grid (self->search_page));
+  wire_album_grid (self, spotifygtk_home_page_get_album_grid (self->home_page));
+  wire_album_grid (self, spotifygtk_library_page_get_album_grid (self->library_page));
 
   gtk_box_append (GTK_BOX (content_box), GTK_WIDGET (self->page_stack));
   gtk_paned_set_start_child (self->content_paned, content_box);

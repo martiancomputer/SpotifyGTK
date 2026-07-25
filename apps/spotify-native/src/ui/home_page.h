@@ -16,6 +16,9 @@
 
 #include <adwaita.h>
 
+#include "spotify/session.h"
+#include "album_grid.h"
+
 G_BEGIN_DECLS
 
 #define SPOTIFYGTK_TYPE_HOME_PAGE (spotifygtk_home_page_get_type ())
@@ -23,5 +26,13 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkHomePage, spotifygtk_home_page,
                       SPOTIFYGTK, HOME_PAGE, GtkBox)
 
 SpotifyGtkHomePage *spotifygtk_home_page_new (void);
+
+/* Once the session is READY, load the collection and fill the "From your
+ * Liked Songs" shelf. A no-op until then. */
+void spotifygtk_home_page_set_session (SpotifyGtkHomePage   *self,
+                                       SpotifyNativeSession *session);
+
+/* The shelf, so the window can wire "album-activated" to the context page. */
+SpotifyGtkAlbumGrid *spotifygtk_home_page_get_album_grid (SpotifyGtkHomePage *self);
 
 G_END_DECLS

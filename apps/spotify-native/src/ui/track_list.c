@@ -308,6 +308,18 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
   gtk_box_append (GTK_BOX (self), scroller);
 }
 
+void
+spotifygtk_track_list_set_top_inset (SpotifyGtkTrackList *self, gint px)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+
+  /* On the listview so the gap is part of the scrollable content and scrolls
+   * under the header; on the status label too, so an empty/loading message
+   * clears the header rather than hiding behind it. */
+  gtk_widget_set_margin_top (GTK_WIDGET (self->list), px);
+  gtk_widget_set_margin_top (GTK_WIDGET (self->status), px);
+}
+
 SpotifyGtkTrackList *
 spotifygtk_track_list_new (void)
 {

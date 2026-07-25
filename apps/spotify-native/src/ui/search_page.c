@@ -10,19 +10,26 @@
 
 #include "search_page.h"
 #include "track_list.h"
+#include "album_grid.h"
 
 #include "spotify/spclient.h"   /* build_search_uri */
 
 #include <string.h>
 
 #define SEARCH_DEBOUNCE_MS 350
-#define SEARCH_RESULT_LIMIT 100
+#define SEARCH_RESULT_LIMIT 500
+
+/* Height reserved above the first row for the floating header (title + entry
+ * + its top/bottom margins). Rows scroll up under the header's fading edge. */
+#define SEARCH_HEADER_INSET 128
 
 struct _SpotifyGtkSearchPage {
   GtkBox parent_instance;
 
   GtkSearchEntry      *entry;
   SpotifyGtkTrackList *results;
+  SpotifyGtkAlbumGrid *albums;
+  GtkWidget           *albums_section;   /* "Albums" heading + shelf; hidden when empty */
 
   SpotifyNativeSession *session;
 
@@ -109,6 +116,20 @@ on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_dat
   (void) list;
 }
 
+/* The floating header must clear whichever section is topmost. When albums
+ * show, they sit at the top and carry the inset (set once at build time), so
+ * the list drops its own; when there are no albums, the list is topmost and
+ * takes the inset back. */
+static void
+set_albums_visible (SpotifyGtkSearchPage *self, gboolean visible)
+{
+  gtk_widget_set_visible (self->albums_section, visible);
+  spotifygtk_track_list_set_top_inset (self->results,
+                                       visible ? 0 : SEARCH_HEADER_INSET);
+  if (!visible)
+    spotifygtk_album_grid_clear (self->albums);
+}
+
 static void
 on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -133,12 +154,14 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
       return;
     g_autofree gchar *msg = g_strdup_printf ("Search failed: %s", err->message);
+    set_albums_visible (self, FALSE);
     spotifygtk_track_list_clear (self->results);
     spotifygtk_track_list_set_status (self->results, msg);
     return;
   }
 
   if (tracks->len == 0) {
+    set_albums_visible (self, FALSE);
     spotifygtk_track_list_clear (self->results);
     spotifygtk_track_list_set_status (self->results, "No results.");
     return;
@@ -148,6 +171,11 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GPtrArray) shown = (query && *query)
     ? filter_by_relevance (tracks, query)
     : g_ptr_array_ref (tracks);
+
+  /* The albums shelf is the distinct albums present in these very results --
+   * real matches, grouped, not a second query. */
+  guint n_albums = spotifygtk_album_grid_set_from_tracks (self->albums, shown, 40);
+  set_albums_visible (self, n_albums > 0);
 
   spotifygtk_track_list_set_native_tracks (self->results, shown);
 }
@@ -169,6 +197,7 @@ dispatch_search (gpointer user_data)
   }
 
   if (!query || !*query) {
+    set_albums_visible (self, FALSE);
     spotifygtk_track_list_clear (self->results);
     spotifygtk_track_list_set_status (self->results, NULL);
     return G_SOURCE_REMOVE;
@@ -244,19 +273,60 @@ static void
 spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
 {
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
-  gtk_box_set_spacing (GTK_BOX (self), 12);
-  gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
-  gtk_widget_set_margin_end (GTK_WIDGET (self), 12);
-  gtk_widget_set_margin_top (GTK_WIDGET (self), 24);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self), 24);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
 
-  /* Title and entry are centred; the results below stay left-aligned. */
+  /* The list fills the whole page and the header floats over its top edge, so
+   * rows scroll up *underneath* the title and entry rather than starting below
+   * them. The list is inset by the header's height so the first row clears it. */
+  GtkWidget *overlay = gtk_overlay_new ();
+  gtk_widget_set_hexpand (overlay, TRUE);
+  gtk_widget_set_vexpand (overlay, TRUE);
+
+  GtkWidget *base = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+
+  /* Albums shelf: hidden until a search returns albums. It sits at the top and
+   * carries the header inset so its cards slide under the frosted header; the
+   * list below it then needs no inset of its own. */
+  self->albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_margin_start (self->albums_section, 35);
+  gtk_widget_set_margin_end (self->albums_section, 12);
+  gtk_widget_set_margin_top (self->albums_section, SEARCH_HEADER_INSET);
+  gtk_widget_set_visible (self->albums_section, FALSE);
+
+  GtkWidget *albums_heading = gtk_label_new ("Albums");
+  gtk_widget_add_css_class (albums_heading, "section-heading");
+  gtk_label_set_xalign (GTK_LABEL (albums_heading), 0.0);
+  gtk_box_append (GTK_BOX (self->albums_section), albums_heading);
+
+  self->albums = spotifygtk_album_grid_new_shelf ();
+  gtk_box_append (GTK_BOX (self->albums_section), GTK_WIDGET (self->albums));
+  gtk_box_append (GTK_BOX (base), self->albums_section);
+
+  self->results = spotifygtk_track_list_new ();
+  gtk_widget_set_margin_start (GTK_WIDGET (self->results), 35);
+  gtk_widget_set_margin_end (GTK_WIDGET (self->results), 12);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (self->results), 24);
+  gtk_widget_set_vexpand (GTK_WIDGET (self->results), TRUE);
+  spotifygtk_track_list_set_top_inset (self->results, SEARCH_HEADER_INSET);
+  g_signal_connect (self->results, "track-activated", G_CALLBACK (on_track_activated), self);
+  gtk_box_append (GTK_BOX (base), GTK_WIDGET (self->results));
+
+  gtk_overlay_set_child (GTK_OVERLAY (overlay), base);
+
+  /* Frosted header: pinned to the top, its own height only, so clicks below it
+   * fall through to the list. `.search-glass` gives it the gradient fade. */
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_add_css_class (header, "search-glass");
+  gtk_widget_set_valign (header, GTK_ALIGN_START);
+  gtk_widget_set_hexpand (header, TRUE);
+  gtk_widget_set_margin_top (header, 24);
+  gtk_widget_set_margin_bottom (header, 22);
+
   GtkWidget *title = gtk_label_new ("Search");
   gtk_widget_add_css_class (title, "title-text");
   gtk_label_set_xalign (GTK_LABEL (title), 0.5);
-  gtk_box_append (GTK_BOX (self), title);
+  gtk_box_append (GTK_BOX (header), title);
 
   self->entry = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
   gtk_widget_set_size_request (GTK_WIDGET (self->entry), 460, -1);
@@ -264,11 +334,11 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   gtk_search_entry_set_placeholder_text (self->entry, "Songs, artists, albums");
   g_signal_connect (self->entry, "search-changed", G_CALLBACK (on_search_changed), self);
   g_signal_connect (self->entry, "activate", G_CALLBACK (on_search_activate), self);
-  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->entry));
+  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->entry));
 
-  self->results = spotifygtk_track_list_new ();
-  g_signal_connect (self->results, "track-activated", G_CALLBACK (on_track_activated), self);
-  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->results));
+  gtk_overlay_add_overlay (GTK_OVERLAY (overlay), header);
+
+  gtk_box_append (GTK_BOX (self), overlay);
 }
 
 SpotifyGtkSearchPage *
@@ -298,4 +368,11 @@ spotifygtk_search_page_get_list (SpotifyGtkSearchPage *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_SEARCH_PAGE (self), NULL);
   return self->results;
+}
+
+SpotifyGtkAlbumGrid *
+spotifygtk_search_page_get_album_grid (SpotifyGtkSearchPage *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SEARCH_PAGE (self), NULL);
+  return self->albums;
 }

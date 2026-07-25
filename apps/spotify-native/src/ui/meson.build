@@ -11,6 +11,7 @@ ui_sources = files(
   'track_item.c',
   'track_row.c',
   'track_list.c',
+  'album_grid.c',
   'home_page.c',
   'search_page.c',
   'liked_songs_page.c',

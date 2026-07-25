@@ -43,6 +43,14 @@ void spotifygtk_track_list_clear (SpotifyGtkTrackList *self);
 /* Number rows 1..n rather than showing per-row art. */
 void spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered);
 
+/*
+ * Reserve `px` of empty space above the first row, inside the scrollable area
+ * so it scrolls away with the content. The search page uses this to float a
+ * translucent header over the list: rows start below the header but slide up
+ * underneath it as you scroll.
+ */
+void spotifygtk_track_list_set_top_inset (SpotifyGtkTrackList *self, gint px);
+
 /* Mark whichever row matches `uri` as the current track. Pass NULL to clear.
  * `playing` false with a non-NULL uri means paused: the row keeps its
  * indicator but stops animating. */

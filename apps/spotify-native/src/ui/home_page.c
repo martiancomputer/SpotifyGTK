@@ -14,18 +14,103 @@
  */
 
 #include "home_page.h"
+#include "album_grid.h"
 
 struct _SpotifyGtkHomePage {
   GtkBox parent_instance;
   GtkLabel *greeting;
+
+  /* "From your Liked Songs": the one shelf with a real native data source.
+   * Populated from the collection once the session is ready; the other
+   * sections still have no endpoint and say so. */
+  SpotifyGtkAlbumGrid  *albums;
+  GtkWidget            *liked_section;
+  SpotifyNativeSession *session;      /* not owned; the window outlives us */
+  GCancellable         *load_cancel;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkHomePage, spotifygtk_home_page, GTK_TYPE_BOX)
 
 static void
+spotifygtk_home_page_dispose (GObject *object)
+{
+  SpotifyGtkHomePage *self = SPOTIFYGTK_HOME_PAGE (object);
+  if (self->load_cancel) {
+    g_cancellable_cancel (self->load_cancel);
+    g_clear_object (&self->load_cancel);
+  }
+  self->session = NULL;
+  G_OBJECT_CLASS (spotifygtk_home_page_parent_class)->dispose (object);
+}
+
+static void
 spotifygtk_home_page_class_init (SpotifyGtkHomePageClass *klass)
 {
-  (void) klass;
+  G_OBJECT_CLASS (klass)->dispose = spotifygtk_home_page_dispose;
+}
+
+/* === Loading the Liked Songs shelf === */
+
+typedef struct { GWeakRef page; } HomeLoad;
+
+static void
+on_liked_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  HomeLoad *cl = user_data;
+  g_autoptr(SpotifyGtkHomePage) self = g_weak_ref_get (&cl->page);
+  g_weak_ref_clear (&cl->page);
+  g_free (cl);
+
+  g_autoptr(GError) err = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &err);
+
+  if (!self)
+    return;
+  if (!tracks) {
+    /* Cancelled or failed: leave the section hidden rather than showing an
+     * error on the home page. Search and Liked Songs still work. */
+    return;
+  }
+
+  /* A shelf, not the whole library: 100 cards is already a long scroll, and
+   * the Library page shows the full album set. */
+  guint n = spotifygtk_album_grid_set_from_tracks (self->albums, tracks, 100);
+  gtk_widget_set_visible (self->liked_section, n > 0);
+}
+
+void
+spotifygtk_home_page_set_session (SpotifyGtkHomePage   *self,
+                                  SpotifyNativeSession *session)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_HOME_PAGE (self));
+
+  self->session = session;
+
+  if (self->load_cancel) {
+    g_cancellable_cancel (self->load_cancel);
+    g_clear_object (&self->load_cancel);
+  }
+  if (!session ||
+      spotifygtk_native_session_get_state (session) != SPOTIFYGTK_SESSION_READY)
+    return;
+
+  g_autofree gchar *uri = spotifygtk_native_session_dup_collection_uri (session);
+  if (!uri)
+    return;
+
+  self->load_cancel = g_cancellable_new ();
+  HomeLoad *cl = g_new0 (HomeLoad, 1);
+  g_weak_ref_init (&cl->page, self);
+  spotifygtk_native_session_load_tracks (session, uri, 1000, self->load_cancel,
+                                         on_liked_loaded, cl);
+}
+
+SpotifyGtkAlbumGrid *
+spotifygtk_home_page_get_album_grid (SpotifyGtkHomePage *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_HOME_PAGE (self), NULL);
+  return self->albums;
 }
 
 static const gchar *
@@ -134,6 +219,15 @@ spotifygtk_home_page_init (SpotifyGtkHomePage *self)
    * (whose signal the window never even connected) only duplicated it. */
 
   gtk_box_append (GTK_BOX (content), header);
+
+  /* --- From your Liked Songs (real data) --- */
+  self->liked_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_box_append (GTK_BOX (self->liked_section),
+                  build_section_header ("From your Liked Songs", NULL));
+  self->albums = spotifygtk_album_grid_new_shelf ();
+  gtk_box_append (GTK_BOX (self->liked_section), GTK_WIDGET (self->albums));
+  gtk_widget_set_visible (self->liked_section, FALSE);   /* until the load lands */
+  gtk_box_append (GTK_BOX (content), self->liked_section);
 
   /* --- Continue Listening --- */
   GtkWidget *shelf_nav = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);

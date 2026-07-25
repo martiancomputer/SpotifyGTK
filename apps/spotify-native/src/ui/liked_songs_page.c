@@ -5,11 +5,13 @@
 #include "liked_songs_page.h"
 #include "track_list.h"
 
+#include <string.h>
+
 /* A real collection runs to thousands of tracks (4,773 on the account this
  * was developed against) and a single metadata batch that large is rejected
- * by the server. One screenful is what the page shows; paging the rest is a
- * follow-up. */
-#define LIKED_SONGS_LIMIT 500
+ * by the server. 1000 is the largest batch confirmed to resolve in one shot;
+ * paging past it is a follow-up. */
+#define LIKED_SONGS_LIMIT 1000
 
 /* After a failure, ignore refresh requests for this long, so revisiting the
  * page cannot turn one error into a stream of retries. */
@@ -19,8 +21,13 @@ struct _SpotifyGtkLikedSongsPage {
   GtkBox parent_instance;
 
   SpotifyGtkTrackList  *list;
+  GtkSearchEntry       *filter_entry;
   SpotifyNativeSession *session;
   GCancellable         *in_flight;
+
+  /* The full loaded collection, kept so the filter can rebuild the visible
+   * list from it without re-fetching. Owned (a ref on the loaded array). */
+  GPtrArray *all_tracks;
 
   gboolean loaded;
   gint64   retry_after;
@@ -37,6 +44,63 @@ on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_dat
   SpotifyGtkLikedSongsPage *self = user_data;
   g_signal_emit (self, signals[TRACK_ACTIVATED], 0, track);
   (void) list;
+}
+
+/* A track matches when every whitespace-separated term of the (casefolded)
+ * query appears somewhere in its title, artists or album. The filter is local:
+ * it narrows the already-loaded collection, so it is instant and works offline
+ * of the catalog. */
+static gboolean
+track_matches (const SpotifyNativeTrack *t, const gchar *const *terms)
+{
+  g_autofree gchar *hay = g_strdup_printf ("%s\t%s\t%s",
+    t->name ? t->name : "", t->artists ? t->artists : "", t->album ? t->album : "");
+  g_autofree gchar *hay_cf = g_utf8_casefold (hay, -1);
+
+  for (guint i = 0; terms[i]; i++)
+    if (!strstr (hay_cf, terms[i]))    /* an empty term matches, which is fine */
+      return FALSE;
+  return TRUE;
+}
+
+/* Rebuild the visible list from all_tracks under the current filter text. */
+static void
+apply_filter (SpotifyGtkLikedSongsPage *self)
+{
+  if (!self->all_tracks)
+    return;
+
+  const gchar *query = gtk_editable_get_text (GTK_EDITABLE (self->filter_entry));
+
+  if (!query || !*query) {
+    spotifygtk_track_list_set_native_tracks (self->list, self->all_tracks);
+    if (self->all_tracks->len == 0)
+      spotifygtk_track_list_set_status (self->list, "No liked songs yet.");
+    return;
+  }
+
+  g_autofree gchar *cf = g_utf8_casefold (query, -1);
+  g_auto(GStrv) terms = g_strsplit (cf, " ", -1);
+
+  /* Borrowed pointers into all_tracks; set_native_tracks takes its own copies,
+   * so this shallow array needs no free func. */
+  g_autoptr(GPtrArray) filtered = g_ptr_array_new ();
+  for (guint i = 0; i < self->all_tracks->len; i++) {
+    SpotifyNativeTrack *t = g_ptr_array_index (self->all_tracks, i);
+    if (track_matches (t, (const gchar *const *) terms))
+      g_ptr_array_add (filtered, t);
+  }
+
+  spotifygtk_track_list_set_native_tracks (self->list, filtered);
+  if (filtered->len == 0)
+    spotifygtk_track_list_set_status (self->list, "No matches.");
+}
+
+static void
+on_filter_changed (GtkSearchEntry *entry, gpointer user_data)
+{
+  apply_filter (user_data);
+  (void) entry;
 }
 
 static void
@@ -69,9 +133,9 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   }
 
   self->retry_after = 0;
-  spotifygtk_track_list_set_native_tracks (self->list, tracks);
-  if (tracks->len == 0)
-    spotifygtk_track_list_set_status (self->list, "No liked songs yet.");
+  g_clear_pointer (&self->all_tracks, g_ptr_array_unref);
+  self->all_tracks = g_ptr_array_ref (tracks);
+  apply_filter (self);   /* honours whatever is already typed (usually nothing) */
 
   self->loaded = TRUE;
 }
@@ -85,6 +149,7 @@ spotifygtk_liked_songs_page_dispose (GObject *object)
     g_cancellable_cancel (self->in_flight);
   g_clear_object (&self->in_flight);
   g_clear_object (&self->session);
+  g_clear_pointer (&self->all_tracks, g_ptr_array_unref);
 
   G_OBJECT_CLASS (spotifygtk_liked_songs_page_parent_class)->dispose (object);
 }
@@ -116,6 +181,16 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   gtk_widget_add_css_class (title, "title-text");
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
   gtk_box_append (GTK_BOX (self), title);
+
+  /* Local filter over the loaded collection — narrows what's shown, does not
+   * hit the catalog. */
+  self->filter_entry = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
+  gtk_search_entry_set_placeholder_text (self->filter_entry, "Filter liked songs");
+  gtk_widget_set_halign (GTK_WIDGET (self->filter_entry), GTK_ALIGN_START);
+  gtk_widget_set_size_request (GTK_WIDGET (self->filter_entry), 340, -1);
+  g_signal_connect (self->filter_entry, "search-changed",
+                    G_CALLBACK (on_filter_changed), self);
+  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->filter_entry));
 
   self->list = spotifygtk_track_list_new ();
   spotifygtk_track_list_set_numbered (self->list, TRUE);

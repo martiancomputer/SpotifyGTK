@@ -11,6 +11,7 @@
 
 #include "spotify/session.h"
 #include "track_list.h"
+#include "album_grid.h"
 
 G_BEGIN_DECLS
 
@@ -26,6 +27,10 @@ void spotifygtk_search_page_set_session (SpotifyGtkSearchPage *self,
 /* The results list, so the window can wire play-context and the row context
  * menu (add-to-queue / go-to-album / go-to-artist) to it directly. */
 SpotifyGtkTrackList *spotifygtk_search_page_get_list (SpotifyGtkSearchPage *self);
+
+/* The albums shelf, so the window can wire "album-activated" to the context
+ * page exactly as it wires the row menu's "go-to-album". */
+SpotifyGtkAlbumGrid *spotifygtk_search_page_get_album_grid (SpotifyGtkSearchPage *self);
 
 void spotifygtk_search_page_set_playing_uri (SpotifyGtkSearchPage *self,
                                           const gchar *uri,
