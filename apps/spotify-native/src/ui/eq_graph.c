@@ -1,15 +1,23 @@
 /*
  * eq_graph.c — Draggable equaliser response curve.
  *
- * The curve is not an interpolation through the handles: every pixel column is
- * a real evaluation of the cascade's magnitude response at that frequency
- * (spotifygtk_eq_magnitude_db, the same coefficient maths the audio path runs).
- * That means what is drawn is what is heard — including the parts a slider
- * strip hides, like two adjacent bands summing to more boost than either was
- * set to, or a lone band's skirts leaking an octave either side.
+ * The curve is not an interpolation through the handles: it is the real summed
+ * magnitude response of the biquad cascade, from the same coefficient maths the
+ * audio path runs (spotifygtk_eq_response_curve). What is drawn is what is
+ * heard — including the parts a slider strip hides, like two adjacent bands
+ * summing to more boost than either was set to.
+ *
+ * PERFORMANCE
+ *
+ * The first version called a per-frequency magnitude helper once per pixel
+ * column, and that helper recomputed all fifteen biquads from scratch every
+ * time — roughly 16,000 pow/cos/log10 calls per frame, on the main thread,
+ * during a drag. It was visibly laggy. Now the coefficients are computed once
+ * per curve, and the curve itself is cached: it is rebuilt only when a gain
+ * actually changes or the widget is resized, not on every frame.
  *
  * Axes: log frequency across (20 Hz .. 20 kHz, matching how pitch is heard),
- * linear dB up (+-12, the same range the settings clamp to).
+ * linear dB up (+-12, the range the settings clamp to).
  */
 
 #include "eq_graph.h"
@@ -21,23 +29,28 @@
 #define EQ_MAX_DB     ( 12.0)
 #define EQ_MIN_HZ     20.0
 #define EQ_MAX_HZ     20000.0
-#define GRAPH_HEIGHT  190
-#define PAD_L         38.0    /* room for the dB scale */
-#define PAD_R         10.0
-#define PAD_T         10.0
-#define PAD_B         24.0    /* room for the frequency labels */
-#define HANDLE_R      5.5
+#define GRAPH_HEIGHT  210
+#define PAD_L         42.0
+#define PAD_R         14.0
+#define PAD_T         14.0
+#define PAD_B         26.0
+#define HANDLE_R      4.5
 
-/* The response is drawn at the rate Spotify actually decodes at; the filter
- * shape is rate-dependent and this is the one that matters in practice. */
+/* The filter shape is rate-dependent; this is the rate Spotify decodes at. */
 #define DISPLAY_RATE  44100
 
 struct _SpotifyGtkEqGraph {
   GtkDrawingArea parent_instance;
 
   gdouble gains[SPOTIFYGTK_EQ_BANDS];
-  gint    active_band;    /* -1 when not dragging */
+  gint    active_band;      /* -1 when not dragging */
+  gint    hover_band;       /* -1 when the pointer is away */
   gdouble drag_start_y;
+
+  /* Cached response, one dB value per pixel column of the plot area. */
+  gdouble *curve;
+  gint     curve_len;
+  gboolean curve_dirty;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkEqGraph, spotifygtk_eq_graph, GTK_TYPE_DRAWING_AREA)
@@ -56,6 +69,13 @@ freq_to_x (gdouble hz, gdouble w)
 }
 
 static gdouble
+x_to_freq (gdouble x, gdouble w)
+{
+  gdouble t = (x - PAD_L) / MAX (1.0, w - PAD_L - PAD_R);
+  return pow (10.0, log10 (EQ_MIN_HZ) + t * (log10 (EQ_MAX_HZ) - log10 (EQ_MIN_HZ)));
+}
+
+static gdouble
 db_to_y (gdouble db, gdouble h)
 {
   gdouble t = (EQ_MAX_DB - db) / (EQ_MAX_DB - EQ_MIN_DB);
@@ -65,7 +85,7 @@ db_to_y (gdouble db, gdouble h)
 static gdouble
 y_to_db (gdouble y, gdouble h)
 {
-  gdouble t = (y - PAD_T) / (h - PAD_T - PAD_B);
+  gdouble t = (y - PAD_T) / MAX (1.0, h - PAD_T - PAD_B);
   return CLAMP (EQ_MAX_DB - t * (EQ_MAX_DB - EQ_MIN_DB), EQ_MIN_DB, EQ_MAX_DB);
 }
 
@@ -77,6 +97,31 @@ freq_label (gint hz)
   return g_strdup_printf ("%d", hz);
 }
 
+/* --- cached curve --- */
+
+/* Rebuilt only when a gain changes or the width does; see the header comment
+ * on why this is not done per frame. */
+static void
+rebuild_curve (SpotifyGtkEqGraph *self, gdouble w)
+{
+  gint n = (gint) (w - PAD_L - PAD_R);
+  if (n < 2)
+    return;
+
+  if (n != self->curve_len) {
+    g_free (self->curve);
+    self->curve     = g_new0 (gdouble, n);
+    self->curve_len = n;
+  }
+
+  g_autofree gdouble *freqs = g_new (gdouble, n);
+  for (gint i = 0; i < n; i++)
+    freqs[i] = x_to_freq (PAD_L + i, w);
+
+  spotifygtk_eq_response_curve (self->gains, DISPLAY_RATE, freqs, self->curve, n);
+  self->curve_dirty = FALSE;
+}
+
 /* --- drawing --- */
 
 static void
@@ -84,107 +129,123 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
 {
   SpotifyGtkEqGraph *self = SPOTIFYGTK_EQ_GRAPH (area);
   gdouble w = width, h = height;
+  gdouble plot_top = PAD_T, plot_bot = h - PAD_B;
+  gdouble x0 = PAD_L, x1 = w - PAD_R;
 
-  /* Foreground from the theme so the grid and labels follow light/dark; the
-   * curve uses the app accent, which is the same in every palette. */
+  if (x1 - x0 < 4.0 || plot_bot - plot_top < 4.0)
+    return;
+
+  if (self->curve_dirty || self->curve_len != (gint) (x1 - x0))
+    rebuild_curve (self, w);
+  if (!self->curve)
+    return;
+
   GdkRGBA fg;
   gtk_widget_get_color (GTK_WIDGET (area), &fg);
   const gdouble ar = 0.114, ag = 0.725, ab = 0.329;   /* @accent #1db954 */
 
-  cairo_set_line_width (cr, 1.0);
   cairo_select_font_face (cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size (cr, 10.0);
+  cairo_set_line_width (cr, 1.0);
 
-  /* Horizontal dB gridlines, 0 dB emphasised. */
-  for (gdouble db = EQ_MIN_DB; db <= EQ_MAX_DB + 0.1; db += 6.0) {
-    gdouble y = db_to_y (db, h);
-    gboolean zero = fabs (db) < 0.001;
-    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, zero ? 0.34 : 0.13);
-    cairo_move_to (cr, PAD_L, y);
-    cairo_line_to (cr, w - PAD_R, y);
+  /* Frequency guides: decades bright, the labelled bands faint. */
+  for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b += 2) {
+    gdouble x = freq_to_x (spotifygtk_eq_frequencies[b], w);
+    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.07);
+    cairo_move_to (cr, x, plot_top);
+    cairo_line_to (cr, x, plot_bot);
     cairo_stroke (cr);
 
-    g_autofree gchar *lbl = g_strdup_printf ("%+g", db);
-    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.5);
-    cairo_move_to (cr, 6.0, y + 3.5);
+    g_autofree gchar *lbl = freq_label (spotifygtk_eq_frequencies[b]);
+    cairo_text_extents_t ext;
+    cairo_text_extents (cr, lbl, &ext);
+    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.45);
+    cairo_move_to (cr, x - ext.width / 2.0, h - 8.0);
     cairo_show_text (cr, lbl);
   }
 
-  /* Vertical decade guides. */
-  static const gint guides[] = { 100, 1000, 10000 };
-  for (gsize i = 0; i < G_N_ELEMENTS (guides); i++) {
-    gdouble x = freq_to_x (guides[i], w);
-    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.13);
-    cairo_move_to (cr, x, PAD_T);
-    cairo_line_to (cr, x, h - PAD_B);
+  /* dB gridlines, 0 dB emphasised, labels right-aligned in the gutter. */
+  for (gdouble db = EQ_MIN_DB; db <= EQ_MAX_DB + 0.1; db += 6.0) {
+    gdouble y = db_to_y (db, h);
+    gboolean zero = fabs (db) < 0.001;
+    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, zero ? 0.28 : 0.10);
+    cairo_move_to (cr, x0, y);
+    cairo_line_to (cr, x1, y);
     cairo_stroke (cr);
+
+    g_autofree gchar *lbl = g_strdup_printf ("%+g", db);
+    cairo_text_extents_t ext;
+    cairo_text_extents (cr, lbl, &ext);
+    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.45);
+    cairo_move_to (cr, PAD_L - 8.0 - ext.width, y + 3.5);
+    cairo_show_text (cr, lbl);
   }
 
-  /* The response curve, evaluated per pixel column. */
-  gdouble x0 = PAD_L, x1 = w - PAD_R;
+  /* Clip so the fill and curve cannot bleed into the label gutters. */
+  cairo_save (cr);
+  cairo_rectangle (cr, x0, plot_top, x1 - x0, plot_bot - plot_top);
+  cairo_clip (cr);
+
+  /* Trace the response once; reuse the path for the fill and the stroke. */
   cairo_new_path (cr);
-  for (gdouble x = x0; x <= x1; x += 1.0) {
-    gdouble t  = (x - x0) / MAX (1.0, x1 - x0);
-    gdouble hz = pow (10.0, log10 (EQ_MIN_HZ) +
-                            t * (log10 (EQ_MAX_HZ) - log10 (EQ_MIN_HZ)));
-    gdouble db = spotifygtk_eq_magnitude_db (self->gains, hz, DISPLAY_RATE);
-    gdouble y  = db_to_y (CLAMP (db, EQ_MIN_DB, EQ_MAX_DB), h);
-    if (x == x0) cairo_move_to (cr, x, y);
-    else         cairo_line_to (cr, x, y);
+  for (gint i = 0; i < self->curve_len; i++) {
+    gdouble x = x0 + i;
+    gdouble y = db_to_y (CLAMP (self->curve[i], EQ_MIN_DB, EQ_MAX_DB), h);
+    if (i == 0) cairo_move_to (cr, x, y);
+    else        cairo_line_to (cr, x, y);
   }
-
-  /* Keep the stroke, reuse the path to shade the area back to 0 dB. */
   cairo_path_t *curve = cairo_copy_path (cr);
-  cairo_line_to (cr, x1, db_to_y (0.0, h));
-  cairo_line_to (cr, x0, db_to_y (0.0, h));
+
+  /* Fill from the curve down to the floor, fading out — the shape reads as a
+   * solid mass hanging off the curve rather than a band pinned to 0 dB, which
+   * is what made the old fill-to-zero look like a detached blob. */
+  cairo_line_to (cr, x1, plot_bot);
+  cairo_line_to (cr, x0, plot_bot);
   cairo_close_path (cr);
-  cairo_set_source_rgba (cr, ar, ag, ab, 0.16);
+
+  cairo_pattern_t *grad = cairo_pattern_create_linear (0, plot_top, 0, plot_bot);
+  cairo_pattern_add_color_stop_rgba (grad, 0.0, ar, ag, ab, 0.34);
+  cairo_pattern_add_color_stop_rgba (grad, 1.0, ar, ag, ab, 0.02);
+  cairo_set_source (cr, grad);
   cairo_fill (cr);
+  cairo_pattern_destroy (grad);
 
   cairo_new_path (cr);
   cairo_append_path (cr, curve);
   cairo_path_destroy (curve);
   cairo_set_source_rgba (cr, ar, ag, ab, 0.95);
   cairo_set_line_width (cr, 2.0);
+  cairo_set_line_join (cr, CAIRO_LINE_JOIN_ROUND);
   cairo_stroke (cr);
 
-  /* Handles, one per band, on the curve at that band's centre. */
+  cairo_restore (cr);
+
+  /* Handles sit on the curve at each band centre. */
   for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++) {
-    gdouble hz = spotifygtk_eq_frequencies[b];
-    gdouble x  = freq_to_x (hz, w);
-    gdouble db = spotifygtk_eq_magnitude_db (self->gains, hz, DISPLAY_RATE);
-    gdouble y  = db_to_y (CLAMP (db, EQ_MIN_DB, EQ_MAX_DB), h);
-    gboolean hot = (b == self->active_band);
+    gdouble x = freq_to_x (spotifygtk_eq_frequencies[b], w);
+    gint    i = CLAMP ((gint) (x - x0), 0, self->curve_len - 1);
+    gdouble y = db_to_y (CLAMP (self->curve[i], EQ_MIN_DB, EQ_MAX_DB), h);
+    gboolean hot = (b == self->active_band || b == self->hover_band);
+    gdouble  r   = hot ? HANDLE_R + 1.5 : HANDLE_R;
 
     cairo_set_source_rgba (cr, ar, ag, ab, 1.0);
-    cairo_arc (cr, x, y, hot ? HANDLE_R + 1.5 : HANDLE_R, 0, 2 * G_PI);
+    cairo_arc (cr, x, y, r, 0, 2 * G_PI);
     cairo_fill (cr);
 
-    cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, hot ? 1.0 : 0.85);
-    cairo_set_line_width (cr, 1.6);
-    cairo_arc (cr, x, y, hot ? HANDLE_R + 1.5 : HANDLE_R, 0, 2 * G_PI);
+    cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, hot ? 0.95 : 0.7);
+    cairo_set_line_width (cr, 1.5);
+    cairo_arc (cr, x, y, r, 0, 2 * G_PI);
     cairo_stroke (cr);
-
-    /* Label every other band so the axis does not crowd at 15 bands. */
-    if (b % 2 == 0) {
-      g_autofree gchar *lbl = freq_label (spotifygtk_eq_frequencies[b]);
-      cairo_text_extents_t ext;
-      cairo_text_extents (cr, lbl, &ext);
-      cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.5);
-      cairo_move_to (cr, x - ext.width / 2.0, h - 3.0);
-      cairo_show_text (cr, lbl);
-    }
   }
   (void) data;
 }
 
 /* --- interaction --- */
 
-/* Nearest band by horizontal distance: the handle sits on the curve, so its
- * height moves as neighbours change, and picking by x alone is both simpler
- * and what the pointer is actually aiming at. */
+/* Nearest band by horizontal distance: the handle rides the curve, so its
+ * height moves as neighbours change, and x is what the pointer is aiming at. */
 static gint
-band_at_x (SpotifyGtkEqGraph *self, gdouble x, gdouble w)
+band_at_x (gdouble x, gdouble w)
 {
   gint    best = 0;
   gdouble best_d = G_MAXDOUBLE;
@@ -192,7 +253,6 @@ band_at_x (SpotifyGtkEqGraph *self, gdouble x, gdouble w)
     gdouble d = fabs (freq_to_x (spotifygtk_eq_frequencies[b], w) - x);
     if (d < best_d) { best_d = d; best = b; }
   }
-  (void) self;
   return best;
 }
 
@@ -203,19 +263,16 @@ apply_drag (SpotifyGtkEqGraph *self, gdouble y)
     return;
 
   gdouble h  = gtk_widget_get_height (GTK_WIDGET (self));
-  gdouble db = y_to_db (y, h);
-
-  /* Snap to whole dB: the settings store and the slider strip before it both
-   * worked in 1 dB steps, and a continuous value would write a new setting on
-   * every motion event. */
-  db = CLAMP (round (db), EQ_MIN_DB, EQ_MAX_DB);
+  /* Snap to whole dB: the settings store works in 1 dB steps, and a continuous
+   * value would write a setting and rebuild the curve on every motion event. */
+  gdouble db = CLAMP (round (y_to_db (y, h)), EQ_MIN_DB, EQ_MAX_DB);
 
   if (self->gains[self->active_band] == db)
     return;
 
   self->gains[self->active_band] = db;
-  g_signal_emit (self, signals[BAND_CHANGED], 0,
-                 (guint) self->active_band, db);
+  self->curve_dirty = TRUE;
+  g_signal_emit (self, signals[BAND_CHANGED], 0, (guint) self->active_band, db);
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
@@ -223,9 +280,10 @@ static void
 on_drag_begin (GtkGestureDrag *gesture, gdouble x, gdouble y, gpointer user_data)
 {
   SpotifyGtkEqGraph *self = user_data;
-  self->active_band  = band_at_x (self, x, gtk_widget_get_width (GTK_WIDGET (self)));
+  self->active_band  = band_at_x (x, gtk_widget_get_width (GTK_WIDGET (self)));
   self->drag_start_y = y;
   apply_drag (self, y);
+  gtk_widget_queue_draw (GTK_WIDGET (self));
   (void) gesture;
 }
 
@@ -247,6 +305,29 @@ on_drag_end (GtkGestureDrag *gesture, gdouble ox, gdouble oy, gpointer user_data
   (void) gesture; (void) ox;
 }
 
+static void
+on_motion (GtkEventControllerMotion *ctl, gdouble x, gdouble y, gpointer user_data)
+{
+  SpotifyGtkEqGraph *self = user_data;
+  gint b = band_at_x (x, gtk_widget_get_width (GTK_WIDGET (self)));
+  if (b != self->hover_band) {
+    self->hover_band = b;
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+  }
+  (void) ctl; (void) y;
+}
+
+static void
+on_motion_leave (GtkEventControllerMotion *ctl, gpointer user_data)
+{
+  SpotifyGtkEqGraph *self = user_data;
+  if (self->hover_band != -1) {
+    self->hover_band = -1;
+    gtk_widget_queue_draw (GTK_WIDGET (self));
+  }
+  (void) ctl;
+}
+
 /* --- boilerplate --- */
 
 void
@@ -257,12 +338,23 @@ spotifygtk_eq_graph_set_gains (SpotifyGtkEqGraph *self, const gdouble *gains_db)
     return;
   for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++)
     self->gains[b] = CLAMP (gains_db[b], EQ_MIN_DB, EQ_MAX_DB);
+  self->curve_dirty = TRUE;
   gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+static void
+spotifygtk_eq_graph_finalize (GObject *object)
+{
+  SpotifyGtkEqGraph *self = SPOTIFYGTK_EQ_GRAPH (object);
+  g_clear_pointer (&self->curve, g_free);
+  G_OBJECT_CLASS (spotifygtk_eq_graph_parent_class)->finalize (object);
 }
 
 static void
 spotifygtk_eq_graph_class_init (SpotifyGtkEqGraphClass *klass)
 {
+  G_OBJECT_CLASS (klass)->finalize = spotifygtk_eq_graph_finalize;
+
   signals[BAND_CHANGED] = g_signal_new (
     "band-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
     NULL, NULL, NULL, G_TYPE_NONE, 2, G_TYPE_UINT, G_TYPE_DOUBLE);
@@ -272,6 +364,8 @@ static void
 spotifygtk_eq_graph_init (SpotifyGtkEqGraph *self)
 {
   self->active_band = -1;
+  self->hover_band  = -1;
+  self->curve_dirty = TRUE;
   gtk_widget_set_size_request (GTK_WIDGET (self), -1, GRAPH_HEIGHT);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
 
@@ -282,6 +376,11 @@ spotifygtk_eq_graph_init (SpotifyGtkEqGraph *self)
   g_signal_connect (drag, "drag-update", G_CALLBACK (on_drag_update), self);
   g_signal_connect (drag, "drag-end",    G_CALLBACK (on_drag_end),    self);
   gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (drag));
+
+  GtkEventController *motion = gtk_event_controller_motion_new ();
+  g_signal_connect (motion, "motion", G_CALLBACK (on_motion), self);
+  g_signal_connect (motion, "leave",  G_CALLBACK (on_motion_leave), self);
+  gtk_widget_add_controller (GTK_WIDGET (self), motion);
 }
 
 SpotifyGtkEqGraph *

@@ -53,4 +53,14 @@ void spotifygtk_eq_process (SpotifyEq *eq, gint16 *samples,
 gdouble spotifygtk_eq_magnitude_db (const gdouble *gains_db,
                                     gdouble freq_hz, gint sample_rate);
 
+/*
+ * Same response, evaluated at `n` frequencies at once. The band coefficients
+ * are computed once for the whole call rather than once per frequency, which
+ * is the difference between a UI that redraws smoothly and one that does
+ * thousands of pow/cos per frame. `out_db` must have room for `n`.
+ */
+void spotifygtk_eq_response_curve (const gdouble *gains_db, gint sample_rate,
+                                   const gdouble *freqs_hz, gdouble *out_db,
+                                   gsize n);
+
 G_END_DECLS

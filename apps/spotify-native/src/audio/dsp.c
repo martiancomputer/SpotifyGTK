@@ -145,33 +145,49 @@ spotifygtk_eq_process (SpotifyEq *eq, gint16 *samples,
   }
 }
 
+
+void
+spotifygtk_eq_response_curve (const gdouble *gains_db, gint sample_rate,
+                              const gdouble *freqs_hz, gdouble *out_db, gsize n)
+{
+  if (!gains_db || !freqs_hz || !out_db || sample_rate <= 0)
+    return;
+
+  /* Once for the whole curve, not once per point. */
+  Biquad bq[SPOTIFYGTK_EQ_BANDS];
+  for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++)
+    compute_biquad (&bq[b], spotifygtk_eq_frequencies[b], gains_db[b],
+                    (gdouble) sample_rate);
+
+  for (gsize i = 0; i < n; i++) {
+    gdouble f = freqs_hz[i];
+    if (f <= 0.0) { out_db[i] = 0.0; continue; }
+
+    gdouble w     = 2.0 * G_PI * f / (gdouble) sample_rate;
+    gdouble cosw  = cos (w);
+    gdouble cos2w = cos (2.0 * w);
+
+    /* Cascaded biquads multiply in magnitude. Accumulate the product and take
+     * a single log at the end rather than one per band. */
+    gdouble prod = 1.0;
+    for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++) {
+      gdouble num = bq[b].b0 * bq[b].b0 + bq[b].b1 * bq[b].b1 + bq[b].b2 * bq[b].b2
+                  + 2.0 * (bq[b].b0 * bq[b].b1 + bq[b].b1 * bq[b].b2) * cosw
+                  + 2.0 * bq[b].b0 * bq[b].b2 * cos2w;
+      gdouble den = 1.0 + bq[b].a1 * bq[b].a1 + bq[b].a2 * bq[b].a2
+                  + 2.0 * (bq[b].a1 + bq[b].a1 * bq[b].a2) * cosw
+                  + 2.0 * bq[b].a2 * cos2w;
+      if (den > 1e-20 && num > 1e-20)
+        prod *= num / den;
+    }
+    out_db[i] = 10.0 * log10 (MAX (prod, 1e-20));
+  }
+}
+
 gdouble
 spotifygtk_eq_magnitude_db (const gdouble *gains_db, gdouble freq_hz, gint sample_rate)
 {
-  if (!gains_db || sample_rate <= 0 || freq_hz <= 0.0)
-    return 0.0;
-
-  gdouble w     = 2.0 * G_PI * freq_hz / (gdouble) sample_rate;
-  gdouble cosw  = cos (w);
-  gdouble cos2w = cos (2.0 * w);
-  gdouble total = 0.0;
-
-  /* Cascaded biquads multiply in magnitude, so they add in dB. */
-  for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++) {
-    Biquad bq;
-    compute_biquad (&bq, spotifygtk_eq_frequencies[b], gains_db[b],
-                    (gdouble) sample_rate);
-
-    gdouble num = bq.b0 * bq.b0 + bq.b1 * bq.b1 + bq.b2 * bq.b2
-                + 2.0 * (bq.b0 * bq.b1 + bq.b1 * bq.b2) * cosw
-                + 2.0 * bq.b0 * bq.b2 * cos2w;
-    gdouble den = 1.0 + bq.a1 * bq.a1 + bq.a2 * bq.a2
-                + 2.0 * (bq.a1 + bq.a1 * bq.a2) * cosw
-                + 2.0 * bq.a2 * cos2w;
-
-    if (den > 1e-20 && num > 1e-20)
-      total += 10.0 * log10 (num / den);
-  }
-
-  return total;
+  gdouble out = 0.0;
+  spotifygtk_eq_response_curve (gains_db, sample_rate, &freq_hz, &out, 1);
+  return out;
 }
