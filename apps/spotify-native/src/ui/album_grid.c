@@ -42,7 +42,8 @@
 #define CARD_ART_PX     150   /* on-screen card art size */
 #define CARD_DECODE_PX  180   /* decode a touch larger so downscaling stays crisp */
 #define CARD_WIDTH      (CARD_ART_PX + 24)
-#define SHELF_HEIGHT    236   /* art + two text lines + margins + scrollbar lane */
+#define SHELF_HEIGHT    214   /* art + two text lines + margins; the
+                                 * scrollbar adds its own space below */
 
 /* === One album in the model === */
 
@@ -334,6 +335,11 @@ album_grid_new (gboolean wrap)
 
     gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                     GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    /* Non-overlay, like every other scroller in the app (track list, settings,
+     * queue): the bar occupies real layout space and sits beside the content
+     * instead of floating over it. Overlay bars were drawing across the card
+     * titles here, which is the inconsistency this fixes. */
+    gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
     gtk_widget_set_vexpand (scroller, TRUE);
     gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
   } else {
@@ -341,12 +347,12 @@ album_grid_new (gboolean wrap)
     gtk_orientable_set_orientation (GTK_ORIENTABLE (view),
                                     GTK_ORIENTATION_HORIZONTAL);
     gtk_widget_add_css_class (view, "album-shelfview");
-    /* Leave a lane below the cards so the overlay scrollbar rides in empty
-     * space rather than across the artist labels. */
-    gtk_widget_set_margin_bottom (view, 14);
 
     gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                     GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+    /* Same treatment as the grid: the bar gets its own strip under the cards
+     * rather than being drawn across the artist line. */
+    gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
     gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (scroller),
                                                 SHELF_HEIGHT);
   }

@@ -25,7 +25,7 @@
 #define PAD_L         38.0    /* room for the dB scale */
 #define PAD_R         10.0
 #define PAD_T         10.0
-#define PAD_B         010.0 + 14.0   /* room for the frequency labels */
+#define PAD_B         24.0    /* room for the frequency labels */
 #define HANDLE_R      5.5
 
 /* The response is drawn at the rate Spotify actually decodes at; the filter
