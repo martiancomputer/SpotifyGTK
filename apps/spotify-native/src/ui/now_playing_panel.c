@@ -4,6 +4,8 @@
 
 #include "now_playing_panel.h"
 
+#include <math.h>
+
 /* Fixed cover edge; the panel is ~300px wide, so this leaves a margin. */
 #define ART_SIZE 260
 #include "cover_loader.h"
@@ -59,6 +61,92 @@ on_collapse_clicked (GtkButton *button, gpointer user_data)
    * Playing panel; the queue button in the playback bar reopens it. */
   g_signal_emit (self, signals[COLLAPSE_REQUESTED], 0);
   (void) button;
+}
+
+/* === Marquee title ===
+ *
+ * A long track title used to force the whole panel wider than the window,
+ * pushing the artwork and queue off-screen, because a plain GtkLabel demands
+ * its full text width as its minimum size. Wrapping the title in a clipping
+ * scroller caps that: the scroller has a near-zero minimum width, so the panel
+ * keeps its intended size and the title is clipped instead of overflowing.
+ * When the title is wider than the panel it scrolls slowly back and forth --
+ * the "radio ticker" look -- and when it fits it just sits still.
+ */
+typedef struct {
+  GtkScrolledWindow *scroller;
+  gint64             start_us;
+} Marquee;
+
+static gboolean
+marquee_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
+{
+  Marquee *m = user_data;
+  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (m->scroller);
+  gdouble span = gtk_adjustment_get_upper (hadj) - gtk_adjustment_get_page_size (hadj);
+
+  if (span <= 1.0) {                       /* title fits: hold at the start */
+    gtk_adjustment_set_value (hadj, 0.0);
+    m->start_us = 0;
+    return G_SOURCE_CONTINUE;
+  }
+
+  const gdouble speed = 32.0;              /* px per second */
+  const gdouble pause = 1.6;               /* seconds held at each end */
+  gdouble travel = span / speed;
+  gdouble cycle  = 2.0 * (pause + travel);
+
+  gint64 now = gdk_frame_clock_get_frame_time (clock);
+  if (m->start_us == 0)
+    m->start_us = now;
+  gdouble t = fmod ((now - m->start_us) / (gdouble) G_USEC_PER_SEC, cycle);
+
+  /* pause at left, scroll right, pause at right, scroll back -- a triangle. */
+  gdouble v;
+  if      (t < pause)                 v = 0.0;
+  else if (t < pause + travel)        v = (t - pause) / travel * span;
+  else if (t < 2.0 * pause + travel)  v = span;
+  else                                v = span - (t - (2.0 * pause + travel)) / travel * span;
+
+  gtk_adjustment_set_value (hadj, v);
+  (void) widget;
+  return G_SOURCE_CONTINUE;
+}
+
+/* A single-line label in a clipping, self-scrolling container. The label is
+ * returned via *out_label so the caller can set its text; the marquee state is
+ * stashed on it as "marquee" so a track change can restart the scroll. */
+static GtkWidget *
+build_marquee (GtkLabel **out_label, const gchar *css)
+{
+  GtkWidget *scroller = gtk_scrolled_window_new ();
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
+                                  GTK_POLICY_EXTERNAL, GTK_POLICY_NEVER);
+  gtk_scrolled_window_set_propagate_natural_width (GTK_SCROLLED_WINDOW (scroller), FALSE);
+  gtk_scrolled_window_set_min_content_width (GTK_SCROLLED_WINDOW (scroller), 0);
+  gtk_widget_set_hexpand (scroller, TRUE);
+
+  GtkWidget *label = gtk_label_new ("");
+  gtk_widget_add_css_class (label, css);
+  gtk_label_set_xalign (GTK_LABEL (label), 0.0);
+  gtk_label_set_single_line_mode (GTK_LABEL (label), TRUE);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), label);
+
+  Marquee *m = g_new0 (Marquee, 1);
+  m->scroller = GTK_SCROLLED_WINDOW (scroller);
+  g_object_set_data (G_OBJECT (label), "marquee", m);
+  gtk_widget_add_tick_callback (label, marquee_tick, m, g_free);
+
+  *out_label = GTK_LABEL (label);
+  return scroller;
+}
+
+static void
+marquee_reset (GtkLabel *label)
+{
+  Marquee *m = g_object_get_data (G_OBJECT (label), "marquee");
+  if (m)
+    m->start_us = 0;   /* next tick restarts from the left */
 }
 
 static void
@@ -142,14 +230,16 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_widget_set_margin_end (info, 24);
   gtk_widget_set_margin_top (info, 16);
 
-  self->track_label = GTK_LABEL (gtk_label_new ("Track Title"));
-  gtk_widget_add_css_class (GTK_WIDGET (self->track_label), "normal-text");
-  gtk_label_set_xalign (self->track_label, 0.0);
-  gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->track_label));
+  GtkWidget *track_marquee = build_marquee (&self->track_label, "normal-text");
+  gtk_label_set_text (self->track_label, "Track Title");
+  gtk_box_append (GTK_BOX (info), track_marquee);
 
+  /* The artist/album line stays a plain ellipsizing label -- one moving line
+   * reads as a ticker; two would just look restless. */
   self->artist_label = GTK_LABEL (gtk_label_new ("Artist • Album"));
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "dim-text");
   gtk_label_set_xalign (self->artist_label, 0.0);
+  gtk_label_set_ellipsize (self->artist_label, PANGO_ELLIPSIZE_END);
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->artist_label));
 
   gtk_box_append (GTK_BOX (self->art_section), info);
@@ -195,6 +285,7 @@ spotifygtk_now_playing_panel_set_track (SpotifyGtkNowPlayingPanel *self,
   g_return_if_fail (SPOTIFYGTK_IS_NOW_PLAYING_PANEL (self));
 
   gtk_label_set_text (self->track_label, track_name ? track_name : "");
+  marquee_reset (self->track_label);
 
   g_autofree gchar *subtitle = g_strdup_printf ("%s • %s",
                                                 artist ? artist : "",
@@ -258,6 +349,7 @@ spotifygtk_now_playing_panel_set_queue (SpotifyGtkNowPlayingPanel *self, JsonArr
     GtkWidget *label = gtk_label_new (name);
     gtk_widget_add_css_class (label, "normal-text");
     gtk_label_set_xalign (GTK_LABEL (label), 0.0);
+    gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_END);
     gtk_box_append (GTK_BOX (box), label);
 
     gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), box);

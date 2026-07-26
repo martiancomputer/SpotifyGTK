@@ -48,6 +48,13 @@ struct _SpotifyGtkNativeWindow {
   /* Sidebar */
   SpotifyGtkSidebar *sidebar;
 
+  /* Header navigation, browser-style. `nav_history` holds NavEntry* in visit
+   * order; `nav_pos` indexes the current one, so Back/Forward just step it. */
+  GtkWidget *nav_back;
+  GtkWidget *nav_fwd;
+  GPtrArray *nav_history;
+  gint       nav_pos;
+
   /* Pages */
   GtkStack *page_stack;
   SpotifyGtkHomePage *home_page;
@@ -87,7 +94,93 @@ G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, GTK_TYPE_
 
 /* === Forward declarations === */
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
+static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
+static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
+                                 const gchar *title, const gchar *kind);
 static void spotifygtk_native_window_collapse_queue (SpotifyGtkNativeWindow *self);
+
+/* === Header navigation history === */
+
+typedef struct {
+  gchar *page;    /* stack child name */
+  gchar *uri;     /* context pages only; NULL for plain pages */
+  gchar *title;
+  gchar *kind;
+} NavEntry;
+
+static void
+nav_entry_free (gpointer data)
+{
+  NavEntry *e = data;
+  g_free (e->page); g_free (e->uri); g_free (e->title); g_free (e->kind);
+  g_free (e);
+}
+
+static void
+nav_update_buttons (SpotifyGtkNativeWindow *self)
+{
+  if (self->nav_back)
+    gtk_widget_set_sensitive (self->nav_back, self->nav_pos > 0);
+  if (self->nav_fwd)
+    gtk_widget_set_sensitive (self->nav_fwd,
+                              self->nav_pos >= 0 &&
+                              self->nav_pos < (gint) self->nav_history->len - 1);
+}
+
+/* Record a freshly-reached location, dropping any forward history (a new move
+ * forks the timeline) and collapsing a repeat of the current spot. */
+static void
+nav_record (SpotifyGtkNativeWindow *self, const gchar *page,
+            const gchar *uri, const gchar *title, const gchar *kind)
+{
+  while ((gint) self->nav_history->len > self->nav_pos + 1)
+    g_ptr_array_remove_index (self->nav_history, self->nav_history->len - 1);
+
+  if (self->nav_history->len > 0) {
+    NavEntry *top = g_ptr_array_index (self->nav_history, self->nav_history->len - 1);
+    if (g_strcmp0 (top->page, page) == 0 && g_strcmp0 (top->uri, uri) == 0)
+      return;
+  }
+
+  NavEntry *e = g_new0 (NavEntry, 1);
+  e->page = g_strdup (page); e->uri = g_strdup (uri);
+  e->title = g_strdup (title); e->kind = g_strdup (kind);
+  g_ptr_array_add (self->nav_history, e);
+  self->nav_pos = (gint) self->nav_history->len - 1;
+  nav_update_buttons (self);
+}
+
+/* Step Back (-1) or Forward (+1) without recording -- replaying history. */
+static void
+nav_go (SpotifyGtkNativeWindow *self, gint dir)
+{
+  gint target = self->nav_pos + dir;
+  if (target < 0 || target >= (gint) self->nav_history->len)
+    return;
+
+  self->nav_pos = target;
+  NavEntry *e = g_ptr_array_index (self->nav_history, target);
+  if (e->uri)
+    spotifygtk_context_page_load (self->context_page, e->uri,
+                                  e->title ? e->title : "Album",
+                                  e->kind ? e->kind : "Album");
+  navigate_raw (self, e->page);
+  nav_update_buttons (self);
+}
+
+static void
+on_nav_back_clicked (GtkButton *b, gpointer user_data)
+{
+  nav_go (user_data, -1);
+  (void) b;
+}
+
+static void
+on_nav_fwd_clicked (GtkButton *b, gpointer user_data)
+{
+  nav_go (user_data, +1);
+  (void) b;
+}
 
 /* === Track selection, queue and play-context === */
 
@@ -254,9 +347,8 @@ on_list_go_to_album (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer use
   if (!track || !track->album_uri)
     return;
 
-  spotifygtk_context_page_load (self->context_page, track->album_uri,
-                                track->album ? track->album : "Album", "Album");
-  navigate_to_page (self, "context");
+  navigate_to_context (self, track->album_uri,
+                       track->album ? track->album : "Album", "Album");
   (void) list;
 }
 
@@ -276,9 +368,8 @@ on_list_go_to_artist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer us
                   : g_strdup (track->artists);
   }
 
-  spotifygtk_context_page_load (self->context_page, track->artist_uri,
-                                primary ? primary : "Artist", "Artist");
-  navigate_to_page (self, "context");
+  navigate_to_context (self, track->artist_uri,
+                       primary ? primary : "Artist", "Artist");
   (void) list;
 }
 
@@ -291,9 +382,7 @@ on_album_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
   SpotifyGtkNativeWindow *self = user_data;
   if (!uri || !*uri)
     return;
-  spotifygtk_context_page_load (self->context_page, uri,
-                                name && *name ? name : "Album", "Album");
-  navigate_to_page (self, "context");
+  navigate_to_context (self, uri, name && *name ? name : "Album", "Album");
   (void) grid;
 }
 
@@ -487,7 +576,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
 
     const gchar *visible = gtk_stack_get_visible_child_name (self->page_stack);
     if (visible)
-      navigate_to_page (self, visible);
+      navigate_raw (self, visible);   /* refresh in place; not a history move */
   }
 }
 
@@ -521,7 +610,7 @@ on_content_paned_position (GObject *object, GParamSpec *pspec, gpointer user_dat
 
 /* === Navigation === */
 static void
-navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
+navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
 {
   if (!gtk_stack_get_child_by_name (self->page_stack, page_name)) {
     g_warning ("No page named '%s'", page_name);
@@ -544,6 +633,24 @@ navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
                                                self->current_track_uri, is_playing);
   spotifygtk_context_page_set_playing_uri (self->context_page,
                                            self->current_track_uri, is_playing);
+}
+
+/* Plain-page navigation that records history (sidebar clicks, etc.). */
+static void
+navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
+{
+  navigate_raw (self, page_name);
+  nav_record (self, page_name, NULL, NULL, NULL);
+}
+
+/* Open an album/artist context page and record it, so Back returns here. */
+static void
+navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
+                     const gchar *title, const gchar *kind)
+{
+  spotifygtk_context_page_load (self->context_page, uri, title, kind);
+  navigate_raw (self, "context");
+  nav_record (self, "context", uri, title, kind);
 }
 
 /* === Theming ===================================================== */
@@ -897,6 +1004,21 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_sidebar_collapse_toggled), self);
   gtk_header_bar_pack_start (GTK_HEADER_BAR (header), menu_btn);
 
+  /* Browser-style Back/Forward over the page history. */
+  self->nav_back = gtk_button_new_from_icon_name ("go-previous-symbolic");
+  gtk_widget_add_css_class (self->nav_back, "flat");
+  gtk_widget_set_tooltip_text (self->nav_back, "Back");
+  gtk_widget_set_sensitive (self->nav_back, FALSE);
+  g_signal_connect (self->nav_back, "clicked", G_CALLBACK (on_nav_back_clicked), self);
+  gtk_header_bar_pack_start (GTK_HEADER_BAR (header), self->nav_back);
+
+  self->nav_fwd = gtk_button_new_from_icon_name ("go-next-symbolic");
+  gtk_widget_add_css_class (self->nav_fwd, "flat");
+  gtk_widget_set_tooltip_text (self->nav_fwd, "Forward");
+  gtk_widget_set_sensitive (self->nav_fwd, FALSE);
+  g_signal_connect (self->nav_fwd, "clicked", G_CALLBACK (on_nav_fwd_clicked), self);
+  gtk_header_bar_pack_start (GTK_HEADER_BAR (header), self->nav_fwd);
+
   GtkWidget *title = gtk_label_new ("SpotifyGTK");
   gtk_widget_add_css_class (title, "title");
   gtk_header_bar_set_title_widget (GTK_HEADER_BAR (header), title);
@@ -1037,6 +1159,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_track_uri, g_free);
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  g_clear_pointer (&self->nav_history, g_ptr_array_unref);
   if (self->user_queue) {
     g_queue_free_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
     self->user_queue = NULL;
@@ -1058,6 +1181,8 @@ spotifygtk_native_window_init (SpotifyGtkNativeWindow *self)
 {
   self->context_index = -1;
   self->user_queue = g_queue_new ();
+  self->nav_history = g_ptr_array_new_with_free_func (nav_entry_free);
+  self->nav_pos = -1;
 }
 
 SpotifyGtkNativeWindow *

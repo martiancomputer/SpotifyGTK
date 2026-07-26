@@ -491,6 +491,7 @@ typedef struct {
   gboolean              output_failed;
   gboolean              queue_initialized;
   GSource            *timeout_source;
+  GSource            *cancel_source;   /* quits the loop when the UI cancellable trips */
   SpotifyNativeEngineControl *control;
   SpotifyNativeEngineProgressFunc progress;
   gpointer            progress_data;
@@ -1656,6 +1657,23 @@ on_live_test_timeout (gpointer user_data)
   return G_SOURCE_REMOVE;
 }
 
+/* The UI cancelled (Stop, or a switch to another track). Quit the engine loop
+ * so the worker unwinds. Without this the cancellable was only *checked* at the
+ * pause/queue waits and threaded into the CDN fetcher -- so a stream that had
+ * stalled with no async op in flight (nothing to error out and quit the loop)
+ * left the loop running forever, the task never completed, and every later
+ * track was unplayable until the client was restarted. Runs on the engine
+ * context, so quitting the loop here is safe. */
+static gboolean
+on_engine_cancelled (GCancellable *cancellable, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  g_message ("[live-test] engine cancelled by the UI -- quitting the loop to unwind");
+  g_main_loop_quit (state->loop);
+  (void) cancellable;
+  return G_SOURCE_CONTINUE;
+}
+
 static gboolean
 run_live_test (const gchar *token, GCancellable *cancellable,
                SpotifyNativeEngineProgressFunc progress,
@@ -1732,6 +1750,16 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   g_source_set_callback (state.timeout_source, on_live_test_timeout, &state, NULL);
   g_source_attach (state.timeout_source, context);
 
+  /* Unlike the startup watchdog above (disabled once audio flows), this lives
+   * for the whole run: a Stop or track switch mid-stream must quit the loop
+   * even when no async hop is in flight to carry the cancellation. */
+  if (cancellable) {
+    state.cancel_source = g_cancellable_source_new (cancellable);
+    g_source_set_callback (state.cancel_source,
+                           G_SOURCE_FUNC (on_engine_cancelled), &state, NULL);
+    g_source_attach (state.cancel_source, context);
+  }
+
   g_main_loop_run (loop);
 
   /* on_live_test_timeout() returns G_SOURCE_REMOVE, which destroys the
@@ -1745,11 +1773,18 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     state.timeout_source = NULL;
   }
 
+  if (state.cancel_source) {
+    g_source_destroy (state.cancel_source);
+    g_source_unref (state.cancel_source);
+    state.cancel_source = NULL;
+  }
+
   /* Cancellation callbacks are delivered on the private engine context. Give
    * them a bounded drain window before releasing the stack-backed state and
    * protocol clients, preventing a late soup/AP callback from observing freed
    * callback data after a timeout or Stop request. */
-  if (state.timed_out) {
+  if (state.timed_out ||
+      (state.cancellable && g_cancellable_is_cancelled (state.cancellable))) {
     guint drained = 0;
     while (g_main_context_pending (context) && drained++ < 64)
       g_main_context_iteration (context, FALSE);
