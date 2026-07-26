@@ -52,7 +52,7 @@ struct _SpotifyGtkNativeWindow {
   /* Login gate: an opaque layer over the whole window that stays up until the
    * session actually reaches READY. */
   GtkWidget  *login_gate;
-  GtkWidget  *header_bar;      /* insensitive while the gate is up */
+  GtkWidget  *menu_btn;        /* app header controls, disabled while gated */
   GtkWidget  *login_button;
   GtkLabel   *login_status;
   NativeAuth *auth;
@@ -575,8 +575,11 @@ on_player_position_changed (SpotifyNativePlayerService *player,
  * "a token exists" is not the same as "the token works", and signing in is the
  * one thing that must not be half-shown. It is an overlay rather than a
  * separate page so nothing behind it can be clicked or scrolled while it is up,
- * and the header bar is made insensitive alongside it, since a GtkWindow's
- * titlebar sits outside the window child and an overlay cannot cover it.
+ * A GtkWindow's titlebar sits outside the window child, so an overlay cannot
+ * cover it. The app's own header controls (menu, Back/Forward) are therefore
+ * disabled alongside the gate -- but NOT the GtkHeaderBar itself, which also
+ * owns the window's close/minimize/maximize buttons: desensitising the whole
+ * bar left no way to close or resize the window while signed out.
  *
  * Styled from the same @-colours as everything else — @bg_content ground,
  * @accent for the button — rather than a login-specific palette.
@@ -622,8 +625,11 @@ spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *self,
   gtk_widget_set_sensitive (self->login_button, TRUE);
   gtk_label_set_text (self->login_status, status ? status : "");
   gtk_widget_set_visible (self->login_gate, TRUE);
-  if (self->header_bar)
-    gtk_widget_set_sensitive (self->header_bar, FALSE);
+
+  /* Window controls stay live; only navigation into a signed-out UI is barred. */
+  if (self->menu_btn) gtk_widget_set_sensitive (self->menu_btn, FALSE);
+  if (self->nav_back) gtk_widget_set_sensitive (self->nav_back, FALSE);
+  if (self->nav_fwd)  gtk_widget_set_sensitive (self->nav_fwd,  FALSE);
 }
 
 static GtkWidget *
@@ -713,8 +719,9 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     /* Only now is the sign-in real, so this is the one place the gate lifts. */
     if (self->login_gate)
       gtk_widget_set_visible (self->login_gate, FALSE);
-    if (self->header_bar)
-      gtk_widget_set_sensitive (self->header_bar, TRUE);
+    if (self->menu_btn)
+      gtk_widget_set_sensitive (self->menu_btn, TRUE);
+    nav_update_buttons (self);   /* re-enable per actual history position */
   } else if (state == SPOTIFYGTK_SESSION_FAILED) {
     /* A stored token that the server refuses is indistinguishable, from here,
      * from having no token at all — put the gate back so there is a way out
@@ -1151,6 +1158,7 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_header_bar_set_show_title_buttons (GTK_HEADER_BAR (header), TRUE);
 
   GtkWidget *menu_btn = gtk_button_new_from_icon_name ("open-menu-symbolic");
+  self->menu_btn = menu_btn;
   gtk_widget_add_css_class (menu_btn, "flat");
   gtk_widget_set_tooltip_text (menu_btn, "Show or hide the sidebar");
   g_signal_connect (menu_btn, "clicked",
@@ -1176,7 +1184,6 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_add_css_class (title, "title");
   gtk_header_bar_set_title_widget (GTK_HEADER_BAR (header), title);
 
-  self->header_bar = header;
   gtk_window_set_titlebar (GTK_WINDOW (self), header);
 
   /* Horizontal paned: sidebar | (content | queue) */
