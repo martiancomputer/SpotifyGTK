@@ -32,6 +32,11 @@ gdouble spotifygtk_native_engine_control_get_volume (SpotifyNativeEngineControl 
 
 /* Equaliser gains, dB per band (SPOTIFYGTK_EQ_BANDS). Pushed like volume;
  * the filter state lives in the control so it persists across buffers. */
+/* Device rate to open the output at; 0 (default) follows the stream and does
+ * no conversion. Any other rate engages the resampler. */
+void    spotifygtk_native_engine_control_set_output_rate (SpotifyNativeEngineControl *control,
+                                                          gint rate_hz);
+
 void    spotifygtk_native_engine_control_set_eq (SpotifyNativeEngineControl *control,
                                                  const gdouble *gains_db, gboolean enabled);
 

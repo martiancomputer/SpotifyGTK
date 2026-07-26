@@ -17,7 +17,7 @@ struct _SpotifyGtkSettings {
   SpotifyGtkSampleRate sample_rate;
 
   gboolean eq_enabled;
-  gdouble  eq_gains[10];   /* dB per band; matches SPOTIFYGTK_EQ_BANDS */
+  gdouble  eq_gains[SPOTIFYGTK_SETTINGS_EQ_BANDS];  /* dB per band */
 
   gchar *path;
 };
@@ -56,7 +56,7 @@ load (SpotifyGtkSettings *self)
   gsize n = 0;
   g_autofree gdouble *g = g_key_file_get_double_list (kf, SETTINGS_GROUP,
                                                       "eq-gains", &n, NULL);
-  for (gsize i = 0; g && i < n && i < 10; i++)
+  for (gsize i = 0; g && i < n && i < SPOTIFYGTK_SETTINGS_EQ_BANDS; i++)
     self->eq_gains[i] = CLAMP (g[i], -12.0, 12.0);
 
   /* A hand-edited or truncated file must not put the UI into a state its
@@ -78,7 +78,8 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_integer (kf, SETTINGS_GROUP, "media-mode", self->media_mode);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "sample-rate", self->sample_rate);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "eq-enabled", self->eq_enabled);
-  g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains, 10);
+  g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains,
+                              SPOTIFYGTK_SETTINGS_EQ_BANDS);
 
   g_autofree gchar *dir = g_path_get_dirname (self->path);
   g_mkdir_with_parents (dir, 0700);
@@ -154,7 +155,7 @@ void
 spotifygtk_settings_set_eq_band (SpotifyGtkSettings *self, guint band, gdouble gain_db)
 {
   g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
-  if (band >= 10)
+  if (band >= SPOTIFYGTK_SETTINGS_EQ_BANDS)
     return;
   gdouble v = CLAMP (gain_db, -12.0, 12.0);
   if (self->eq_gains[band] == v)
@@ -182,4 +183,15 @@ spotifygtk_settings_reset_eq (SpotifyGtkSettings *self)
   memset (self->eq_gains, 0, sizeof self->eq_gains);
   save (self);
   g_signal_emit (self, signals[CHANGED], 0);
+}
+
+gint
+spotifygtk_settings_sample_rate_hz (SpotifyGtkSampleRate rate)
+{
+  switch (rate) {
+    case SPOTIFYGTK_SAMPLE_RATE_44100: return 44100;
+    case SPOTIFYGTK_SAMPLE_RATE_48000: return 48000;
+    case SPOTIFYGTK_SAMPLE_RATE_96000: return 96000;
+    default:                           return 0;   /* follow the stream */
+  }
 }

@@ -62,6 +62,7 @@
 #include "spotify/cdn.h"
 #include "audio/decoder.h"
 #include "audio/dsp.h"
+#include "audio/resampler.h"
 #include "audio/output.h"
 #include "native_engine.h"
 
@@ -85,6 +86,10 @@ struct _SpotifyNativeEngineControl {
   gdouble    eq_gains[SPOTIFYGTK_EQ_BANDS];
   gboolean   eq_enabled;
   gboolean   eq_dirty;
+
+  /* Desired device rate; 0 means "follow whatever the stream decoded to",
+   * which is passthrough and the highest-fidelity path. */
+  gint       output_rate;
 };
 
 SpotifyNativeEngineControl *
@@ -173,6 +178,26 @@ spotifygtk_native_engine_control_set_eq (SpotifyNativeEngineControl *control,
 
 /* Apply the equaliser to a PCM buffer in the audio worker, after volume.
  * Pushes any pending gain change into the filter, then filters in place. */
+void
+spotifygtk_native_engine_control_set_output_rate (SpotifyNativeEngineControl *control,
+                                                  gint rate_hz)
+{
+  if (!control) return;
+  g_mutex_lock (&control->lock);
+  control->output_rate = rate_hz > 0 ? rate_hz : 0;
+  g_mutex_unlock (&control->lock);
+}
+
+static gint
+engine_control_get_output_rate (SpotifyNativeEngineControl *control)
+{
+  if (!control) return 0;
+  g_mutex_lock (&control->lock);
+  gint r = control->output_rate;
+  g_mutex_unlock (&control->lock);
+  return r;
+}
+
 static void
 engine_control_apply_eq (SpotifyNativeEngineControl *control,
                          gint16 *samples, gsize n_frames, gint channels, gint rate)
@@ -629,6 +654,8 @@ audio_output_thread (gpointer user_data)
 {
   LiveTestState *state = user_data;
   SpotifyAudioOutput *output = NULL;
+  SpotifyResampler   *resampler = NULL;
+  gint                device_rate = 0;   /* rate the device was opened at */
 
   for (;;) {
     StreamQueueItem *item = g_async_queue_pop (state->pcm_queue);
@@ -652,7 +679,19 @@ audio_output_thread (gpointer user_data)
     }
 
     if (!output) {
-      output = spotifygtk_output_open (frame->sample_rate, frame->channels);
+      /* A target rate from the settings engages the resampler; 0 follows the
+       * stream, which stays a straight copy to the device. */
+      gint target = engine_control_get_output_rate (state->control);
+      device_rate = (target > 0) ? target : frame->sample_rate;
+
+      if (device_rate != frame->sample_rate) {
+        resampler = spotifygtk_resampler_new (frame->channels);
+        spotifygtk_resampler_set_rates (resampler, frame->sample_rate, device_rate);
+        g_message ("[live-test] resampling %d Hz -> %d Hz",
+                   frame->sample_rate, device_rate);
+      }
+
+      output = spotifygtk_output_open (device_rate, frame->channels);
       if (!output) {
         g_warning ("[live-test] streaming decoder opened, but no PCM output backend is available");
         mark_output_failed (state);
@@ -678,11 +717,27 @@ audio_output_thread (gpointer user_data)
                                  frame->n_frames, frame->channels);
     engine_control_apply_eq (state->control, frame->samples,
                              frame->n_frames, frame->channels, frame->sample_rate);
-    gsize written = spotifygtk_output_write (output, frame->samples, frame->n_frames);
-    if (written != frame->n_frames) {
+    /* Position is reported in device frames, so it must use the rate the
+     * device is running at, not the stream's. */
+    gsize expected = frame->n_frames;
+    gint16 *pcm = frame->samples;
+    g_autofree gint16 *converted = NULL;
+
+    if (resampler && !spotifygtk_resampler_is_passthrough (resampler)) {
+      expected = spotifygtk_resampler_process (resampler, frame->samples,
+                                               frame->n_frames, &converted);
+      pcm = converted;
+      if (expected == 0) {          /* block too short to yield a frame yet */
+        pcm_frame_free (frame);
+        continue;
+      }
+    }
+
+    gsize written = spotifygtk_output_write (output, pcm, expected);
+    if (written != expected) {
       g_warning ("[live-test] streaming audio output wrote %" G_GSIZE_FORMAT
                  " of %" G_GSIZE_FORMAT " PCM frames",
-                 written, frame->n_frames);
+                 written, expected);
       mark_output_failed (state);
     } else {
       state->output_frames += written;
@@ -691,7 +746,7 @@ audio_output_thread (gpointer user_data)
        * paused or stalled stream holds its position rather than running on. */
       spotifygtk_native_engine_control_report_position (state->control,
                                                         state->output_frames,
-                                                        frame->sample_rate);
+                                                        device_rate);
     }
     pcm_frame_free (frame);
   }
@@ -700,6 +755,7 @@ audio_output_thread (gpointer user_data)
     spotifygtk_output_drain (output);
     spotifygtk_output_close (output);
   }
+  spotifygtk_resampler_free (resampler);
   return NULL;
 }
 

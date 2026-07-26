@@ -1105,6 +1105,11 @@ apply_eq_from_settings (SpotifyGtkNativeWindow *self)
   spotifygtk_player_service_set_eq (self->player,
                                     spotifygtk_settings_get_eq_gains (s),
                                     spotifygtk_settings_get_eq_enabled (s));
+
+  spotifygtk_player_service_set_output_rate (
+    self->player,
+    spotifygtk_settings_sample_rate_hz (
+      spotifygtk_settings_get_sample_rate (spotifygtk_settings_get_default ())));
 }
 
 static void

@@ -50,6 +50,14 @@ if get_option('tests')
   )
   test('dsp-equaliser', test_dsp)
 
+  test_resampler = executable('test-resampler',
+    'test_resampler.c',
+    '../src/audio/resampler.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, m_dep],
+  )
+  test('resampler', test_resampler)
+
   test_login_encoding = executable('test-login-encoding',
     'test_login_encoding.c',
     '../src/spotify/protobuf_min.c',

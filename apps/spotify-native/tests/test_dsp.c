@@ -59,8 +59,15 @@ test_band_changes_amplitude (void)
 
   gdouble up[SPOTIFYGTK_EQ_BANDS]   = { 0 };
   gdouble down[SPOTIFYGTK_EQ_BANDS] = { 0 };
-  up[5]   = 12.0;    /* index 5 == 1000 Hz */
-  down[5] = -12.0;
+
+  /* Look the band up rather than hardcoding an index: the band count and
+   * spacing have changed once already (10 octave bands -> 15 at 2/3 octave),
+   * and a stale literal silently tested the wrong band instead of failing. */
+  gint band = 0;
+  for (int i = 0; i < SPOTIFYGTK_EQ_BANDS; i++)
+    if (spotifygtk_eq_frequencies[i] == (gint) freq) { band = i; break; }
+  up[band]   = 12.0;    /* the 1 kHz band */
+  down[band] = -12.0;
 
   SpotifyEq *eq_up = spotifygtk_eq_new ();
   spotifygtk_eq_set (eq_up, up, TRUE);

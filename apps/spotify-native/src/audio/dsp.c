@@ -6,13 +6,18 @@
 #include <math.h>
 #include <string.h>
 
+/* ISO 2/3-octave centres. Ten octave-spaced bands were coarse enough that a
+ * single slider moved a whole octave at once; this is the next standard step
+ * up and lands the handles where the ear expects them. */
 const gint spotifygtk_eq_frequencies[SPOTIFYGTK_EQ_BANDS] = {
-  31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000
+  25, 40, 63, 100, 160, 250, 400, 630,
+  1000, 1600, 2500, 4000, 6300, 10000, 16000
 };
 
-/* Octave-spaced bands, so Q = sqrt(2) gives roughly non-overlapping,
- * flat-when-summed response. */
-#define EQ_Q       1.4142135623730951
+/* Q must track the spacing: at 2/3-octave the octave-spaced sqrt(2) left the
+ * bands overlapping heavily, so adjacent sliders fought each other and the
+ * summed response bulged. Q = 2^(N/2)/(2^N - 1) with N = 2/3. */
+#define EQ_Q       2.1450849718747373
 #define EQ_MAX_CH  2
 
 typedef struct {
@@ -138,4 +143,35 @@ spotifygtk_eq_process (SpotifyEq *eq, gint16 *samples,
       samples[i * channels + c] = (gint16) CLAMP (out, G_MININT16, G_MAXINT16);
     }
   }
+}
+
+gdouble
+spotifygtk_eq_magnitude_db (const gdouble *gains_db, gdouble freq_hz, gint sample_rate)
+{
+  if (!gains_db || sample_rate <= 0 || freq_hz <= 0.0)
+    return 0.0;
+
+  gdouble w     = 2.0 * G_PI * freq_hz / (gdouble) sample_rate;
+  gdouble cosw  = cos (w);
+  gdouble cos2w = cos (2.0 * w);
+  gdouble total = 0.0;
+
+  /* Cascaded biquads multiply in magnitude, so they add in dB. */
+  for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++) {
+    Biquad bq;
+    compute_biquad (&bq, spotifygtk_eq_frequencies[b], gains_db[b],
+                    (gdouble) sample_rate);
+
+    gdouble num = bq.b0 * bq.b0 + bq.b1 * bq.b1 + bq.b2 * bq.b2
+                + 2.0 * (bq.b0 * bq.b1 + bq.b1 * bq.b2) * cosw
+                + 2.0 * bq.b0 * bq.b2 * cos2w;
+    gdouble den = 1.0 + bq.a1 * bq.a1 + bq.a2 * bq.a2
+                + 2.0 * (bq.a1 + bq.a1 * bq.a2) * cosw
+                + 2.0 * bq.a2 * cos2w;
+
+    if (den > 1e-20 && num > 1e-20)
+      total += 10.0 * log10 (num / den);
+  }
+
+  return total;
 }

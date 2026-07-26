@@ -17,7 +17,7 @@
 
 G_BEGIN_DECLS
 
-#define SPOTIFYGTK_EQ_BANDS 10
+#define SPOTIFYGTK_EQ_BANDS 15
 
 /* ISO-ish octave centres, Hz. Exposed so the UI can label its sliders with
  * the same frequencies the filters actually use. */
@@ -43,5 +43,14 @@ void spotifygtk_eq_set (SpotifyEq *eq, const gdouble *gains_db, gboolean enabled
  */
 void spotifygtk_eq_process (SpotifyEq *eq, gint16 *samples,
                             gsize n_frames, gint channels, gint sample_rate);
+
+/*
+ * Combined magnitude response of the whole band cascade at `freq_hz`, in dB.
+ * This is the same coefficient maths the audio path uses, so the curve the UI
+ * draws is the filter that actually runs -- including how neighbouring bands
+ * overlap and sum -- rather than a pretty interpolation through the handles.
+ */
+gdouble spotifygtk_eq_magnitude_db (const gdouble *gains_db,
+                                    gdouble freq_hz, gint sample_rate);
 
 G_END_DECLS

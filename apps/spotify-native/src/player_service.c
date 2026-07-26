@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include "native_engine.h"
+#include "audio/dsp.h"
 
 struct _SpotifyNativePlayerService {
   GObject parent_instance;
@@ -12,7 +13,8 @@ struct _SpotifyNativePlayerService {
   gchar *track_uri;
   gchar *pending_uri;   /* track requested while another was still playing */
   gint volume_percent;
-  gdouble  eq_gains[10];
+  gdouble  eq_gains[SPOTIFYGTK_EQ_BANDS];
+  gint     output_rate;   /* 0 = follow the stream */
   gboolean eq_enabled;
   guint position_timer_id;   /* polls the engine control for playback position */
   SpotifyNativePlayerState state;
@@ -197,6 +199,7 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
                                               self->volume_percent / 100.0);
   spotifygtk_native_engine_control_set_eq (self->control,
                                            self->eq_gains, self->eq_enabled);
+  spotifygtk_native_engine_control_set_output_rate (self->control, self->output_rate);
   if (!self->main_context)
     self->main_context = g_main_context_ref_thread_default ();
   if (!self->main_context)
@@ -357,4 +360,17 @@ SpotifyNativePlayerService *
 spotifygtk_player_service_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_PLAYER_SERVICE, NULL);
+}
+
+void
+spotifygtk_player_service_set_output_rate (SpotifyNativePlayerService *self, gint hz)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+
+  self->output_rate = hz > 0 ? hz : 0;
+
+  /* Takes effect on the next track: the device is already open at the old rate
+   * and reopening it mid-stream would gap the audio. */
+  if (self->control)
+    spotifygtk_native_engine_control_set_output_rate (self->control, self->output_rate);
 }
