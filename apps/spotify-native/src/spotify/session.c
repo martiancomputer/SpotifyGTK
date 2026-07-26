@@ -342,7 +342,16 @@ on_ap_connected (GObject *source, GAsyncResult *result, gpointer user_data)
       g_warning ("session: AP connect failed (%s); retry %u/%u in %ums",
                  err ? err->message : "unknown error",
                  self->connect_attempts, AP_CONNECT_MAX_ATTEMPTS, delay_ms);
-      g_timeout_add (delay_ms, retry_ap_connect, self);
+
+      /* Attach to the session's own context, not the global default one that
+       * g_timeout_add() uses — otherwise the retry runs on the GTK main thread
+       * and every request chained off it (client-token, login5, spclient) binds
+       * to the main context, which is exactly the isolation this class exists
+       * to guarantee. See the matching note in main.c. */
+      GSource *retry = g_timeout_source_new (delay_ms);
+      g_source_set_callback (retry, retry_ap_connect, self, NULL);
+      g_source_attach (retry, self->context);
+      g_source_unref (retry);
       return;
     }
 

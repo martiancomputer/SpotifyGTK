@@ -18,10 +18,24 @@ struct _SpotifyGtkSettingsPage {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkSettingsPage, spotifygtk_settings_page, GTK_TYPE_BOX)
 
+enum { LOG_OUT, N_SIGNALS };
+static guint signals[N_SIGNALS];
+
 static void
 spotifygtk_settings_page_class_init (SpotifyGtkSettingsPageClass *klass)
 {
-  (void) klass;
+  /* The page does not own the session or the credentials, so it asks rather
+   * than acts -- the window owns both and does the actual sign-out. */
+  signals[LOG_OUT] = g_signal_new ("log-out", G_TYPE_FROM_CLASS (klass),
+                                   G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+                                   G_TYPE_NONE, 0);
+}
+
+static void
+on_log_out_clicked (GtkButton *button, gpointer user_data)
+{
+  g_signal_emit (SPOTIFYGTK_SETTINGS_PAGE (user_data), signals[LOG_OUT], 0);
+  (void) button;
 }
 
 /* === Building blocks === */
@@ -333,6 +347,20 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              build_dropdown (renderers, 0, FALSE)));
 
   gtk_box_append (GTK_BOX (content), perf_group);
+
+  /* --- Account --- */
+  GtkWidget *account_group = build_group ("Account");
+
+  GtkWidget *logout = gtk_button_new_with_label ("Log out");
+  gtk_widget_add_css_class (logout, "pill-button");
+  g_signal_connect (logout, "clicked", G_CALLBACK (on_log_out_clicked), self);
+  gtk_box_append (GTK_BOX (account_group),
+                  build_row ("Signed in",
+                             "Forgets the stored credentials and returns to the "
+                             "sign-in screen. Playback stops.",
+                             logout));
+
+  gtk_box_append (GTK_BOX (content), account_group);
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
   gtk_box_append (GTK_BOX (self), scroller);

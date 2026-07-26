@@ -492,6 +492,7 @@ typedef struct {
   gboolean              queue_initialized;
   GSource            *timeout_source;
   GSource            *cancel_source;   /* quits the loop when the UI cancellable trips */
+  GMainContext       *context;         /* borrowed: the engine's private context */
   SpotifyNativeEngineControl *control;
   SpotifyNativeEngineProgressFunc progress;
   gpointer            progress_data;
@@ -1605,7 +1606,22 @@ on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
       g_warning ("[live-test] handshake failed (%s); retry %u/%u in %ums",
                  err ? err->message : "unknown error",
                  state->connect_attempts, AP_CONNECT_MAX_ATTEMPTS, delay_ms);
-      g_timeout_add (delay_ms, retry_ap_connect, state);
+
+      /* NOT g_timeout_add(): that attaches to the *global default* context, so
+       * the retry fires on the GTK main thread. Everything chained off the
+       * reconnect — client-token, login5, spclient, and every CDN range fetch —
+       * then binds to the main context too, because libsoup/GTask capture the
+       * thread-default at call time. Two real consequences, both seen in core
+       * dumps: on_range_response ran on the UI thread, where stream_queue_frame
+       * blocks in g_cond_wait_until and freezes the window; and the engine state
+       * machine ran on two threads at once, which freed a socket client out from
+       * under the other thread (SIGSEGV in g_object_ref). Attach to the engine's
+       * own context so the retry stays on the worker, like every other source
+       * here. */
+      GSource *retry = g_timeout_source_new (delay_ms);
+      g_source_set_callback (retry, retry_ap_connect, state, NULL);
+      g_source_attach (retry, state->context);
+      g_source_unref (retry);
       return;
     }
 
@@ -1717,6 +1733,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     .pcm_queue = NULL, .output_thread = NULL, .queued_frames = 0,
     .output_failed = FALSE, .queue_initialized = FALSE,
     .timeout_source = NULL,
+    .context = context,
     .control = control,
     .progress = progress, .progress_data = progress_data,
     .cancellable = cancellable,

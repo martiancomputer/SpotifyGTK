@@ -28,6 +28,7 @@
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
 #include <string.h>
+#include <errno.h>
 
 #define SPOTIFY_AUTH_URL   "https://accounts.spotify.com/authorize"
 #define SPOTIFY_TOKEN_URL  "https://accounts.spotify.com/api/token"
@@ -98,6 +99,23 @@ static gchar *
 token_file_path (void)
 {
   return g_build_filename (g_get_user_config_dir (), "spotify-native", "token", NULL);
+}
+
+void
+native_auth_log_out (NativeAuth *self)
+{
+  g_return_if_fail (NATIVEAUTH_IS_AUTH (self));
+
+  /* Both halves matter: clearing only the in-memory copy would leave the next
+   * run signed in from disk, and deleting only the file would leave this
+   * process still holding a usable token. */
+  g_clear_pointer (&self->access_token, g_free);
+  g_clear_pointer (&self->refresh_token, g_free);
+  self->expires_at = 0;
+
+  g_autofree gchar *path = token_file_path ();
+  if (g_unlink (path) != 0 && errno != ENOENT)
+    g_warning ("native-auth: could not remove %s: %s", path, g_strerror (errno));
 }
 
 static void

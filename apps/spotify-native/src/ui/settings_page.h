@@ -18,4 +18,6 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkSettingsPage, spotifygtk_settings_page,
 
 SpotifyGtkSettingsPage *spotifygtk_settings_page_new (void);
 
+/* Signal: "log-out" -- the user asked to sign out; the window performs it. */
+
 G_END_DECLS

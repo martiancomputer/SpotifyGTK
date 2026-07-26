@@ -21,6 +21,9 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window,
 
 SpotifyGtkNativeWindow *spotifygtk_native_window_new (GtkApplication *app);
 
+/* Forget the signed-in account and raise the login gate again. */
+void spotifygtk_native_window_log_out (SpotifyGtkNativeWindow *self);
+
 /* Navigation */
 void spotifygtk_native_window_navigate_to_settings (SpotifyGtkNativeWindow *self);
 void spotifygtk_native_window_navigate_to (SpotifyGtkNativeWindow *self,

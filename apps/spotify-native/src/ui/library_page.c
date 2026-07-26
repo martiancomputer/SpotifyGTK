@@ -135,36 +135,43 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
 
-  GtkWidget *scroller = gtk_scrolled_window_new ();
-  gtk_widget_set_vexpand (scroller, TRUE);
-  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
-                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-  gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
-
-  GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
-  gtk_widget_set_margin_start (content, 35);
-  gtk_widget_set_margin_end (content, 35);
-  gtk_widget_set_margin_top (content, 24);
-  gtk_widget_set_margin_bottom (content, 24);
+  /* No outer scroller: the albums GridView brings its own, and nesting it in a
+   * second vertical scroller would hand it unbounded height, so it would
+   * realise every album at once instead of only the visible ones. The headings
+   * stay fixed and the grid is the one scrolling region. */
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_set_margin_start (header, 35);
+  gtk_widget_set_margin_end (header, 35);
+  gtk_widget_set_margin_top (header, 24);
 
   GtkWidget *title = gtk_label_new ("Library");
   gtk_widget_add_css_class (title, "title-text");
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
-  gtk_box_append (GTK_BOX (content), title);
+  gtk_box_append (GTK_BOX (header), title);
 
   /* --- Albums (real, from the collection) --- */
-  gtk_box_append (GTK_BOX (content), heading ("Albums"));
+  gtk_box_append (GTK_BOX (header), heading ("Albums"));
 
   self->albums_status = gtk_label_new ("Not signed in yet.");
   gtk_widget_add_css_class (self->albums_status, "dim-text");
   gtk_label_set_xalign (GTK_LABEL (self->albums_status), 0.0);
-  gtk_box_append (GTK_BOX (content), self->albums_status);
+  gtk_box_append (GTK_BOX (header), self->albums_status);
+
+  gtk_box_append (GTK_BOX (self), header);
 
   self->albums = spotifygtk_album_grid_new_grid ();
-  gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->albums));
+  gtk_widget_set_margin_start (GTK_WIDGET (self->albums), 35);
+  gtk_widget_set_margin_end (GTK_WIDGET (self->albums), 35);
+  gtk_widget_set_margin_top (GTK_WIDGET (self->albums), 12);
+  gtk_widget_set_vexpand (GTK_WIDGET (self->albums), TRUE);
+  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->albums));
 
   /* --- Playlists (honest gap) --- */
-  gtk_box_append (GTK_BOX (content), heading ("Playlists"));
+  GtkWidget *footer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_margin_start (footer, 35);
+  gtk_widget_set_margin_end (footer, 35);
+  gtk_widget_set_margin_bottom (footer, 24);
+  gtk_box_append (GTK_BOX (footer), heading ("Playlists"));
 
   GtkWidget *note = gtk_label_new (
     "Your playlists need spclient's rootlist endpoint, which returns "
@@ -176,10 +183,9 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_label_set_xalign (GTK_LABEL (note), 0.0);
   gtk_label_set_wrap (GTK_LABEL (note), TRUE);
   gtk_label_set_max_width_chars (GTK_LABEL (note), 74);
-  gtk_box_append (GTK_BOX (content), note);
+  gtk_box_append (GTK_BOX (footer), note);
 
-  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
-  gtk_box_append (GTK_BOX (self), scroller);
+  gtk_box_append (GTK_BOX (self), footer);
 }
 
 SpotifyGtkLibraryPage *

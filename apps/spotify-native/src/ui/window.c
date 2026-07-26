@@ -28,6 +28,7 @@
 #include "liked_songs_page.h"
 #include "library_page.h"
 #include "settings_page.h"
+#include "spotify/native_auth.h"
 #include "settings.h"
 #include "context_page.h"
 #include "track_list.h"
@@ -47,6 +48,14 @@ struct _SpotifyGtkNativeWindow {
 
   /* Sidebar */
   SpotifyGtkSidebar *sidebar;
+
+  /* Login gate: an opaque layer over the whole window that stays up until the
+   * session actually reaches READY. */
+  GtkWidget  *login_gate;
+  GtkWidget  *header_bar;      /* insensitive while the gate is up */
+  GtkWidget  *login_button;
+  GtkLabel   *login_status;
+  NativeAuth *auth;
 
   /* Header navigation, browser-style. `nav_history` holds NavEntry* in visit
    * order; `nav_pos` indexes the current one, so Back/Forward just step it. */
@@ -93,6 +102,8 @@ struct _SpotifyGtkNativeWindow {
 G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* === Forward declarations === */
+static void spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *self,
+                                                      const gchar *status);
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
@@ -557,6 +568,127 @@ on_player_position_changed (SpotifyNativePlayerService *player,
   (void) player;
 }
 
+/* === Login gate ===
+ *
+ * An opaque layer over the entire window, shown whenever there is no usable
+ * session, and taken down only once the session actually reports READY —
+ * "a token exists" is not the same as "the token works", and signing in is the
+ * one thing that must not be half-shown. It is an overlay rather than a
+ * separate page so nothing behind it can be clicked or scrolled while it is up,
+ * and the header bar is made insensitive alongside it, since a GtkWindow's
+ * titlebar sits outside the window child and an overlay cannot cover it.
+ *
+ * Styled from the same @-colours as everything else — @bg_content ground,
+ * @accent for the button — rather than a login-specific palette.
+ */
+static void
+on_auth_completed (NativeAuth *auth, gboolean success, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+
+  gtk_widget_set_sensitive (self->login_button, TRUE);
+
+  if (!success) {
+    gtk_label_set_text (self->login_status,
+                        "Sign-in was not completed. Try again.");
+    return;
+  }
+
+  /* The token is stored; the session picks it up on start. The gate stays up
+   * until state-changed reports READY. */
+  gtk_label_set_text (self->login_status, "Signing in…");
+  spotifygtk_native_session_start (self->session);
+  (void) auth;
+}
+
+static void
+on_login_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+
+  gtk_widget_set_sensitive (GTK_WIDGET (button), FALSE);
+  gtk_label_set_text (self->login_status,
+                      "Waiting for you to approve access in your browser…");
+  native_auth_begin (self->auth);
+}
+
+static void
+spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *self,
+                                          const gchar *status)
+{
+  if (!self->login_gate)
+    return;
+
+  gtk_widget_set_sensitive (self->login_button, TRUE);
+  gtk_label_set_text (self->login_status, status ? status : "");
+  gtk_widget_set_visible (self->login_gate, TRUE);
+  if (self->header_bar)
+    gtk_widget_set_sensitive (self->header_bar, FALSE);
+}
+
+static GtkWidget *
+build_login_gate (SpotifyGtkNativeWindow *self)
+{
+  /* Fills the overlay and paints the ground opaque, so the UI behind it is
+   * neither visible nor reachable. */
+  GtkWidget *gate = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class (gate, "login-gate");
+  gtk_widget_set_hexpand (gate, TRUE);
+  gtk_widget_set_vexpand (gate, TRUE);
+  gtk_widget_set_halign (gate, GTK_ALIGN_FILL);
+  gtk_widget_set_valign (gate, GTK_ALIGN_FILL);
+
+  GtkWidget *centre = gtk_box_new (GTK_ORIENTATION_VERTICAL, 16);
+  gtk_widget_set_halign (centre, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (centre, GTK_ALIGN_CENTER);
+  gtk_widget_set_vexpand (centre, TRUE);
+
+  GtkWidget *title = gtk_label_new ("SpotifyGTK");
+  gtk_widget_add_css_class (title, "title-text");
+  gtk_box_append (GTK_BOX (centre), title);
+
+  GtkWidget *blurb = gtk_label_new (
+    "Sign in with your Spotify account to load your library and play music.");
+  gtk_widget_add_css_class (blurb, "dim-text");
+  gtk_label_set_justify (GTK_LABEL (blurb), GTK_JUSTIFY_CENTER);
+  gtk_label_set_wrap (GTK_LABEL (blurb), TRUE);
+  gtk_label_set_max_width_chars (GTK_LABEL (blurb), 44);
+  gtk_box_append (GTK_BOX (centre), blurb);
+
+  self->login_button = gtk_button_new_with_label ("Log into SpotifyGTK");
+  gtk_widget_add_css_class (self->login_button, "login-button");
+  gtk_widget_set_halign (self->login_button, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_top (self->login_button, 8);
+  g_signal_connect (self->login_button, "clicked",
+                    G_CALLBACK (on_login_clicked), self);
+  gtk_box_append (GTK_BOX (centre), self->login_button);
+
+  self->login_status = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->login_status), "dim-text");
+  gtk_label_set_justify (self->login_status, GTK_JUSTIFY_CENTER);
+  gtk_label_set_wrap (self->login_status, TRUE);
+  gtk_label_set_max_width_chars (self->login_status, 44);
+  gtk_box_append (GTK_BOX (centre), GTK_WIDGET (self->login_status));
+
+  gtk_box_append (GTK_BOX (gate), centre);
+  return gate;
+}
+
+void
+spotifygtk_native_window_log_out (SpotifyGtkNativeWindow *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_WINDOW (self));
+
+  /* Stop playback first: the engine holds an AP session minted from the
+   * credentials we are about to discard. */
+  if (self->player)
+    spotifygtk_player_service_stop (self->player);
+
+  native_auth_log_out (self->auth);
+
+  spotifygtk_native_window_show_login_gate (self, "Signed out.");
+}
+
 /* === Session === */
 static void
 on_session_state_changed (SpotifyNativeSession *session, gint state,
@@ -577,6 +709,18 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     const gchar *visible = gtk_stack_get_visible_child_name (self->page_stack);
     if (visible)
       navigate_raw (self, visible);   /* refresh in place; not a history move */
+
+    /* Only now is the sign-in real, so this is the one place the gate lifts. */
+    if (self->login_gate)
+      gtk_widget_set_visible (self->login_gate, FALSE);
+    if (self->header_bar)
+      gtk_widget_set_sensitive (self->header_bar, TRUE);
+  } else if (state == SPOTIFYGTK_SESSION_FAILED) {
+    /* A stored token that the server refuses is indistinguishable, from here,
+     * from having no token at all — put the gate back so there is a way out
+     * other than restarting. */
+    spotifygtk_native_window_show_login_gate (
+      self, message && *message ? message : "Could not sign in.");
   }
 }
 
@@ -688,6 +832,15 @@ static const gchar *theme_body =
   ".sidebar { background-color: @bg_panel;"
   "  border-right: 1px solid @border; }"
   ".main-content { background-color: @bg_content; }"
+  /* Login gate: opaque so nothing shows through, and drawn from the same
+   * palette as the rest of the UI rather than a sign-in-specific one. */
+  ".login-gate { background-color: @bg_content; }"
+  ".login-button { background-color: @accent; color: @on_accent;"
+  "  font-size: 15px; font-weight: 700; border-radius: 999px;"
+  "  padding: 12px 34px; min-height: 0;"
+  "  transition: background-color 140ms ease; }"
+  ".login-button:hover { background-color: @ctrl_fill_hover; color: @ctrl_on_fill; }"
+  ".login-button:disabled { background-color: @bg_selected; color: @fg_dim; }"
   /* Frosted header on the search page. The rows scroll underneath it (see the
    * GtkOverlay in search_page.c); this gradient is what sells that -- solid at
    * the top where the title and entry sit, then fading to fully transparent at
@@ -1023,6 +1176,7 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_add_css_class (title, "title");
   gtk_header_bar_set_title_widget (GTK_HEADER_BAR (header), title);
 
+  self->header_bar = header;
   gtk_window_set_titlebar (GTK_WINDOW (self), header);
 
   /* Horizontal paned: sidebar | (content | queue) */
@@ -1059,6 +1213,8 @@ spotifygtk_native_window_constructed (GObject *object)
   self->liked_page = spotifygtk_liked_songs_page_new ();
   self->library_page = spotifygtk_library_page_new ();
   self->settings_page = spotifygtk_settings_page_new ();
+  g_signal_connect_swapped (self->settings_page, "log-out",
+                            G_CALLBACK (spotifygtk_native_window_log_out), self);
   self->context_page = spotifygtk_context_page_new ();
 
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->home_page), "home");
@@ -1135,13 +1291,31 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_queue_clicked), self);
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->playback_bar));
 
-  gtk_window_set_child (GTK_WINDOW (self), GTK_WIDGET (self->root_box));
+  /* The whole UI sits under an overlay so the login gate can cover it. */
+  GtkWidget *shell = gtk_overlay_new ();
+  gtk_overlay_set_child (GTK_OVERLAY (shell), GTK_WIDGET (self->root_box));
+
+  self->login_gate = build_login_gate (self);
+  gtk_overlay_add_overlay (GTK_OVERLAY (shell), self->login_gate);
+
+  gtk_window_set_child (GTK_WINDOW (self), shell);
 
   self->queue_expanded = TRUE;
 
-  /* Sign in. Everything protocol-related happens on the session's worker
+  /* Sign in only if there is something to sign in with. Starting the session
+   * without a token would send it down the AP path just to fail, so the gate
+   * goes up first and the session starts when the user comes back from the
+   * browser. Everything protocol-related happens on the session's worker
    * thread; "state-changed" arrives back here on the GTK thread. */
-  spotifygtk_native_session_start (self->session);
+  self->auth = native_auth_new ();
+  g_signal_connect (self->auth, "completed", G_CALLBACK (on_auth_completed), self);
+
+  if (native_auth_has_valid_token (self->auth)) {
+    gtk_widget_set_visible (self->login_gate, FALSE);
+    spotifygtk_native_session_start (self->session);
+  } else {
+    spotifygtk_native_window_show_login_gate (self, NULL);
+  }
 
   /* SPOTIFY_START_PAGE opens straight onto a given page, so a specific one
    * can be exercised without clicking through the UI. Unknown names fall
@@ -1160,6 +1334,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->current_track_uri, g_free);
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   g_clear_pointer (&self->nav_history, g_ptr_array_unref);
+  g_clear_object (&self->auth);
   if (self->user_queue) {
     g_queue_free_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
     self->user_queue = NULL;
