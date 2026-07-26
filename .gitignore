@@ -31,3 +31,7 @@ config.local.h
  
 # OS
 .DS_Store
+
+# perf profiling output (local only)
+perf.data
+perf.data.old
