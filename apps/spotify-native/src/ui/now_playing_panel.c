@@ -6,8 +6,10 @@
 
 #include <math.h>
 
-/* Fixed cover edge; the panel is ~300px wide, so this leaves a margin. */
-#define ART_SIZE 260
+/* Decode target for the panel cover. The displayed size now follows the panel
+ * width, so this is just "big enough for the widest the panel can get" (the
+ * paned clamps it to 420) rather than the drawn size. */
+#define ART_DECODE_PX 420
 #include "cover_loader.h"
 
 struct _SpotifyGtkNowPlayingPanel {
@@ -211,18 +213,25 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_overlay_set_child (GTK_OVERLAY (art_overlay), GTK_WIDGET (self->album_art));
   gtk_overlay_add_overlay (GTK_OVERLAY (art_overlay), GTK_WIDGET (self->album_pic));
 
-  /* A fixed square, centred, that does NOT expand. GtkPicture reports its
-   * paintable's intrinsic size as its natural size, so without a hard
-   * size_request a large cover made the art (and with it the whole right
-   * pane) grow, and covers of different sizes reflowed the panel on every
-   * track change. Locking the box means the art is always ART_SIZE regardless
-   * of the cover, and it can never drive the panel width. */
-  gtk_widget_set_size_request (art_overlay, ART_SIZE, ART_SIZE);
-  gtk_widget_set_halign (art_overlay, GTK_ALIGN_CENTER);
-  gtk_widget_set_hexpand (art_overlay, FALSE);
-  gtk_widget_set_valign (art_overlay, GTK_ALIGN_START);
-  gtk_widget_set_margin_top (art_overlay, 8);
-  gtk_box_append (GTK_BOX (self->art_section), art_overlay);
+  /* The cover follows the panel width again, in a GtkAspectFrame so it stays
+   * square while doing it (ratio 1.0, obey_child FALSE: always square, whatever
+   * the child would rather be, so a non-square cover cannot stretch the box).
+   *
+   * This was previously pinned to a fixed square because covers appeared to
+   * grow the whole right pane. That turned out to be the track title -- an
+   * unconstrained GtkLabel demanding its full text width as the panel's
+   * minimum -- not the artwork; the title is a clipping marquee now, so the
+   * fixed square is no longer needed. The picture itself cannot force growth
+   * either: can_shrink is TRUE, so its minimum width is zero and only its
+   * natural size scales with the cover, which the paned clamp already bounds. */
+  GtkWidget *art_frame = gtk_aspect_frame_new (0.5f, 0.5f, 1.0f, FALSE);
+  gtk_aspect_frame_set_child (GTK_ASPECT_FRAME (art_frame), art_overlay);
+  gtk_widget_set_hexpand (art_frame, TRUE);
+  gtk_widget_set_valign (art_frame, GTK_ALIGN_START);
+  gtk_widget_set_margin_start (art_frame, 20);
+  gtk_widget_set_margin_end (art_frame, 20);
+  gtk_widget_set_margin_top (art_frame, 8);
+  gtk_box_append (GTK_BOX (self->art_section), art_frame);
 
   /* Track info */
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
@@ -243,6 +252,7 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->artist_label));
 
   gtk_box_append (GTK_BOX (self->art_section), info);
+  gtk_widget_set_margin_bottom (self->art_section, 6);
   gtk_box_append (GTK_BOX (self), self->art_section);
 
   /* Queue list, under a "Next Up" heading that hides itself when empty so an
@@ -252,7 +262,7 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_label_set_xalign (self->queue_heading, 0.0);
   gtk_widget_set_margin_start (GTK_WIDGET (self->queue_heading), 20);
   gtk_widget_set_margin_end (GTK_WIDGET (self->queue_heading), 16);
-  gtk_widget_set_margin_top (GTK_WIDGET (self->queue_heading), 16);
+  gtk_widget_set_margin_top (GTK_WIDGET (self->queue_heading), 30);
   gtk_widget_set_visible (GTK_WIDGET (self->queue_heading), FALSE);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->queue_heading));
 
@@ -426,5 +436,5 @@ spotifygtk_now_playing_panel_set_cover (SpotifyGtkNowPlayingPanel *self, const g
   /* No cancellable: there is exactly one of these widgets, and a late cover
    * can only ever belong to the track it was asked for or be superseded by
    * the next call, which overwrites it anyway. */
-  spotifygtk_cover_load (cover_id, 420, NULL, on_cover_loaded_spotifygtk_now_playing_panel, self);
+  spotifygtk_cover_load (cover_id, ART_DECODE_PX, NULL, on_cover_loaded_spotifygtk_now_playing_panel, self);
 }
