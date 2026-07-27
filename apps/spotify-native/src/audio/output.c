@@ -11,11 +11,17 @@
 #include "output.h"
 
 static const AudioBackendKind PRIORITY_ORDER[] = {
+#ifdef G_OS_WIN32
+  /* The POSIX backends are not built on Windows, so WASAPI is the whole list
+   * rather than a fallback appended to it. */
+  AUDIO_BACKEND_WASAPI,
+#else
 #if HAVE_PIPEWIRE
   AUDIO_BACKEND_PIPEWIRE,
 #endif
   AUDIO_BACKEND_PULSE,
   AUDIO_BACKEND_ALSA,
+#endif
 };
 
 const gchar *
@@ -40,11 +46,15 @@ spotifygtk_output_open (gint sample_rate, gint channels)
     gboolean ok = FALSE;
 
     switch (out->kind) {
+#ifdef G_OS_WIN32
+      case AUDIO_BACKEND_WASAPI:   ok = output_wasapi_try_open   (out, sample_rate, channels); break;
+#else
 #if HAVE_PIPEWIRE
       case AUDIO_BACKEND_PIPEWIRE: ok = output_pipewire_try_open (out, sample_rate, channels); break;
 #endif
       case AUDIO_BACKEND_PULSE:    ok = output_pulse_try_open    (out, sample_rate, channels); break;
       case AUDIO_BACKEND_ALSA:     ok = output_alsa_try_open     (out, sample_rate, channels); break;
+#endif
       default: break;
     }
 
@@ -54,7 +64,13 @@ spotifygtk_output_open (gint sample_rate, gint channels)
     }
   }
 
-  g_warning ("Audio output: no backend available (tried PipeWire/Pulse/ALSA as compiled in)");
+  g_warning ("Audio output: no backend available (tried %s)",
+#ifdef G_OS_WIN32
+             "WASAPI"
+#else
+             "PipeWire/Pulse/ALSA as compiled in"
+#endif
+            );
   g_free (out);
   return NULL;
 }

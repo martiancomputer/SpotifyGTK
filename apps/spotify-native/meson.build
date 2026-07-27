@@ -51,6 +51,13 @@ if enable_pipewire
   endif
 endif
 
+is_windows = host_machine.system() == 'windows'
+
+# WASAPI is COM, so it needs ole32; nothing else Windows-specific is linked.
+if is_windows
+  all_deps += cc.find_library('ole32', required: true)
+endif
+
 pulse_dep        = dependency('libpulse',        required: false)
 pulse_simple_dep = dependency('libpulse-simple', required: false)
 alsa_dep         = dependency('alsa',            required: false)
@@ -89,6 +96,7 @@ conf.set10('HAVE_OPENSSL',  openssl_dep.found())
 conf.set10('HAVE_PIPEWIRE', have_pipewire)
 conf.set10('HAVE_PULSE',    have_pulse)
 conf.set10('HAVE_ALSA',     alsa_dep.found())
+conf.set10('HAVE_WASAPI',   is_windows)
 configure_file(output: 'config.h', configuration: conf)
 config_inc = include_directories('.')
 

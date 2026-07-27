@@ -29,7 +29,11 @@
 
 #include <libsoup/soup.h>
 #include <string.h>
+#ifdef G_OS_WIN32
+#include <windows.h>
+#else
 #include <sys/utsname.h>
+#endif
 
 #define SPOTIFY_SEMANTIC_VERSION "1.2.52.442"
 
@@ -167,14 +171,70 @@ spotifygtk_client_token_request (SpotifyClientToken *self, const gchar *client_i
 {
   g_return_if_fail (SPOTIFYGTK_IS_CLIENT_TOKEN (self));
 
-  /* NativeDesktopLinuxData (oneof field 5 inside PlatformSpecificData):
-   *   system_name (field 1)    — uname -s, always "Linux"
-   *   system_release (field 2) — uname -r, kernel release string
-   *   system_version (field 3) — uname -v, kernel version string
-   *   hardware (field 4)       — uname -m, machine hardware name
+  /* The platform block is a oneof, and the variants are not merely different
+   * field numbers -- Linux sends four *strings* from uname, Windows sends
+   * *integers*. Sending the Linux shape from Windows is not a cosmetic lie the
+   * server tolerates; getting this message wrong is what returns HTTP 400 with
+   * a zero-length body (see the file header). Both layouts are transcribed from
+   * connectivity.proto and librespot's spclient.rs. */
+  g_autoptr(GByteArray) platform_data = g_byte_array_new ();
+
+#ifdef G_OS_WIN32
+  /* NativeDesktopWindowsData (oneof field 4):
+   *   os_version (1), os_build (3), platform_id (4),
+   *   unknown_value_6 (6), image_file_machine (7), pe_machine (8),
+   *   unknown_value_10 (10)
    *
-   * Field numbers verified against go-librespot's connectivity.proto
-   * and librespot's spclient.rs (mut_desktop_linux() branch). */
+   * platform_id 2 is System.PlatformID.Win32NT. The machine constants are
+   * IMAGE_FILE_MACHINE_* / PE Machine values; 34404 (0x8664) is x86_64.
+   * unknown_value_6 and unknown_value_10 are named that way in the schema
+   * itself -- librespot sends 9 and true, and so do we, because nothing here
+   * knows what they mean and inventing values is how the 400 happens. */
+  OSVERSIONINFOEXW osv = { 0 };
+  osv.dwOSVersionInfoSize = sizeof (osv);
+
+  /* GetVersionEx() lies about the version for apps without a compatibility
+   * manifest (it caps at 6.2 on Windows 8+). RtlGetVersion does not, and is
+   * the documented way out of that; fall back only if it cannot be resolved. */
+  HMODULE ntdll = GetModuleHandleW (L"ntdll.dll");
+  LONG (WINAPI *rtl_get_version) (OSVERSIONINFOEXW *) = NULL;
+  if (ntdll)
+    rtl_get_version = (LONG (WINAPI *) (OSVERSIONINFOEXW *))
+                        (void *) GetProcAddress (ntdll, "RtlGetVersion");
+
+  gint32 os_version = 10, os_build = 0;
+  if (rtl_get_version && rtl_get_version (&osv) == 0) {
+    os_version = (gint32) osv.dwMajorVersion;
+    os_build   = (gint32) osv.dwBuildNumber;
+  } else {
+    g_warning ("clienttoken: RtlGetVersion unavailable; using static Windows fields");
+  }
+
+  gint32 machine;
+#if defined(_M_ARM64) || defined(__aarch64__)
+  machine = 43620;            /* ARM64 */
+#elif defined(_M_ARM) || defined(__arm__)
+  machine = 448;              /* ARM */
+#elif defined(_M_X64) || defined(__x86_64__)
+  machine = 34404;            /* x86_64 */
+#else
+  machine = 332;              /* x86 */
+#endif
+
+  g_autoptr(GByteArray) win_data = g_byte_array_new ();
+  pb_write_varint_field (win_data, 1,  (guint64) os_version);
+  pb_write_varint_field (win_data, 3,  (guint64) os_build);
+  pb_write_varint_field (win_data, 4,  2);
+  pb_write_varint_field (win_data, 6,  9);
+  pb_write_varint_field (win_data, 7,  (guint64) machine);
+  pb_write_varint_field (win_data, 8,  (guint64) machine);
+  pb_write_varint_field (win_data, 10, 1);
+
+  pb_write_message_field (platform_data, 4, win_data->data, win_data->len);
+#else
+  /* NativeDesktopLinuxData (oneof field 5):
+   *   system_name (1) = uname -s, system_release (2) = -r,
+   *   system_version (3) = -v, hardware (4) = -m */
   struct utsname uts;
   if (uname (&uts) != 0) {
     /* Non-fatal: fall back to static strings librespot would also use. */
@@ -191,9 +251,8 @@ spotifygtk_client_token_request (SpotifyClientToken *self, const gchar *client_i
   pb_write_bytes_field (linux_data, 3, (const guint8 *) uts.version,  strlen (uts.version));
   pb_write_bytes_field (linux_data, 4, (const guint8 *) uts.machine,  strlen (uts.machine));
 
-  /* PlatformSpecificData: oneof — desktop_linux is field 5. */
-  g_autoptr(GByteArray) platform_data = g_byte_array_new ();
   pb_write_message_field (platform_data, 5, linux_data->data, linux_data->len);
+#endif
 
   /* ConnectivitySdkData:
    *   platform_specific_data (field 1, embedded PlatformSpecificData)
