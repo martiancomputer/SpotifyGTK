@@ -60,19 +60,48 @@ into `build/dist/`. Turning that into an installer (NSIS/MSIX) is not done.
 
 ## Status — honest
 
-Nothing here has run on Windows. The WASAPI backend and the Windows
-client-token block are written against the documented APIs and against
-librespot's own Windows branch, and the shared tree still builds and passes its
-11 tests on Linux, but:
+### Verified
 
-- **No part of this has been executed on Windows.** First run will find things.
-- The client-token block additionally needs live Spotify servers to confirm —
-  a wrong platform message fails as an opaque `HTTP 400`, so if sign-in fails
-  on Windows with a 400 and an empty body, suspect this first.
+Both Windows-only source paths were cross-compiled against the real mingw-w64
+Windows headers (`x86_64-w64-mingw32-gcc` 16.1, `-Wall -Wextra`, no warnings):
+
+- `output_wasapi.c` compiles **and links** into a Windows `.exe` with `-lole32`.
+  That proves the `COBJMACROS` call forms, the `WAVEFORMATEX`/`eRender`/
+  `AUDCLNT_SHAREMODE_SHARED` names, and that `INITGUID` resolves
+  `CLSID_MMDeviceEnumerator` / `IID_IAudioClient` / `IID_IAudioRenderClient` /
+  `IID_ISimpleAudioVolume` without linking a separate uuid library.
+- The Windows arm of the client-token platform block compiles (extracted
+  verbatim from `clienttoken.c`): `RtlGetVersion` via `GetProcAddress`,
+  `OSVERSIONINFOEXW`, and the machine-constant selection.
+
+One concrete catch from doing this: **`AUDCLNT_STREAMFLAGS_AUTOCONVERT_PCM` and
+`AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY` are not defined in mingw-w64's
+`audioclient.h`.** The `#ifndef` fallbacks in `output_wasapi.c` are what make it
+build at all; without them this would not have compiled.
+
+### Not verified
+
+- **Nothing has run on Windows.** Compiling is not the same as working: the WASAPI buffer
+  handling, the COM apartment pairing and the drain loop are all unexercised.
+- **The Meson platform gating is unvalidated.** A cross `meson setup` fails at
+  the very first dependency (`glib-2.0`) because a cross toolchain alone has no
+  mingw pkg-config or mingw GLib, so configuration never reaches the
+  `host_machine.system()` branches in `meson.build` / `src/audio/meson.build`.
+  Building under MSYS2, where the dependencies exist, is what will exercise them.
+- **The client-token block needs live servers.** A wrong platform message fails
+  as an opaque `HTTP 400` with an empty body, so if Windows sign-in fails that
+  way, suspect this first.
 - `g_chmod (path, 0600)` on the stored token is a silent no-op on Windows. The
   file sits in the user profile, which is ACL'd, but the "chmod 600" claim in
   `native_auth.c`'s header is not true there. DPAPI (`CryptProtectData`) is the
   proper fix and is not done.
 - `cairo_select_font_face ("Sans", …)` in `ui/eq_graph.c` resolves via
-  fontconfig on Linux; on Windows it will fall back to whatever Cairo picks.
+  fontconfig on Linux; on Windows Cairo will fall back to whatever it picks.
   Rendering that text through Pango instead would be more correct.
+
+### Reproducing the compile check without MSYS2
+
+`meson setup` cannot run, but the two Windows files can still be compiled
+directly with only `mingw-w64-gcc` installed, by shimming the handful of GLib
+types they use. That is how the results above were produced; it catches header,
+macro and API-name errors, which is most of what a port gets wrong first.
