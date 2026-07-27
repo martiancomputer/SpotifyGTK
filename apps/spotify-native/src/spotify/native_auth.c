@@ -187,14 +187,21 @@ on_token_response (GObject *source, GAsyncResult *result, gpointer user_data)
                           root, "error", "unknown");
     g_warning ("native_auth: Spotify token error: %s", desc ? desc : code);
 
-    /* A rejected refresh means the stored refresh_token is dead -- revoked,
-     * rotated, or issued to a different client. Keeping it on disk makes
-     * every subsequent run retry the same dead token and fail identically,
-     * which is why the only way out used to be deleting the file by hand.
-     * Discard it and fall through to the browser flow instead. */
+    /* Only invalid_grant means the refresh token is actually dead (revoked,
+     * rotated, or issued to another client). Discarding on *any* error threw
+     * away a perfectly good token whenever Spotify returned a rate limit or a
+     * transient 5xx, turning one blip into a full browser login. */
+    if (self->refresh_token && g_strcmp0 (code, "invalid_grant") != 0) {
+      g_warning ("native_auth: token refresh failed (%s); keeping the stored "
+                 "refresh token and reporting failure", code);
+      g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
+      g_bytes_unref (bytes);
+      return;
+    }
+
     if (self->refresh_token) {
-      g_warning ("native_auth: discarding the stored refresh token and "
-                 "restarting the login flow");
+      g_warning ("native_auth: refresh token rejected as invalid_grant; "
+                 "discarding it and restarting the login flow");
       g_clear_pointer (&self->refresh_token, g_free);
       g_clear_pointer (&self->access_token, g_free);
       self->expires_at = 0;
@@ -324,6 +331,22 @@ native_auth_has_valid_token (NativeAuth *self)
   if (!self->access_token && !load_tokens (self))
     return FALSE;
   return (g_get_real_time () / G_USEC_PER_SEC) < self->expires_at;
+}
+
+gboolean
+native_auth_has_credentials (NativeAuth *self)
+{
+  g_return_val_if_fail (NATIVEAUTH_IS_AUTH (self), FALSE);
+
+  /* Deliberately weaker than has_valid_token(): an *expired* access token with
+   * a refresh token still beside it needs no user interaction at all, because
+   * the refresh happens silently. Callers deciding whether to put a sign-in
+   * screen in the user's way must ask this, not has_valid_token() -- access
+   * tokens last an hour, so gating a login prompt on validity means prompting
+   * roughly hourly for an account that never actually signed out. */
+  if (!self->access_token && !self->refresh_token && !load_tokens (self))
+    return FALSE;
+  return self->access_token != NULL || self->refresh_token != NULL;
 }
 
 const gchar *

@@ -1322,7 +1322,11 @@ spotifygtk_native_window_constructed (GObject *object)
   self->auth = native_auth_new ();
   g_signal_connect (self->auth, "completed", G_CALLBACK (on_auth_completed), self);
 
-  if (native_auth_has_valid_token (self->auth)) {
+  /* has_credentials, not has_valid_token: an hour-old access token refreshes
+   * silently inside the session, and gating on validity put a login screen in
+   * the way every time one expired. If the refresh genuinely fails the session
+   * reports FAILED and the gate comes back up. */
+  if (native_auth_has_credentials (self->auth)) {
     gtk_widget_set_visible (self->login_gate, FALSE);
     spotifygtk_native_session_start (self->session);
   } else {

@@ -86,6 +86,11 @@ NativeAuth *native_auth_new (void);
 void     native_auth_begin (NativeAuth *self);
 
 gboolean     native_auth_has_valid_token (NativeAuth *self);
+
+/* TRUE when a sign-in can be attempted without user interaction -- i.e. there
+ * is an access token or a refresh token on hand. Use this, not
+ * has_valid_token(), to decide whether to show a login prompt. */
+gboolean     native_auth_has_credentials  (NativeAuth *self);
 const gchar *native_auth_get_token       (NativeAuth *self);
 void         native_auth_refresh         (NativeAuth *self);
 
