@@ -167,14 +167,14 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_widget_add_css_class (title, "media-card-title");
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
   gtk_label_set_ellipsize (GTK_LABEL (title), PANGO_ELLIPSIZE_END);
-  gtk_label_set_max_width_chars (GTK_LABEL (title), 14);
+  gtk_label_set_max_width_chars (GTK_LABEL (title), 18);
   gtk_box_append (GTK_BOX (box), title);
 
   GtkWidget *sub = gtk_label_new ("");
   gtk_widget_add_css_class (sub, "media-card-subtitle");
   gtk_label_set_xalign (GTK_LABEL (sub), 0.0);
   gtk_label_set_ellipsize (GTK_LABEL (sub), PANGO_ELLIPSIZE_END);
-  gtk_label_set_max_width_chars (GTK_LABEL (sub), 16);
+  gtk_label_set_max_width_chars (GTK_LABEL (sub), 20);
   gtk_box_append (GTK_BOX (box), sub);
 
   g_object_set_data (G_OBJECT (card), "art",   art);

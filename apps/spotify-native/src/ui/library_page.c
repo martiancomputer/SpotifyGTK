@@ -174,11 +174,13 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_box_append (GTK_BOX (footer), heading ("Playlists"));
 
   GtkWidget *note = gtk_label_new (
-    "Your playlists need spclient's rootlist endpoint, which returns "
-    "playlist4_external protobuf — a larger schema than the track metadata "
-    "the rest of the catalog uses, and the one remaining piece of this "
-    "migration. A playlist still opens once its URI is known: the "
-    "context-resolve path handles spotify:playlist:<id> like everything else.");
+    "Your playlists aren’t available in this client yet.");
+  gtk_widget_set_tooltip_text (note,
+    "Needs spclient’s rootlist endpoint, which returns playlist4_external "
+    "protobuf — a larger schema than the track metadata the rest of the "
+    "catalog uses, and the one remaining piece of this migration. A playlist "
+    "still opens once its URI is known: the context-resolve path handles "
+    "spotify:playlist:<id> like everything else.");
   gtk_widget_add_css_class (note, "dim-text");
   gtk_label_set_xalign (GTK_LABEL (note), 0.0);
   gtk_label_set_wrap (GTK_LABEL (note), TRUE);

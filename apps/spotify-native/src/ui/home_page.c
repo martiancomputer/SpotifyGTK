@@ -145,36 +145,24 @@ build_section_header (const gchar *title, GtkWidget *action)
 /* Placeholder body for a section with no data source yet. Deliberately
  * plain: it should read as "not built" rather than "failed to load". */
 static GtkWidget *
-build_empty_state (const gchar *detail)
+build_empty_state (const gchar *summary, const gchar *technical)
 {
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
-  gtk_widget_add_css_class (box, "card");
-  gtk_widget_set_margin_bottom (box, 4);
-
-  GtkWidget *label = gtk_label_new (detail);
+  /* A dim line, not a filled card. Three of these stacked as padded slabs made
+   * the one section with real data look like the exception on the page. The
+   * short line says what the user needs to know; the protocol reason -- which
+   * is developer-facing, however true -- moves to the tooltip. */
+  GtkWidget *label = gtk_label_new (summary);
   gtk_widget_add_css_class (label, "dim-text");
   gtk_label_set_xalign (GTK_LABEL (label), 0.0);
   gtk_label_set_wrap (GTK_LABEL (label), TRUE);
   gtk_label_set_max_width_chars (GTK_LABEL (label), 76);
-  gtk_widget_set_margin_start (label, 16);
-  gtk_widget_set_margin_end (label, 16);
-  gtk_widget_set_margin_top (label, 18);
-  gtk_widget_set_margin_bottom (label, 18);
-  gtk_box_append (GTK_BOX (box), label);
+  gtk_widget_set_margin_bottom (label, 8);
+  if (technical)
+    gtk_widget_set_tooltip_text (label, technical);
 
-  return box;
+  return label;
 }
 
-static GtkWidget *
-build_icon_button (const gchar *icon, const gchar *tooltip)
-{
-  GtkWidget *button = gtk_button_new_from_icon_name (icon);
-  gtk_widget_add_css_class (button, "flat");
-  gtk_widget_add_css_class (button, "circular");
-  gtk_widget_set_tooltip_text (button, tooltip);
-  gtk_widget_set_valign (button, GTK_ALIGN_CENTER);
-  return button;
-}
 
 static void
 spotifygtk_home_page_init (SpotifyGtkHomePage *self)
@@ -230,44 +218,36 @@ spotifygtk_home_page_init (SpotifyGtkHomePage *self)
   gtk_box_append (GTK_BOX (content), self->liked_section);
 
   /* --- Continue Listening --- */
-  GtkWidget *shelf_nav = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
-  GtkWidget *prev = build_icon_button ("pan-start-symbolic", "Scroll left");
-  GtkWidget *next = build_icon_button ("pan-end-symbolic", "Scroll right");
-  gtk_widget_set_sensitive (prev, FALSE);
-  gtk_widget_set_sensitive (next, FALSE);
-  gtk_box_append (GTK_BOX (shelf_nav), prev);
-  gtk_box_append (GTK_BOX (shelf_nav), next);
-
   GtkWidget *continue_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append (GTK_BOX (continue_section),
-                  build_section_header ("Continue Listening", shelf_nav));
+                  build_section_header ("Continue Listening", NULL));
   gtk_box_append (GTK_BOX (continue_section),
-                  build_empty_state ("Needs the playlist rootlist, which comes back as "
+                  build_empty_state ("Nothing here yet — your playlists aren’t available "
+                                     "in this client so far.",
+                                     "Needs spclient’s rootlist endpoint, which returns "
                                      "playlist4_external protobuf rather than the JSON the "
                                      "rest of the catalog uses."));
   gtk_box_append (GTK_BOX (content), continue_section);
 
   /* --- Recently Played --- */
-  GtkWidget *show_all = gtk_button_new_with_label ("Show all");
-  gtk_widget_add_css_class (show_all, "pill-button");
-  gtk_widget_set_sensitive (show_all, FALSE);
-
   GtkWidget *recent_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append (GTK_BOX (recent_section),
-                  build_section_header ("Recently Played", show_all));
+                  build_section_header ("Recently Played", NULL));
   gtk_box_append (GTK_BOX (recent_section),
-                  build_empty_state ("No spclient endpoint for listening history is known — "
-                                     "librespot exposes none, so there is nothing to port "
-                                     "here yet."));
+                  build_empty_state ("Your listening history isn’t available in this client.",
+                                     "No spclient endpoint for recently-played is known; "
+                                     "librespot exposes none, so there is nothing to "
+                                     "port here yet."));
   gtk_box_append (GTK_BOX (content), recent_section);
 
   /* --- Made For You --- */
   GtkWidget *made_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append (GTK_BOX (made_section), build_section_header ("Made For You", NULL));
   gtk_box_append (GTK_BOX (made_section),
-                  build_empty_state ("Editorial mixes come from Spotify's recommendation "
-                                     "endpoints, which this client does not talk to yet. "
-                                     "Search and Liked Songs work today."));
+                  build_empty_state ("Personalised mixes aren’t available in this client. "
+                                     "Search and Liked Songs work today.",
+                                     "Editorial mixes come from Spotify’s recommendation "
+                                     "endpoints, which this client does not talk to yet."));
   gtk_box_append (GTK_BOX (content), made_section);
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
