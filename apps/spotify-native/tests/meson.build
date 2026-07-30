@@ -50,6 +50,15 @@ if get_option('tests')
   )
   test('dsp-equaliser', test_dsp)
 
+  test_collection = executable('test-collection',
+    'test_collection.c',
+    '../src/spotify/collection.c',
+    '../src/spotify/protobuf_min.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep],
+  )
+  test('collection-write-encoding', test_collection)
+
   test_resampler = executable('test-resampler',
     'test_resampler.c',
     '../src/audio/resampler.c',
