@@ -20,10 +20,19 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DISK="$HERE/win.qcow2"
-NVRAM="$HERE/OVMF_VARS.fd"
-UNATTEND_DIR="$HERE/unattend"
-SHARE="$HERE/share"
+
+# Scripts and autounattend.xml are source and live in the repo. The VM's
+# runtime state -- a 64 GB disk image, UEFI variables, the guest share -- is
+# host infrastructure and deliberately does NOT: a disk image inside a working
+# tree is one careless `git add -f` from being unrecoverable, and it drags the
+# repo into any backup or sync of the project directory.
+VM_DIR="${SPOTIFYGTK_VM_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/spotifygtk-vm}"
+mkdir -p "$VM_DIR"
+
+DISK="$VM_DIR/win.qcow2"
+NVRAM="$VM_DIR/OVMF_VARS.fd"
+SHARE="$VM_DIR/share"
+UNATTEND_DIR="$HERE/unattend"      # source: stays with the repo
 
 DISK_SIZE="${DISK_SIZE:-64G}"
 RAM_MB="${RAM_MB:-6144}"
@@ -85,6 +94,7 @@ The page is JS-gated, so it cannot be fetched from a script.
 EOF
       exit 1
     }
+    echo "==> VM state in $VM_DIR (override with SPOTIFYGTK_VM_DIR)"
     [[ -f "$DISK" ]] || qemu-img create -f qcow2 "$DISK" "$DISK_SIZE"
 
     echo "==> installing Windows unattended; this takes 20-60 minutes."
@@ -103,7 +113,7 @@ EOF
     ;;
 
   run)
-    [[ -f "$DISK" ]] || { echo "error: no disk yet -- run '$0 install <iso>' first" >&2; exit 1; }
+    [[ -f "$DISK" ]] || { echo "error: no disk at $DISK -- run '$0 install <iso>' first" >&2; exit 1; }
     launch -boot order=c
     ;;
 
