@@ -91,11 +91,11 @@
       <ImageInstall>
         <OSImage>
           <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
-          <!-- Evaluation ISOs carry a single edition, so index 1 is it. A
-               multi-edition ISO needs /IMAGE/NAME instead; run-vm.sh prints
-               the available editions if setup stalls here. -->
+          <!-- Retail media is multi-edition (this ISO carries a 7.5 GB
+               install.wim and no ei.cfg), so name the edition rather than
+               trust an index: index 1 is whatever happens to be first. -->
           <InstallFrom><MetaData wcm:action="add">
-            <Key>/IMAGE/INDEX</Key><Value>1</Value>
+            <Key>/IMAGE/NAME</Key><Value>Windows 11 Home</Value>
           </MetaData></InstallFrom>
         </OSImage>
       </ImageInstall>
@@ -174,6 +174,21 @@
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">
           <Order>4</Order>
+          <Description>Remove provisioned bloatware appx packages</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$junk=@('Microsoft.XboxGamingOverlay','Microsoft.XboxGameOverlay','Microsoft.Xbox.TCUI','Microsoft.XboxIdentityProvider','Microsoft.XboxSpeechToTextOverlay','Microsoft.GamingApp','Microsoft.ZuneMusic','Microsoft.ZuneVideo','Microsoft.BingNews','Microsoft.BingWeather','Microsoft.BingSearch','Microsoft.MicrosoftSolitaireCollection','Microsoft.People','Microsoft.WindowsFeedbackHub','Microsoft.WindowsMaps','Microsoft.GetHelp','Microsoft.Getstarted','Microsoft.MicrosoftOfficeHub','Microsoft.Todos','Microsoft.PowerAutomateDesktop','MicrosoftTeams','MSTeams','Microsoft.Copilot','Microsoft.549981C3F5F10','Clipchamp.Clipchamp','Microsoft.OutlookForWindows','Microsoft.SkypeApp','Microsoft.YourPhone'); foreach($n in $junk){ Get-AppxProvisionedPackage -Online ^| Where-Object DisplayName -eq $n ^| Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue } "</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Description>Stop OneDrive setup and consumer content</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "reg delete 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' /v OneDriveSetup /f 2&gt;$null; reg add 'HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive' /v DisableFileSyncNGSC /t REG_DWORD /d 1 /f; reg add 'HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent' /v DisableWindowsConsumerFeatures /t REG_DWORD /d 1 /f"</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>6</Order>
+          <Description>Defender exclusions for the build tree</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-MpPreference -ExclusionPath 'C:\src','C:\msys64' -ErrorAction SilentlyContinue"</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>7</Order>
           <Description>Mark provisioning complete</Description>
           <CommandLine>cmd /c echo ready &gt; C:\provisioned.txt</CommandLine>
         </SynchronousCommand>
