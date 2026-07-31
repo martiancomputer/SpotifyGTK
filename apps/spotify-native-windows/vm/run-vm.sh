@@ -90,11 +90,15 @@ EOF
     echo "==> installing Windows unattended; this takes 20-60 minutes."
     echo "    watch progress in the QEMU window, or poll:  $0 ssh true"
     # VVFAT serves unattend/ to the guest as a removable drive, which is where
-    # Windows Setup looks for autounattend.xml -- no ISO-authoring tool needed.
+    # Windows Setup looks for autounattend.xml -- equivalent to embedding it in
+    # the ISO, without needing xorriso/genisoimage to rebuild one.
+    #
+    # Read-only on purpose: QEMU's read-write VVFAT is unreliable, and Setup
+    # only ever reads this file.
     launch \
       -boot order=d \
       -drive file="$ISO",media=cdrom,readonly=on \
-      -drive file="fat:rw:$UNATTEND_DIR",format=raw,if=none,id=unattend \
+      -drive file="fat:$UNATTEND_DIR",format=raw,if=none,id=unattend,readonly=on \
       -device usb-storage,drive=unattend
     ;;
 
