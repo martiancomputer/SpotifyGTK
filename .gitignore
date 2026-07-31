@@ -35,3 +35,9 @@ config.local.h
 # perf profiling output (local only)
 perf.data
 perf.data.old
+
+# Windows build VM artefacts (disk images, firmware vars, guest share)
+apps/spotify-native-windows/vm/*.qcow2
+apps/spotify-native-windows/vm/OVMF_VARS.fd
+apps/spotify-native-windows/vm/share/
+apps/spotify-native-windows/build/
