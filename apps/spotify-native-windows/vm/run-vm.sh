@@ -105,9 +105,16 @@ EOF
     #
     # Read-only on purpose: QEMU's read-write VVFAT is unreliable, and Setup
     # only ever reads this file.
+    # Attach the CD explicitly to an AHCI controller. Letting QEMU auto-attach
+    # on q35 put it on the implicit SATA bus, where OVMF timed out reading it
+    # ("failed to start Boot0002 ... Sata(0,0,0xFFFF,0x0) : Time out") and then
+    # fell through the whole boot order to PXE, which looked like a netboot
+    # attempt but was just the last entry in the list.
     launch \
       -boot order=d \
-      -drive file="$ISO",media=cdrom,readonly=on \
+      -device ahci,id=ahci \
+      -drive file="$ISO",if=none,id=cd0,media=cdrom,readonly=on \
+      -device ide-cd,bus=ahci.0,drive=cd0,bootindex=0 \
       -drive file="fat:$UNATTEND_DIR",format=raw,if=none,id=unattend,readonly=on \
       -device usb-storage,drive=unattend
     ;;
