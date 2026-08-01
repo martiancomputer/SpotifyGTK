@@ -30,6 +30,13 @@
 #include <string.h>
 #include <errno.h>
 
+#ifdef G_OS_WIN32
+/* ShellExecuteW, used to open the browser -- see native_auth_begin for why
+ * GIO's launch path cannot be used on Windows. */
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
 #define SPOTIFY_AUTH_URL   "https://accounts.spotify.com/authorize"
 #define SPOTIFY_TOKEN_URL  "https://accounts.spotify.com/api/token"
 
@@ -391,7 +398,31 @@ native_auth_begin (NativeAuth *self)
 
   g_message ("native_auth: opening browser for Spotify authorization "
             "(keymaster client_id, port %d)...", NATIVE_AUTH_REDIRECT_PORT);
+#ifdef G_OS_WIN32
+  /* g_app_info_launch_default_for_uri() does not work on Windows: GIO's win32
+   * GAppInfo asserts on the NULL GAppLaunchContext that is legal everywhere
+   * else --
+   *   g_app_launch_context_get_startup_notify_id: assertion
+   *   'G_IS_APP_LAUNCH_CONTEXT (context)' failed
+   * -- and the browser never opens, so sign-in cannot complete at all.
+   * ShellExecuteW is the platform's own "open this with whatever handles it"
+   * and needs no launch context. */
+  {
+    g_autofree gunichar2 *wurl = g_utf8_to_utf16 (url, -1, NULL, NULL, NULL);
+    if (wurl) {
+      HINSTANCE rc = ShellExecuteW (NULL, L"open", (LPCWSTR) wurl,
+                                    NULL, NULL, SW_SHOWNORMAL);
+      /* >32 means success; anything else is an error code. Say so loudly and
+       * print the URL, so a failure here is recoverable by hand rather than
+       * looking like the app simply ignored the button. */
+      if ((INT_PTR) rc <= 32)
+        g_warning ("native_auth: could not open a browser (ShellExecute code %d). "
+                   "Open this URL manually:\n%s", (int) (INT_PTR) rc, url);
+    }
+  }
+#else
   g_app_info_launch_default_for_uri (url, NULL, NULL);
+#endif
 }
 
 void
