@@ -506,6 +506,11 @@ typedef struct {
   /* Frames to discard after a seek lands, to close the gap between the Ogg
    * page we landed on and the sample actually asked for. See do_seek. */
   guint64             seek_discard_frames;
+  /* Rate the output device is actually running at, which is NOT the stream
+   * rate once the resampler is engaged. Written by the audio worker when it
+   * opens the device, read by the seek landing; a plain int written once per
+   * output open, so the race is benign. */
+  gint                device_rate;
   glong               bitrate_nominal;   /* for the seek byte estimate */
   gint                stream_sample_rate;
   SpotifyDecoder     *stream_decoder;
@@ -706,6 +711,7 @@ audio_output_thread (gpointer user_data)
                    frame->sample_rate, device_rate);
       }
 
+      state->device_rate = device_rate;
       output = spotifygtk_output_open (device_rate, frame->channels);
       if (!output) {
         g_warning ("[live-test] streaming decoder opened, but no PCM output backend is available");
@@ -1061,9 +1067,20 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_dat
     shortfall = (gint64) rate * SEEK_MAX_TRIM_SEC;
 
   state->seek_discard_frames = (guint64) shortfall;
-  state->output_frames       = landed_frames + (guint64) shortfall;
+
+  /* output_frames is counted in DEVICE frames -- the audio worker adds what it
+   * writes to the device, and position is reported against the device rate. A
+   * granule is in STREAM frames. Those are the same number only when no
+   * resampling is happening; with the resampler engaged (44.1k -> 48k here)
+   * presetting a granule directly made every seek report a position short by
+   * the rate ratio, which is 8.1% -- about 20 s at the four-minute mark. */
+  gint    dev_rate      = state->device_rate > 0 ? state->device_rate : rate;
+  guint64 stream_frames = landed_frames + (guint64) shortfall;
+  state->output_frames  = (guint64) ((gdouble) stream_frames
+                                     * (gdouble) dev_rate / (gdouble) rate);
+
   spotifygtk_native_engine_control_report_position (state->control,
-                                                    state->output_frames, rate);
+                                                    state->output_frames, dev_rate);
 
   g_message ("[seek] landed at logical byte %" G_GOFFSET_FORMAT "+%" G_GSIZE_FORMAT
              ", granule %" G_GINT64_FORMAT " (%.1fs; target %.1fs)",
