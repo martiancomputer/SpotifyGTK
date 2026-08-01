@@ -32,6 +32,7 @@ mkdir -p "$VM_DIR"
 DISK="$VM_DIR/win.qcow2"
 NVRAM="$VM_DIR/OVMF_VARS.fd"
 SHARE="$VM_DIR/share"
+MONITOR="$VM_DIR/monitor.sock"
 UNATTEND_DIR="$HERE/unattend"      # source: stays with the repo
 
 DISK_SIZE="${DISK_SIZE:-64G}"
@@ -78,6 +79,7 @@ launch () {                       # launch <extra qemu args...>
     -device virtio-balloon \
     -usb -device usb-tablet \
     -vga std \
+    -monitor "unix:$MONITOR,server,nowait" \
     "$@"
 }
 
@@ -110,6 +112,11 @@ EOF
     # ("failed to start Boot0002 ... Sata(0,0,0xFFFF,0x0) : Time out") and then
     # fell through the whole boot order to PXE, which looked like a netboot
     # attempt but was just the last entry in the list.
+    # Nothing is watching the console to answer "Press any key to boot from
+    # CD or DVD", which times out into "No bootable option". Tap it remotely.
+    rm -f "$MONITOR"
+    "$HERE/press-boot-key.sh" "$MONITOR" &
+
     launch \
       -boot order=d \
       -device ahci,id=ahci \
