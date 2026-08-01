@@ -278,8 +278,15 @@ spotifygtk_client_token_request (SpotifyClientToken *self, const gchar *client_i
   pb_write_varint_field  (request, 1, 1);
   pb_write_message_field (request, 2, client_data->data, client_data->len);
 
+  /* Per-platform, because the fields describing the platform are: `uts` only
+   * exists in the Linux branch above. */
+#ifdef G_OS_WIN32
+  g_message ("clienttoken: sending request (windows build=%d device_id=%.8s...)",
+             (int) os_build, device_id ? device_id : "(null)");
+#else
   g_message ("clienttoken: sending request (kernel=%s arch=%s device_id=%.8s...)",
              uts.release, uts.machine, device_id ? device_id : "(null)");
+#endif
 
   SoupMessage *msg = soup_message_new (SOUP_METHOD_POST, CLIENTTOKEN_URL);
   soup_message_headers_replace (soup_message_get_request_headers (msg),

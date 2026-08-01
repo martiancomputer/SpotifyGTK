@@ -53,11 +53,6 @@ endif
 
 is_windows = host_machine.system() == 'windows'
 
-# WASAPI is COM, so it needs ole32; nothing else Windows-specific is linked.
-if is_windows
-  all_deps += cc.find_library('ole32', required: true)
-endif
-
 pulse_dep        = dependency('libpulse',        required: false)
 pulse_simple_dep = dependency('libpulse-simple', required: false)
 alsa_dep         = dependency('alsa',            required: false)
@@ -74,6 +69,15 @@ cc = meson.get_compiler('c')
 
 # libm: the now-playing equaliser animates its bar heights with sin().
 m_dep = cc.find_library('m', required: false)
+
+# WASAPI is COM, so it needs ole32; nothing else Windows-specific is linked.
+# This has to live below cc, not up with the other dependency lookups -- the
+# earlier placement referenced cc before meson.get_compiler() defined it, which
+# only ever failed on Windows because the block sits behind `if is_windows` and
+# never evaluated on Linux.
+if is_windows
+  all_deps += cc.find_library('ole32', required: true)
+endif
 if m_dep.found()
   all_deps += m_dep
 endif
