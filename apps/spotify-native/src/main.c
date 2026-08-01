@@ -492,6 +492,7 @@ typedef struct {
   guint8              file_id[20];
   guint8              track_gid[16];
   guint8              audio_key[AUDIO_KEY_LEN];
+  GSource            *key_timeout_source;
   gchar              *cdn_url;
   const gchar         *track_uri;
   GBytes             *initial_cdn_chunk;
@@ -1367,10 +1368,61 @@ on_cdn_initial_chunk_result (GBytes *decrypted_chunk, GError *error, gpointer us
                                on_cdn_seek_probe_result, state);
 }
 
+/*
+ * An audio-key request the account is not entitled to is not rejected -- the
+ * access point simply never answers it. No AES_KEY_ERROR, no packet of any
+ * kind. (Observed against a live AP with a free account asking for the
+ * Premium-only OGG_VORBIS_320.)
+ *
+ * Without a deadline of its own that silence is indistinguishable from a dead
+ * socket, so it fell through to the run watchdog and was reported as a network
+ * problem -- sending anyone who hit it to debug their firewall over what is
+ * really an entitlement answer. This deadline exists to tell the truth instead.
+ */
+#define AUDIO_KEY_ATTEMPT_TIMEOUT_S 8
+
+static void
+clear_key_timeout (LiveTestState *state)
+{
+  if (!state->key_timeout_source)
+    return;
+  g_source_destroy (state->key_timeout_source);
+  g_source_unref (state->key_timeout_source);
+  state->key_timeout_source = NULL;
+}
+
+static gboolean
+on_audio_key_attempt_timeout (gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  /* Drop our ref here rather than via clear_key_timeout(): returning
+   * G_SOURCE_REMOVE destroys the source, and GLib holds its own ref for the
+   * duration of the dispatch, so unreffing from inside the callback is safe. */
+  GSource *fired = state->key_timeout_source;
+  state->key_timeout_source = NULL;
+  if (fired)
+    g_source_unref (fired);
+
+  g_warning ("[live-test] no audio-key response after %ds. Everything up to this "
+             "point succeeded, so this is an entitlement answer rather than a "
+             "network fault: this client requests OGG_VORBIS_320, which Spotify "
+             "grants to Premium accounts only.",
+             AUDIO_KEY_ATTEMPT_TIMEOUT_S);
+  /* The UI only gets the generic "Native playback failed" from player_service.c;
+   * there is no ERROR stage on SpotifyNativeEngineStage to carry a reason. The
+   * log line above is the only place this is currently explained. */
+  state->ok = FALSE;
+  g_main_loop_quit (state->loop);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_audio_key_result (const guint8 key[AUDIO_KEY_LEN], GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+
+  clear_key_timeout (state);
 
   if (key) {
     g_message ("[live-test] AUDIO KEY SUCCEEDED -- got 16-byte AES key.");
@@ -1407,7 +1459,15 @@ on_audio_storage_result (SpclientCdnUrls *urls, GError *error, gpointer user_dat
     g_message ("[live-test] Requesting audio key for the track...");
     spotifygtk_audio_key_request (state->audio_key_client, state->track_gid, 16,
                                   state->file_id, 20, on_audio_key_result, state);
-    return; /* Wait for AES key */
+
+    /* Attached by hand for the same reason the run watchdog is: g_timeout_add()
+     * binds the source to the *global default* context rather than the engine's
+     * private one, where it would never fire. */
+    clear_key_timeout (state);
+    state->key_timeout_source = g_timeout_source_new_seconds (AUDIO_KEY_ATTEMPT_TIMEOUT_S);
+    g_source_set_callback (state->key_timeout_source, on_audio_key_attempt_timeout, state, NULL);
+    g_source_attach (state->key_timeout_source, state->context);
+    return; /* Wait for AES key, or for that deadline */
   } else {
     g_warning ("[live-test] get_audio_storage failed: %s", error ? error->message : "unknown error");
     state->ok = FALSE;
@@ -1903,6 +1963,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     .pcm_queue = NULL, .output_thread = NULL, .queued_frames = 0,
     .output_failed = FALSE, .queue_initialized = FALSE,
     .timeout_source = NULL,
+    .key_timeout_source = NULL,
     .context = context,
     .control = control,
     .progress = progress, .progress_data = progress_data,
@@ -1959,6 +2020,10 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     g_source_unref (state.timeout_source);
     state.timeout_source = NULL;
   }
+
+  /* Outlives the loop if playback started before it fired, or if the loop was
+   * quit by cancellation while a key request was still in flight. */
+  clear_key_timeout (&state);
 
   if (state.cancel_source) {
     g_source_destroy (state.cancel_source);
