@@ -26,7 +26,9 @@ G_DECLARE_FINAL_TYPE (SpotifyApSession, spotifygtk_ap_session, SPOTIFYGTK, AP_SE
 
 typedef enum {
   AP_CMD_SECRET_BLOCK    = 0x02,
-  AP_CMD_PING            = 0x04,
+  AP_CMD_PING            = 0x04,  /* server keepalive; MUST be answered */
+  AP_CMD_PONG            = 0x49,  /* our reply, echoing the ping payload */
+  AP_CMD_PONG_ACK        = 0x4a,
   AP_CMD_STREAM_CHUNK    = 0x08,
   AP_CMD_STREAM_CHUNK_RES= 0x09,
   AP_CMD_CHANNEL_ERROR   = 0x0a,

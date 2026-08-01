@@ -626,13 +626,34 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  ApPacketHandler handler = g_hash_table_lookup (self->handlers, GUINT_TO_POINTER (cmd));
-  if (handler) {
-    gpointer hdata2 = g_hash_table_lookup (self->handler_data, GUINT_TO_POINTER (cmd));
-    handler (self, cmd, payload_ptr, pay_len, hdata2);
+  /* Answer the access point's keepalive before anything else.
+   *
+   * Spotify's AP pings periodically and closes the connection on a client that
+   * does not pong -- which surfaces as "An existing connection was forcibly
+   * closed by the remote host" some time after login, with nothing else in the
+   * log to explain it. The reply is the same four payload bytes back under
+   * opcode 0x49.
+   *
+   * Handled here rather than left to callers so every AP consumer gets it: the
+   * session and the playback engine both hold long-lived connections, and
+   * neither had any reason to know the protocol needs this. */
+  if (cmd == AP_CMD_PING) {
+    /* Must not return early here: the tail of this function bumps recv_nonce
+     * and queues the next read. Skipping either desyncs the Shannon stream --
+     * every later packet then fails its MAC -- and stops the receive loop. */
+    spotifygtk_ap_session_send (self, AP_CMD_PONG, payload_ptr, pay_len);
+  } else if (cmd == AP_CMD_PONG_ACK) {
+    /* The server acknowledging our pong. Nothing to do, but recognise it so it
+     * is not logged as an unhandled packet. */
   } else {
-    g_message ("ap.c: no handler registered for incoming cmd=0x%02x (%u bytes), ignoring",
-              cmd, pay_len);
+    ApPacketHandler handler = g_hash_table_lookup (self->handlers, GUINT_TO_POINTER (cmd));
+    if (handler) {
+      gpointer hdata2 = g_hash_table_lookup (self->handler_data, GUINT_TO_POINTER (cmd));
+      handler (self, cmd, payload_ptr, pay_len, hdata2);
+    } else {
+      g_message ("ap.c: no handler registered for incoming cmd=0x%02x (%u bytes), ignoring",
+                cmd, pay_len);
+    }
   }
 
   self->recv_nonce++;
