@@ -533,7 +533,13 @@ typedef struct {
  * by decoding and throwing away. Beyond that the byte estimate was wrong
  * enough that trimming would mean discarding real seconds of audio. */
 #define SEEK_UNDERSHOOT_MS   1500
-#define SEEK_MAX_TRIM_SEC    10
+/* Past this, the byte estimate was wrong enough that trimming would mean
+ * decoding away real seconds of audio -- so re-aim using the ratio we just
+ * measured instead, once, and trim the remainder of that. */
+#define SEEK_REFINE_SEC      4
+/* Absolute ceiling on trimming, purely so a pathological granule cannot make
+ * the engine sit there discarding forever. */
+#define SEEK_MAX_TRIM_SEC    60
 
 #define CDN_SEEK_PROBE_OFFSET 4093
 #define CDN_SEEK_PROBE_LENGTH 8192
@@ -953,6 +959,7 @@ typedef struct {
   guint          generation;
   gint64         target_ms;
   goffset        request_offset;
+  gboolean       refined;      /* TRUE once the estimate has been re-aimed */
 } SeekLanding;
 
 static void do_seek (LiveTestState *state);
@@ -979,6 +986,7 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_dat
   guint    gen        = land->generation;
   gint64   target_ms  = land->target_ms;
   goffset  req_off    = land->request_offset;
+  gboolean refined    = land->refined;
   g_free (land);
 
   /* A newer seek superseded this one: its teardown already happened, so drop
@@ -1014,11 +1022,43 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_dat
   gint64 target_frames = target_ms * (gint64) rate / 1000;
   gint64 shortfall     = target_frames - (gint64) landed_frames;
 
+  g_message ("[seek] target %.1fs, landed %.1fs, shortfall %.1fs%s",
+             (double) target_ms / 1000.0, (double) landed_frames / rate,
+             (double) shortfall / rate, refined ? " (refined)" : "");
+
   if (shortfall < 0)
     shortfall = 0;                       /* overshot: nothing to trim */
+
+  /* A large shortfall means nominal bitrate lied -- which it does on VBR. We
+   * now know one true (byte, sample) pair, so re-aim with the measured ratio
+   * rather than discarding many seconds of decoded audio. Once only: the
+   * second attempt trims whatever is left, so a bad ratio cannot loop. */
+  if (!refined && landed_frames > 0 && req_off > 0 &&
+      shortfall > (gint64) rate * SEEK_REFINE_SEC) {
+    gdouble bytes_per_frame = (gdouble) req_off / (gdouble) landed_frames;
+    gint64  aim_frames      = target_frames - (gint64) (rate * SEEK_UNDERSHOOT_MS / 1000);
+    if (aim_frames < 0)
+      aim_frames = 0;
+    goffset new_off = (goffset) (bytes_per_frame * (gdouble) aim_frames);
+
+    g_message ("[seek] re-aiming: %.1f bytes/frame measured, byte %" G_GOFFSET_FORMAT
+               " -> %" G_GOFFSET_FORMAT, bytes_per_frame, req_off, new_off);
+
+    SeekLanding *again    = g_new0 (SeekLanding, 1);
+    again->state          = state;
+    again->generation     = state->playback_generation;
+    again->target_ms      = target_ms;
+    again->request_offset = new_off;
+    again->refined        = TRUE;
+
+    spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
+                                new_off, CDN_FULL_DOWNLOAD_CHUNK,
+                                on_seek_landing_chunk, again);
+    return;
+  }
+
   if (shortfall > (gint64) rate * SEEK_MAX_TRIM_SEC)
-    shortfall = 0;                       /* estimate was wildly off; do not
-                                          * silently eat seconds of audio */
+    shortfall = (gint64) rate * SEEK_MAX_TRIM_SEC;
 
   state->seek_discard_frames = (guint64) shortfall;
   state->output_frames       = landed_frames + (guint64) shortfall;
