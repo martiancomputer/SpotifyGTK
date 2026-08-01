@@ -36,8 +36,7 @@ config.local.h
 perf.data
 perf.data.old
 
-# Windows build VM artefacts (disk images, firmware vars, guest share)
-apps/spotify-native-windows/vm/*.qcow2
-apps/spotify-native-windows/vm/OVMF_VARS.fd
-apps/spotify-native-windows/vm/share/
+# The Windows VM is an environment, not part of the project: scripts, answer
+# file, disk images and the rebuilt ISO all stay local.
+apps/spotify-native-windows/vm/
 apps/spotify-native-windows/build/
