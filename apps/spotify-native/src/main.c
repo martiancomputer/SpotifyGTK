@@ -503,6 +503,9 @@ typedef struct {
   guint8             *header_prefix;
   gsize               header_prefix_len;
   guint               playback_generation;
+  /* Frames to discard after a seek lands, to close the gap between the Ogg
+   * page we landed on and the sample actually asked for. See do_seek. */
+  guint64             seek_discard_frames;
   glong               bitrate_nominal;   /* for the seek byte estimate */
   gint                stream_sample_rate;
   SpotifyDecoder     *stream_decoder;
@@ -526,6 +529,12 @@ typedef struct {
 /* Deliberately not AES-block aligned: comparing this independently
  * decrypted range with the same bytes from the initial range proves both
  * counter advancement and the intra-block discard path in cdn.c. */
+/* How far short of the seek target to aim, and the largest gap we will close
+ * by decoding and throwing away. Beyond that the byte estimate was wrong
+ * enough that trimming would mean discarding real seconds of audio. */
+#define SEEK_UNDERSHOOT_MS   1500
+#define SEEK_MAX_TRIM_SEC    10
+
 #define CDN_SEEK_PROBE_OFFSET 4093
 #define CDN_SEEK_PROBE_LENGTH 8192
 #define CDN_DECODE_PROBE_LENGTH (64 * 1024)
@@ -824,6 +833,21 @@ stream_decode_chunk (LiveTestState *state, GBytes *decrypted_chunk, gboolean fin
   guint frames_pulled = 0;
   PcmFrame *frame = NULL;
   while ((frame = spotifygtk_decoder_pull (state->stream_decoder)) != NULL) {
+    /* Eat the post-seek shortfall before anything reaches the device. */
+    if (state->seek_discard_frames > 0) {
+      if (frame->n_frames <= state->seek_discard_frames) {
+        state->seek_discard_frames -= frame->n_frames;
+        pcm_frame_free (frame);
+        continue;
+      }
+      gsize drop = (gsize) state->seek_discard_frames;
+      gsize keep = frame->n_frames - drop;
+      memmove (frame->samples, frame->samples + drop * (gsize) frame->channels,
+               keep * (gsize) frame->channels * sizeof (gint16));
+      frame->n_frames = keep;
+      state->seek_discard_frames = 0;
+    }
+
     gsize frame_count = frame->n_frames;
     if (!stream_queue_frame (state, frame))
       return FALSE;
@@ -983,8 +1007,23 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_dat
 
   gint    rate          = state->stream_sample_rate > 0 ? state->stream_sample_rate : 44100;
   guint64 landed_frames = (guint64) granule;
-  state->output_frames  = landed_frames;
-  spotifygtk_native_engine_control_report_position (state->control, landed_frames, rate);
+
+  /* Close the remaining gap by discarding decoded frames rather than reporting
+   * the landing point as the new position. Position is preset to the target so
+   * the progress bar reads correctly while those frames are being eaten. */
+  gint64 target_frames = target_ms * (gint64) rate / 1000;
+  gint64 shortfall     = target_frames - (gint64) landed_frames;
+
+  if (shortfall < 0)
+    shortfall = 0;                       /* overshot: nothing to trim */
+  if (shortfall > (gint64) rate * SEEK_MAX_TRIM_SEC)
+    shortfall = 0;                       /* estimate was wildly off; do not
+                                          * silently eat seconds of audio */
+
+  state->seek_discard_frames = (guint64) shortfall;
+  state->output_frames       = landed_frames + (guint64) shortfall;
+  spotifygtk_native_engine_control_report_position (state->control,
+                                                    state->output_frames, rate);
 
   g_message ("[seek] landed at logical byte %" G_GOFFSET_FORMAT "+%" G_GSIZE_FORMAT
              ", granule %" G_GINT64_FORMAT " (%.1fs; target %.1fs)",
@@ -1055,10 +1094,28 @@ do_seek (LiveTestState *state)
   if (was_paused)
     spotifygtk_native_engine_control_pause (state->control);
 
+  /* Deliberately aim SHORT of the target.
+   *
+   * The byte offset is only an estimate: nominal bitrate is not actual bitrate
+   * on a VBR stream, and we then snap to the first Ogg page in the window,
+   * which is another jump forward. Landing wherever that lands and calling it
+   * done is what made a drag to 3:02 arrive at 2:54 -- and, because the
+   * estimate is a pure function of the target, land in exactly the same wrong
+   * place however many times it was retried.
+   *
+   * So bias the estimate back by SEEK_UNDERSHOOT_MS and let the landing
+   * callback discard decoded frames forward to the exact sample. Undershooting
+   * is recoverable by decoding a little extra; overshooting is not recoverable
+   * without another round trip. */
   glong   bitrate = state->bitrate_nominal > 0 ? state->bitrate_nominal : 160000;
-  goffset offset  = (goffset) ((gdouble) target_ms / 1000.0 * (gdouble) bitrate / 8.0);
+  gint64  aim_ms  = target_ms - SEEK_UNDERSHOOT_MS;
+  if (aim_ms < 0)
+    aim_ms = 0;
+  goffset offset  = (goffset) ((gdouble) aim_ms / 1000.0 * (gdouble) bitrate / 8.0);
   if (offset < 0)
     offset = 0;
+
+  state->seek_discard_frames = 0;
 
   /* Invalidate any read-ahead fetch already in flight for the old position. */
   state->playback_generation++;
