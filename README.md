@@ -1,11 +1,22 @@
 # SpotifyGTK
 
-A native Spotify client project for Linux — with a Windows target that builds
-but has not yet been run — written entirely in **C**, zero Rust, zero Electron.
-Built for raw performance and long-term stability rather than convenience.
+A native Spotify client project for Linux — and now Windows, where it signs in,
+streams and plays through WASAPI — written entirely in **C**, zero Rust, zero
+Electron. Built for raw performance and long-term stability rather than
+convenience.
 
 ![License](https://img.shields.io/github/license/martiancomputer/SpotifyGTK)
 ![CI](https://github.com/martiancomputer/SpotifyGTK/actions/workflows/build.yml/badge.svg)
+
+## Screenshots
+
+The album view with the Now Playing panel open. Track lists, album art and the
+queue all arrive over the native protocol stack — no Web API involved.
+
+| Light | Dark |
+|---|---|
+| ![Album view, light theme](media/preview-1.jpeg) | ![Album view, dark theme](media/preview-2.jpeg) |
+| ![Album view with cream accent](media/preview-5.jpeg) | ![Album view showing the playing-row indicator](media/preview-3.jpeg) |
 
 ---
 
