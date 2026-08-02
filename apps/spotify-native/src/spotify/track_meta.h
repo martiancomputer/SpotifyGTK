@@ -68,6 +68,11 @@ typedef struct {
    * (https://i.scdn.co/image/<hex>), so every consumer would otherwise
    * convert it identically. */
   gchar   *cover_id;
+
+  /* Release year from Track.album.date, or 0 when absent or implausible.
+   * Only the year is kept: it is what an album header shows, and month/day
+   * are frequently absent or placeholder values in this data. */
+  gint     release_year;
 } SpotifyTrackMeta;
 
 /*

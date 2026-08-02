@@ -22,7 +22,9 @@
 #define NAMED_MESSAGE_FIELD_GID  1
 
 /* metadata.proto: Album.cover_group -> ImageGroup.image -> Image */
+#define ALBUM_FIELD_DATE           6
 #define ALBUM_FIELD_COVER_GROUP   17
+#define DATE_FIELD_YEAR            1
 #define IMAGE_GROUP_FIELD_IMAGE    1
 #define IMAGE_FIELD_FILE_ID        1
 #define IMAGE_FIELD_WIDTH          3
@@ -49,6 +51,43 @@ bytes_to_hex (const guint8 *data, gsize len)
  * would still pick the right image undecoded; it is decoded anyway so the
  * value is not quietly wrong if anyone later reads it.
  */
+/*
+ * Release year from Album.date.
+ *
+ * Date.year is sint32, so zigzag-encoded -- the same trap that made every
+ * track duration come back doubled. Unlike the cover comparison, the decoded
+ * value is used directly here, so getting this wrong would show a wrong year
+ * rather than merely a wrong ordering.
+ *
+ * Field numbers are taken from metadata.proto rather than observed, so the
+ * result is range-checked: a wrong field number parses into a plausible-looking
+ * integer rather than failing, and a silently wrong year on every album is
+ * worse than no year at all. Anything outside living memory of recorded music
+ * is treated as absent.
+ */
+static gint
+album_release_year (const guint8 *album_data, gsize album_len)
+{
+  const guint8 *date_data = NULL;
+  gsize         date_len  = 0;
+
+  if (!pb_find_bytes_field (album_data, album_len, ALBUM_FIELD_DATE,
+                            &date_data, &date_len))
+    return 0;
+
+  guint64 raw = 0;
+  if (!pb_find_varint_field (date_data, date_len, DATE_FIELD_YEAR, &raw))
+    return 0;
+
+  gint64 year = (gint64) ((raw >> 1) ^ (~(raw & 1) + 1));
+  if (year < 1860 || year > 2200) {
+    g_debug ("track_meta: implausible release year %" G_GINT64_FORMAT
+             " -- treating as absent", year);
+    return 0;
+  }
+  return (gint) year;
+}
+
 static gchar *
 dup_largest_cover_id (const guint8 *album_data, gsize album_len)
 {
@@ -204,6 +243,8 @@ spotifygtk_track_meta_parse (const guint8     *track_data,
         out->cover_id = dup_largest_cover_id (field_data, field_len);
       if (wire_type == PB_WIRE_LENGTH_DELIMITED && !out->album_uri)
         out->album_uri = dup_uri_from_submessage (field_data, field_len, "album");
+      if (wire_type == PB_WIRE_LENGTH_DELIMITED && out->release_year == 0)
+        out->release_year = album_release_year (field_data, field_len);
       break;
 
     case TRACK_FIELD_ARTIST:

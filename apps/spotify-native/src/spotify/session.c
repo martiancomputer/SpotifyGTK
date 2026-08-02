@@ -93,6 +93,7 @@ spotifygtk_native_track_copy (const SpotifyNativeTrack *track)
   copy->duration_ms = track->duration_ms;
   copy->is_explicit = track->is_explicit;
   copy->cover_id    = g_strdup (track->cover_id);
+  copy->release_year = track->release_year;
   copy->album_uri   = g_strdup (track->album_uri);
   copy->artist_uri  = g_strdup (track->artist_uri);
   return copy;
@@ -557,6 +558,7 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     track->cover_id    = g_strdup (info->meta.cover_id);
     track->album_uri   = g_strdup (info->meta.album_uri);
     track->artist_uri  = g_strdup (info->meta.artist_uri);
+    track->release_year = info->meta.release_year;
 
     g_ptr_array_add (out, track);
   }

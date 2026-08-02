@@ -16,6 +16,7 @@ struct _SpotifyGtkContextPage {
 
   GtkLabel            *kind_label;
   GtkLabel            *title_label;
+  GtkLabel            *year_label;
   SpotifyGtkTrackList *list;
 
   SpotifyNativeSession *session;
@@ -54,6 +55,23 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
      * re-navigation would be swallowed by the same-URI no-op. */
     g_clear_pointer (&self->current_uri, g_free);
     return;
+  }
+
+  /*
+   * The release year rides on the tracks rather than arriving separately --
+   * context-resolve returns a track list, not an album object, so this is the
+   * only place it is available. Every track on an album carries the same year;
+   * take the first that has one, since a compilation can carry stragglers with
+   * none. A mixed context (a playlist) will show its first track's year, which
+   * is why the caller only asks for this on albums.
+   */
+  for (guint i = 0; i < tracks->len; i++) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
+    if (t->release_year > 0) {
+      g_autofree gchar *year = g_strdup_printf ("%d", t->release_year);
+      gtk_label_set_text (self->year_label, year);
+      break;
+    }
   }
 
   spotifygtk_track_list_set_native_tracks (self->list, tracks);
@@ -98,12 +116,27 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   gtk_label_set_xalign (self->kind_label, 0.0);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->kind_label));
 
+  /* Title and release year share a row, year trailing. The title expands so
+   * the year stays pinned to the right edge however long the title is, and
+   * the title -- not the year -- is what ellipsises when space runs out. */
+  GtkWidget *title_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  gtk_widget_set_margin_bottom (title_row, 8);
+
   self->title_label = GTK_LABEL (gtk_label_new (""));
   gtk_widget_add_css_class (GTK_WIDGET (self->title_label), "title-text");
   gtk_label_set_xalign (self->title_label, 0.0);
   gtk_label_set_ellipsize (self->title_label, PANGO_ELLIPSIZE_END);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self->title_label), 8);
-  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->title_label));
+  gtk_widget_set_hexpand (GTK_WIDGET (self->title_label), TRUE);
+  gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->title_label));
+
+  self->year_label = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->year_label), "dim-text");
+  gtk_label_set_xalign (self->year_label, 1.0);
+  gtk_widget_set_valign (GTK_WIDGET (self->year_label), GTK_ALIGN_END);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (self->year_label), 6);
+  gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->year_label));
+
+  gtk_box_append (GTK_BOX (self), title_row);
 
   self->list = spotifygtk_track_list_new ();
   spotifygtk_track_list_set_numbered (self->list, TRUE);
@@ -137,6 +170,9 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
 
   gtk_label_set_text (self->kind_label, kind ? kind : "");
   gtk_label_set_text (self->title_label, title ? title : "");
+  /* Cleared here rather than left stale: the year belongs to the previous
+   * context until this one's tracks come back with their own. */
+  gtk_label_set_text (self->year_label, "");
 
   /* Already showing this exactly — don't re-fetch on a repeat navigation. */
   if (g_strcmp0 (uri, self->current_uri) == 0 && !self->in_flight)

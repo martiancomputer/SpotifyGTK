@@ -30,8 +30,34 @@ struct _SpotifyGtkLikedSongsPage {
    * list from it without re-fetching. Owned (a ref on the loaded array). */
   GPtrArray *all_tracks;
 
+  /* Sort controls: which key, and whether it runs the natural way round. */
+  GtkWidget *sort_buttons[3];
+  guint      sort_key;
+  gboolean   sort_desc[3];   /* remembered per key, so switching back restores it */
+
   gboolean loaded;
   gint64   retry_after;
+};
+
+/*
+ * Sort keys.
+ *
+ * ADDED is the order the collection came back in, which is Spotify's own
+ * newest-first ordering -- so it needs no key of its own, just the original
+ * index. That matters because the actual added_at timestamp lives in
+ * collection2v2, which this client has a write encoder for and no read path;
+ * sorting by position gets the ordering right without that work, though it is
+ * why no date can be *shown* per row yet.
+ */
+enum {
+  SORT_ADDED = 0,
+  SORT_LENGTH,
+  SORT_ALPHA,
+  N_SORT_KEYS
+};
+
+static const gchar *const SORT_LABELS[N_SORT_KEYS] = {
+  "Date added", "Length", "A\u2013Z"
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkLikedSongsPage, spotifygtk_liked_songs_page, GTK_TYPE_BOX)
@@ -64,6 +90,58 @@ track_matches (const SpotifyNativeTrack *t, const gchar *const *terms)
   return TRUE;
 }
 
+/* Stable across equal keys: qsort is not required to be, and two songs of the
+ * same length jumping about on every re-sort looks like a bug. The original
+ * index is the tiebreak, which is also what makes SORT_ADDED work. */
+typedef struct { SpotifyNativeTrack *track; guint index; } SortRow;
+
+static gint
+compare_rows (gconstpointer a, gconstpointer b, gpointer user_data)
+{
+  const SortRow *ra = a, *rb = b;
+  SpotifyGtkLikedSongsPage *self = user_data;
+  gint cmp = 0;
+
+  switch (self->sort_key) {
+  case SORT_LENGTH:
+    cmp = (ra->track->duration_ms > rb->track->duration_ms) -
+          (ra->track->duration_ms < rb->track->duration_ms);
+    break;
+  case SORT_ALPHA: {
+    g_autofree gchar *na = g_utf8_casefold (ra->track->name ? ra->track->name : "", -1);
+    g_autofree gchar *nb = g_utf8_casefold (rb->track->name ? rb->track->name : "", -1);
+    cmp = g_utf8_collate (na, nb);
+    break;
+  }
+  case SORT_ADDED:
+  default:
+    break;   /* index alone; see the enum comment */
+  }
+
+  if (cmp == 0)
+    cmp = (ra->index > rb->index) - (ra->index < rb->index);
+  else if (self->sort_desc[self->sort_key])
+    cmp = -cmp;
+
+  return cmp;
+}
+
+/* Sort `rows` (borrowed track pointers) in place under the current key. */
+static void
+sort_visible (SpotifyGtkLikedSongsPage *self, GPtrArray *rows)
+{
+  g_autoptr(GArray) tmp = g_array_sized_new (FALSE, FALSE, sizeof (SortRow), rows->len);
+  for (guint i = 0; i < rows->len; i++) {
+    SortRow r = { g_ptr_array_index (rows, i), i };
+    g_array_append_val (tmp, r);
+  }
+
+  g_array_sort_with_data (tmp, compare_rows, self);
+
+  for (guint i = 0; i < rows->len; i++)
+    rows->pdata[i] = g_array_index (tmp, SortRow, i).track;
+}
+
 /* Rebuild the visible list from all_tracks under the current filter text. */
 static void
 apply_filter (SpotifyGtkLikedSongsPage *self)
@@ -74,8 +152,16 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
   const gchar *query = gtk_editable_get_text (GTK_EDITABLE (self->filter_entry));
 
   if (!query || !*query) {
-    spotifygtk_track_list_set_native_tracks (self->list, self->all_tracks);
-    if (self->all_tracks->len == 0)
+    /* Even unfiltered this has to go through the sort, so a shallow copy
+     * rather than handing all_tracks straight over -- sorting that in place
+     * would destroy the original order SORT_ADDED depends on. */
+    g_autoptr(GPtrArray) everything = g_ptr_array_new ();
+    for (guint i = 0; i < self->all_tracks->len; i++)
+      g_ptr_array_add (everything, g_ptr_array_index (self->all_tracks, i));
+    sort_visible (self, everything);
+
+    spotifygtk_track_list_set_native_tracks (self->list, everything);
+    if (everything->len == 0)
       spotifygtk_track_list_set_status (self->list, "No liked songs yet.");
     return;
   }
@@ -92,9 +178,47 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
       g_ptr_array_add (filtered, t);
   }
 
+  sort_visible (self, filtered);
   spotifygtk_track_list_set_native_tracks (self->list, filtered);
   if (filtered->len == 0)
     spotifygtk_track_list_set_status (self->list, "No matches.");
+}
+
+/* Show the direction on the active button only. The inactive ones carry no
+ * arrow, so the row reads as "sorted by this, that way round" at a glance
+ * rather than as three independent controls. */
+static void
+refresh_sort_labels (SpotifyGtkLikedSongsPage *self)
+{
+  for (guint i = 0; i < N_SORT_KEYS; i++) {
+    if (i == self->sort_key) {
+      g_autofree gchar *text =
+        g_strdup_printf ("%s %s", SORT_LABELS[i],
+                         self->sort_desc[i] ? "\u2193" : "\u2191");
+      gtk_button_set_label (GTK_BUTTON (self->sort_buttons[i]), text);
+    } else {
+      gtk_button_set_label (GTK_BUTTON (self->sort_buttons[i]), SORT_LABELS[i]);
+    }
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->sort_buttons[i]),
+                                  i == self->sort_key);
+  }
+}
+
+static void
+on_sort_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkLikedSongsPage *self = user_data;
+  guint which = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (button), "sort-key"));
+
+  /* Clicking the active key flips it; clicking another switches to it and
+   * keeps whichever direction that key was last left in. */
+  if (which == self->sort_key)
+    self->sort_desc[which] = !self->sort_desc[which];
+  else
+    self->sort_key = which;
+
+  refresh_sort_labels (self);
+  apply_filter (self);
 }
 
 static void
@@ -188,10 +312,52 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   self->filter_entry = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
   gtk_search_entry_set_placeholder_text (self->filter_entry, "Filter liked songs");
   gtk_widget_set_halign (GTK_WIDGET (self->filter_entry), GTK_ALIGN_START);
+  gtk_widget_set_valign (GTK_WIDGET (self->filter_entry), GTK_ALIGN_CENTER);
   gtk_widget_set_size_request (GTK_WIDGET (self->filter_entry), 340, -1);
   g_signal_connect (self->filter_entry, "search-changed",
                     G_CALLBACK (on_filter_changed), self);
-  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->filter_entry));
+
+  /*
+   * Filter on the left, sort on the right, one row.
+   *
+   * A "linked" box of toggle buttons is the stock GTK/libadwaita idiom for a
+   * mutually exclusive set -- it renders as one segmented control using the
+   * theme's own styling, so it inherits whatever the rest of the app is
+   * wearing instead of introducing a look of its own.
+   */
+  GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  gtk_widget_set_margin_bottom (controls, 4);
+  gtk_box_append (GTK_BOX (controls), GTK_WIDGET (self->filter_entry));
+
+  GtkWidget *spacer = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand (spacer, TRUE);
+  gtk_box_append (GTK_BOX (controls), spacer);
+
+  GtkWidget *sort_caption = gtk_label_new ("Sort by");
+  gtk_widget_add_css_class (sort_caption, "dim-text");
+  gtk_widget_set_valign (sort_caption, GTK_ALIGN_CENTER);
+  gtk_box_append (GTK_BOX (controls), sort_caption);
+
+  GtkWidget *sort_group = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class (sort_group, "linked");
+  gtk_widget_set_valign (sort_group, GTK_ALIGN_CENTER);
+
+  for (guint i = 0; i < N_SORT_KEYS; i++) {
+    GtkWidget *b = gtk_toggle_button_new_with_label (SORT_LABELS[i]);
+    gtk_widget_add_css_class (b, "flat");
+    g_object_set_data (G_OBJECT (b), "sort-key", GUINT_TO_POINTER (i));
+    g_signal_connect (b, "clicked", G_CALLBACK (on_sort_clicked), self);
+    gtk_box_append (GTK_BOX (sort_group), b);
+    self->sort_buttons[i] = b;
+  }
+  gtk_box_append (GTK_BOX (controls), sort_group);
+  gtk_box_append (GTK_BOX (self), controls);
+
+  /* Newest first is what the collection already arrives as, so the default
+   * state describes the list rather than re-ordering it on load. */
+  self->sort_key        = SORT_ADDED;
+  self->sort_desc[SORT_ADDED] = FALSE;
+  refresh_sort_labels (self);
 
   self->list = spotifygtk_track_list_new ();
   spotifygtk_track_list_set_numbered (self->list, TRUE);
