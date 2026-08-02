@@ -102,12 +102,23 @@ spotifygtk_audio_key_handle_error (SpotifyAudioKeyClient *self,
   guint32 seq = ((guint32) payload[0] << 24) | ((guint32) payload[1] << 16) |
                 ((guint32) payload[2] << 8)  |  (guint32) payload[3];
 
+  /* The two bytes after the sequence are the reason the request was refused,
+   * and they were previously parsed by nobody -- every distinct denial
+   * collapsed into one generic string. That matters because the interesting
+   * question is *which* refusal this is: an account not entitled to a format
+   * looks identical to a track unavailable in the market unless the code is
+   * carried through. Absent on a short packet, hence the sentinel. */
+  gint key_error = -1;
+  if (len >= 6)
+    key_error = ((gint) payload[4] << 8) | (gint) payload[5];
+
   AudioKeyCallback cb   = g_hash_table_lookup (self->pending, &seq);
   gpointer         data = g_hash_table_lookup (self->pending_data, &seq);
   g_warning ("audio-key: received error response seq=%u (%" G_GSIZE_FORMAT
-             " bytes, pending=%s)", seq, len, cb ? "yes" : "no");
+             " bytes, pending=%s, code=%d)", seq, len, cb ? "yes" : "no", key_error);
   if (cb) {
-    GError *err = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Audio key request denied");
+    GError *err = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "Audio key request denied (code %d)", key_error);
     cb (NULL, err, data);
     g_error_free (err);
   }

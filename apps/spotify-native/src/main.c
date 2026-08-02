@@ -1369,15 +1369,19 @@ on_cdn_initial_chunk_result (GBytes *decrypted_chunk, GError *error, gpointer us
 }
 
 /*
- * An audio-key request the account is not entitled to is not rejected -- the
- * access point simply never answers it. No AES_KEY_ERROR, no packet of any
- * kind. (Observed against a live AP with a free account asking for the
- * Premium-only OGG_VORBIS_320.)
+ * Backstop for an audio-key request that never gets an answer.
  *
- * Without a deadline of its own that silence is indistinguishable from a dead
- * socket, so it fell through to the run watchdog and was reported as a network
- * problem -- sending anyone who hit it to debug their firewall over what is
- * really an entitlement answer. This deadline exists to tell the truth instead.
+ * A refusal is normally explicit: the AP replies AES_KEY_ERROR carrying a
+ * reason code, promptly (~200ms observed). An earlier reading of this code --
+ * that the AP silently ignores unentitled requests -- was wrong. That silence
+ * came from the connection already being dead, because the client was not
+ * answering the AP's keepalive ping; once that was fixed, denials arrived as
+ * proper error packets.
+ *
+ * The deadline is still worth having: without one, a genuinely stuck request
+ * falls through to the run watchdog and gets reported as a network fault,
+ * which is a lie about a request that reached the server. It just fires far
+ * less often than the comment here used to claim.
  */
 #define AUDIO_KEY_ATTEMPT_TIMEOUT_S 8
 
