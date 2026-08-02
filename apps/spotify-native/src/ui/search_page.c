@@ -17,7 +17,7 @@
 #include <string.h>
 
 #define SEARCH_DEBOUNCE_MS 350
-#define SEARCH_RESULT_LIMIT 500
+#define SEARCH_RESULT_LIMIT SPOTIFYGTK_SESSION_MAX_BATCH
 
 /* Height reserved above the first row for the floating header (title + entry
  * + its top/bottom margins). Rows scroll up under the header's fading edge. */
@@ -66,9 +66,14 @@ typedef struct {
 static gboolean
 track_matches_query (const SpotifyNativeTrack *track, const gchar *const *terms)
 {
+  /* Album included: searching for a record name otherwise matched nothing in
+   * its own track list, since neither the title nor the artist carries it.
+   * That was survivable at 500 results and is not once the limit is maxed --
+   * more rows arrive, and more of them are filler this filter has to drop. */
   g_autofree gchar *haystack =
-    g_strdup_printf ("%s %s", track->name ? track->name : "",
-                              track->artists ? track->artists : "");
+    g_strdup_printf ("%s %s %s", track->name ? track->name : "",
+                                 track->artists ? track->artists : "",
+                                 track->album ? track->album : "");
   g_autofree gchar *folded = g_utf8_casefold (haystack, -1);
 
   for (guint i = 0; terms[i]; i++) {

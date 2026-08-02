@@ -103,7 +103,8 @@ spotifygtk_home_page_set_session (SpotifyGtkHomePage   *self,
   self->load_cancel = g_cancellable_new ();
   HomeLoad *cl = g_new0 (HomeLoad, 1);
   g_weak_ref_init (&cl->page, self);
-  spotifygtk_native_session_load_tracks (session, uri, 1000, self->load_cancel,
+  spotifygtk_native_session_load_tracks (session, uri, SPOTIFYGTK_SESSION_MAX_BATCH,
+                                         self->load_cancel,
                                          on_liked_loaded, cl);
 }
 

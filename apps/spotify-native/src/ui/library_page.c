@@ -69,9 +69,10 @@ on_albums_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  /* Show every distinct album in the collection (there are far fewer albums
-   * than the 1000 tracks they come from). */
-  guint n = spotifygtk_album_grid_set_from_tracks (self->albums, tracks, 1000);
+  /* Show every distinct album in the collection -- there are far fewer albums
+   * than the tracks they come from, so this cap is never the binding one. */
+  guint n = spotifygtk_album_grid_set_from_tracks (self->albums, tracks,
+                                                   SPOTIFYGTK_SESSION_MAX_BATCH);
   gtk_widget_set_visible (self->albums_status, n == 0);
   if (n == 0)
     gtk_label_set_text (GTK_LABEL (self->albums_status),
@@ -104,7 +105,8 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
   self->load_cancel = g_cancellable_new ();
   LibLoad *cl = g_new0 (LibLoad, 1);
   g_weak_ref_init (&cl->page, self);
-  spotifygtk_native_session_load_tracks (session, uri, 1000, self->load_cancel,
+  spotifygtk_native_session_load_tracks (session, uri, SPOTIFYGTK_SESSION_MAX_BATCH,
+                                         self->load_cancel,
                                          on_albums_loaded, cl);
 }
 

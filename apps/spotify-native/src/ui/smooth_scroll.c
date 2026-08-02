@@ -123,6 +123,17 @@ spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
   /* BOTH_AXES so a horizontal target still sees the vertical wheel. */
   GtkEventController *wheel =
     gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
+
+  /*
+   * CAPTURE, so this runs *before* GtkScrolledWindow's own scroll handling
+   * rather than after it. In the default bubble phase both handlers acted on
+   * the same event: the scrolled window applied its stepped jump first, which
+   * moved the adjustment behind this animation's back, and the tick below
+   * correctly concluded that something else had taken over and bailed out.
+   * The visible result was scrolling that intermittently reverted to the old
+   * stepped feel for a stretch and then went smooth again.
+   */
+  gtk_event_controller_set_propagation_phase (wheel, GTK_PHASE_CAPTURE);
   g_signal_connect (wheel, "scroll", G_CALLBACK (on_scroll), ss);
   gtk_widget_add_controller (GTK_WIDGET (scroller), wheel);
 }

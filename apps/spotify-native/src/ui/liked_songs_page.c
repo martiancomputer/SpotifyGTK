@@ -9,9 +9,11 @@
 
 /* A real collection runs to thousands of tracks (4,773 on the account this
  * was developed against) and a single metadata batch that large is rejected
- * by the server. 1000 is the largest batch confirmed to resolve in one shot;
- * paging past it is a follow-up. */
-#define LIKED_SONGS_LIMIT 1000
+ * by the server. Track SPOTIFYGTK_SESSION_MAX_BATCH -- the largest batch
+ * confirmed to resolve in one shot -- rather than repeating a number here that
+ * then goes stale when the ceiling moves. Paging past it is still a follow-up:
+ * a 4,773-track collection needs several batches, not a bigger one. */
+#define LIKED_SONGS_LIMIT SPOTIFYGTK_SESSION_MAX_BATCH
 
 /* After a failure, ignore refresh requests for this long, so revisiting the
  * page cannot turn one error into a stream of retries. */
