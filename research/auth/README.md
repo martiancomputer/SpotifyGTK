@@ -129,18 +129,23 @@ vector matches the fixed C port exactly. Baked into
       confirmed against real ground truth (a live server for the first
       two; a compiled-and-run copy of the actual reference crate for the
       third) rather than assumed fixed.
-- [ ] **Next live run is the real test** of whether login now succeeds
-      end to end. High confidence given the cipher is now verified against
-      real reference vectors, but nothing offline can prove server
-      acceptance — that's what an actual run against `ap.spotify.com` is for.
+- [x] **Login succeeds end to end**, confirmed repeatedly against real access
+      points on both Linux and Windows: handshake, DH exchange, RSA signature
+      verification and HMAC key derivation all accepted, then
+      `ap.c: login succeeded as <user>`.
+- [x] **Answer the AP's keepalive.** `AP_CMD_PING` (0x04) was defined and
+      handled nowhere, so the server dropped any connection that outlived one
+      ping interval — the cause of "playback randomly stops" on every platform,
+      not just Windows. Replying with PONG (0x49) fixed it. The reply must not
+      return early from the dispatch: the tail of that function bumps
+      `recv_nonce` and queues the next read, and skipping either desynchronises
+      the Shannon stream so every later packet fails its MAC.
 - [x] Login step (`ap.c`: `spotifygtk_ap_session_login()`, ported from
       `authentication.rs`'s `AUTHENTICATION_SPOTIFY_TOKEN` path -- reuses
       the OAuth token rather than needing a raw username/password). Needs
       a working post-handshake receive loop to deliver the result, which
       didn't exist before this either -- both landed together.
-- [ ] **GCancellable plumbing.** None of ap.c's async calls (SRV resolve,
-      TCP connect, handshake reads, receive loop reads) currently accept a
-      cancellable -- hardcoded NULL throughout. Harmless in short-lived CLI
-      usage (main.c's live-test path documents why), but a real
-      use-after-free risk once this code is driven by a long-running app
-      that might need to abort a stuck connection attempt.
+- [x] **GCancellable plumbing.** ap.c's async calls now take the session's
+      cancellable throughout, and cancellation is observable in the logs
+      ("receive loop header read failed: Operation was cancelled") when the UI
+      stops a track mid-connect.

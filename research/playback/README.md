@@ -107,9 +107,12 @@ PCM probe was then written in full to the PulseAudio backend.
 
 ## Open items
 
-- [ ] Implement `apresolve` properly instead of the hardcoded
-      `spclient.wg.spotify.com` fallback (works per librespot's own code,
-      but is a simplification worth closing out)
+- [x] Implement `apresolve` properly. Live: "apresolve offered 6 access
+      point(s), 2 usable", and the chosen AP varies per run. The hardcoded
+      `spclient.wg.spotify.com` remains only as the fallback it was meant to be.
+- [ ] **Per-track AP connection.** The engine runs the entire auth chain --
+      apresolve, handshake, login, client-token, login5 -- once *per track*,
+      which is most of the 3-4s delay before audio starts. Diagnosed, not fixed.
 - [x] Replace whole-file collection with incremental CDN range feeding,
       decoder-backed PCM output, a bounded queue, and a dedicated output
       worker with pause/resume control; the remaining scheduler work is queue

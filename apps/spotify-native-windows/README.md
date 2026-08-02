@@ -60,44 +60,59 @@ into `build/dist/`. Turning that into an installer (NSIS/MSIX) is not done.
 
 ## Status — honest
 
-### Verified
+### Verified, on real Windows
 
-Both Windows-only source paths were cross-compiled against the real mingw-w64
-Windows headers (`x86_64-w64-mingw32-gcc` 16.1, `-Wall -Wextra`, no warnings):
+Built under **MSYS2 UCRT64** on a Windows 11 guest and run there. Everything
+below was observed, not inferred:
 
-- `output_wasapi.c` compiles **and links** into a Windows `.exe` with `-lole32`.
-  That proves the `COBJMACROS` call forms, the `WAVEFORMATEX`/`eRender`/
-  `AUDCLNT_SHAREMODE_SHARED` names, and that `INITGUID` resolves
-  `CLSID_MMDeviceEnumerator` / `IID_IAudioClient` / `IID_IAudioRenderClient` /
-  `IID_ISimpleAudioVolume` without linking a separate uuid library.
-- The Windows arm of the client-token platform block compiles (extracted
-  verbatim from `clienttoken.c`): `RtlGetVersion` via `GetProcAddress`,
-  `OSVERSIONINFOEXW`, and the machine-constant selection.
+- **The build.** `meson setup build ../spotify-native && meson compile -C build`
+  produces a working `spotify-native.exe`. This is also what validated the
+  `host_machine.system()` gating in `meson.build` and `src/audio/meson.build` —
+  a cross `meson setup` never reaches those branches, so MSYS2 is what exercised
+  them.
+- **The client-token platform block, against live servers.** `NativeDesktopWindowsData`
+  returns HTTP 200 (`clienttoken: sending request (windows build=26200 …)`).
+  This was the highest-risk unverifiable piece: a wrong platform message fails
+  as an opaque HTTP 400 with an empty body.
+- **Sign-in**, through login5 to a usable bearer token.
+- **Streaming**, end to end: AP handshake, metadata, CDN resolution, audio key,
+  decrypt, decode.
+- **WASAPI playback.** Audio actually comes out. The buffer handling, COM
+  apartment pairing and drain loop are exercised.
+- **Packaging.** `build/dist/` runs as a portable directory on a machine with no
+  MSYS2 and no GTK installed.
 
-One concrete catch from doing this: **`AUDCLNT_STREAMFLAGS_AUTOCONVERT_PCM` and
-`AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY` are not defined in mingw-w64's
-`audioclient.h`.** The `#ifndef` fallbacks in `output_wasapi.c` are what make it
-build at all; without them this would not have compiled.
+Concrete catches from the port, each of which broke something real:
 
-### Not verified
+- **`AUDCLNT_STREAMFLAGS_AUTOCONVERT_PCM` and `AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY`
+  are not defined in mingw-w64's `audioclient.h`.** The `#ifndef` fallbacks in
+  `output_wasapi.c` are what make it build at all.
+- **`g_app_info_launch_default_for_uri()` asserts on Windows** when handed a NULL
+  launch context, so OAuth sign-in could not open a browser. `ShellExecuteW` is
+  used instead (`native_auth.c`).
+- **A GTK bundle needs `lib/gio/modules/`.** Without glib-networking there, every
+  HTTPS request fails with "TLS support is not available" — which looks like a
+  network problem and is not. Loadable modules also carry their own dependency
+  chains, so the DLL closure has to be computed to a fixpoint rather than in one
+  pass over the executables: 81 DLLs before, 109 after.
 
-- **Nothing has run on Windows.** Compiling is not the same as working: the WASAPI buffer
-  handling, the COM apartment pairing and the drain loop are all unexercised.
-- **The Meson platform gating is unvalidated.** A cross `meson setup` fails at
-  the very first dependency (`glib-2.0`) because a cross toolchain alone has no
-  mingw pkg-config or mingw GLib, so configuration never reaches the
-  `host_machine.system()` branches in `meson.build` / `src/audio/meson.build`.
-  Building under MSYS2, where the dependencies exist, is what will exercise them.
-- **The client-token block needs live servers.** A wrong platform message fails
-  as an opaque `HTTP 400` with an empty body, so if Windows sign-in fails that
-  way, suspect this first.
+### Not verified / known wrong
+
+- **`build.sh --bundle` still walks dependencies in a single pass.** The fixpoint
+  loop described above was worked out separately and has not been folded back
+  into the tracked script, so a bundle produced by it may be missing the DLLs
+  that only loadable modules pull in.
 - `g_chmod (path, 0600)` on the stored token is a silent no-op on Windows. The
   file sits in the user profile, which is ACL'd, but the "chmod 600" claim in
   `native_auth.c`'s header is not true there. DPAPI (`CryptProtectData`) is the
   proper fix and is not done.
 - `cairo_select_font_face ("Sans", …)` in `ui/eq_graph.c` resolves via
-  fontconfig on Linux; on Windows Cairo will fall back to whatever it picks.
+  fontconfig on Linux; on Windows Cairo falls back to whatever it picks.
   Rendering that text through Pango instead would be more correct.
+- No installer. `build/dist/` is a portable directory; turning it into NSIS or
+  MSIX is not done.
+- The cross-compile path below is a compile check only — no binary produced that
+  way has been run.
 
 ### Reproducing the compile check without MSYS2
 

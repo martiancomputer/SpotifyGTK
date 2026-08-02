@@ -10,6 +10,14 @@ is the difference between "an alternative client" and "an accidental
 ad-stripper." This is tracked here specifically so it doesn't get
 deprioritized as just plumbing.
 
+**Note (2026-08-02): free-tier playback is not reachable at all**, so this is a
+standing commitment rather than pending work. A free account is refused an audio
+key for every file a track offers — OGG_VORBIS 320/160/96 and AAC_24 alike, each
+within ~200ms — so the gate is the audio-key exchange itself, not a format or a
+bitrate. Nothing here can play a note on a free account, which means there is
+currently no ad to insert. If that ever changes, this is the work that has to
+land alongside it, not after.
+
 ## Open items
 
 - [ ] Device-state announcement payload — currently a placeholder JSON-ish
