@@ -187,7 +187,31 @@ spotifygtk_cdn_fetcher_class_init (SpotifyCdnFetcherClass *klass)
 static void
 spotifygtk_cdn_fetcher_init (SpotifyCdnFetcher *self)
 {
-  self->session = soup_session_new_with_options ("user-agent", "SpotifyGTK/" APP_VERSION, NULL);
+  /*
+   * Both timeouts are load-bearing, and their absence is what killed playback
+   * after a long pause.
+   *
+   * libsoup pools connections and, with no timeout set, waits forever. Observed
+   * live: a 73-second pause, then the range request issued on resume never got
+   * an answer at all -- no 206, no error, nothing for 96 seconds until the user
+   * gave up. The connection had gone away while idle (server or an intermediary
+   * dropping it, silently, as they do), and the request went out on a socket
+   * with nobody at the other end.
+   *
+   * idle-timeout is the actual fix: a pooled connection older than this is
+   * closed rather than reused, so a resume after a pause opens a fresh one.
+   * timeout is the backstop for a request that stalls anyway, and turns an
+   * indefinite hang into an error -- which the read-ahead path already knows
+   * how to recover from by re-resolving and retrying.
+   *
+   * Chunks arrive every second or two during playback, so idle-timeout is never
+   * reached while audio is actually flowing; it only bites across a pause,
+   * which is precisely when the connection is not worth keeping.
+   */
+  self->session = soup_session_new_with_options ("user-agent", "SpotifyGTK/" APP_VERSION,
+                                                 "timeout", 20,
+                                                 "idle-timeout", 15,
+                                                 NULL);
 }
 
 SpotifyCdnFetcher *
