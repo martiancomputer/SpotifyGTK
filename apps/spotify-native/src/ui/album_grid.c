@@ -38,9 +38,19 @@
 
 #include "album_grid.h"
 #include "cover_loader.h"
+#include "smooth_scroll.h"
 
-#define CARD_ART_PX     150   /* on-screen card art size */
-#define CARD_DECODE_PX  180   /* decode a touch larger so downscaling stays crisp */
+#define CARD_ART_PX     176   /* on-screen card art size */
+/*
+ * Decode at roughly 2x the on-screen size. At 180 against a 150px card there
+ * was almost no headroom, so any downscaling GTK did landed on nearly
+ * one-to-one pixels and the art looked soft -- and on a HiDPI display the
+ * card is physically 2x its logical size, so the source was genuinely below
+ * the panel resolution. Spotify already hands us the largest variant it has
+ * (see dup_largest_cover_id), so this costs download bandwidth we were
+ * spending anyway; what it does cost is texture memory, ~4x per cached cover.
+ */
+#define CARD_DECODE_PX  352
 #define CARD_WIDTH      (CARD_ART_PX + 24)
 
 /* Vertical space a shelf card needs beyond the art itself: 8+8 box margins,
@@ -111,10 +121,6 @@ struct _SpotifyGtkAlbumGrid {
   GtkWidget  *scroller;   /* borrowed: owned by the box */
   GtkWidget  *view;       /* borrowed: owned by the scroller */
 
-  /* Wheel-scroll animation state; see smooth_scroll_tick(). */
-  guint       scroll_tick;
-  gdouble     scroll_target;
-  gdouble     scroll_last_set;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkAlbumGrid, spotifygtk_album_grid, GTK_TYPE_BOX)
@@ -148,141 +154,6 @@ on_card_clicked (GtkButton *button, gpointer user_data)
   const gchar *name = g_object_get_data (G_OBJECT (button), "album-name");
   if (uri && *uri)
     g_signal_emit (self, signals[ALBUM_ACTIVATED], 0, uri, name);
-}
-
-/*
- * Wheel scrolling over the grid, animated.
- *
- * Dragging the scrollbar felt smoother than scrolling over the cards, and that
- * is not a subjective impression: dragging moves the adjustment continuously,
- * one position per frame, while a mouse wheel delivers discrete notches that
- * GtkScrolledWindow applies as instantaneous jumps. Same widget, two very
- * different motions.
- *
- * So take the notch as a *destination* rather than a displacement, and ease the
- * adjustment toward it a fraction per frame. Repeated notches accumulate onto
- * the pending target instead of resetting it, which is what makes a fast flick
- * feel continuous rather than stuttering.
- */
-#define SMOOTH_SCROLL_STEP  118.0   /* px per wheel notch */
-#define SMOOTH_SCROLL_EASE  0.24    /* fraction of the remaining gap per frame */
-
-static gboolean
-smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
-{
-  SpotifyGtkAlbumGrid *self = user_data;
-  GtkAdjustment *adj =
-    gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->scroller));
-  (void) widget; (void) clock;
-
-  gdouble value = gtk_adjustment_get_value (adj);
-
-  /* Someone grabbed the scrollbar, or a keyboard or programmatic scroll landed,
-   * while this was still animating. Their position wins -- abandon the
-   * animation rather than dragging the view back out from under them. */
-  if (ABS (value - self->scroll_last_set) > 1.0) {
-    self->scroll_tick = 0;
-    return G_SOURCE_REMOVE;
-  }
-
-  gdouble remaining = self->scroll_target - value;
-  if (ABS (remaining) < 0.5) {
-    gtk_adjustment_set_value (adj, self->scroll_target);
-    self->scroll_tick = 0;
-    return G_SOURCE_REMOVE;
-  }
-
-  gtk_adjustment_set_value (adj, value + remaining * SMOOTH_SCROLL_EASE);
-  self->scroll_last_set = gtk_adjustment_get_value (adj);
-  return G_SOURCE_CONTINUE;
-}
-
-static gboolean
-on_grid_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy,
-                gpointer user_data)
-{
-  SpotifyGtkAlbumGrid *self = user_data;
-  (void) dx;
-
-#if GTK_CHECK_VERSION (4, 8, 0)
-  /* Touchpads already deliver continuous pixel deltas, and GTK's own handling
-   * of those is smooth and has kinetic follow-through. Animating on top would
-   * fight it. This is only for the discrete case a wheel produces. */
-  if (gtk_event_controller_scroll_get_unit (ctrl) != GDK_SCROLL_UNIT_WHEEL)
-    return GDK_EVENT_PROPAGATE;
-#else
-  (void) ctrl;
-#endif
-
-  if (dy == 0.0)
-    return GDK_EVENT_PROPAGATE;
-
-  GtkAdjustment *adj =
-    gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->scroller));
-  if (!adj)
-    return GDK_EVENT_PROPAGATE;
-
-  gdouble lower = gtk_adjustment_get_lower (adj);
-  gdouble upper = gtk_adjustment_get_upper (adj) - gtk_adjustment_get_page_size (adj);
-  if (upper < lower)
-    upper = lower;
-
-  gdouble value = gtk_adjustment_get_value (adj);
-  /* Accumulate onto the in-flight target so a flick of several notches travels
-   * the full distance instead of each notch cancelling the last. */
-  gdouble base   = (self->scroll_tick != 0) ? self->scroll_target : value;
-  gdouble target = CLAMP (base + dy * SMOOTH_SCROLL_STEP, lower, upper);
-
-  /* Already hard against the end: let it propagate so an enclosing scroller
-   * can take over rather than the event vanishing here. */
-  if (target == value && (value <= lower || value >= upper))
-    return GDK_EVENT_PROPAGATE;
-
-  self->scroll_target   = target;
-  self->scroll_last_set = value;
-  if (self->scroll_tick == 0)
-    self->scroll_tick = gtk_widget_add_tick_callback (self->scroller,
-                                                      smooth_scroll_tick, self, NULL);
-  return GDK_EVENT_STOP;
-}
-
-/*
- * A shelf scrolls sideways, but a mouse wheel only ever reports dy -- so
- * without this the wheel did nothing at all while the pointer was over a
- * shelf, which is most of the Search page.
- *
- * Consumed only while the shelf can still move that way. At either end the
- * event propagates, so a shelf sitting inside a vertical page scroller does
- * not swallow the wheel and trap the page.
- */
-static gboolean
-on_shelf_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy,
-                 gpointer user_data)
-{
-  GtkScrolledWindow *scroller = user_data;
-  GtkAdjustment *adj = gtk_scrolled_window_get_hadjustment (scroller);
-  (void) ctrl;
-
-  if (!adj)
-    return GDK_EVENT_PROPAGATE;
-
-  gdouble delta = (dx != 0.0) ? dx : dy;
-  if (delta == 0.0)
-    return GDK_EVENT_PROPAGATE;
-
-  gdouble lower = gtk_adjustment_get_lower (adj);
-  gdouble upper = gtk_adjustment_get_upper (adj) - gtk_adjustment_get_page_size (adj);
-  gdouble value = gtk_adjustment_get_value (adj);
-
-  if ((delta < 0 && value <= lower) || (delta > 0 && value >= upper))
-    return GDK_EVENT_PROPAGATE;
-
-  gdouble step = gtk_adjustment_get_step_increment (adj);
-  if (step <= 0.0)
-    step = CARD_WIDTH;
-
-  gtk_adjustment_set_value (adj, CLAMP (value + delta * step, lower, upper));
-  return GDK_EVENT_STOP;
 }
 
 /* Build the reusable card shell once per recycled widget, not once per album. */
@@ -494,10 +365,8 @@ album_grid_new (gboolean wrap)
     gtk_widget_set_vexpand (scroller, TRUE);
     gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
 
-    GtkEventController *wheel =
-      gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
-    g_signal_connect (wheel, "scroll", G_CALLBACK (on_grid_scroll), self);
-    gtk_widget_add_controller (scroller, wheel);
+    spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
+                                     GTK_ORIENTATION_VERTICAL);
   } else {
     view = gtk_list_view_new (GTK_SELECTION_MODEL (model), factory);
     gtk_orientable_set_orientation (GTK_ORIENTABLE (view),
@@ -527,10 +396,8 @@ album_grid_new (gboolean wrap)
     gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (scroller),
                                                 CARD_ART_PX + SHELF_TEXT_ALLOWANCE);
 
-    GtkEventController *wheel =
-      gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
-    g_signal_connect (wheel, "scroll", G_CALLBACK (on_shelf_scroll), scroller);
-    gtk_widget_add_controller (scroller, wheel);
+    spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
+                                     GTK_ORIENTATION_HORIZONTAL);
   }
 
   gtk_widget_set_hexpand (scroller, TRUE);
@@ -541,6 +408,17 @@ album_grid_new (gboolean wrap)
   self->view     = view;
 
   return self;
+}
+
+/* The scrolling adjustment, so a page can react to scroll position -- the
+ * Library uses it to fold its header away. NULL before the view is built. */
+GtkAdjustment *
+spotifygtk_album_grid_get_vadjustment (SpotifyGtkAlbumGrid *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self), NULL);
+  if (!self->scroller)
+    return NULL;
+  return gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->scroller));
 }
 
 /*

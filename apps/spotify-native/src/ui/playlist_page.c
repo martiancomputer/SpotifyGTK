@@ -3,6 +3,7 @@
  */
 
 #include "playlist_page.h"
+#include "smooth_scroll.h"
 
 struct _SpotifyGtkPlaylistPage {
   AdwBin parent_instance;
@@ -192,6 +193,8 @@ spotifygtk_playlist_page_init (SpotifyGtkPlaylistPage *self)
   GtkWidget *scroll = gtk_scrolled_window_new ();
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroll),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroll),
+                                   GTK_ORIENTATION_VERTICAL);
 
   self->root_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 24));
   gtk_widget_set_margin_start (GTK_WIDGET (self->root_box), 32);

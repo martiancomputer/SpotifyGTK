@@ -19,6 +19,7 @@
 #include "track_list.h"
 #include "track_row.h"
 #include "track_item.h"
+#include "smooth_scroll.h"
 
 struct _SpotifyGtkTrackList {
   GtkBox parent_instance;
@@ -285,6 +286,8 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
   gtk_widget_set_vexpand (scroller, TRUE);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
+                                   GTK_ORIENTATION_VERTICAL);
   gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
 
   self->store = g_list_store_new (SPOTIFYGTK_TYPE_TRACK_ITEM);

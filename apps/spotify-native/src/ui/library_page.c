@@ -6,11 +6,9 @@
  * path everything else uses. Those are genuinely albums the user has saved
  * tracks from, so the grid is real library data, not filler.
  *
- * What is still missing: the *playlist* list needs spclient's rootlist
- * endpoint, which returns playlist4_external protobuf rather than the JSON the
- * catalog path parses. Until that parser exists the page says so rather than
- * inventing playlists. (A playlist opens fine once its URI is known — the
- * context-resolve path already handles spotify:playlist:<id>.)
+ * Playlists used to be a footer here, saying they were unavailable. That cost
+ * the grid a permanent row of albums to display one sentence, so it now lives
+ * on its own page (see window.c) and this page is albums only.
  */
 
 #include "library_page.h"
@@ -21,6 +19,7 @@ struct _SpotifyGtkLibraryPage {
 
   SpotifyGtkAlbumGrid  *albums;
   GtkWidget            *albums_status;   /* "Loading…" / empty note */
+  GtkWidget            *header_revealer; /* title + heading, folds away on scroll */
   SpotifyNativeSession *session;         /* not owned */
   GCancellable         *load_cancel;
 };
@@ -116,6 +115,39 @@ spotifygtk_library_page_get_album_grid (SpotifyGtkLibraryPage *self)
   return self->albums;
 }
 
+
+/*
+ * Fold the page header away as the grid scrolls.
+ *
+ * The obvious implementation -- put the header and the grid in one outer
+ * GtkScrolledWindow -- cannot be used here. That hands the GridView unbounded
+ * height, so it stops virtualising and realises every album at once, which is
+ * the several-hundred-card, ~75MB texture problem album_grid.c was rewritten to
+ * fix. So the grid stays the only scrolling region and the header reacts to its
+ * adjustment instead.
+ *
+ * Two thresholds rather than one: folding the header changes how much height
+ * the grid gets, which moves the adjustment, which could re-trigger the test.
+ * A single threshold would sit on that boundary and flap. Hiding well after the
+ * point where it reappears gives the hysteresis to settle.
+ */
+#define HEADER_HIDE_AT   90.0
+#define HEADER_SHOW_AT   12.0
+
+static void
+on_albums_scrolled (GtkAdjustment *adj, gpointer user_data)
+{
+  SpotifyGtkLibraryPage *self = user_data;
+  gdouble value = gtk_adjustment_get_value (adj);
+  gboolean revealed =
+    gtk_revealer_get_reveal_child (GTK_REVEALER (self->header_revealer));
+
+  if (revealed && value > HEADER_HIDE_AT)
+    gtk_revealer_set_reveal_child (GTK_REVEALER (self->header_revealer), FALSE);
+  else if (!revealed && value < HEADER_SHOW_AT)
+    gtk_revealer_set_reveal_child (GTK_REVEALER (self->header_revealer), TRUE);
+}
+
 /* === Building blocks === */
 
 static GtkWidget *
@@ -137,8 +169,9 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
 
   /* No outer scroller: the albums GridView brings its own, and nesting it in a
    * second vertical scroller would hand it unbounded height, so it would
-   * realise every album at once instead of only the visible ones. The headings
-   * stay fixed and the grid is the one scrolling region. */
+   * realise every album at once instead of only the visible ones. The grid is
+   * the one scrolling region; this header sits above it and folds away in
+   * response to its adjustment -- see on_albums_scrolled(). */
   GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
   gtk_widget_set_margin_start (header, 35);
   gtk_widget_set_margin_end (header, 35);
@@ -157,7 +190,13 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_label_set_xalign (GTK_LABEL (self->albums_status), 0.0);
   gtk_box_append (GTK_BOX (header), self->albums_status);
 
-  gtk_box_append (GTK_BOX (self), header);
+  self->header_revealer = gtk_revealer_new ();
+  gtk_revealer_set_transition_type (GTK_REVEALER (self->header_revealer),
+                                    GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
+  gtk_revealer_set_transition_duration (GTK_REVEALER (self->header_revealer), 180);
+  gtk_revealer_set_reveal_child (GTK_REVEALER (self->header_revealer), TRUE);
+  gtk_revealer_set_child (GTK_REVEALER (self->header_revealer), header);
+  gtk_box_append (GTK_BOX (self), self->header_revealer);
 
   self->albums = spotifygtk_album_grid_new_grid ();
   /*
@@ -173,39 +212,10 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_widget_set_vexpand (GTK_WIDGET (self->albums), TRUE);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->albums));
 
-  /* --- Playlists (honest gap) --- */
-  /*
-   * This sits outside the scrolling grid, so every pixel it occupies is taken
-   * from the albums permanently. It was costing roughly 90px -- heading margin,
-   * an 8px gap, the note, and 24px beneath -- to say one sentence, which left a
-   * band of empty page under the note and cut the last album row mid-card.
-   * Tightened to about half that: still legible, still honest about the gap,
-   * without charging the grid a full album row for the privilege.
-   */
-  GtkWidget *footer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
-  gtk_widget_set_margin_start (footer, 35);
-  gtk_widget_set_margin_end (footer, 35);
-  gtk_widget_set_margin_top (footer, 4);
-  gtk_widget_set_margin_bottom (footer, 10);
-  GtkWidget *pl_heading = heading ("Playlists");
-  gtk_widget_set_margin_top (pl_heading, 0);
-  gtk_box_append (GTK_BOX (footer), pl_heading);
+  GtkAdjustment *vadj = spotifygtk_album_grid_get_vadjustment (self->albums);
+  if (vadj)
+    g_signal_connect (vadj, "value-changed", G_CALLBACK (on_albums_scrolled), self);
 
-  GtkWidget *note = gtk_label_new (
-    "Your playlists aren’t available in this client yet.");
-  gtk_widget_set_tooltip_text (note,
-    "Needs spclient’s rootlist endpoint, which returns playlist4_external "
-    "protobuf — a larger schema than the track metadata the rest of the "
-    "catalog uses, and the one remaining piece of this migration. A playlist "
-    "still opens once its URI is known: the context-resolve path handles "
-    "spotify:playlist:<id> like everything else.");
-  gtk_widget_add_css_class (note, "dim-text");
-  gtk_label_set_xalign (GTK_LABEL (note), 0.0);
-  gtk_label_set_wrap (GTK_LABEL (note), TRUE);
-  gtk_label_set_max_width_chars (GTK_LABEL (note), 74);
-  gtk_box_append (GTK_BOX (footer), note);
-
-  gtk_box_append (GTK_BOX (self), footer);
 }
 
 SpotifyGtkLibraryPage *

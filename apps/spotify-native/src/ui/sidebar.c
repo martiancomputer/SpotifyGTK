@@ -8,6 +8,7 @@
  */
 
 #include "sidebar.h"
+#include "smooth_scroll.h"
 
 struct _SpotifyGtkSidebar {
   GtkBox parent_instance;
@@ -42,6 +43,7 @@ static const struct {
   { "search",  "Search",      "system-search-symbolic" },
   { "liked",   "Liked Songs", "emblem-favorite-symbolic" },
   { "library", "Library",     "view-list-symbolic" },
+  { "playlists","Playlists",  "view-app-grid-symbolic" },
   { "settings","Settings",    "preferences-system-symbolic" },
 };
 
@@ -195,6 +197,8 @@ spotifygtk_sidebar_init (SpotifyGtkSidebar *self)
   gtk_widget_set_vexpand (pinned_scroller, TRUE);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (pinned_scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (pinned_scroller),
+                                   GTK_ORIENTATION_VERTICAL);
 
   self->pinned_list = GTK_LIST_BOX (gtk_list_box_new ());
   gtk_list_box_set_selection_mode (self->pinned_list, GTK_SELECTION_NONE);

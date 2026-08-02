@@ -38,6 +38,9 @@ void spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self);
 void spotifygtk_album_grid_set_content_margins (SpotifyGtkAlbumGrid *self,
                                                 int start, int end);
 
+/* Scrolling adjustment of the grid, for pages that react to scroll position. */
+GtkAdjustment *spotifygtk_album_grid_get_vadjustment (SpotifyGtkAlbumGrid *self);
+
 /* Signal: album-activated (const gchar *uri, const gchar *name) */
 
 G_END_DECLS

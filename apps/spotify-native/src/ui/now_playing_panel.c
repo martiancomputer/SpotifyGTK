@@ -11,6 +11,7 @@
  * paned clamps it to 420) rather than the drawn size. */
 #define ART_DECODE_PX 420
 #include "cover_loader.h"
+#include "smooth_scroll.h"
 
 struct _SpotifyGtkNowPlayingPanel {
   GtkBox parent_instance;
@@ -124,6 +125,8 @@ build_marquee (GtkLabel **out_label, const gchar *css)
   GtkWidget *scroller = gtk_scrolled_window_new ();
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_EXTERNAL, GTK_POLICY_NEVER);
+  spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
+                                   GTK_ORIENTATION_VERTICAL);
   gtk_scrolled_window_set_propagate_natural_width (GTK_SCROLLED_WINDOW (scroller), FALSE);
   gtk_scrolled_window_set_min_content_width (GTK_SCROLLED_WINDOW (scroller), 0);
   gtk_widget_set_hexpand (scroller, TRUE);
@@ -270,6 +273,8 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
   gtk_widget_set_vexpand (queue_scroller, TRUE);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (queue_scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (queue_scroller),
+                                   GTK_ORIENTATION_VERTICAL);
   gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (queue_scroller), FALSE);
 
   self->queue_list = GTK_LIST_BOX (gtk_list_box_new ());

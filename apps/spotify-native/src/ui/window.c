@@ -1233,6 +1233,42 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->search_page), "search");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->liked_page), "liked");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->library_page), "library");
+  /*
+   * Playlists has no data source yet, so this page exists to say so rather
+   * than to hide the gap. It used to be a footer on the Library page, where it
+   * permanently cost that grid a row of albums to display one sentence.
+   *
+   * It needs spclient's rootlist endpoint, which returns playlist4_external
+   * protobuf rather than the JSON the catalog path parses. A playlist still
+   * opens fine once its URI is known -- context-resolve handles
+   * spotify:playlist:<id> like everything else.
+   */
+  {
+    GtkWidget *pl = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_margin_start (pl, 35);
+    gtk_widget_set_margin_end (pl, 35);
+    gtk_widget_set_margin_top (pl, 24);
+
+    GtkWidget *pl_title = gtk_label_new ("Playlists");
+    gtk_widget_add_css_class (pl_title, "title-text");
+    gtk_label_set_xalign (GTK_LABEL (pl_title), 0.0);
+    gtk_box_append (GTK_BOX (pl), pl_title);
+
+    GtkWidget *pl_note = gtk_label_new (
+      "Your playlists aren\u2019t available in this client yet.");
+    gtk_widget_add_css_class (pl_note, "dim-text");
+    gtk_label_set_xalign (GTK_LABEL (pl_note), 0.0);
+    gtk_label_set_wrap (GTK_LABEL (pl_note), TRUE);
+    gtk_label_set_max_width_chars (GTK_LABEL (pl_note), 74);
+    gtk_widget_set_tooltip_text (pl_note,
+      "Needs spclient\u2019s rootlist endpoint, which returns playlist4_external "
+      "protobuf \u2014 a larger schema than the track metadata the rest of the "
+      "catalog uses, and the one remaining piece of this migration.");
+    gtk_box_append (GTK_BOX (pl), pl_note);
+
+    gtk_stack_add_named (self->page_stack, pl, "playlists");
+  }
+
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->settings_page), "settings");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->context_page), "context");
 
