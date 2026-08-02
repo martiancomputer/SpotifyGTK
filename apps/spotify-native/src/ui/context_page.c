@@ -116,25 +116,38 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   gtk_label_set_xalign (self->kind_label, 0.0);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->kind_label));
 
-  /* Title and release year share a row, year trailing. The title expands so
-   * the year stays pinned to the right edge however long the title is, and
-   * the title -- not the year -- is what ellipsises when space runs out. */
-  GtkWidget *title_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  /*
+   * Title and release year share a row, the year sitting just past the end of
+   * the title rather than out at the right margin. Pinned to the edge it was
+   * a long eye-track away from the thing it describes, and on a wide window it
+   * read as an unrelated element.
+   *
+   * So the title does *not* expand -- a trailing spacer absorbs the slack
+   * instead, which keeps the year adjacent whatever the title's length. The
+   * title still ellipsises when the row runs out of room, because an
+   * ellipsising label has a small minimum width and yields first.
+   */
+  GtkWidget *title_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   gtk_widget_set_margin_bottom (title_row, 8);
 
   self->title_label = GTK_LABEL (gtk_label_new (""));
   gtk_widget_add_css_class (GTK_WIDGET (self->title_label), "title-text");
   gtk_label_set_xalign (self->title_label, 0.0);
   gtk_label_set_ellipsize (self->title_label, PANGO_ELLIPSIZE_END);
-  gtk_widget_set_hexpand (GTK_WIDGET (self->title_label), TRUE);
   gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->title_label));
 
   self->year_label = GTK_LABEL (gtk_label_new (""));
   gtk_widget_add_css_class (GTK_WIDGET (self->year_label), "dim-text");
-  gtk_label_set_xalign (self->year_label, 1.0);
+  gtk_label_set_xalign (self->year_label, 0.0);
+  /* Bottom-aligned against a much larger title, so it settles near the
+   * baseline instead of floating beside the cap height. */
   gtk_widget_set_valign (GTK_WIDGET (self->year_label), GTK_ALIGN_END);
   gtk_widget_set_margin_bottom (GTK_WIDGET (self->year_label), 6);
   gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->year_label));
+
+  GtkWidget *title_slack = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand (title_slack, TRUE);
+  gtk_box_append (GTK_BOX (title_row), title_slack);
 
   gtk_box_append (GTK_BOX (self), title_row);
 
