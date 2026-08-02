@@ -32,6 +32,12 @@ guint spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
 
 void spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self);
 
+/* Inset the cards while leaving the scrollbar flush with the widget edge.
+ * Use this rather than a margin on the widget itself, which would push the
+ * scrollbar inward too and leave a gutter beside it. */
+void spotifygtk_album_grid_set_content_margins (SpotifyGtkAlbumGrid *self,
+                                                int start, int end);
+
 /* Signal: album-activated (const gchar *uri, const gchar *name) */
 
 G_END_DECLS

@@ -160,8 +160,15 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_box_append (GTK_BOX (self), header);
 
   self->albums = spotifygtk_album_grid_new_grid ();
-  gtk_widget_set_margin_start (GTK_WIDGET (self->albums), 35);
-  gtk_widget_set_margin_end (GTK_WIDGET (self->albums), 35);
+  /*
+   * The horizontal inset goes on the cards, not on this widget. A margin here
+   * would push the scrollbar inward too, stacking its width on top of the
+   * margin and leaving a dead gutter beside it -- the bar belongs flush with
+   * the page edge like every other scroller in the app. The end inset is a
+   * little smaller than the start because the bar itself occupies the
+   * difference, which is what makes the two sides read as equal.
+   */
+  spotifygtk_album_grid_set_content_margins (self->albums, 35, 22);
   gtk_widget_set_margin_top (GTK_WIDGET (self->albums), 12);
   gtk_widget_set_vexpand (GTK_WIDGET (self->albums), TRUE);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->albums));

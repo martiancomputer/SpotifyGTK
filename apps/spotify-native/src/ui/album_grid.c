@@ -43,6 +43,12 @@
 #define CARD_DECODE_PX  180   /* decode a touch larger so downscaling stays crisp */
 #define CARD_WIDTH      (CARD_ART_PX + 24)
 
+/* Vertical space a shelf card needs beyond the art itself: 8+8 box margins,
+ * two 8px gaps, a title row and an artist row, plus the button's own padding
+ * and a few pixels of clearance so the scrollbar underneath is not touching
+ * the text. */
+#define SHELF_TEXT_ALLOWANCE  96
+
 /* === One album in the model === */
 
 #define SPOTIFYGTK_TYPE_ALBUM_ITEM (spotifygtk_album_item_get_type ())
@@ -101,6 +107,14 @@ struct _SpotifyGtkAlbumGrid {
 
   GListStore *store;
   gboolean    wrap;
+
+  GtkWidget  *scroller;   /* borrowed: owned by the box */
+  GtkWidget  *view;       /* borrowed: owned by the scroller */
+
+  /* Wheel-scroll animation state; see smooth_scroll_tick(). */
+  guint       scroll_tick;
+  gdouble     scroll_target;
+  gdouble     scroll_last_set;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkAlbumGrid, spotifygtk_album_grid, GTK_TYPE_BOX)
@@ -134,6 +148,102 @@ on_card_clicked (GtkButton *button, gpointer user_data)
   const gchar *name = g_object_get_data (G_OBJECT (button), "album-name");
   if (uri && *uri)
     g_signal_emit (self, signals[ALBUM_ACTIVATED], 0, uri, name);
+}
+
+/*
+ * Wheel scrolling over the grid, animated.
+ *
+ * Dragging the scrollbar felt smoother than scrolling over the cards, and that
+ * is not a subjective impression: dragging moves the adjustment continuously,
+ * one position per frame, while a mouse wheel delivers discrete notches that
+ * GtkScrolledWindow applies as instantaneous jumps. Same widget, two very
+ * different motions.
+ *
+ * So take the notch as a *destination* rather than a displacement, and ease the
+ * adjustment toward it a fraction per frame. Repeated notches accumulate onto
+ * the pending target instead of resetting it, which is what makes a fast flick
+ * feel continuous rather than stuttering.
+ */
+#define SMOOTH_SCROLL_STEP  118.0   /* px per wheel notch */
+#define SMOOTH_SCROLL_EASE  0.24    /* fraction of the remaining gap per frame */
+
+static gboolean
+smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
+{
+  SpotifyGtkAlbumGrid *self = user_data;
+  GtkAdjustment *adj =
+    gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->scroller));
+  (void) widget; (void) clock;
+
+  gdouble value = gtk_adjustment_get_value (adj);
+
+  /* Someone grabbed the scrollbar, or a keyboard or programmatic scroll landed,
+   * while this was still animating. Their position wins -- abandon the
+   * animation rather than dragging the view back out from under them. */
+  if (ABS (value - self->scroll_last_set) > 1.0) {
+    self->scroll_tick = 0;
+    return G_SOURCE_REMOVE;
+  }
+
+  gdouble remaining = self->scroll_target - value;
+  if (ABS (remaining) < 0.5) {
+    gtk_adjustment_set_value (adj, self->scroll_target);
+    self->scroll_tick = 0;
+    return G_SOURCE_REMOVE;
+  }
+
+  gtk_adjustment_set_value (adj, value + remaining * SMOOTH_SCROLL_EASE);
+  self->scroll_last_set = gtk_adjustment_get_value (adj);
+  return G_SOURCE_CONTINUE;
+}
+
+static gboolean
+on_grid_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy,
+                gpointer user_data)
+{
+  SpotifyGtkAlbumGrid *self = user_data;
+  (void) dx;
+
+#if GTK_CHECK_VERSION (4, 8, 0)
+  /* Touchpads already deliver continuous pixel deltas, and GTK's own handling
+   * of those is smooth and has kinetic follow-through. Animating on top would
+   * fight it. This is only for the discrete case a wheel produces. */
+  if (gtk_event_controller_scroll_get_unit (ctrl) != GDK_SCROLL_UNIT_WHEEL)
+    return GDK_EVENT_PROPAGATE;
+#else
+  (void) ctrl;
+#endif
+
+  if (dy == 0.0)
+    return GDK_EVENT_PROPAGATE;
+
+  GtkAdjustment *adj =
+    gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->scroller));
+  if (!adj)
+    return GDK_EVENT_PROPAGATE;
+
+  gdouble lower = gtk_adjustment_get_lower (adj);
+  gdouble upper = gtk_adjustment_get_upper (adj) - gtk_adjustment_get_page_size (adj);
+  if (upper < lower)
+    upper = lower;
+
+  gdouble value = gtk_adjustment_get_value (adj);
+  /* Accumulate onto the in-flight target so a flick of several notches travels
+   * the full distance instead of each notch cancelling the last. */
+  gdouble base   = (self->scroll_tick != 0) ? self->scroll_target : value;
+  gdouble target = CLAMP (base + dy * SMOOTH_SCROLL_STEP, lower, upper);
+
+  /* Already hard against the end: let it propagate so an enclosing scroller
+   * can take over rather than the event vanishing here. */
+  if (target == value && (value <= lower || value >= upper))
+    return GDK_EVENT_PROPAGATE;
+
+  self->scroll_target   = target;
+  self->scroll_last_set = value;
+  if (self->scroll_tick == 0)
+    self->scroll_tick = gtk_widget_add_tick_callback (self->scroller,
+                                                      smooth_scroll_tick, self, NULL);
+  return GDK_EVENT_STOP;
 }
 
 /*
@@ -373,20 +483,21 @@ album_grid_new (gboolean wrap)
     gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                     GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     /*
-     * Overlay here, unlike the shelf below. A non-overlay vertical bar claims a
-     * permanent strip of layout width, and since the page already insets this
-     * widget by its own margin the two stacked up: the grid ended ~80px from
-     * the right edge against ~35px on the left, which read as a dead gutter
-     * rather than as symmetric padding. Floating the bar restores the symmetry.
-     *
-     * The earlier objection to overlay was about the *horizontal* shelf bar
-     * being drawn across the card titles. That still holds, and that scroller
-     * still opts out -- but it does not apply to a vertical bar tracking the
-     * right edge of a grid.
+     * Non-overlay, matching every other scroller in the app. Overlay was tried
+     * to reclaim the right-hand gutter and was the wrong trade: GTK draws an
+     * overlay bar with a translucent trough that floats over the content, so
+     * this one bar no longer looked like any of the others. The gutter is a
+     * margin problem and is fixed as one -- see set_content_margins(), which
+     * insets the cards while leaving the scroller itself flush right.
      */
-    gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), TRUE);
+    gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
     gtk_widget_set_vexpand (scroller, TRUE);
     gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
+
+    GtkEventController *wheel =
+      gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+    g_signal_connect (wheel, "scroll", G_CALLBACK (on_grid_scroll), self);
+    gtk_widget_add_controller (scroller, wheel);
   } else {
     view = gtk_list_view_new (GTK_SELECTION_MODEL (model), factory);
     gtk_orientable_set_orientation (GTK_ORIENTABLE (view),
@@ -400,17 +511,21 @@ album_grid_new (gboolean wrap)
     gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
 
     /*
-     * Ask the card how tall it is instead of asserting a number. The previous
-     * fixed 214px was a hand-computed guess that came out slightly short --
-     * margins 16 + art 150 + spacing 16 + two text lines is already ~218 before
-     * any CSS padding on the button -- so the vertical policy of NEVER clipped
-     * the difference, and what got clipped was the bottom of the title row,
-     * right where the horizontal scrollbar sits. That is the overlap.
+     * Two things together, because natural-height propagation alone was not
+     * enough: it raises the *natural* request, but a GtkBox under pressure
+     * hands out minimum heights, and the minimum here is far below a card. The
+     * cards stayed clipped -- title cut through its descenders, artist line
+     * gone entirely, scrollbar sitting in the wound.
      *
-     * Propagating the natural height means the card's real measurement decides,
-     * so changing CARD_ART_PX or a font size cannot silently reintroduce this.
+     * min_content_height is the part a parent must honour. Sized from the art
+     * plus a measured allowance for the two text rows, margins and the button's
+     * padding, with SHELF_TEXT_ALLOWANCE deliberately generous: being a few
+     * pixels over costs a few pixels of whitespace, being a few pixels under
+     * costs a clipped title, and those are not symmetric mistakes.
      */
     gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (scroller), TRUE);
+    gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (scroller),
+                                                CARD_ART_PX + SHELF_TEXT_ALLOWANCE);
 
     GtkEventController *wheel =
       gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
@@ -422,7 +537,31 @@ album_grid_new (gboolean wrap)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), view);
   gtk_box_append (GTK_BOX (self), scroller);
 
+  self->scroller = scroller;
+  self->view     = view;
+
   return self;
+}
+
+/*
+ * Inset the cards without insetting the scrollbar.
+ *
+ * A page that puts its own margin on this whole widget pushes the scrollbar
+ * inward along with the content, which stacks the bar's width on top of the
+ * page margin and leaves a dead gutter -- ~80px against ~35px on the other
+ * side, which is what it looked like. Applying the inset to the view instead
+ * keeps the bar flush with the page edge, where every other scroller in the
+ * app puts it, and lets the cards sit at whatever margin the page wants.
+ */
+void
+spotifygtk_album_grid_set_content_margins (SpotifyGtkAlbumGrid *self,
+                                           int start, int end)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  if (!self->view)
+    return;
+  gtk_widget_set_margin_start (self->view, start);
+  gtk_widget_set_margin_end (self->view, end);
 }
 
 SpotifyGtkAlbumGrid *
