@@ -493,6 +493,9 @@ typedef struct {
   guint8              track_gid[16];
   guint8              audio_key[AUDIO_KEY_LEN];
   GSource            *key_timeout_source;
+  /* Read-ahead retries spent on the current position. Reset on every chunk
+   * that lands, so this bounds consecutive failures rather than the track. */
+  guint               read_ahead_retries;
   gchar              *cdn_url;
   const gchar         *track_uri;
   GBytes             *initial_cdn_chunk;
@@ -1191,17 +1194,48 @@ do_seek (LiveTestState *state)
                               on_seek_landing_chunk, land);
 }
 
+#define READ_AHEAD_MAX_RETRIES 2
+static void on_read_ahead_restorage (SpclientCdnUrls *urls, GError *error, gpointer user_data);
+
 static void
 on_read_ahead_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
   if (!decrypted_chunk) {
-    g_warning ("[live-test] read-ahead fetch failed at logical offset %" G_GOFFSET_FORMAT ": %s",
-               state->next_download_offset, error ? error->message : "unknown error");
+    /*
+     * One refused range used to end the track outright. That is the wrong
+     * response to the most common cause: a CDN URL that aged out while
+     * playback was paused. The bytes are still there and the file is still
+     * licensed -- only the signed URL has expired -- so re-resolving and
+     * retrying recovers, where giving up loses the rest of the track and
+     * reads to the listener as "the audio randomly died".
+     *
+     * Bounded, and the counter resets on every chunk that lands, so this
+     * survives a stale URL or a transient blip without spinning forever on a
+     * genuinely dead stream.
+     */
+    if (state->read_ahead_retries < READ_AHEAD_MAX_RETRIES) {
+      state->read_ahead_retries++;
+      g_warning ("[live-test] read-ahead fetch failed at logical offset %" G_GOFFSET_FORMAT
+                 ": %s -- re-resolving the CDN URL and retrying.",
+                 state->next_download_offset, error ? error->message : "unknown error");
+      spotifygtk_spclient_get_audio_storage (state->spclient, state->file_id, 20,
+                                             state->bearer_token, state->client_token,
+                                             on_read_ahead_restorage, state);
+      return;
+    }
+
+    g_warning ("[live-test] read-ahead fetch failed at logical offset %" G_GOFFSET_FORMAT
+               ": %s -- gave up after %d retries.",
+               state->next_download_offset, error ? error->message : "unknown error",
+               READ_AHEAD_MAX_RETRIES);
     state->ok = FALSE;
     g_main_loop_quit (state->loop);
     return;
   }
+
+  /* Progress made: forgive earlier failures at other offsets. */
+  state->read_ahead_retries = 0;
 
   gsize len = 0;
   g_bytes_get_data (decrypted_chunk, &len);
@@ -1236,6 +1270,44 @@ on_read_ahead_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
   g_message ("[live-test] final CDN range reached; read-ahead decoder drained.");
   state->ok = TRUE;
   g_main_loop_quit (state->loop);
+}
+
+static void start_read_ahead (LiveTestState *state);
+
+/*
+ * A CDN URL went stale mid-track. Resolve fresh ones for the same file and
+ * resume from where the failed range began.
+ *
+ * The storage response is per-file and short-lived: the URLs carry an issue
+ * timestamp and the validity window is the server's, not something the client
+ * can read off them. So the only way to know a URL has aged out is to have a
+ * request refused, which is exactly what brings us here.
+ */
+static void
+on_read_ahead_restorage (SpclientCdnUrls *urls, GError *error, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+
+  if (!urls || urls->n_urls == 0) {
+    g_warning ("[live-test] could not re-resolve CDN storage after a failed "
+               "range (%s); ending the track.",
+               error ? error->message : "no URLs returned");
+    if (urls)
+      spclient_cdn_urls_free (urls);
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  g_free (state->cdn_url);
+  state->cdn_url = g_strdup (urls->urls[0]);
+  spclient_cdn_urls_free (urls);
+
+  g_message ("[live-test] re-resolved CDN storage; retrying the range at offset %"
+             G_GOFFSET_FORMAT " (attempt %u/%d).",
+             state->next_download_offset, state->read_ahead_retries,
+             READ_AHEAD_MAX_RETRIES);
+  start_read_ahead (state);
 }
 
 static void
