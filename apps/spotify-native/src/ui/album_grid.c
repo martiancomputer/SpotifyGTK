@@ -402,15 +402,15 @@ album_grid_new (gboolean wrap)
      * And a hard floor on the widget itself, because the two settings above
      * were not enough on Home.
      *
-     * Home puts its shelves inside an outer vertical GtkScrolledWindow; Search
-     * does not. That nesting is the whole difference between the page where the
-     * cards came out right and the page where they stayed clipped, so the
-     * request above is evidently negotiable somewhere in that chain. I could not
-     * pin down exactly where from reading the widget code, and a size request is
-     * the one constraint no container bargains away -- so state the height as a
-     * floor rather than as a preference and stop the cards being squeezed at all.
+     * On the scroller, not on the SpotifyGtkAlbumGrid box that wraps it. That
+     * distinction is the entire bug: this widget is a vertical GtkBox, and the
+     * shelf branch -- unlike the grid branch above -- never sets vexpand on its
+     * scroller. A floor on the box therefore made the *box* 292px while the
+     * scroller inside kept taking only its own natural height, so the dead
+     * space appeared below the scrollbar and the cards stayed exactly as
+     * squeezed as before. Constrain the thing whose height actually matters.
      */
-    gtk_widget_set_size_request (GTK_WIDGET (self), -1,
+    gtk_widget_set_size_request (scroller, -1,
                                  CARD_ART_PX + SHELF_TEXT_ALLOWANCE + SHELF_BAR_ALLOWANCE);
 
     spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
