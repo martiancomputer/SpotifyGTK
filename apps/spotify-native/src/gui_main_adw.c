@@ -5,6 +5,7 @@
 #include "config.h"
 #include "ui/window.h"
 #include "playback_probe.h"
+#include "log_file.h"
 
 static void
 on_activate (GtkApplication *app, gpointer user_data)
@@ -31,6 +32,10 @@ on_activate (GtkApplication *app, gpointer user_data)
 int
 main (int argc, char *argv[])
 {
+  /* Before anything else that might log, so a bug report covers sign-in and
+   * the AP handshake rather than starting halfway through the session. */
+  spotifygtk_log_file_init ();
+
   /* Single-instance is right for users but blocks running a freshly built
    * copy while another is already open, which makes verifying UI changes
    * awkward. SPOTIFY_DEV_INSTANCE opts out for development. */
@@ -54,5 +59,6 @@ main (int argc, char *argv[])
 
   int status = g_application_run (G_APPLICATION (app), argc, argv);
   g_object_unref (app);
+  spotifygtk_log_file_shutdown ();
   return status;
 }
