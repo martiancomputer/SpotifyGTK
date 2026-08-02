@@ -45,6 +45,33 @@ struct _SpotifyNativeSession {
   gboolean  refreshing;
   GList    *pending_ops;
 
+  /*
+   * One shared copy of the collection.
+   *
+   * Home, Library and Liked Songs all resolve the same collection URI, and all
+   * three are handed the session at sign-in -- so the same several-thousand
+   * track load ran three times concurrently, each paying its own paging round
+   * trips and keeping its own copy. Cached here, on the worker thread that owns
+   * every load, so the second and third callers are served from memory.
+   *
+   * Deliberately not a general cache: only the collection URI is shared between
+   * pages, and a search or an album is per-view and short-lived.
+   */
+  gchar     *collection_cache_uri;    /* which URI the cache holds */
+  GPtrArray *collection_cache;        /* SpotifyNativeTrack*, owned */
+
+  /*
+   * Requests waiting on a collection load already in flight.
+   *
+   * A cache alone was not enough: all three pages are handed the session in the
+   * same breath at sign-in and ask concurrently, so every one of them missed an
+   * empty cache and started its own load. Measured, before this: six paging
+   * requests where two would do. Coalescing is what actually removes the
+   * duplication; the cache then covers later navigations.
+   */
+  gchar  *collection_inflight_uri;
+  GList  *collection_waiters;         /* GTask*, each holding its own ref */
+
   /* Shared state: written by the worker, read by the main thread. */
   GMutex   lock;
   SpotifyNativeSessionState state;
@@ -486,6 +513,42 @@ static void
 load_op_finish (LoadTracksOp *op)
 {
   GPtrArray *out = g_steal_pointer (&op->out);
+
+  /* Keep collection loads for the other pages that will ask for the same URI.
+   * Only the collection: everything else is per-view. */
+  if (out && op->context_uri && strstr (op->context_uri, ":collection")) {
+    SpotifyNativeSession *self = op->session;
+    g_clear_pointer (&self->collection_cache, g_ptr_array_unref);
+    g_free (self->collection_cache_uri);
+
+    self->collection_cache_uri = g_strdup (op->context_uri);
+    self->collection_cache = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_track_free);
+    for (guint i = 0; i < out->len; i++)
+      g_ptr_array_add (self->collection_cache,
+                       spotifygtk_native_track_copy (g_ptr_array_index (out, i)));
+
+    /* Everyone who joined this load gets their own copy, since callers own
+     * what they receive and some sort it in place. */
+    g_clear_pointer (&self->collection_inflight_uri, g_free);
+    GList *waiters = self->collection_waiters;
+    self->collection_waiters = NULL;
+    for (GList *l = waiters; l; l = l->next) {
+      GTask *waiting = l->data;
+      GPtrArray *copy = g_ptr_array_new_with_free_func (
+        (GDestroyNotify) spotifygtk_native_track_free);
+      for (guint i = 0; i < out->len; i++)
+        g_ptr_array_add (copy, spotifygtk_native_track_copy (g_ptr_array_index (out, i)));
+      g_task_return_pointer (waiting, copy, (GDestroyNotify) g_ptr_array_unref);
+      g_object_unref (waiting);
+    }
+    if (waiters) {
+      g_message ("session: satisfied %u joined collection request(s) from the "
+                 "same load", g_list_length (waiters));
+      g_list_free (waiters);
+    }
+  }
+
   g_task_return_pointer (op->task, out, (GDestroyNotify) g_ptr_array_unref);
   g_object_unref (op->task);
   load_op_free (op);
@@ -511,6 +574,20 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
       load_op_finish (op);
       return;
     }
+    /* Fail the joined requests too, or they would wait for a completion that
+     * is never coming. */
+    SpotifyNativeSession *sess = op->session;
+    g_clear_pointer (&sess->collection_inflight_uri, g_free);
+    GList *waiters = sess->collection_waiters;
+    sess->collection_waiters = NULL;
+    for (GList *l = waiters; l; l = l->next) {
+      g_task_return_new_error (l->data, G_IO_ERROR, G_IO_ERROR_FAILED,
+        "could not load track metadata: %s",
+        error ? error->message : "no tracks returned");
+      g_object_unref (l->data);
+    }
+    g_list_free (waiters);
+
     g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_FAILED,
       "could not load track metadata: %s",
       error ? error->message : "no tracks returned");
@@ -776,6 +853,36 @@ spotifygtk_native_session_load_tracks (SpotifyNativeSession *self,
     return;
   }
 
+  /* Already fetching this exact URI: wait for it rather than duplicating it. */
+  if (self->collection_inflight_uri &&
+      g_strcmp0 (context_uri, self->collection_inflight_uri) == 0) {
+    g_message ("session: joining the collection load already in flight");
+    self->collection_waiters = g_list_append (self->collection_waiters, task);
+    return;   /* the task ref transfers to the waiter list */
+  }
+
+  /* Cache hit: hand back a copy and skip the network entirely. A copy rather
+   * than the array itself because callers own what they receive and some sort
+   * it in place. */
+  if (self->collection_cache && self->collection_cache_uri &&
+      g_strcmp0 (context_uri, self->collection_cache_uri) == 0) {
+    GPtrArray *copy = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_track_free);
+    for (guint i = 0; i < self->collection_cache->len; i++)
+      g_ptr_array_add (copy, spotifygtk_native_track_copy (
+        g_ptr_array_index (self->collection_cache, i)));
+
+    g_message ("session: serving %u collection track(s) from cache", copy->len);
+    g_task_return_pointer (task, copy, (GDestroyNotify) g_ptr_array_unref);
+    g_object_unref (task);
+    return;
+  }
+
+  if (strstr (context_uri, ":collection")) {
+    g_free (self->collection_inflight_uri);
+    self->collection_inflight_uri = g_strdup (context_uri);
+  }
+
   LoadTracksOp *op = g_new0 (LoadTracksOp, 1);
   op->session     = self;
   op->task        = task;   /* ref transferred; holds a ref on `self` too */
@@ -890,6 +997,8 @@ static void
 spotifygtk_native_session_finalize (GObject *object)
 {
   SpotifyNativeSession *self = SPOTIFYGTK_NATIVE_SESSION (object);
+  g_clear_pointer (&self->collection_cache, g_ptr_array_unref);
+  g_clear_pointer (&self->collection_cache_uri, g_free);
   g_mutex_clear (&self->lock);
   G_OBJECT_CLASS (spotifygtk_native_session_parent_class)->finalize (object);
 }

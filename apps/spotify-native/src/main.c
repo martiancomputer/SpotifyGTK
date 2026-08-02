@@ -1585,6 +1585,9 @@ on_audio_storage_result (SpclientCdnUrls *urls, GError *error, gpointer user_dat
   g_main_loop_quit (state->loop);
 }
 
+static void proceed_with_credentials (LiveTestState *state);
+static void cred_cache_invalidate (void);
+
 static void
 on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError *error, gpointer user_data)
 {
@@ -1622,6 +1625,10 @@ on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError 
     }
   } else {
     g_warning ("[live-test] get_track_metadata failed: %s", error ? error->message : "unknown error");
+    /* This is the first request made with the streaming credentials, so it is
+     * where a stale or revoked pair shows up. Drop the cache rather than
+     * re-serving it for the rest of the hour and failing every track. */
+    cred_cache_invalidate ();
     state->ok = FALSE;
   }
 
@@ -1783,6 +1790,79 @@ on_context_probe_result (JsonNode *context, GError *error, gpointer user_data)
                                            on_batch_probe_result, state);
 }
 
+/*
+ * Streaming credentials, cached for the life of the process.
+ *
+ * The engine runs its whole auth chain once per *track*, and on a real run the
+ * fixed part of that costs about a second before a byte of audio is fetched:
+ * handshake and login ~360ms, then client-token ~280ms and login5 ~430ms. The
+ * last two are plain HTTP and their results are good for an hour, so paying for
+ * them again on every track was buying nothing.
+ *
+ * Cached with the expiry the server states, minus a margin so a token cannot
+ * lapse between the check here and its use a few hundred milliseconds later.
+ * The AP handshake still happens per track -- that is a bigger change and is
+ * left alone.
+ */
+static GMutex  cred_cache_lock;
+static gchar  *cred_cache_bearer;
+static gchar  *cred_cache_client_token;
+static gint64  cred_cache_expiry_us;   /* monotonic */
+
+#define CRED_CACHE_MARGIN_US (60 * G_USEC_PER_SEC)
+
+/* Returns TRUE and fills both out-params (newly allocated) when a usable pair
+ * is cached. */
+static gboolean
+cred_cache_take (gchar **bearer, gchar **client_token)
+{
+  gboolean hit = FALSE;
+
+  g_mutex_lock (&cred_cache_lock);
+  if (cred_cache_bearer && cred_cache_client_token &&
+      g_get_monotonic_time () < cred_cache_expiry_us) {
+    *bearer       = g_strdup (cred_cache_bearer);
+    *client_token = g_strdup (cred_cache_client_token);
+    hit = TRUE;
+  }
+  g_mutex_unlock (&cred_cache_lock);
+
+  return hit;
+}
+
+static void
+cred_cache_store (const gchar *bearer, const gchar *client_token,
+                  gint32 expires_in_seconds)
+{
+  if (!bearer || !client_token)
+    return;
+
+  g_mutex_lock (&cred_cache_lock);
+  g_free (cred_cache_bearer);
+  g_free (cred_cache_client_token);
+  cred_cache_bearer       = g_strdup (bearer);
+  cred_cache_client_token = g_strdup (client_token);
+
+  gint64 life = (gint64) (expires_in_seconds > 0 ? expires_in_seconds : 3600)
+                * G_USEC_PER_SEC;
+  if (life > CRED_CACHE_MARGIN_US)
+    life -= CRED_CACHE_MARGIN_US;
+  cred_cache_expiry_us = g_get_monotonic_time () + life;
+  g_mutex_unlock (&cred_cache_lock);
+}
+
+/* Dropped when a request built on these is refused, so a revoked or otherwise
+ * bad pair cannot be re-served for the rest of the hour. */
+static void
+cred_cache_invalidate (void)
+{
+  g_mutex_lock (&cred_cache_lock);
+  g_clear_pointer (&cred_cache_bearer, g_free);
+  g_clear_pointer (&cred_cache_client_token, g_free);
+  cred_cache_expiry_us = 0;
+  g_mutex_unlock (&cred_cache_lock);
+}
+
 static void
 on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
                   GError *error, gpointer user_data)
@@ -1794,6 +1874,30 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
               "(expires in %ds).", expires_in_seconds);
 
     state->bearer_token = g_strdup (access_token);
+    cred_cache_store (access_token, state->client_token, expires_in_seconds);
+    proceed_with_credentials (state);
+    return;
+  }
+  else {
+    g_warning ("[live-test] login5 failed: %s", error ? error->message : "unknown error");
+    g_warning ("[live-test] AP login itself succeeded -- only the streaming auth-relay "
+              "chain (client-token/login5) failed. See spotify/login5.h and spotify/"
+              "clienttoken.h.");
+    state->ok = FALSE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+}
+
+/*
+ * Everything after the streaming credentials are in hand, whether they were
+ * fetched or came from the cache. Split out so a cache hit re-enters at exactly
+ * the same point rather than duplicating this.
+ */
+static void
+proceed_with_credentials (LiveTestState *state)
+{
+  {
     state->spclient = spotifygtk_spclient_new ();
     spotifygtk_spclient_set_cancellable (state->spclient, state->cancellable);
 
@@ -1826,15 +1930,7 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
                                             state->bearer_token, state->client_token,
                                             on_track_metadata_result, state);
     return; /* Wait for track metadata */
-  } else {
-    g_warning ("[live-test] login5 failed: %s", error ? error->message : "unknown error");
-    g_warning ("[live-test] AP login itself succeeded -- only the streaming auth-relay "
-              "chain (client-token/login5) failed. See spotify/login5.h and spotify/"
-              "clienttoken.h.");
-    state->ok = FALSE;
   }
-
-  g_main_loop_quit (state->loop);
 }
 
 static void
@@ -1893,6 +1989,15 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
    * original native_auth OAuth token -- see spotify/login5.h). This
    * is the next real unknown worth proving against actual Spotify
    * services rather than just building and hoping. */
+  if (cred_cache_take (&state->bearer_token, &state->client_token)) {
+    g_message ("[live-test] reusing cached streaming credentials -- skipping "
+               "client-token and login5 (~700ms saved on this track).");
+    report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
+                     "Connected to Spotify; preparing the streaming session.");
+    proceed_with_credentials (state);
+    return;
+  }
+
   g_message ("[live-test] AP login confirmed -- now testing the streaming auth-relay chain "
             "(client-token -> login5)...");
   report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
