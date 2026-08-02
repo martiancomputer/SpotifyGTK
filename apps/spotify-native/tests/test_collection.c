@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "spotify/collection.h"
+#include "spotify/protobuf_min.h"
 
 /* Transport stubs. These tests exercise the encoder, and linking the real
  * Mercury would drag in the AP connection, Shannon and OpenSSL for code that
@@ -141,6 +142,140 @@ test_empty_uris_are_skipped (void)
   g_assert_cmpuint (buf->len, ==, one_only->len);
 }
 
+
+/* ── PageRequest encoding / PageResponse decoding ─────────────────────────── */
+
+static void
+test_page_request_encoding (void)
+{
+  g_autoptr(GByteArray) buf =
+    spotifygtk_collection_build_page_request ("bob", "collection", NULL, 100);
+
+  /* field 1 "bob", field 2 "collection", field 4 varint 100. No field 3: proto3
+   * omits an absent token rather than sending an empty string. */
+  const guint8 want[] = {
+    0x0a, 0x03, 'b','o','b',
+    0x12, 0x0a, 'c','o','l','l','e','c','t','i','o','n',
+    0x20, 0x64,
+  };
+  assert_bytes (buf, want, sizeof (want), "page request encoding");
+}
+
+static void
+test_page_request_omits_zero_limit (void)
+{
+  g_autoptr(GByteArray) with_limit =
+    spotifygtk_collection_build_page_request ("bob", "collection", NULL, 1);
+  g_autoptr(GByteArray) no_limit =
+    spotifygtk_collection_build_page_request ("bob", "collection", NULL, 0);
+
+  /* A zero limit is proto3's default and must be absent, not written as 0 --
+   * two bytes shorter, and the difference a real client shows on the wire. */
+  g_assert_cmpuint (no_limit->len, ==, with_limit->len - 2);
+}
+
+static void
+test_page_request_carries_token (void)
+{
+  g_autoptr(GByteArray) buf =
+    spotifygtk_collection_build_page_request ("bob", "collection", "tok", 0);
+  const guint8 want[] = {
+    0x0a, 0x03, 'b','o','b',
+    0x12, 0x0a, 'c','o','l','l','e','c','t','i','o','n',
+    0x1a, 0x03, 't','o','k',
+  };
+  assert_bytes (buf, want, sizeof (want), "page request with token");
+}
+
+static void
+test_page_response_decoding (void)
+{
+  /* Two items and a next-page token, hand-built to the schema:
+   *   items { uri: "spotify:track:aaa" added_at: 1700000000 }
+   *   items { uri: "spotify:track:bbb" is_removed: true }
+   *   next_page_token: "nxt"
+   */
+  GByteArray *msg = g_byte_array_new ();
+
+  const gchar *uri_a = "spotify:track:aaa";
+  GByteArray *item_a = g_byte_array_new ();
+  pb_write_bytes_field (item_a, 1, (const guint8 *) uri_a, strlen (uri_a));
+  pb_write_varint_field (item_a, 2, 1700000000u);
+  pb_write_message_field (msg, 1, item_a->data, item_a->len);
+  g_byte_array_unref (item_a);
+
+  const gchar *uri_b = "spotify:track:bbb";
+  GByteArray *item_b = g_byte_array_new ();
+  pb_write_bytes_field (item_b, 1, (const guint8 *) uri_b, strlen (uri_b));
+  pb_write_varint_field (item_b, 3, 1);
+  pb_write_message_field (msg, 1, item_b->data, item_b->len);
+  g_byte_array_unref (item_b);
+
+  pb_write_bytes_field (msg, 2, (const guint8 *) "nxt", 3);
+
+  SpotifyCollectionItem *items = NULL;
+  guint n = 0;
+  g_autofree gchar *token = NULL;
+
+  g_assert_true (spotifygtk_collection_parse_page_response (msg->data, msg->len,
+                                                            &items, &n, &token));
+  g_assert_cmpuint (n, ==, 2);
+  g_assert_cmpstr (items[0].uri, ==, uri_a);
+  g_assert_cmpint (items[0].added_at, ==, 1700000000);
+  g_assert_false (items[0].is_removed);
+  g_assert_cmpstr (items[1].uri, ==, uri_b);
+  g_assert_cmpint (items[1].added_at, ==, 0);
+  g_assert_true (items[1].is_removed);
+  g_assert_cmpstr (token, ==, "nxt");
+
+  spotifygtk_collection_items_free (items, n);
+  g_byte_array_unref (msg);
+}
+
+static void
+test_page_response_added_at_is_not_zigzag (void)
+{
+  /* added_at is int32, so a plain varint. Decoding it as sint32 would halve it
+   * -- the mirror of the bug that once doubled every track duration, and
+   * invisible without a check like this because the result stays plausible. */
+  GByteArray *msg = g_byte_array_new ();
+  GByteArray *item = g_byte_array_new ();
+  pb_write_bytes_field (item, 1, (const guint8 *) "spotify:track:x", 15);
+  pb_write_varint_field (item, 2, 1000000000u);
+  pb_write_message_field (msg, 1, item->data, item->len);
+  g_byte_array_unref (item);
+
+  SpotifyCollectionItem *items = NULL;
+  guint n = 0;
+  g_assert_true (spotifygtk_collection_parse_page_response (msg->data, msg->len,
+                                                            &items, &n, NULL));
+  g_assert_cmpuint (n, ==, 1);
+  g_assert_cmpint (items[0].added_at, ==, 1000000000);
+
+  spotifygtk_collection_items_free (items, n);
+  g_byte_array_unref (msg);
+}
+
+static void
+test_page_response_empty_is_not_an_error (void)
+{
+  /* An empty page is a legitimate answer -- the end of the collection -- and
+   * must not be reported the same way as an unparseable body. */
+  const guint8 empty_but_valid[] = { 0x12, 0x00 };   /* next_page_token: "" */
+  SpotifyCollectionItem *items = NULL;
+  guint n = 0;
+  g_autofree gchar *token = NULL;
+
+  g_assert_true (spotifygtk_collection_parse_page_response (
+                   empty_but_valid, sizeof (empty_but_valid), &items, &n, &token));
+  g_assert_cmpuint (n, ==, 0);
+  g_assert_null (token);
+
+  g_assert_false (spotifygtk_collection_parse_page_response (NULL, 0, &items, &n, &token));
+
+  spotifygtk_collection_items_free (items, n);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -150,5 +285,11 @@ main (int argc, char **argv)
   g_test_add_func ("/collection/added-at-varint",    test_added_at_is_plain_varint);
   g_test_add_func ("/collection/multiple-items",     test_multiple_items_repeat_the_tag);
   g_test_add_func ("/collection/empty-uris-skipped", test_empty_uris_are_skipped);
+  g_test_add_func ("/collection/page-request",        test_page_request_encoding);
+  g_test_add_func ("/collection/page-request-limit",  test_page_request_omits_zero_limit);
+  g_test_add_func ("/collection/page-request-token",  test_page_request_carries_token);
+  g_test_add_func ("/collection/page-response",       test_page_response_decoding);
+  g_test_add_func ("/collection/page-added-at",       test_page_response_added_at_is_not_zigzag);
+  g_test_add_func ("/collection/page-empty",          test_page_response_empty_is_not_an_error);
   return g_test_run ();
 }

@@ -23,11 +23,17 @@
  * `is_removed` is precisely the like/unlike bit, and `set` is "collection" for
  * Liked Songs. A track URI or an album URI both go in `uri`.
  *
- * What is *not* known is the Mercury URI this is sent to. librespot implements
- * collection reads only and has no write path anywhere in its tree, so there is
- * nothing to copy: its endpoints follow `hm://<service>/v<n>/<resource>`
- * (`hm://playlist/v2/playlist/`, `hm://connect-state/v1/...`), but the
- * collection one is not among them.
+ * What is *not* known is the Mercury URI this is sent to -- in either
+ * direction. An earlier note here said librespot implements collection reads;
+ * it does not. collection2v2.proto sits in its tree but is absent from
+ * protocol/build.rs and referenced by no Rust file, so it is carried as a
+ * captured schema and never used. There is no reference implementation to copy
+ * for reads or writes.
+ *
+ * What can be said is the shape of its other endpoints,
+ * `hm://<service>/v<n>/<resource>` (`hm://playlist/v2/playlist/`,
+ * `hm://connect-state/v1/...`), which is what the candidate list in the
+ * harness probe is built from.
  *
  * That is why the endpoint is a *parameter* here rather than a constant baked
  * into the call: candidates can be tried from the harness without a rebuild,
@@ -70,6 +76,67 @@ typedef void (*SpotifyCollectionCallback) (gboolean ok, guint16 status,
  * Send a collection write. `endpoint` is the full `hm://...` URI — see the
  * header comment on why it is not hardcoded.
  */
+/* ── Reading a page of the collection ─────────────────────────────────────
+ *
+ * PageRequest -> PageResponse from the same schema. This is what carries
+ * `added_at`, which /context-resolve does not: resolving the collection URI
+ * returns the tracks in added order but no timestamps, so Liked Songs can be
+ * sorted by date and cannot show one.
+ */
+
+/* One entry of a PageResponse. `uri` is owned by the response array. */
+typedef struct {
+  gchar   *uri;
+  gint32   added_at;    /* seconds since epoch; 0 when absent */
+  gboolean is_removed;
+} SpotifyCollectionItem;
+
+void spotifygtk_collection_items_free (SpotifyCollectionItem *items, guint n_items);
+
+/*
+ * Encode a PageRequest. Separate from the send for the same reason the write
+ * encoder is: it can be pinned byte-for-byte in a test with no AP session, so
+ * a failing request is attributable to the endpoint rather than the payload.
+ *
+ * `pagination_token` may be NULL for the first page. Returns a new GByteArray;
+ * free with g_byte_array_unref().
+ */
+GByteArray *spotifygtk_collection_build_page_request (const gchar *username,
+                                                      const gchar *set,
+                                                      const gchar *pagination_token,
+                                                      gint32       limit);
+
+/*
+ * Parse a PageResponse. Returns FALSE only if the buffer is unusable; a
+ * response with no items is a legitimate empty page and returns TRUE with
+ * *n_items == 0.
+ *
+ * *next_page_token is newly allocated, or NULL when the last page is reached.
+ */
+gboolean spotifygtk_collection_parse_page_response (const guint8           *data,
+                                                    gsize                   len,
+                                                    SpotifyCollectionItem **items,
+                                                    guint                  *n_items,
+                                                    gchar                 **next_page_token);
+
+/* ok is TRUE only for a 2xx Mercury status. Items and token are owned by the
+ * callee and valid for the duration of the callback. */
+typedef void (*SpotifyCollectionPageCallback) (gboolean               ok,
+                                               guint16                status,
+                                               SpotifyCollectionItem *items,
+                                               guint                  n_items,
+                                               const gchar           *next_page_token,
+                                               gpointer               user_data);
+
+void spotifygtk_collection_read_page (SpotifyMercury                *mercury,
+                                      const gchar                   *endpoint,
+                                      const gchar                   *username,
+                                      const gchar                   *set,
+                                      const gchar                   *pagination_token,
+                                      gint32                         limit,
+                                      SpotifyCollectionPageCallback  callback,
+                                      gpointer                       user_data);
+
 void spotifygtk_collection_write (SpotifyMercury            *mercury,
                                   const gchar               *endpoint,
                                   const gchar               *username,
