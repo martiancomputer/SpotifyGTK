@@ -386,8 +386,21 @@ perform_handshake (SpotifyApSession *self, GError **error)
 
   guint32 resp_total = read_be32 (resp_size_be);
   if (resp_total < 4 || resp_total > HANDSHAKE_MAX_RESPONSE) {
+    /*
+     * Log the raw bytes, not just the decoded number. This fires intermittently
+     * against some access points and retrying a different one succeeds, so the
+     * value itself is the only evidence of what went wrong -- and it is
+     * informative: one observed failure decoded to 872415232 = 0x34000000,
+     * which is the plausible length 0x34 sitting in the top byte rather than
+     * the bottom, i.e. the stream one position out of step rather than random
+     * garbage. Whether that is a short greeting from the server, a stale
+     * socket, or something on our side is not yet known; without the bytes
+     * there is nothing to reason from.
+     */
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                "implausible handshake response size: %u", resp_total);
+                "implausible handshake response size: %u (raw bytes %02x %02x %02x %02x)",
+                resp_total, resp_size_be[0], resp_size_be[1],
+                resp_size_be[2], resp_size_be[3]);
     return FALSE;
   }
   guint32 resp_payload_len = resp_total - 4;
