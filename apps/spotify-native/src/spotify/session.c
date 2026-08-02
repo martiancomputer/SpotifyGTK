@@ -520,8 +520,32 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
 
   GPtrArray *out = op->out;
 
+  /*
+   * Emit in the order the URIs were *requested*, not the order they came back.
+   *
+   * The server is explicitly allowed to reorder or omit entries -- which is why
+   * SpclientTrackInfo carries entity_uri rather than relying on position -- and
+   * appending in response order silently threw the context's own ordering away.
+   * On an album that is not cosmetic: the running order is part of the record,
+   * and artists who cross-fade between tracks (Hybrid's "Disappear Here", say)
+   * had their sequencing scrambled.
+   *
+   * Index this page by URI, then walk the request slice and place each track
+   * where it belongs. A URI the server did not return is simply skipped.
+   */
+  g_autoptr(GHashTable) by_uri = g_hash_table_new (g_str_hash, g_str_equal);
   for (guint i = 0; i < n_tracks; i++) {
-    const SpclientTrackInfo *info = &tracks[i];
+    if (tracks[i].entity_uri)
+      g_hash_table_insert (by_uri, tracks[i].entity_uri, (gpointer) &tracks[i]);
+  }
+
+  guint page_len = MIN (op->uris->len - op->next_uri, SPOTIFYGTK_SESSION_MAX_BATCH);
+  for (guint i = 0; i < page_len; i++) {
+    const gchar *want = g_ptr_array_index (op->uris, op->next_uri + i);
+    const SpclientTrackInfo *info = g_hash_table_lookup (by_uri, want);
+    if (!info)
+      continue;   /* server omitted this one; leave a gap rather than a hole */
+
     SpotifyNativeTrack *track = g_new0 (SpotifyNativeTrack, 1);
 
     track->uri         = g_strdup (info->entity_uri);
@@ -537,7 +561,9 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     g_ptr_array_add (out, track);
   }
 
-  op->next_uri += n_tracks;
+  /* Advance by the page asked for, not by what came back -- otherwise an
+   * omitted track would shift every later page and lose the tail. */
+  op->next_uri += page_len;
   request_next_page (op);
 }
 
