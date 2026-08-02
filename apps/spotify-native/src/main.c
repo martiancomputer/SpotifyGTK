@@ -1385,6 +1385,24 @@ on_cdn_initial_chunk_result (GBytes *decrypted_chunk, GError *error, gpointer us
  */
 #define AUDIO_KEY_ATTEMPT_TIMEOUT_S 8
 
+/* AudioFile::Format values from metadata.proto, so a log says what a track
+ * actually offers rather than a bare integer. */
+static const gchar *
+audio_format_label (guint64 format)
+{
+  switch (format) {
+    case 0:  return "OGG_VORBIS_96";
+    case 1:  return "OGG_VORBIS_160";
+    case 2:  return "OGG_VORBIS_320";
+    case 3:  return "MP3_256";
+    case 4:  return "MP3_320";
+    case 8:  return "AAC_24";
+    case 9:  return "AAC_48";
+    case 16: return "FLAC";
+    default: return "unknown";
+  }
+}
+
 static void
 clear_key_timeout (LiveTestState *state)
 {
@@ -1409,9 +1427,9 @@ on_audio_key_attempt_timeout (gpointer user_data)
     g_source_unref (fired);
 
   g_warning ("[live-test] no audio-key response after %ds. Everything up to this "
-             "point succeeded, so this is an entitlement answer rather than a "
-             "network fault: this client requests OGG_VORBIS_320, which Spotify "
-             "grants to Premium accounts only.",
+             "point succeeded, so the request reached the server; silence here is "
+             "not itself a verdict on entitlement -- an unentitled account is "
+             "normally refused explicitly and promptly, with a reason code.",
              AUDIO_KEY_ATTEMPT_TIMEOUT_S);
   /* The UI only gets the generic "Native playback failed" from player_service.c;
    * there is no ERROR stage on SpotifyNativeEngineStage to carry a reason. The
@@ -1440,7 +1458,22 @@ on_audio_key_result (const guint8 key[AUDIO_KEY_LEN], GError *error, gpointer us
                                 on_cdn_initial_chunk_result, state);
     return; /* Wait for CDN chunk */
   } else {
-    g_warning ("[live-test] audio key request failed: %s", error ? error->message : "unknown error");
+    /*
+     * The refusal a non-Premium account gets, so say what it means rather than
+     * leaving someone to guess from a bare code.
+     *
+     * Established against a live server on 2026-08-02: a free account is
+     * refused a key for *every* file a track offers -- OGG_VORBIS 320, 160 and
+     * 96 and AAC_24 alike, each within ~200ms. So the gate is the audio-key
+     * exchange itself, not any format or bitrate, and trying a different file
+     * does not help. librespot has required Premium for the same reason for
+     * its whole existence.
+     */
+    g_warning ("[live-test] audio key request failed: %s. Everything before this "
+               "step succeeded, so this is Spotify refusing to license the audio, "
+               "not a fault in the client: the native audio-key path requires "
+               "Spotify Premium, for every format a track offers.",
+               error ? error->message : "unknown error");
     state->ok = FALSE;
   }
 
@@ -1489,7 +1522,8 @@ on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError 
     g_message ("[live-test] TRACK METADATA SUCCEEDED -- found %u files:", n_files);
     gint best_idx = -1;
     for (guint i = 0; i < n_files; i++) {
-      g_message ("  file[%u]: format=%" G_GUINT64_FORMAT, i, files[i].format);
+      g_message ("  file[%u]: format=%" G_GUINT64_FORMAT " = %s",
+                 i, files[i].format, audio_format_label (files[i].format));
       
       /* OGG_VORBIS_320 = 2, OGG_VORBIS_160 = 1, OGG_VORBIS_96 = 0 */
       if (files[i].format == 2) best_idx = i;
