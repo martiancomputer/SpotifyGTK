@@ -58,6 +58,8 @@
  * and a few pixels of clearance so the scrollbar underneath is not touching
  * the text. */
 #define SHELF_TEXT_ALLOWANCE  96
+/* Strip the horizontal scrollbar occupies below the cards. */
+#define SHELF_BAR_ALLOWANCE   20
 
 /* === One album in the model === */
 
@@ -395,6 +397,21 @@ album_grid_new (gboolean wrap)
     gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (scroller), TRUE);
     gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (scroller),
                                                 CARD_ART_PX + SHELF_TEXT_ALLOWANCE);
+
+    /*
+     * And a hard floor on the widget itself, because the two settings above
+     * were not enough on Home.
+     *
+     * Home puts its shelves inside an outer vertical GtkScrolledWindow; Search
+     * does not. That nesting is the whole difference between the page where the
+     * cards came out right and the page where they stayed clipped, so the
+     * request above is evidently negotiable somewhere in that chain. I could not
+     * pin down exactly where from reading the widget code, and a size request is
+     * the one constraint no container bargains away -- so state the height as a
+     * floor rather than as a preference and stop the cards being squeezed at all.
+     */
+    gtk_widget_set_size_request (GTK_WIDGET (self), -1,
+                                 CARD_ART_PX + SHELF_TEXT_ALLOWANCE + SHELF_BAR_ALLOWANCE);
 
     spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
                                      GTK_ORIENTATION_HORIZONTAL);
