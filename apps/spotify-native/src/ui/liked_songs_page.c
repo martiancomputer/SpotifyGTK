@@ -9,11 +9,10 @@
 
 /* A real collection runs to thousands of tracks (4,773 on the account this
  * was developed against) and a single metadata batch that large is rejected
- * by the server. Track SPOTIFYGTK_SESSION_MAX_BATCH -- the largest batch
- * confirmed to resolve in one shot -- rather than repeating a number here that
- * then goes stale when the ceiling moves. Paging past it is still a follow-up:
- * a 4,773-track collection needs several batches, not a bigger one. */
-#define LIKED_SONGS_LIMIT SPOTIFYGTK_SESSION_MAX_BATCH
+ * by the server in one request. The session now pages: it splits a load into
+ * MAX_BATCH-sized metadata requests and concatenates them, so this asks for the
+ * whole-load ceiling and lets that happen underneath. */
+#define LIKED_SONGS_LIMIT SPOTIFYGTK_SESSION_MAX_TRACKS
 
 /* After a failure, ignore refresh requests for this long, so revisiting the
  * page cannot turn one error into a stream of retries. */

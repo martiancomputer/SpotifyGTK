@@ -461,14 +461,36 @@ typedef struct {
   GTask                *task;
   gchar                *context_uri;
   guint                 max_tracks;
+
+  /* Paging state. A context resolve hands back every track URI at once, but a
+   * metadata request for all of them is refused outright once the list is big
+   * enough (4773 rejected, 2000 accepted). So the URIs are kept here and walked
+   * in SPOTIFYGTK_SESSION_MAX_BATCH-sized requests, accumulating into `out`. */
+  GPtrArray            *uris;      /* gchar*, owned; the full list */
+  guint                 next_uri;  /* start index of the request in flight */
+  GPtrArray            *out;       /* SpotifyNativeTrack*, owned; accumulated */
 } LoadTracksOp;
 
 static void
 load_op_free (LoadTracksOp *op)
 {
   g_free (op->context_uri);
+  g_clear_pointer (&op->uris, g_ptr_array_unref);
+  g_clear_pointer (&op->out, g_ptr_array_unref);
   g_free (op);
 }
+
+/* Hand the accumulated tracks back and finish the task. */
+static void
+load_op_finish (LoadTracksOp *op)
+{
+  GPtrArray *out = g_steal_pointer (&op->out);
+  g_task_return_pointer (op->task, out, (GDestroyNotify) g_ptr_array_unref);
+  g_object_unref (op->task);
+  load_op_free (op);
+}
+
+static void request_next_page (LoadTracksOp *op);
 
 static void
 on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
@@ -477,6 +499,17 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
   LoadTracksOp *op = user_data;
 
   if (error || !tracks) {
+    /* A page that fails after earlier ones succeeded still leaves something
+     * worth showing, and a partial collection beats an error page -- so only
+     * fail the whole load when nothing at all was gathered. */
+    if (op->out && op->out->len > 0) {
+      g_warning ("session: metadata page starting at %u failed (%s); returning "
+                 "the %u track(s) already loaded",
+                 op->next_uri, error ? error->message : "no tracks returned",
+                 op->out->len);
+      load_op_finish (op);
+      return;
+    }
     g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_FAILED,
       "could not load track metadata: %s",
       error ? error->message : "no tracks returned");
@@ -485,8 +518,7 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     return;
   }
 
-  GPtrArray *out = g_ptr_array_new_with_free_func (
-    (GDestroyNotify) spotifygtk_native_track_free);
+  GPtrArray *out = op->out;
 
   for (guint i = 0; i < n_tracks; i++) {
     const SpclientTrackInfo *info = &tracks[i];
@@ -505,9 +537,44 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     g_ptr_array_add (out, track);
   }
 
-  g_task_return_pointer (op->task, out, (GDestroyNotify) g_ptr_array_unref);
-  g_object_unref (op->task);
-  load_op_free (op);
+  op->next_uri += n_tracks;
+  request_next_page (op);
+}
+
+/*
+ * Request metadata for the next chunk, or finish if the list is exhausted.
+ *
+ * Sequential rather than parallel on purpose: the requests share one bearer and
+ * one spclient, and a collection is three or four chunks at most, so overlapping
+ * them buys little and makes cancellation and partial failure much harder to
+ * reason about.
+ */
+static void
+request_next_page (LoadTracksOp *op)
+{
+  if (!op->uris || op->next_uri >= op->uris->len) {
+    load_op_finish (op);
+    return;
+  }
+
+  guint remaining = op->uris->len - op->next_uri;
+  guint n         = MIN (remaining, SPOTIFYGTK_SESSION_MAX_BATCH);
+
+  g_mutex_lock (&op->session->lock);
+  g_autofree gchar *bearer = g_strdup (op->session->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (op->session->client_token);
+  g_mutex_unlock (&op->session->lock);
+
+  if (op->uris->len > SPOTIFYGTK_SESSION_MAX_BATCH)
+    g_message ("session: metadata page %u-%u of %u",
+               op->next_uri, op->next_uri + n, op->uris->len);
+
+  /* The chunk is a pointer slice into the existing array -- the URI strings are
+   * borrowed for the duration of the call, not copied. */
+  spotifygtk_spclient_get_tracks_metadata (op->session->spclient,
+                                           (const gchar *const *) &op->uris->pdata[op->next_uri],
+                                           n, bearer, ctoken,
+                                           on_batch_metadata, op);
 }
 
 static void
@@ -559,7 +626,7 @@ on_context_resolved (JsonNode *context, GError *error, gpointer user_data)
     /* An empty context is a legitimate answer (no search results, empty
      * playlist), so return an empty array rather than an error and let the
      * UI say "nothing here". */
-    g_ptr_array_free (uris, TRUE);
+    g_ptr_array_unref (uris);
     GPtrArray *empty = g_ptr_array_new_with_free_func (
       (GDestroyNotify) spotifygtk_native_track_free);
     g_task_return_pointer (op->task, empty, (GDestroyNotify) g_ptr_array_unref);
@@ -568,20 +635,15 @@ on_context_resolved (JsonNode *context, GError *error, gpointer user_data)
     return;
   }
 
-  g_ptr_array_add (uris, NULL);   /* NULL-terminate for the const gchar *const * form */
+  /* Hand the list to the op and walk it a page at a time. No NULL terminator:
+   * get_tracks_metadata() takes an explicit count, which is what lets a page be
+   * a plain pointer slice into this array rather than a copy. */
+  op->uris     = uris;
+  op->next_uri = 0;
+  op->out      = g_ptr_array_new_with_free_func (
+                   (GDestroyNotify) spotifygtk_native_track_free);
 
-  g_mutex_lock (&op->session->lock);
-  g_autofree gchar *bearer = g_strdup (op->session->bearer_token);
-  g_autofree gchar *ctoken = g_strdup (op->session->client_token);
-  g_mutex_unlock (&op->session->lock);
-
-  spotifygtk_spclient_get_tracks_metadata (op->session->spclient,
-                                           (const gchar *const *) uris->pdata,
-                                           uris->len - 1,
-                                           bearer, ctoken,
-                                           on_batch_metadata, op);
-
-  g_ptr_array_free (uris, TRUE);
+  request_next_page (op);
 }
 
 /* Issue the context-resolve for an op whose bearer is known good. */
@@ -675,7 +737,9 @@ spotifygtk_native_session_load_tracks (SpotifyNativeSession *self,
 
   if (max_tracks == 0)
     max_tracks = SPOTIFYGTK_SESSION_DEFAULT_MAX_TRACKS;
-  max_tracks = MIN (max_tracks, SPOTIFYGTK_SESSION_MAX_BATCH);
+  /* Clamped to the overall ceiling, not to one request's worth: anything larger
+   * than a single batch is paged rather than truncated. */
+  max_tracks = MIN (max_tracks, SPOTIFYGTK_SESSION_MAX_TRACKS);
 
   if (!self->context) {
     g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,

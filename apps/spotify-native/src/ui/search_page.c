@@ -17,7 +17,7 @@
 #include <string.h>
 
 #define SEARCH_DEBOUNCE_MS 350
-#define SEARCH_RESULT_LIMIT SPOTIFYGTK_SESSION_MAX_BATCH
+#define SEARCH_RESULT_LIMIT SPOTIFYGTK_SESSION_MAX_TRACKS
 
 /* Height reserved above the first row for the floating header (title + entry
  * + its top/bottom margins). Rows scroll up under the header's fading edge. */

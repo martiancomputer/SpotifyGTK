@@ -126,10 +126,13 @@ GPtrArray *spotifygtk_native_session_load_tracks_finish (SpotifyNativeSession *s
  * than to a round number -- going past it does not fail gracefully, the whole
  * request is refused and the page shows nothing.
  *
- * Paging past a single batch is still the real fix for collections larger
- * than this; see liked_songs_page.c. */
+ * MAX_BATCH is one request's worth. A load larger than that is split into
+ * several sequential requests and the results concatenated, so MAX_TRACKS --
+ * the ceiling on a whole load -- is independent of it and exists only to stop
+ * a pathological context from being fetched in its entirety. */
 #define SPOTIFYGTK_SESSION_DEFAULT_MAX_TRACKS 200
-#define SPOTIFYGTK_SESSION_MAX_BATCH          2000 /* confirmed working at 500/1000/2000; 4773 rejected */
+#define SPOTIFYGTK_SESSION_MAX_BATCH          2000  /* one request; 500/1000/2000 confirmed, 4773 rejected */
+#define SPOTIFYGTK_SESSION_MAX_TRACKS         10000 /* whole load, across pages */
 
 /* Signal: state-changed (SpotifyNativeSessionState state, const gchar *message) */
 
