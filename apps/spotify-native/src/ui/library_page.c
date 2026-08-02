@@ -167,11 +167,22 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->albums));
 
   /* --- Playlists (honest gap) --- */
-  GtkWidget *footer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  /*
+   * This sits outside the scrolling grid, so every pixel it occupies is taken
+   * from the albums permanently. It was costing roughly 90px -- heading margin,
+   * an 8px gap, the note, and 24px beneath -- to say one sentence, which left a
+   * band of empty page under the note and cut the last album row mid-card.
+   * Tightened to about half that: still legible, still honest about the gap,
+   * without charging the grid a full album row for the privilege.
+   */
+  GtkWidget *footer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
   gtk_widget_set_margin_start (footer, 35);
   gtk_widget_set_margin_end (footer, 35);
-  gtk_widget_set_margin_bottom (footer, 24);
-  gtk_box_append (GTK_BOX (footer), heading ("Playlists"));
+  gtk_widget_set_margin_top (footer, 4);
+  gtk_widget_set_margin_bottom (footer, 10);
+  GtkWidget *pl_heading = heading ("Playlists");
+  gtk_widget_set_margin_top (pl_heading, 0);
+  gtk_box_append (GTK_BOX (footer), pl_heading);
 
   GtkWidget *note = gtk_label_new (
     "Your playlists aren’t available in this client yet.");

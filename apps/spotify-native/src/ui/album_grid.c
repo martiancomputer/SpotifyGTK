@@ -42,8 +42,6 @@
 #define CARD_ART_PX     150   /* on-screen card art size */
 #define CARD_DECODE_PX  180   /* decode a touch larger so downscaling stays crisp */
 #define CARD_WIDTH      (CARD_ART_PX + 24)
-#define SHELF_HEIGHT    214   /* art + two text lines + margins; the
-                                 * scrollbar adds its own space below */
 
 /* === One album in the model === */
 
@@ -136,6 +134,45 @@ on_card_clicked (GtkButton *button, gpointer user_data)
   const gchar *name = g_object_get_data (G_OBJECT (button), "album-name");
   if (uri && *uri)
     g_signal_emit (self, signals[ALBUM_ACTIVATED], 0, uri, name);
+}
+
+/*
+ * A shelf scrolls sideways, but a mouse wheel only ever reports dy -- so
+ * without this the wheel did nothing at all while the pointer was over a
+ * shelf, which is most of the Search page.
+ *
+ * Consumed only while the shelf can still move that way. At either end the
+ * event propagates, so a shelf sitting inside a vertical page scroller does
+ * not swallow the wheel and trap the page.
+ */
+static gboolean
+on_shelf_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy,
+                 gpointer user_data)
+{
+  GtkScrolledWindow *scroller = user_data;
+  GtkAdjustment *adj = gtk_scrolled_window_get_hadjustment (scroller);
+  (void) ctrl;
+
+  if (!adj)
+    return GDK_EVENT_PROPAGATE;
+
+  gdouble delta = (dx != 0.0) ? dx : dy;
+  if (delta == 0.0)
+    return GDK_EVENT_PROPAGATE;
+
+  gdouble lower = gtk_adjustment_get_lower (adj);
+  gdouble upper = gtk_adjustment_get_upper (adj) - gtk_adjustment_get_page_size (adj);
+  gdouble value = gtk_adjustment_get_value (adj);
+
+  if ((delta < 0 && value <= lower) || (delta > 0 && value >= upper))
+    return GDK_EVENT_PROPAGATE;
+
+  gdouble step = gtk_adjustment_get_step_increment (adj);
+  if (step <= 0.0)
+    step = CARD_WIDTH;
+
+  gtk_adjustment_set_value (adj, CLAMP (value + delta * step, lower, upper));
+  return GDK_EVENT_STOP;
 }
 
 /* Build the reusable card shell once per recycled widget, not once per album. */
@@ -335,11 +372,19 @@ album_grid_new (gboolean wrap)
 
     gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                     GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    /* Non-overlay, like every other scroller in the app (track list, settings,
-     * queue): the bar occupies real layout space and sits beside the content
-     * instead of floating over it. Overlay bars were drawing across the card
-     * titles here, which is the inconsistency this fixes. */
-    gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
+    /*
+     * Overlay here, unlike the shelf below. A non-overlay vertical bar claims a
+     * permanent strip of layout width, and since the page already insets this
+     * widget by its own margin the two stacked up: the grid ended ~80px from
+     * the right edge against ~35px on the left, which read as a dead gutter
+     * rather than as symmetric padding. Floating the bar restores the symmetry.
+     *
+     * The earlier objection to overlay was about the *horizontal* shelf bar
+     * being drawn across the card titles. That still holds, and that scroller
+     * still opts out -- but it does not apply to a vertical bar tracking the
+     * right edge of a grid.
+     */
+    gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), TRUE);
     gtk_widget_set_vexpand (scroller, TRUE);
     gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
   } else {
@@ -350,11 +395,27 @@ album_grid_new (gboolean wrap)
 
     gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                     GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
-    /* Same treatment as the grid: the bar gets its own strip under the cards
-     * rather than being drawn across the artist line. */
+    /* The bar gets its own strip under the cards rather than being drawn across
+     * the artist line. */
     gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
-    gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (scroller),
-                                                SHELF_HEIGHT);
+
+    /*
+     * Ask the card how tall it is instead of asserting a number. The previous
+     * fixed 214px was a hand-computed guess that came out slightly short --
+     * margins 16 + art 150 + spacing 16 + two text lines is already ~218 before
+     * any CSS padding on the button -- so the vertical policy of NEVER clipped
+     * the difference, and what got clipped was the bottom of the title row,
+     * right where the horizontal scrollbar sits. That is the overlap.
+     *
+     * Propagating the natural height means the card's real measurement decides,
+     * so changing CARD_ART_PX or a font size cannot silently reintroduce this.
+     */
+    gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (scroller), TRUE);
+
+    GtkEventController *wheel =
+      gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
+    g_signal_connect (wheel, "scroll", G_CALLBACK (on_shelf_scroll), scroller);
+    gtk_widget_add_controller (scroller, wheel);
   }
 
   gtk_widget_set_hexpand (scroller, TRUE);
