@@ -29,6 +29,10 @@ struct _SpotifyGtkTrackRow {
   /* Cancelled when the row is reused or destroyed, so a slow cover cannot
    * land on a row that now shows a different track. */
   GCancellable *cover_cancellable;
+  /* The cover this row wants, kept so a load skipped during a scroll can be
+   * reissued once the list settles. */
+  gchar        *pending_cover_id;
+  gboolean      cover_shown;
 
   gboolean show_album;
   gboolean show_artists;
@@ -59,6 +63,7 @@ spotifygtk_track_row_dispose (GObject *object)
     g_cancellable_cancel (self->cover_cancellable);
     g_clear_object (&self->cover_cancellable);
   }
+  g_clear_pointer (&self->pending_cover_id, g_free);
   if (self->eq_tick_id != 0 && self->eq_area) {
     gtk_widget_remove_tick_callback (GTK_WIDGET (self->eq_area), self->eq_tick_id);
     self->eq_tick_id = 0;
@@ -167,11 +172,24 @@ on_row_cover_loaded (GdkTexture *texture, gpointer user_data)
   SpotifyGtkTrackRow *self = user_data;
 
   if (!texture)
-    return;   /* keep the placeholder icon */
+    return;   /* keep the placeholder icon; retry_cover() may come back for it */
 
+  self->cover_shown = TRUE;
   gtk_image_set_from_paintable (self->album_art, GDK_PAINTABLE (texture));
   gtk_widget_set_visible (GTK_WIDGET (self->album_art), TRUE);
   gtk_widget_set_visible (GTK_WIDGET (self->track_num), FALSE);
+}
+
+void
+spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+
+  if (self->cover_shown || !self->pending_cover_id)
+    return;
+
+  spotifygtk_cover_load (self->pending_cover_id, 96, self->cover_cancellable,
+                         on_row_cover_loaded, self);
 }
 
 /* Rows are rebuilt per listing, but a row can be re-set before its cover
@@ -188,6 +206,9 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
     return;
 
   self->cover_cancellable = g_cancellable_new ();
+  g_free (self->pending_cover_id);
+  self->pending_cover_id = g_strdup (cover_id);
+  self->cover_shown = FALSE;
   spotifygtk_cover_load (cover_id, 96, self->cover_cancellable,
                          on_row_cover_loaded, self);
 }

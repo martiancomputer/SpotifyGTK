@@ -60,4 +60,20 @@ void spotifygtk_cover_load (const gchar          *cover_id,
 /* Build the CDN URL for an image id. Exposed for testing. */
 gchar *spotifygtk_cover_build_url (const gchar *cover_id);
 
+/*
+ * While TRUE, a cache miss is dropped instead of fetched. Cache hits are still
+ * served, so rows whose art is already known still paint.
+ *
+ * For use during a fast scroll: binding every row a fling passes over would
+ * otherwise queue hundreds of fetches for rows nobody will look at, competing
+ * with the handful that end up on screen. Callers are expected to clear this
+ * when the scroll settles and re-request what is actually visible.
+ */
+void spotifygtk_cover_set_deferred (gboolean deferred);
+gboolean spotifygtk_cover_get_deferred (void);
+
+/* Warm the cache without delivering anywhere. Honours deferral, so a prefetch
+ * issued while scrolling costs nothing. */
+void spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px);
+
 G_END_DECLS

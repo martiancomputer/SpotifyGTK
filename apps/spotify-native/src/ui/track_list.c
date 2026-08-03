@@ -18,6 +18,7 @@
 
 #include "track_list.h"
 #include "track_row.h"
+#include "cover_loader.h"
 #include "track_item.h"
 #include "smooth_scroll.h"
 
@@ -29,9 +30,79 @@ struct _SpotifyGtkTrackList {
   GListStore  *store;
 
   gboolean numbered;
+
+  /* Scroll settle detection. Cover loading is suppressed while the adjustment
+   * is moving and resumed once it has been still for SETTLE_MS. */
+  GtkAdjustment *vadj;         /* borrowed */
+  guint          settle_id;
+  GPtrArray     *bound_rows;   /* borrowed SpotifyGtkTrackRow*, live bindings */
 };
 
+/*
+ * Long enough that an eased wheel scroll is treated as one gesture rather than
+ * a run of separate ones, short enough that art appears promptly after
+ * stopping. The animation itself runs ~150ms, so anything below that would
+ * fire mid-scroll and defeat the purpose.
+ */
+#define SETTLE_MS 180
+
+/* Rows warmed either side of the visible range once the scroll settles, in the
+ * direction of travel. Bounded deliberately: this is meant to make the next
+ * flick start warm, not to fetch the whole collection. */
+#define PREFETCH_ROWS 24
+
 G_DEFINE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list, GTK_TYPE_BOX)
+
+static gboolean
+on_scroll_settled (gpointer user_data)
+{
+  SpotifyGtkTrackList *self = user_data;
+  self->settle_id = 0;
+
+  /* Loading first, prefetch second: what is on screen must not queue behind
+   * speculative work. */
+  spotifygtk_cover_set_deferred (FALSE);
+
+  for (guint i = 0; i < self->bound_rows->len; i++)
+    spotifygtk_track_row_retry_cover (g_ptr_array_index (self->bound_rows, i));
+
+  /* Warm ahead in the direction just travelled. The visible window is derived
+   * from the adjustment rather than asked of the view, which has no API for
+   * it; approximate is fine for a prefetch. */
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  if (n > 0 && self->vadj) {
+    gdouble upper = gtk_adjustment_get_upper (self->vadj);
+    gdouble page  = gtk_adjustment_get_page_size (self->vadj);
+    gdouble value = gtk_adjustment_get_value (self->vadj);
+    if (upper > page) {
+      gdouble frac = value / (upper - page);
+      guint   last = (guint) (frac * (gdouble) n) + (guint) (page / 56.0);
+      for (guint i = last; i < MIN (last + PREFETCH_ROWS, n); i++) {
+        g_autoptr(SpotifyGtkTrackItem) item =
+          g_list_model_get_item (G_LIST_MODEL (self->store), i);
+        const SpotifyNativeTrack *t = item ? spotifygtk_track_item_get_track (item) : NULL;
+        if (t && t->cover_id)
+          spotifygtk_cover_prefetch (t->cover_id, 96);
+      }
+    }
+  }
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
+{
+  SpotifyGtkTrackList *self = user_data;
+  (void) adj;
+
+  /* Any movement re-arms the timer, so a continuous scroll never settles until
+   * it actually stops. */
+  spotifygtk_cover_set_deferred (TRUE);
+  if (self->settle_id)
+    g_source_remove (self->settle_id);
+  self->settle_id = g_timeout_add (SETTLE_MS, on_scroll_settled, self);
+}
 
 enum { TRACK_ACTIVATED, ADD_TO_QUEUE, GO_TO_ALBUM, GO_TO_ARTIST, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -183,6 +254,9 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   SpotifyGtkTrackRow  *row  = SPOTIFYGTK_TRACK_ROW (gtk_list_item_get_child (list_item));
   SpotifyGtkTrackItem *item = gtk_list_item_get_item (list_item);
 
+  if (!g_ptr_array_find (self->bound_rows, row, NULL))
+    g_ptr_array_add (self->bound_rows, row);
+
   spotifygtk_track_row_set_native_track (row,
     spotifygtk_track_item_get_track (item),
     self->numbered ? (gint) (spotifygtk_track_item_get_number (item)) : 0);
@@ -218,8 +292,9 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
     g_signal_handler_disconnect (item, changed);
   g_object_set_data (G_OBJECT (row), "changed-handler", NULL);
   g_object_set_data (G_OBJECT (row), "bound-item", NULL);
+  g_ptr_array_remove_fast (SPOTIFYGTK_TRACK_LIST (user_data)->bound_rows, row);
 
-  (void) factory; (void) user_data;
+  (void) factory;
 }
 
 /* === Activation === */
@@ -242,6 +317,17 @@ static void
 spotifygtk_track_list_dispose (GObject *object)
 {
   SpotifyGtkTrackList *self = SPOTIFYGTK_TRACK_LIST (object);
+
+  /* The settle timer holds a plain pointer to this list, so it must not outlive
+   * it. Clearing deferral matters just as much: left switched on, the next page
+   * built would treat every cache miss as skippable and never show any art. */
+  if (self->settle_id) {
+    g_source_remove (self->settle_id);
+    self->settle_id = 0;
+  }
+  spotifygtk_cover_set_deferred (FALSE);
+  g_clear_pointer (&self->bound_rows, g_ptr_array_unref);
+
   g_clear_object (&self->store);
   G_OBJECT_CLASS (spotifygtk_track_list_parent_class)->dispose (object);
 }
@@ -288,12 +374,17 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
   spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
                                    GTK_ORIENTATION_VERTICAL);
+
+  self->vadj = gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller));
+  if (self->vadj)
+    g_signal_connect (self->vadj, "value-changed", G_CALLBACK (on_vadj_changed), self);
   gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
 
   self->store = g_list_store_new (SPOTIFYGTK_TYPE_TRACK_ITEM);
 
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
   g_signal_connect (factory, "setup",  G_CALLBACK (factory_setup),  self);
+  self->bound_rows = g_ptr_array_new ();
   g_signal_connect (factory, "bind",   G_CALLBACK (factory_bind),   self);
   g_signal_connect (factory, "unbind", G_CALLBACK (factory_unbind), self);
 

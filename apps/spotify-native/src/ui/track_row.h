@@ -40,6 +40,10 @@ void spotifygtk_track_row_set_show_album (SpotifyGtkTrackRow *self,
                                           gboolean show);
 void spotifygtk_track_row_set_show_artists (SpotifyGtkTrackRow *self,
                                             gboolean show);
+/* Re-request this row's cover if it was skipped because loading was deferred
+ * during a scroll. No-op when the art is already showing. */
+void spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self);
+
 void spotifygtk_track_row_set_playing (SpotifyGtkTrackRow *self,
                                        gboolean is_playing,
                                        gboolean is_paused);

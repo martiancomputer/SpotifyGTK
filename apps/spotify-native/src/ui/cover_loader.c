@@ -21,7 +21,35 @@
  * Eviction is safe while a cover is on screen: GtkPicture holds its own ref,
  * so dropping the cache entry only means a later request re-fetches it, not
  * that a visible image blanks. */
-#define COVER_CACHE_MAX 48
+/*
+ * Bounded by bytes, not by entries.
+ *
+ * A count was the wrong unit once two callers wanted different sizes. The album
+ * grid decodes at 352px (~484 KB a cover) and shows a few dozen; a track list
+ * decodes at 96px (~36 KB) and scrolls past thousands. Forty-eight entries is
+ * generous for the first and hopeless for the second -- a Liked Songs scroll
+ * misses on essentially every row, so nearly every one becomes an HTTP fetch,
+ * which is the stutter. It also meant raising the decode size silently raised
+ * the memory ceiling, since the bound never counted bytes.
+ *
+ * A budget adapts on its own: ~1300 small covers or ~100 large ones, and
+ * changing a decode size can no longer move the ceiling.
+ */
+#define COVER_CACHE_MAX_BYTES (48 * 1024 * 1024)
+
+/* Bytes currently held. GdkTexture does not report its footprint, so this is
+ * computed from the dimensions at insert -- exact for the RGBA memory textures
+ * this loader creates. */
+static gsize cover_cache_bytes = 0;
+
+static gsize
+texture_bytes (GdkTexture *texture)
+{
+  if (!texture)
+    return 0;
+  return (gsize) gdk_texture_get_width (texture) *
+         (gsize) gdk_texture_get_height (texture) * 4;
+}
 
 static GHashTable *cover_cache = NULL;
 
@@ -41,6 +69,34 @@ typedef struct {
   gpointer             user_data;
   GCancellable        *cancellable;   /* owned, may be NULL */
 } PendingRequest;
+
+static gboolean cover_deferred = FALSE;
+
+static void
+prefetch_discard (GdkTexture *texture, gpointer user_data)
+{
+  (void) texture; (void) user_data;   /* the cache insert was the point */
+}
+
+void
+spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px)
+{
+  if (!cover_id || !*cover_id || cover_deferred)
+    return;
+  spotifygtk_cover_load (cover_id, target_px, NULL, prefetch_discard, NULL);
+}
+
+void
+spotifygtk_cover_set_deferred (gboolean deferred)
+{
+  cover_deferred = deferred;
+}
+
+gboolean
+spotifygtk_cover_get_deferred (void)
+{
+  return cover_deferred;
+}
 
 gchar *
 spotifygtk_cover_build_url (const gchar *cover_id)
@@ -156,14 +212,24 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  while (g_queue_get_length (&cover_order) >= COVER_CACHE_MAX) {
+  gsize incoming = texture_bytes (texture);
+
+  while (cover_cache_bytes + incoming > COVER_CACHE_MAX_BYTES &&
+         !g_queue_is_empty (&cover_order)) {
     g_autofree gchar *oldest = g_queue_pop_head (&cover_order);
-    if (oldest)
-      g_hash_table_remove (cover_cache, oldest);
+    if (!oldest)
+      break;
+    GdkTexture *victim = g_hash_table_lookup (cover_cache, oldest);
+    if (victim) {
+      gsize freed = texture_bytes (victim);
+      cover_cache_bytes -= MIN (freed, cover_cache_bytes);
+    }
+    g_hash_table_remove (cover_cache, oldest);
   }
 
   g_hash_table_insert (cover_cache, g_strdup (cache_key), g_object_ref (texture));
   g_queue_push_tail (&cover_order, g_strdup (cache_key));
+  cover_cache_bytes += incoming;
 
   complete_waiters (cache_key, texture);
   (void) source;
@@ -234,6 +300,13 @@ spotifygtk_cover_load (const gchar          *cover_id,
   GdkTexture *cached = g_hash_table_lookup (cover_cache, cache_key);
   if (cached) {
     callback (cached, user_data);
+    return;
+  }
+
+  /* Deferred: a miss costs nothing rather than queueing a fetch for a row the
+   * scroll is already past. The caller re-requests on settle. */
+  if (cover_deferred) {
+    callback (NULL, user_data);
     return;
   }
 
