@@ -283,9 +283,14 @@ spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
    * the track list they came from. Keys are borrowed from the live tracks
    * array, which outlives this call. */
   g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
-  guint shown = 0;
 
-  for (guint i = 0; i < tracks->len && shown < max_albums; i++) {
+  /* Collected first and spliced in one go. Appending per item emits
+   * items-changed each time and the view revalidates on every one, which on a
+   * library of several hundred albums is several hundred rounds of work to
+   * show one list. */
+  g_autoptr(GPtrArray) items = g_ptr_array_new_with_free_func (g_object_unref);
+
+  for (guint i = 0; i < tracks->len && items->len < max_albums; i++) {
     const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
     if (!t || !t->album_uri || !*t->album_uri)
       continue;
@@ -293,13 +298,14 @@ spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
       continue;
     g_hash_table_add (seen, t->album_uri);
 
-    g_autoptr(SpotifyGtkAlbumItem) item =
-      album_item_new (t->album_uri, t->album, t->artists, t->cover_id);
-    g_list_store_append (self->store, item);
-    shown++;
+    g_ptr_array_add (items, album_item_new (t->album_uri, t->album,
+                                            t->artists, t->cover_id));
   }
 
-  return shown;
+  guint existing = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  g_list_store_splice (self->store, 0, existing, items->pdata, items->len);
+
+  return items->len;
 }
 
 static void
