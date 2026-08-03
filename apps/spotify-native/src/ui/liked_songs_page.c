@@ -30,6 +30,27 @@ struct _SpotifyGtkLikedSongsPage {
    * list from it without re-fetching. Owned (a ref on the loaded array). */
   GPtrArray *all_tracks;
 
+  /*
+   * Filtering and sorting precomputation, both keyed by track pointer so the
+   * sort order can change without invalidating them.
+   *
+   * Built once when the collection loads. Doing this per keystroke instead --
+   * which is what it used to do -- meant a casefold and two allocations for
+   * every one of ~4800 tracks on every character typed, plus two more casefolds
+   * per comparison inside the sort. That is the stutter.
+   *
+   * Collate keys rather than casefolded names for the A-Z sort: g_utf8_collate()
+   * has to build one internally on every comparison, so precomputing turns each
+   * comparison into a strcmp.
+   */
+  GHashTable *haystacks;     /* track -> casefolded "name\tartists\talbum" */
+  GHashTable *collate_keys;  /* track -> g_utf8_collate_key of the title */
+
+  /* all_tracks in the current sort order, borrowed pointers. Rebuilt when the
+   * sort changes, not when the filter text does -- the order does not depend on
+   * the query. */
+  GPtrArray *sorted_tracks;
+
   /* Sort controls: which key, and whether it runs the natural way round. */
   GtkWidget *sort_buttons[3];
   guint      sort_key;
@@ -78,16 +99,39 @@ on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_dat
  * it narrows the already-loaded collection, so it is instant and works offline
  * of the catalog. */
 static gboolean
-track_matches (const SpotifyNativeTrack *t, const gchar *const *terms)
+track_matches (SpotifyGtkLikedSongsPage *self,
+               const SpotifyNativeTrack *t, const gchar *const *terms)
 {
-  g_autofree gchar *hay = g_strdup_printf ("%s\t%s\t%s",
-    t->name ? t->name : "", t->artists ? t->artists : "", t->album ? t->album : "");
-  g_autofree gchar *hay_cf = g_utf8_casefold (hay, -1);
+  const gchar *hay_cf = self->haystacks ? g_hash_table_lookup (self->haystacks, t) : NULL;
+  if (!hay_cf)
+    return FALSE;
 
   for (guint i = 0; terms[i]; i++)
     if (!strstr (hay_cf, terms[i]))    /* an empty term matches, which is fine */
       return FALSE;
   return TRUE;
+}
+
+/* Build the per-track lookups. Called once per collection load. */
+static void
+build_track_indexes (SpotifyGtkLikedSongsPage *self)
+{
+  g_clear_pointer (&self->haystacks, g_hash_table_unref);
+  g_clear_pointer (&self->collate_keys, g_hash_table_unref);
+  if (!self->all_tracks)
+    return;
+
+  self->haystacks    = g_hash_table_new_full (NULL, NULL, NULL, g_free);
+  self->collate_keys = g_hash_table_new_full (NULL, NULL, NULL, g_free);
+
+  for (guint i = 0; i < self->all_tracks->len; i++) {
+    SpotifyNativeTrack *t = g_ptr_array_index (self->all_tracks, i);
+    g_autofree gchar *hay = g_strdup_printf ("%s\t%s\t%s",
+      t->name ? t->name : "", t->artists ? t->artists : "", t->album ? t->album : "");
+    g_hash_table_insert (self->haystacks, t, g_utf8_casefold (hay, -1));
+    g_hash_table_insert (self->collate_keys, t,
+                         g_utf8_collate_key (t->name ? t->name : "", -1));
+  }
 }
 
 /* Stable across equal keys: qsort is not required to be, and two songs of the
@@ -108,9 +152,9 @@ compare_rows (gconstpointer a, gconstpointer b, gpointer user_data)
           (ra->track->duration_ms < rb->track->duration_ms);
     break;
   case SORT_ALPHA: {
-    g_autofree gchar *na = g_utf8_casefold (ra->track->name ? ra->track->name : "", -1);
-    g_autofree gchar *nb = g_utf8_casefold (rb->track->name ? rb->track->name : "", -1);
-    cmp = g_utf8_collate (na, nb);
+    const gchar *ka = g_hash_table_lookup (self->collate_keys, ra->track);
+    const gchar *kb = g_hash_table_lookup (self->collate_keys, rb->track);
+    cmp = g_strcmp0 (ka, kb);
     break;
   }
   case SORT_ADDED:
@@ -142,6 +186,23 @@ sort_visible (SpotifyGtkLikedSongsPage *self, GPtrArray *rows)
     rows->pdata[i] = g_array_index (tmp, SortRow, i).track;
 }
 
+/* Rebuild sorted_tracks for the current key. Called when the sort changes or
+ * the collection loads -- never from the filter, whose result is a subset of
+ * this order rather than a different one. */
+static void
+rebuild_sorted (SpotifyGtkLikedSongsPage *self)
+{
+  g_clear_pointer (&self->sorted_tracks, g_ptr_array_unref);
+  if (!self->all_tracks)
+    return;
+
+  self->sorted_tracks = g_ptr_array_sized_new (self->all_tracks->len);
+  for (guint i = 0; i < self->all_tracks->len; i++)
+    g_ptr_array_add (self->sorted_tracks, g_ptr_array_index (self->all_tracks, i));
+
+  sort_visible (self, self->sorted_tracks);
+}
+
 /* Rebuild the visible list from all_tracks under the current filter text. */
 static void
 apply_filter (SpotifyGtkLikedSongsPage *self)
@@ -151,17 +212,12 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
 
   const gchar *query = gtk_editable_get_text (GTK_EDITABLE (self->filter_entry));
 
-  if (!query || !*query) {
-    /* Even unfiltered this has to go through the sort, so a shallow copy
-     * rather than handing all_tracks straight over -- sorting that in place
-     * would destroy the original order SORT_ADDED depends on. */
-    g_autoptr(GPtrArray) everything = g_ptr_array_new ();
-    for (guint i = 0; i < self->all_tracks->len; i++)
-      g_ptr_array_add (everything, g_ptr_array_index (self->all_tracks, i));
-    sort_visible (self, everything);
+  if (!self->sorted_tracks)
+    rebuild_sorted (self);
 
-    spotifygtk_track_list_set_native_tracks (self->list, everything);
-    if (everything->len == 0)
+  if (!query || !*query) {
+    spotifygtk_track_list_set_native_tracks (self->list, self->sorted_tracks);
+    if (self->sorted_tracks->len == 0)
       spotifygtk_track_list_set_status (self->list, "No liked songs yet.");
     return;
   }
@@ -172,13 +228,13 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
   /* Borrowed pointers into all_tracks; set_native_tracks takes its own copies,
    * so this shallow array needs no free func. */
   g_autoptr(GPtrArray) filtered = g_ptr_array_new ();
-  for (guint i = 0; i < self->all_tracks->len; i++) {
-    SpotifyNativeTrack *t = g_ptr_array_index (self->all_tracks, i);
-    if (track_matches (t, (const gchar *const *) terms))
+  for (guint i = 0; i < self->sorted_tracks->len; i++) {
+    SpotifyNativeTrack *t = g_ptr_array_index (self->sorted_tracks, i);
+    if (track_matches (self, t, (const gchar *const *) terms))
       g_ptr_array_add (filtered, t);
   }
 
-  sort_visible (self, filtered);
+  /* Already in sort order: filtering a sorted list preserves it. */
   spotifygtk_track_list_set_native_tracks (self->list, filtered);
   if (filtered->len == 0)
     spotifygtk_track_list_set_status (self->list, "No matches.");
@@ -218,6 +274,7 @@ on_sort_clicked (GtkButton *button, gpointer user_data)
     self->sort_key = which;
 
   refresh_sort_labels (self);
+  rebuild_sorted (self);
   apply_filter (self);
 }
 
@@ -260,6 +317,10 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   self->retry_after = 0;
   g_clear_pointer (&self->all_tracks, g_ptr_array_unref);
   self->all_tracks = g_ptr_array_ref (tracks);
+  /* Both derived from the tracks, so they are built here and not touched again
+   * until the collection reloads. */
+  build_track_indexes (self);
+  rebuild_sorted (self);
   apply_filter (self);   /* honours whatever is already typed (usually nothing) */
 
   self->loaded = TRUE;
@@ -275,6 +336,9 @@ spotifygtk_liked_songs_page_dispose (GObject *object)
   g_clear_object (&self->in_flight);
   g_clear_object (&self->session);
   g_clear_pointer (&self->all_tracks, g_ptr_array_unref);
+  g_clear_pointer (&self->sorted_tracks, g_ptr_array_unref);
+  g_clear_pointer (&self->haystacks, g_hash_table_unref);
+  g_clear_pointer (&self->collate_keys, g_hash_table_unref);
 
   G_OBJECT_CLASS (spotifygtk_liked_songs_page_parent_class)->dispose (object);
 }
