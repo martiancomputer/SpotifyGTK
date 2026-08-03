@@ -96,14 +96,22 @@ on_request_deadline (gpointer user_data)
 
   cl->timed_out = TRUE;
   g_warning ("cdn: no response for logical offset %" G_GOFFSET_FORMAT " after %ds "
-             "-- abandoning the connection and failing the range so it can be retried",
+             "-- failing the range so it can be retried",
              cl->offset, CDN_REQUEST_DEADLINE_S);
 
-  /* Purge the pool as well as this request. The connection is unusable and
-   * libsoup would otherwise hand the same one to the retry. */
-  if (cl->self && cl->self->session)
-    soup_session_abort (cl->self->session);
-
+  /*
+   * Cancel only. soup_session_abort() must NOT be called here, however tempting
+   * it is to purge the dead connection at this point: it tears the pending
+   * operation down *without* completing it, so the callback below never runs
+   * and the retry it was supposed to trigger never happens. Observed exactly
+   * that -- the deadline fired on schedule, every CDN socket closed, and
+   * playback then sat silent because nothing was left to report the failure.
+   * (It would also have been a use-after-free had the abort completed the
+   * operation synchronously, since that frees this closure.)
+   *
+   * Cancelling completes the operation properly. The pool is purged from the
+   * callback instead, where there is no in-flight request left to lose.
+   */
   g_cancellable_cancel (cl->cancel);
   return G_SOURCE_REMOVE;
 }
@@ -157,6 +165,13 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
   gboolean timed_out = cl->timed_out;
   fetch_closure_disarm (cl);
+
+  /* Safe here and not in the deadline handler: this operation has completed, so
+   * there is nothing of ours left for the abort to discard. The connection that
+   * went quiet is unusable, and without this libsoup would hand the same one
+   * straight back to the retry. */
+  if (timed_out && cl->self && cl->self->session)
+    soup_session_abort (cl->self->session);
 
   if (!bytes) {
     /* Report a deadline as a deadline. Cancellation from a Stop looks identical
