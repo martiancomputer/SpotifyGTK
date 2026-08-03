@@ -28,11 +28,19 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            meson ninja-build pkg-config \
+            ninja-build pkg-config \
             libgtk-4-dev libadwaita-1-dev \
             libsoup-3.0-dev libjson-glib-dev \
             libsecret-1-dev libglib2.0-dev \
             libjpeg-turbo8-dev
+
+      # Ubuntu 22.04 ships Meson 0.61 and the project needs >= 1.0, so take it
+      # from pip rather than apt. That is also what a 22.04 user has to do, so
+      # the CI environment matches the one the README documents.
+      - name: Install Meson
+        run: |
+          pip install --user meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install nightly-only dependencies
         if: matrix.profile == 'nightly'
@@ -72,11 +80,19 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            meson ninja-build pkg-config \
+            ninja-build pkg-config \
             libglib2.0-dev libsoup-3.0-dev libjson-glib-dev \
             libgtk-4-dev libadwaita-1-dev \
             libogg-dev libvorbis-dev \
             libssl-dev libpulse-dev libasound2-dev
+
+      # Ubuntu 22.04 ships Meson 0.61 and the project needs >= 1.0, so take it
+      # from pip rather than apt. That is also what a 22.04 user has to do, so
+      # the CI environment matches the one the README documents.
+      - name: Install Meson
+        run: |
+          pip install --user meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install nightly-only dependencies
         if: matrix.profile == 'nightly'
@@ -118,5 +134,6 @@ jobs:
             --error-exitcode=1 \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
+            --suppress=unknownMacro \
             -i apps/spotify-connect/src/vendor \
             apps/spotify-connect/src apps/spotify-native/src

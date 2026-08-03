@@ -119,6 +119,11 @@ sudo ninja -C build install
 ### Prerequisites
 
 **Ubuntu / Debian (24.04+)**
+
+> On Ubuntu 22.04 `apt` ships Meson 0.61, and this project needs **>= 1.0**.
+> Install it from pip there (`pip install --user meson`) and leave `meson` out
+> of the apt line below; 24.04 and later are new enough.
+
 ```bash
 sudo apt install \
   meson ninja-build pkg-config \
