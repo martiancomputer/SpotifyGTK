@@ -50,7 +50,17 @@ G_DEFINE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, G_TYPE_OBJECT)
  * ordinary error the read-ahead path already recovers from by re-resolving and
  * retrying.
  */
-#define CDN_REQUEST_DEADLINE_S 12
+/*
+ * Sized against the largest range actually requested, not against a guess.
+ *
+ * This was 12s while the read-ahead chunk was raised to 256KB in the same
+ * session -- and 256KB on a slow link legitimately takes longer than that
+ * (13s at 20KB/s). So the deadline began killing transfers that were slow but
+ * perfectly healthy, turning a survivable slowdown into a dead stream. It has
+ * to clear the worst case for a real chunk by a wide margin, because the cost
+ * of firing too early is far higher than the cost of waiting.
+ */
+#define CDN_REQUEST_DEADLINE_S 45
 
 typedef struct {
   SpotifyCdnFetcher *self;
@@ -95,9 +105,11 @@ on_request_deadline (gpointer user_data)
     g_source_unref (fired);
 
   cl->timed_out = TRUE;
+  /* Says "failing" rather than "retrying": whether the read-ahead path
+   * actually retries is not this function's to promise, and the log claimed a
+   * recovery that was not observed to happen. */
   g_warning ("cdn: no response for logical offset %" G_GOFFSET_FORMAT " after %ds "
-             "-- failing the range so it can be retried",
-             cl->offset, CDN_REQUEST_DEADLINE_S);
+             "-- cancelling the request", cl->offset, CDN_REQUEST_DEADLINE_S);
 
   /*
    * Cancel only. soup_session_abort() must NOT be called here, however tempting
@@ -162,8 +174,17 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
   FetchClosure *cl = user_data;
   g_autoptr(GError) err = NULL;
 
+  /* Entry logging on purpose: the open question is whether this callback runs
+   * at all after a deadline cancels the request. Two deadlines were observed
+   * with no sign of the read-ahead failure path afterwards, which means either
+   * this never ran or it ran and went somewhere unexpected. One line settles
+   * that; without it the next occurrence is as unreadable as the last. */
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
   gboolean timed_out = cl->timed_out;
+  g_message ("cdn: response callback for logical offset %" G_GOFFSET_FORMAT
+             " (bytes=%s, timed_out=%s, err=%s)",
+             cl->offset, bytes ? "yes" : "no", timed_out ? "yes" : "no",
+             err ? err->message : "none");
   fetch_closure_disarm (cl);
 
   /* Safe here and not in the deadline handler: this operation has completed, so
