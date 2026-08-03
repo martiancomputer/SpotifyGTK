@@ -114,15 +114,17 @@ sudo ninja -C build install
 | GTK | 4.0+ | 4.14+ |
 | Image decode | stb_image / libjpeg-turbo | + VA-API hardware decode |
 | Texture upload | `gdk_memory_texture_new()` | `GdkDmabufTexture` (zero-copy) |
-| Targets | Ubuntu 22.04+, RHEL 9, Debian 12 | Arch, Fedora, Ubuntu 24.04+ |
+| Targets | Ubuntu 24.04+, Debian 13 | Arch, Fedora, Ubuntu 24.04+ |
 
 ### Prerequisites
 
 **Ubuntu / Debian (24.04+)**
 
-> On Ubuntu 22.04 `apt` ships Meson 0.61, and this project needs **>= 1.0**.
-> Install it from pip there (`pip install --user meson`) and leave `meson` out
-> of the apt line below; 24.04 and later are new enough.
+> **Ubuntu 22.04 is not supported.** It ships libadwaita 1.1.7 and both apps
+> require >= 1.4, which cannot be worked around without vendoring it. The
+> stable track used to claim 22.04; that was never true and CI was failing on
+> it. 22.04 also ships Meson 0.61 against a >= 1.0 requirement, so even the
+> configure step needs `pip install --user meson` there.
 
 ```bash
 sudo apt install \

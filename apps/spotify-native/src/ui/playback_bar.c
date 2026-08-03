@@ -579,9 +579,13 @@ spotifygtk_playback_bar_set_liked (SpotifyGtkPlaybackBar *self, gboolean liked)
   g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
 
   self->liked = liked;
-  gtk_button_set_icon_name (self->like_btn,
-                            liked ? "emblem-favorite-symbolic"
-                                  : "emblem-favorite-symbolic");
+  /* One icon, not a pair. The ternary here chose the same name on both
+   * branches, so it never did anything -- found by cppcheck, which is the only
+   * reason anyone noticed. Adwaita ships no outline heart to pair with
+   * emblem-favorite-symbolic (only the starred/non-starred pair, which is a
+   * different visual language), so the state is carried entirely by the
+   * like-active CSS class below. */
+  gtk_button_set_icon_name (self->like_btn, "emblem-favorite-symbolic");
   if (liked)
     gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "like-active");
   else

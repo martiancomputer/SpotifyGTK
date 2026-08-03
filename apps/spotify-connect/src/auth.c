@@ -201,22 +201,7 @@ load_tokens (SpotifyAuth *self)
   g_strfreev (parts);
   return TRUE;
 #else
-  g_autofree gchar *path = g_build_filename (g_get_user_config_dir (),
-                                             "spotifygtk", "tokens", NULL);
-  g_autofree gchar *data = NULL;
-  if (!g_file_get_contents (path, &data, NULL, NULL))
-    return FALSE;
-
-  gchar **parts = g_strsplit (g_strstrip (data), "\n", 3);
-  if (g_strv_length (parts) < 3) { g_strfreev (parts); return FALSE; }
-
-  g_free (self->access_token);
-  g_free (self->refresh_token);
-  self->access_token  = g_strdup (parts[0]);
-  self->refresh_token = g_strdup (parts[1]);
-  self->expires_at    = g_ascii_strtoll (parts[2], NULL, 10);
-  g_strfreev (parts);
-  return TRUE;
+  return load_tokens_from_file (self);
 #endif
 }
 
