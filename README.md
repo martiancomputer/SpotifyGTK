@@ -457,6 +457,28 @@ cd apps/spotify-native  && meson test -C build --print-errorlogs
 - [ ] Vulkan compositing, UI for `spotify-native`
 - [ ] MPRIS2 D-Bus interface
 - [ ] Flatpak packaging
+
+**Optional / blocked on hardware or subscription:**
+
+- [ ] **Widen the audio pipeline past 16-bit.** `PcmFrame.samples` is `gint16`
+      and both output backends are configured to match (`PA_SAMPLE_S16LE`,
+      `wBitsPerSample = 16`), so the whole path is 16-bit end to end. Worth
+      doing on its own merits before any lossless work: the 15-band EQ and the
+      resampler operate on these buffers, and biquad filtering in 16-bit
+      accumulates quantisation that float would not.
+- [ ] **FLAC decode** (`FLAC_FLAC = 16` in `AudioFile::Format`, already
+      labelled in the metadata dump). Only reachable on Spotify's Platinum
+      tier, which is regional -- available in India, not in Poland and
+      elsewhere -- so this cannot be tested without a subscriber on a market
+      that has it. Behind a Meson option until then (`meson setup build
+      -Dplatinum=true`; a build flag, not a ninja one -- ninja only builds what
+      Meson configured).
+
+      Ordering matters: pipeline width first, FLAC second. Adding FLAC to a
+      16-bit pipeline would decode losslessly and then truncate, which looks
+      correct in every log and silently discards exactly what the tier is sold
+      for. libFLAC itself is small, C, and packaged for MSYS2, so it fits the
+      Windows build and the no-Rust constraint.
 - [x] Windows port — builds under MSYS2 UCRT64 and **runs on real Windows 11**: sign-in, streaming, and WASAPI playback all confirmed, and the per-OS client-token block validated against live servers (HTTP 200). `apps/spotify-native-windows/` holds the toolchain files, build script and packaging; `build/dist/` runs portably on a machine with no MSYS2 and no GTK. Remaining: no installer, `build.sh --bundle` still walks the DLL closure in a single pass (loadable modules need a fixpoint), and the stored token is not DPAPI-protected — see that directory's README
 
 ---
