@@ -552,9 +552,28 @@ typedef struct {
 
 #define CDN_SEEK_PROBE_OFFSET 4093
 #define CDN_SEEK_PROBE_LENGTH 8192
+/*
+ * Buffering depth.
+ *
+ * The first fetch stays small so playback starts promptly -- it is the only
+ * thing standing between pressing play and hearing audio.
+ *
+ * Read-ahead chunks are larger, because after that the goal is the opposite:
+ * get ahead of the playhead. At 320kbps a 64KB chunk is about 1.6 seconds of
+ * audio, so the old settings kept roughly one and a half seconds of runway and
+ * had to be back on the network constantly. Any hiccup longer than that was
+ * audible, and a resume from pause landed immediately on a request.
+ *
+ * The PCM queue is what actually decides the depth: the fetch-decode loop runs
+ * until the queue is full and then throttles, so raising it is what lets the
+ * downloader run further ahead. Thirty seconds of 16-bit stereo at 44.1kHz is
+ * about 5 MB -- cheap against the process, and enough that a resume plays for
+ * half a minute before needing the network, which covers a stale connection,
+ * the CDN request deadline and a retry with room to spare.
+ */
 #define CDN_DECODE_PROBE_LENGTH (64 * 1024)
-#define CDN_FULL_DOWNLOAD_CHUNK (64 * 1024)
-#define STREAM_QUEUE_MAX_FRAMES (44100 * 8)
+#define CDN_FULL_DOWNLOAD_CHUNK (256 * 1024)
+#define STREAM_QUEUE_MAX_FRAMES (44100 * 30)
 #define DEFAULT_TEST_TRACK_URI "spotify:track:6rqhFgbbKwnb9MLmUQDhG6"
 
 typedef struct {
