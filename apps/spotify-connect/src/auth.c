@@ -88,6 +88,9 @@ sha256_base64url (const gchar *input)
   return base64url_encode (digest, digest_len);
 }
 
+static void     store_tokens_to_file  (SpotifyAuth *self);
+static gboolean load_tokens_from_file (SpotifyAuth *self);
+
 static void
 store_tokens (SpotifyAuth *self)
 {
@@ -110,9 +113,30 @@ store_tokens (SpotifyAuth *self)
   secret_password_store_sync (&schema, SECRET_COLLECTION_DEFAULT,
                               "SpotifyGTK tokens", blob, NULL, &err,
                               "type", "tokens", NULL);
-  if (err)
-    g_warning ("libsecret store failed: %s", err->message);
+  if (err) {
+    /* Not a warning: no secret service is an ordinary environment, not a
+     * fault, and the file below persists the tokens just as well. */
+    g_message ("libsecret unavailable (%s); storing tokens in the config file "
+               "instead", err->message);
+    store_tokens_to_file (self);
+  }
 #else
+  store_tokens_to_file (self);
+#endif
+}
+
+/*
+ * File fallback, used when libsecret is not compiled in *and* when it is but
+ * no secret service is running.
+ *
+ * That second case was unhandled: the file path lived only in the #else arm,
+ * so a build with libsecret on a machine with no keyring daemon -- CI, a
+ * headless box, a minimal window manager -- could not persist tokens at all
+ * and forced a fresh sign-in on every launch.
+ */
+static void
+store_tokens_to_file (SpotifyAuth *self)
+{
   g_autofree gchar *path = g_build_filename (g_get_user_config_dir (),
                                              "spotifygtk", "tokens", NULL);
   g_autofree gchar *dir  = g_path_get_dirname (path);
@@ -123,7 +147,27 @@ store_tokens (SpotifyAuth *self)
                                             self->expires_at);
   g_file_set_contents (path, data, -1, NULL);
   g_chmod (path, 0600);
-#endif
+}
+
+static gboolean
+load_tokens_from_file (SpotifyAuth *self)
+{
+  g_autofree gchar *path = g_build_filename (g_get_user_config_dir (),
+                                             "spotifygtk", "tokens", NULL);
+  g_autofree gchar *data = NULL;
+  if (!g_file_get_contents (path, &data, NULL, NULL))
+    return FALSE;
+
+  g_auto(GStrv) parts = g_strsplit (g_strstrip (data), "\n", 3);
+  if (g_strv_length (parts) < 3)
+    return FALSE;
+
+  g_free (self->access_token);
+  g_free (self->refresh_token);
+  self->access_token  = g_strdup (parts[0]);
+  self->refresh_token = g_strdup (parts[1]);
+  self->expires_at    = g_ascii_strtoll (parts[2], NULL, 10);
+  return TRUE;
 }
 
 static gboolean
@@ -137,8 +181,12 @@ load_tokens (SpotifyAuth *self)
   };
   gchar *blob = secret_password_lookup_sync (&schema, NULL, &err, "type", "tokens", NULL);
   if (!blob) {
-    if (err) g_warning ("libsecret lookup failed: %s", err->message);
-    return FALSE;
+    if (err)
+      g_message ("libsecret unavailable (%s); looking for tokens in the config "
+                 "file instead", err->message);
+    /* Also reached when the keyring simply holds nothing for us, which is the
+     * normal first-run case. */
+    return load_tokens_from_file (self);
   }
 
   gchar **parts = g_strsplit (g_strstrip (blob), "\n", 3);
