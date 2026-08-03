@@ -35,6 +35,23 @@ struct _SpotifyCdnFetcher {
 
 G_DEFINE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, G_TYPE_OBJECT)
 
+/*
+ * Our own deadline per range request.
+ *
+ * libsoup's SoupSession:timeout does not rescue this case -- observed live, a
+ * request outstanding for over three minutes with the property set to 20. The
+ * connection was in CLOSE-WAIT: the CDN had closed its side during a pause and
+ * libsoup reused the corpse from its pool, writing the request into a socket
+ * whose peer was already gone. Writing succeeds there, so nothing fails; the
+ * response simply never arrives.
+ *
+ * So do not depend on the library's semantics. Arm a timer per request against
+ * a cancellable of our own, and if it fires, cancel -- which surfaces as an
+ * ordinary error the read-ahead path already recovers from by re-resolving and
+ * retrying.
+ */
+#define CDN_REQUEST_DEADLINE_S 12
+
 typedef struct {
   SpotifyCdnFetcher *self;
   SoupMessage       *message;
@@ -43,7 +60,53 @@ typedef struct {
   guint8             key[AUDIO_KEY_LEN];
   goffset            offset;
   gsize              length;
+
+  GCancellable      *cancel;        /* this request only */
+  gulong             parent_id;     /* handler on the shared cancellable */
+  GSource           *deadline;
+  gboolean           timed_out;
 } FetchClosure;
+
+static void
+fetch_closure_disarm (FetchClosure *cl)
+{
+  if (cl->deadline) {
+    g_source_destroy (cl->deadline);
+    g_source_unref (cl->deadline);
+    cl->deadline = NULL;
+  }
+  if (cl->parent_id && cl->self && cl->self->cancellable) {
+    g_cancellable_disconnect (cl->self->cancellable, cl->parent_id);
+    cl->parent_id = 0;
+  }
+  g_clear_object (&cl->cancel);
+}
+
+static gboolean
+on_request_deadline (gpointer user_data)
+{
+  FetchClosure *cl = user_data;
+
+  /* Drop our ref here: returning G_SOURCE_REMOVE destroys the source, and GLib
+   * holds its own ref for the dispatch. */
+  GSource *fired = cl->deadline;
+  cl->deadline = NULL;
+  if (fired)
+    g_source_unref (fired);
+
+  cl->timed_out = TRUE;
+  g_warning ("cdn: no response for logical offset %" G_GOFFSET_FORMAT " after %ds "
+             "-- abandoning the connection and failing the range so it can be retried",
+             cl->offset, CDN_REQUEST_DEADLINE_S);
+
+  /* Purge the pool as well as this request. The connection is unusable and
+   * libsoup would otherwise hand the same one to the retry. */
+  if (cl->self && cl->self->session)
+    soup_session_abort (cl->self->session);
+
+  g_cancellable_cancel (cl->cancel);
+  return G_SOURCE_REMOVE;
+}
 
 #if HAVE_OPENSSL
 static GBytes *
@@ -92,8 +155,20 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError) err = NULL;
 
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
+  gboolean timed_out = cl->timed_out;
+  fetch_closure_disarm (cl);
+
   if (!bytes) {
-    cl->callback (NULL, err, cl->user_data);
+    /* Report a deadline as a deadline. Cancellation from a Stop looks identical
+     * at this level, and the two want opposite responses -- one is retried, the
+     * other means the user has moved on. */
+    g_autoptr(GError) synthetic = NULL;
+    if (timed_out) {
+      synthetic = g_error_new (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                               "no response within %ds (connection abandoned)",
+                               CDN_REQUEST_DEADLINE_S);
+    }
+    cl->callback (NULL, timed_out ? synthetic : err, cl->user_data);
     g_clear_object (&cl->message);
     g_free (cl);
     return;
@@ -163,8 +238,21 @@ spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
              " (physical range starts at %" G_GOFFSET_FORMAT ")",
              offset, length, actual_offset);
 
+  /* Chained to the engine's cancellable so a Stop still aborts this, while the
+   * deadline below can cancel just this request without touching the rest. */
+  cl->cancel = g_cancellable_new ();
+  if (self->cancellable)
+    cl->parent_id = g_cancellable_connect (self->cancellable,
+                                           G_CALLBACK (g_cancellable_cancel),
+                                           g_object_ref (cl->cancel),
+                                           g_object_unref);
+
+  cl->deadline = g_timeout_source_new_seconds (CDN_REQUEST_DEADLINE_S);
+  g_source_set_callback (cl->deadline, on_request_deadline, cl, NULL);
+  g_source_attach (cl->deadline, g_main_context_get_thread_default ());
+
   soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
-                                    self->cancellable,
+                                    cl->cancel,
                                     on_range_response, cl);
   g_object_unref (msg);
 }
