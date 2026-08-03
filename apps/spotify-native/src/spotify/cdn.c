@@ -72,6 +72,7 @@ typedef struct {
   gsize              length;
 
   GCancellable      *cancel;        /* this request only */
+  gboolean           reported;      /* the caller has already been told */
   gulong             parent_id;     /* handler on the shared cancellable */
   GSource           *deadline;
   gboolean           timed_out;
@@ -105,26 +106,53 @@ on_request_deadline (gpointer user_data)
     g_source_unref (fired);
 
   cl->timed_out = TRUE;
-  /* Says "failing" rather than "retrying": whether the read-ahead path
-   * actually retries is not this function's to promise, and the log claimed a
-   * recovery that was not observed to happen. */
   g_warning ("cdn: no response for logical offset %" G_GOFFSET_FORMAT " after %ds "
-             "-- cancelling the request", cl->offset, CDN_REQUEST_DEADLINE_S);
+             "-- reporting the failure directly", cl->offset, CDN_REQUEST_DEADLINE_S);
 
   /*
-   * Cancel only. soup_session_abort() must NOT be called here, however tempting
-   * it is to purge the dead connection at this point: it tears the pending
-   * operation down *without* completing it, so the callback below never runs
-   * and the retry it was supposed to trigger never happens. Observed exactly
-   * that -- the deadline fired on schedule, every CDN socket closed, and
-   * playback then sat silent because nothing was left to report the failure.
-   * (It would also have been a use-after-free had the abort completed the
-   * operation synchronously, since that frees this closure.)
+   * Report the failure from here rather than waiting for the cancelled request
+   * to complete. This is the third design for this, and the first backed by
+   * evidence instead of by what the API ought to do.
    *
-   * Cancelling completes the operation properly. The pool is purged from the
-   * callback instead, where there is no in-flight request left to lose.
+   * With entry logging in the response callback, a live session showed it
+   * running normally for every successful range and *never* running after a
+   * deadline cancelled one -- 45 seconds and counting, with the loop still
+   * iterating (the deadline itself had just fired on it). So cancelling a
+   * stuck send_and_read_async does not complete it, and every recovery built
+   * on "cancel, then handle the error in the callback" could not work.
+   *
+   * So the deadline is the recovery trigger, not a way to make libsoup report
+   * one. `reported` makes that safe: if the operation does eventually complete,
+   * the callback sees the caller has already been told and only cleans up.
+   *
+   * Ordering matters. The session is aborted *before* the callback runs,
+   * because the callback re-resolves and issues a fresh request and aborting
+   * after would kill that one too. And the callback is invoked through locals
+   * rather than through `cl`, because the abort may complete this operation
+   * synchronously, which frees the closure.
    */
+  cl->reported = TRUE;
+
+  CdnChunkCallback callback   = cl->callback;
+  gpointer         caller_data = cl->user_data;
+  goffset          offset      = cl->offset;
+
   g_cancellable_cancel (cl->cancel);
+
+  /* Purge the pool: the connection that went quiet is unusable, and libsoup
+   * would otherwise hand the same one to the retry. */
+  if (cl->self && cl->self->session)
+    soup_session_abort (cl->self->session);
+  /* `cl` may be freed from here on. */
+
+  if (callback) {
+    g_autoptr(GError) err = g_error_new (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                                         "no response within %ds for logical offset %"
+                                         G_GOFFSET_FORMAT " (connection abandoned)",
+                                         CDN_REQUEST_DEADLINE_S, offset);
+    callback (NULL, err, caller_data);
+  }
+
   return G_SOURCE_REMOVE;
 }
 
@@ -181,18 +209,24 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
    * that; without it the next occurrence is as unreadable as the last. */
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
   gboolean timed_out = cl->timed_out;
+  gboolean reported  = cl->reported;
   g_message ("cdn: response callback for logical offset %" G_GOFFSET_FORMAT
              " (bytes=%s, timed_out=%s, err=%s)",
              cl->offset, bytes ? "yes" : "no", timed_out ? "yes" : "no",
              err ? err->message : "none");
   fetch_closure_disarm (cl);
 
-  /* Safe here and not in the deadline handler: this operation has completed, so
-   * there is nothing of ours left for the abort to discard. The connection that
-   * went quiet is unusable, and without this libsoup would hand the same one
-   * straight back to the retry. */
-  if (timed_out && cl->self && cl->self->session)
-    soup_session_abort (cl->self->session);
+  /* The deadline already told the caller and already purged the pool. Anything
+   * arriving now is a late answer to a request that has been given up on:
+   * clean up and say nothing, or the caller would be handed a second result
+   * for a range it has already moved past. */
+  if (reported) {
+    g_clear_object (&cl->message);
+    g_free (cl);
+    if (bytes)
+      g_bytes_unref (bytes);
+    return;
+  }
 
   if (!bytes) {
     /* Report a deadline as a deadline. Cancellation from a Stop looks identical
