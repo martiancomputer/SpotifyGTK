@@ -535,6 +535,33 @@ typedef struct {
   gpointer            progress_data;
 } LiveTestState;
 
+/*
+ * The run currently owning the engine, or NULL between tracks.
+ *
+ * LiveTestState is a stack local in engine_run, and async callbacks carry it as
+ * user_data. That was safe while the context died with the run -- pending
+ * callbacks died with it. Now the context persists, so a response arriving
+ * after a run has returned lands on a dead stack frame. It crashed exactly
+ * that way in on_audio_storage_result: a storage resolve that succeeded after
+ * its run had ended, dereferencing a freed audio_key_client.
+ *
+ * Draining before returning narrows that window but cannot close it, because a
+ * request that is stuck rather than cancellable never completes to be drained
+ * -- which is precisely what the CDN deadline work found earlier today.
+ *
+ * So callbacks compare their state pointer against this before touching it.
+ * Comparing a dangling pointer is well defined; dereferencing one is not, and
+ * this check happens before any dereference.
+ */
+static LiveTestState *engine_active_state = NULL;
+
+static inline gboolean
+run_is_current (LiveTestState *state)
+{
+  return state != NULL && state == engine_active_state;
+}
+
+
 /* Deliberately not AES-block aligned: comparing this independently
  * decrypted range with the same bytes from the initial range proves both
  * counter advancement and the intra-block discard path in cdn.c. */
@@ -1018,6 +1045,9 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_dat
   gboolean refined    = land->refined;
   g_free (land);
 
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
+
   /* A newer seek superseded this one: its teardown already happened, so drop
    * this stale window rather than feeding it into the wrong decoder. */
   if (gen != state->playback_generation)
@@ -1220,6 +1250,8 @@ static void
 on_read_ahead_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
   if (!decrypted_chunk) {
     /*
      * One refused range used to end the track outright. That is the wrong
@@ -1359,6 +1391,8 @@ static void
 on_cdn_seek_probe_result (GBytes *decrypted_chunk, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (!decrypted_chunk) {
     g_warning ("[live-test] CDN seek-probe fetch failed: %s",
@@ -1425,6 +1459,8 @@ static void
 on_cdn_initial_chunk_result (GBytes *decrypted_chunk, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (!decrypted_chunk) {
     g_warning ("[live-test] CDN initial fetch failed: %s",
@@ -1575,6 +1611,8 @@ static void
 on_audio_storage_result (SpclientCdnUrls *urls, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (urls && urls->n_urls > 0) {
     g_message ("[live-test] STORAGE RESOLUTION SUCCEEDED -- CDN URLs:");
@@ -1634,6 +1672,8 @@ static void
 on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (files) {
     g_message ("[live-test] TRACK METADATA SUCCEEDED -- found %u files:", n_files);
@@ -1910,6 +1950,8 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
                   GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (access_token) {
     g_message ("[live-test] LOGIN5 SUCCEEDED -- obtained a spclient-usable bearer token "
@@ -1979,6 +2021,8 @@ static void
 on_client_token_result (const gchar *token, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (token) {
     g_message ("[live-test] client-token obtained, proceeding to login5...");
@@ -2253,6 +2297,11 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     .progress = progress, .progress_data = progress_data,
     .cancellable = cancellable,
   };
+  /* Claim the engine for this run. Callbacks compare against this before
+   * touching their state pointer, so anything left over from a previous track
+   * is dropped instead of writing into a stack frame that has returned. */
+  engine_active_state = &state;
+
   report_progress (&state, SPOTIFYGTK_ENGINE_CONNECTING,
                    "Starting the native Spotify playback engine.");
   /*
@@ -2366,16 +2415,55 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     state.cancel_source = NULL;
   }
 
-  /* Cancellation callbacks are delivered on the private engine context. Give
-   * them a bounded drain window before releasing the stack-backed state and
-   * protocol clients, preventing a late soup/AP callback from observing freed
-   * callback data after a timeout or Stop request. */
-  if (state.timed_out ||
-      (state.cancellable && g_cancellable_is_cancelled (state.cancellable))) {
-    guint drained = 0;
-    while (g_main_context_pending (context) && drained++ < 64)
-      g_main_context_iteration (context, FALSE);
-    g_message ("[live-test] cancellation drain processed %u pending context iteration(s)",
+  /*
+   * Drain before the stack-backed state goes away. This runs on *every* exit,
+   * not only cancellation, and it waits rather than just sweeping what is
+   * already queued.
+   *
+   * Both of those changed because the context now outlives the run. It used to
+   * be created and destroyed per track, so a pending libsoup callback died
+   * with it; now it persists, and a response arriving after the run returned
+   * lands on a LiveTestState that is a dead stack frame. That produced a
+   * SIGSEGV in SPOTIFYGTK_IS_AUDIO_KEY_CLIENT, reached from
+   * on_audio_storage_result -- a storage resolve that completed successfully
+   * after its run had ended.
+   *
+   * The old drain could not have caught it. It only ran when cancelled or
+   * timed out, and g_main_context_pending() is false while a request is
+   * genuinely in flight -- nothing is *ready* until the response arrives -- so
+   * it exited immediately having waited for nothing.
+   *
+   * Cancelling first is what makes the wait short: a cancelled soup operation
+   * completes in milliseconds, so this costs nothing on a normal track switch
+   * while still closing the window.
+   */
+  /* Released before the drain, not after: anything still in flight is by
+   * definition no longer this run's concern, and clearing it first means a
+   * callback that lands mid-drain takes the early return rather than acting on
+   * a state that is about to go away. */
+  engine_active_state = NULL;
+
+  if (state.cancellable)
+    g_cancellable_cancel (state.cancellable);
+
+  {
+    gint64 deadline = g_get_monotonic_time () + 400 * G_TIME_SPAN_MILLISECOND;
+    guint  drained  = 0;
+    guint  idle_passes = 0;
+
+    while (g_get_monotonic_time () < deadline) {
+      if (g_main_context_iteration (context, FALSE)) {
+        drained++;
+        idle_passes = 0;
+        continue;
+      }
+      /* Nothing dispatched. Give in-flight cancellations a moment to land,
+       * and stop once several passes in a row find nothing at all. */
+      if (++idle_passes > 20)
+        break;
+      g_usleep (1000);
+    }
+    g_message ("[live-test] drain processed %u pending context iteration(s)",
                drained);
   }
   g_main_loop_unref (loop);
