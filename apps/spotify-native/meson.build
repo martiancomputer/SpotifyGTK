@@ -24,6 +24,42 @@ soup_dep       = dependency('libsoup-3.0',   version: '>= 3.4')  # cdn.c HTTPS R
 json_glib_dep  = dependency('json-glib-1.0', version: '>= 1.6')  # native_auth.c token response parsing
 gtk4_dep       = dependency('gtk4', version: '>= 4.0', required: enable_gui)
 
+# The UI is laid out against a specific GTK, not merely a minimum one.
+#
+# Widget metrics changed enough across 4.14 -> 4.22 that the same source
+# produces a visibly different window: the Now Playing cover stops filling its
+# panel, and the playback and volume bars take different sizes. An AppImage
+# built on Ubuntu 24.04 (GTK 4.14) showed exactly that, and the fix is not to
+# scatter version-dependent workarounds through the UI.
+#
+# So this is a hard floor rather than a warning. -Dallow_old_gtk=true builds
+# anyway, for anyone who would rather have a working client that looks a little
+# off than none at all.
+gtk_designed_for = '4.22.4'
+adw_designed_for = '1.9.0'
+
+if gtk4_dep.found() and not get_option('allow_old_gtk')
+  if gtk4_dep.version().version_compare('< ' + gtk_designed_for)
+    error(
+      'GTK ' + gtk4_dep.version() + ' is older than ' + gtk_designed_for + ', which the UI is laid out against.\n' +
+      '  The build would succeed and the window would look wrong -- cover art, the playback bar\n' +
+      '  and spacing all differ on older GTK.\n' +
+      '  Build anyway with:  meson setup build -Dallow_old_gtk=true'
+    )
+  endif
+
+  # Checked alongside GTK because libadwaita draws much of what differs --
+  # entries, popovers, the header bar -- so a new GTK with an old libadwaita
+  # lands in the same place.
+  adw_check = dependency('libadwaita-1', version: '>= 1.4', required: false)
+  if adw_check.found() and adw_check.version().version_compare('< ' + adw_designed_for)
+    error(
+      'libadwaita ' + adw_check.version() + ' is older than ' + adw_designed_for + ', which the UI is laid out against.\n' +
+      '  Build anyway with:  meson setup build -Dallow_old_gtk=true'
+    )
+  endif
+endif
+
 # Audio decode -- libogg/libvorbis are 20+ year old, ABI-frozen, pure C.
 ogg_dep        = dependency('ogg',           version: '>= 1.3')
 vorbis_dep     = dependency('vorbis',        version: '>= 1.3')

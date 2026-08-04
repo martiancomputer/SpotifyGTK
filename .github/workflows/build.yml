@@ -100,9 +100,15 @@ jobs:
         if: matrix.profile == 'nightly'
         run: sudo apt-get install -y libpipewire-0.3-dev
 
+      # allow_old_gtk because the runner has GTK 4.14 and the UI is laid out
+      # against 4.22. This job compiles and runs tests; it never looks at a
+      # window, so the layout difference the floor guards against cannot affect
+      # what it verifies. A build meant for a person to use must not set this.
       - name: Configure (Meson)
         working-directory: apps/spotify-native
-        run: meson setup build --native-file build-profiles/${{ matrix.profile }}.ini -Dtests=true
+        run: |
+          meson setup build --native-file build-profiles/${{ matrix.profile }}.ini \
+            -Dtests=true -Dallow_old_gtk=true
 
       - name: Build
         working-directory: apps/spotify-native
