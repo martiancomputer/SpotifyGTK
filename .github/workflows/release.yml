@@ -70,6 +70,7 @@ jobs:
             libogg-dev libvorbis-dev \
             libssl-dev libpulse-dev libasound2-dev \
             librsvg2-dev libgdk-pixbuf-2.0-0 gtk-update-icon-cache \
+            glib-networking \
             desktop-file-utils patchelf file
 
       - name: Install Meson
@@ -80,15 +81,31 @@ jobs:
       - name: Build AppImage
         run: ./packaging/build-appimage.sh
 
-      # Only checks it starts and exits, but that alone catches the failures
-      # this format actually has: a missing loader, an absent GIO module, no
-      # compiled schema. Needs a display, hence xvfb.
+      # Starting is not enough. The first AppImage started perfectly and had no
+      # TLS backend, so every HTTPS request failed and the session died one
+      # step after sign-in. The app reaches out over HTTPS during startup, so
+      # grepping its own output for that failure is a real check rather than a
+      # proxy for one.
       - name: Smoke test
         run: |
           sudo apt-get install -y xvfb
           chmod +x packaging/out/*.AppImage
-          xvfb-run -a timeout 25 ./packaging/out/*.AppImage --appimage-extract-and-run 2>&1 | tail -20 || true
-          echo "started without a loader or schema failure"
+          set +e
+          xvfb-run -a timeout 30 ./packaging/out/*.AppImage --appimage-extract-and-run > run.log 2>&1
+          set -e
+          tail -30 run.log
+
+          if grep -q "TLS support is not available" run.log; then
+            echo "::error::AppImage has no GIO TLS backend -- glib-networking was not bundled"
+            exit 1
+          fi
+          for bad in "Failed to load module" "no such schema" "Settings schema .* is not installed"; do
+            if grep -qE "$bad" run.log; then
+              echo "::error::AppImage runtime problem: $bad"
+              exit 1
+            fi
+          done
+          echo "no TLS, loader or schema failures"
 
       - uses: actions/upload-artifact@v4
         with:
