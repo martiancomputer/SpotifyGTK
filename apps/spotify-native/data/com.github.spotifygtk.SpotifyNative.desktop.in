@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=SpotifyGTK
+GenericName=Music Player
+Comment=Native Spotify client with its own protocol and audio pipeline
+Exec=spotify-native
+Icon=com.github.spotifygtk.SpotifyNative
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Music;Player;GTK;
+Keywords=spotify;music;streaming;player;
+StartupWMClass=spotify-native

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.github.spotifygtk.SpotifyNative</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>SpotifyGTK</name>
+  <summary>Native Spotify client for Linux</summary>
+
+  <description>
+    <p>
+      A Spotify client written entirely in C, with no Rust and no Electron. It
+      speaks Spotify's own protocol directly and decodes and plays audio
+      itself, rather than driving another running client.
+    </p>
+    <p>
+      Includes a 15-band graphic equaliser with a draggable response curve and
+      an optional resampler.
+    </p>
+    <p>
+      Requires a Spotify Premium account. Playback is licensed per account at
+      the protocol level, and a free account is refused an audio key for every
+      format a track offers, so it cannot play regardless of client.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.github.spotifygtk.SpotifyNative.desktop</launchable>
+  <url type="homepage">https://github.com/martiancomputer/SpotifyGTK</url>
+  <url type="bugtracker">https://github.com/martiancomputer/SpotifyGTK/issues</url>
+
+  <developer id="com.github.martiancomputer">
+    <name>martiancomputer</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-04">
+      <description>
+        <p>First packaged release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

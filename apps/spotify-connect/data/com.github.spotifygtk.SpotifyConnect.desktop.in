@@ -6,6 +6,6 @@ Exec=spotify-connect %U
 Icon=com.github.spotifygtk.SpotifyConnect
 Terminal=false
 Type=Application
-Categories=Audio;Music;Player;GTK;
+Categories=AudioVideo;Audio;Music;Player;GTK;
 Keywords=spotify;music;streaming;player;
 StartupWMClass=spotify-connect

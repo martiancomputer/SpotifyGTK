@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  App icon. Deliberately not Spotify's mark: this is an independent client and
+  must not present itself as the official app, in a launcher or anywhere else.
+  A speaker cone with an equaliser curve across it, which is what the client
+  actually is - its own audio pipeline with a graphic EQ.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2ec27e"/>
+      <stop offset="1" stop-color="#1a7f4f"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)"/>
+
+  <!-- cone -->
+  <circle cx="64" cy="64" r="34" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="4"/>
+  <circle cx="64" cy="64" r="13" fill="#ffffff" fill-opacity="0.9"/>
+
+  <!-- equaliser curve -->
+  <path d="M22 64 Q38 40 50 64 T78 64 Q90 88 106 64"
+        fill="none" stroke="#ffffff" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

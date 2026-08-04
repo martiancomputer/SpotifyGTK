@@ -105,6 +105,7 @@ configure_file(output: 'config.h', configuration: conf)
 config_inc = include_directories('.')
 
 # ── Subdirectories ────────────────────────────────────────────────────────────
+subdir('data')
 subdir('src')
 subdir('tests')
 
