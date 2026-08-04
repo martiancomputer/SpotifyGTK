@@ -117,6 +117,9 @@ void spotifygtk_ap_session_login (SpotifyApSession *self,
 
 void spotifygtk_ap_session_disconnect (SpotifyApSession *self);
 
+/* TRUE when the channel is up and login has completed. */
+gboolean spotifygtk_ap_session_is_live (SpotifyApSession *self);
+
 /*
  * Accessors for what APWelcome actually handed us, valid only after
  * a successful login (ApLoginCallback fired with success=TRUE).
@@ -132,6 +135,12 @@ guint64       spotifygtk_ap_session_get_reusable_creds_type (SpotifyApSession *s
 
 /*
  * Signal: "disconnected" (GError *error)
+ *
+ * spotifygtk_ap_session_is_live() reports whether the encrypted channel is up
+ * *and* login has completed, which is the condition for reusing a session
+ * across tracks rather than paying a handshake per track. Connected alone is
+ * not enough: a session can be mid-handshake, or connected with a login that
+ * failed, and neither can serve an audio key.
  *
  * Fires whenever the receive loop terminates unexpectedly (the
  * remote end closed the connection, a read failed, or a MAC check

@@ -49,6 +49,10 @@ struct _SpotifyApSession {
    * bearer token spclient's HTTPS API actually needs, and it wants
    * this reusable credential, not the AP-login OAuth token. */
   gchar           *welcome_username;
+  /* Set when APWelcome lands. Distinct from `connected`, which only says the
+   * encrypted channel is up -- a session can be connected with a login still
+   * in flight, or one that failed, and neither can serve an audio key. */
+  gboolean         logged_in;
   guint8          *reusable_creds;
   gsize            reusable_creds_len;
   guint64          reusable_creds_type;  /* AuthenticationType enum value */
@@ -748,6 +752,7 @@ on_apwelcome (SpotifyApSession *session, ApCommandId cmd,
   g_free (session->welcome_username);
   session->welcome_username = username_data
     ? g_strndup ((const gchar *) username_data, username_len) : NULL;
+  session->logged_in = TRUE;
 
   /* reusable_auth_credentials (0x28) + its type (0x1e, varint enum) --
    * this is what login5's StoredCredential needs downstream (NOT the
@@ -946,6 +951,14 @@ spotifygtk_ap_session_disconnect (SpotifyApSession *self)
     g_clear_object (&self->connection);
   }
   self->connected = FALSE;
+  self->logged_in = FALSE;
+}
+
+gboolean
+spotifygtk_ap_session_is_live (SpotifyApSession *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_AP_SESSION (self), FALSE);
+  return self->connected && self->logged_in && self->connection != NULL;
 }
 
 static void

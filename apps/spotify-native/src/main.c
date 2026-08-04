@@ -1606,6 +1606,29 @@ on_audio_storage_result (SpclientCdnUrls *urls, GError *error, gpointer user_dat
 
 static void proceed_with_credentials (LiveTestState *state);
 static void cred_cache_invalidate (void);
+static void wire_session_to_state (LiveTestState *state, SpotifyApSession *session);
+
+/*
+ * Objects that outlive a single track.
+ *
+ * The engine used to build everything per run and tear it down again, which
+ * cost the whole connection setup on every track. Measured on a real start:
+ * AP handshake and login ~1.9s, the audio key round trip on that fresh
+ * connection ~2.1s, and the first 64KB CDN chunk ~1.0s because its session was
+ * new too and paid a TCP and TLS handshake to a host it had just been talking
+ * to. About 3.9 seconds of a 5.5 second start, thrown away and rebuilt each
+ * time.
+ *
+ * The context has to persist for any of it to: the AP session's socket sources
+ * belong to whichever context was thread-default when they were created, so a
+ * session outliving its context would have nothing pumping it. Runs are
+ * strictly sequential -- player_service only starts the next track from
+ * on_engine_finished -- so exactly one thread has this pushed at a time, which
+ * is what makes a shared context safe without a dedicated host thread.
+ */
+static GMainContext     *engine_context = NULL;
+static SpotifyApSession  *engine_ap      = NULL;
+static SpotifyCdnFetcher *engine_cdn     = NULL;
 
 static void
 on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError *error, gpointer user_data)
@@ -1988,6 +2011,35 @@ on_client_token_result (const gchar *token, gpointer user_data)
                                 token, on_login5_result, state);
 }
 
+/*
+ * Attach this run's state to an AP session, new or reused.
+ *
+ * Every line here must run per track even when the connection is reused,
+ * because all of it points at the current LiveTestState. The audio-key
+ * handlers are the sharp edge: they carry `state` as user_data, so leaving a
+ * previous track's registration in place would hand the next key reply a
+ * pointer to a stack frame that no longer exists. Re-registering overwrites
+ * it, which is why this is a function rather than something done once at
+ * connect time.
+ */
+static void
+wire_session_to_state (LiveTestState *state, SpotifyApSession *session)
+{
+  state->session = session;
+  state->audio_key_client = spotifygtk_audio_key_client_new (session);
+
+  /* Reused across tracks so its connections stay warm. A fresh fetcher opened
+   * a new TLS connection for the first chunk of every track, which measured
+   * ~1s for 64KB against ~10ms once a connection exists. */
+  if (!engine_cdn)
+    engine_cdn = spotifygtk_cdn_fetcher_new ();
+  state->cdn_fetcher = engine_cdn;
+  spotifygtk_cdn_fetcher_set_cancellable (state->cdn_fetcher, state->cancellable);
+
+  spotifygtk_ap_session_set_handler (session, AP_CMD_AES_KEY, on_aes_key, state);
+  spotifygtk_ap_session_set_handler (session, AP_CMD_AES_KEY_ERROR, on_aes_key_error, state);
+}
+
 static void
 on_login_result (gboolean success, const gchar *username, GError *error, gpointer user_data)
 {
@@ -2100,21 +2152,8 @@ on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
                    "Secure AP channel established; signing in.");
 
-  state->session = session;
+  wire_session_to_state (state, session);
   spotifygtk_ap_session_start_receiving (session);
-  state->audio_key_client = spotifygtk_audio_key_client_new (session);
-  state->cdn_fetcher = spotifygtk_cdn_fetcher_new ();
-  /* CDN cancellation is threaded through first; AP/auth cancellation follows
-   * the same pattern as their async APIs are widened. */
-  spotifygtk_cdn_fetcher_set_cancellable (state->cdn_fetcher, state->cancellable);
-
-  /* `state` is already the LiveTestState pointer supplied by run_live_test().
-   * Passing `&state` here would instead retain a pointer to this callback's
-   * stack-local parameter; the first audio-key reply would dereference that
-   * invalid address and crash. */
-  spotifygtk_ap_session_set_handler (session, AP_CMD_AES_KEY, on_aes_key, state);
-  spotifygtk_ap_session_set_handler (session, AP_CMD_AES_KEY_ERROR, on_aes_key_error, state);
-  g_message ("[live-test] registered AP audio-key response handlers");
 
   const gchar *username = g_getenv ("SPOTIFY_USERNAME");  /* optional, may be NULL */
   const gchar *token    = g_object_get_data (G_OBJECT (session), "login-token");
@@ -2169,10 +2208,21 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   /* The engine runs in a worker owned by the GTK service. Keep all AP,
    * libsoup, and timeout sources on a private context so they cannot acquire
    * GTK's default context and dispatch protocol callbacks on the UI thread. */
-  GMainContext *context = g_main_context_new ();
+  if (!engine_context)
+    engine_context = g_main_context_new ();
+  GMainContext *context = engine_context;
   g_main_context_push_thread_default (context);
 
-  SpotifyApSession *session = spotifygtk_ap_session_new ();
+  /* Reuse the connection when it is still up and logged in. is_live() checks
+   * both, plus that a socket exists -- connected alone would let a session
+   * whose login failed, or one mid-handshake, through, and neither can serve
+   * an audio key. */
+  gboolean reusing_ap = engine_ap && spotifygtk_ap_session_is_live (engine_ap);
+  if (!reusing_ap) {
+    g_clear_object (&engine_ap);
+    engine_ap = spotifygtk_ap_session_new ();
+  }
+  SpotifyApSession *session = engine_ap;
   /* Stashed here rather than threaded through as a separate callback
    * parameter -- on_connected() needs it and is reached via
    * spotifygtk_ap_session_connect()'s fixed GAsyncReadyCallback
@@ -2205,7 +2255,26 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   };
   report_progress (&state, SPOTIFYGTK_ENGINE_CONNECTING,
                    "Starting the native Spotify playback engine.");
-  spotifygtk_ap_session_set_cancellable (session, cancellable);
+  /*
+   * The session gets a cancellable of its own, not this run's.
+   *
+   * Handing it the per-run cancellable is what stopped the connection ever
+   * being reused: ending a track cancels that, ap.c treats the cancellation as
+   * a dropped connection and disconnects, so the next track always found a
+   * dead session and reconnected. The probe showed it immediately -- track two
+   * logged a fresh handshake.
+   *
+   * Stopping a track still works: the engine loop is quit by its own cancel
+   * source, and the run's own clients (audio key, spclient, CDN) are cancelled
+   * with it. What no longer happens is tearing down a connection the next
+   * track wants.
+   */
+  if (!reusing_ap) {
+    GCancellable *ap_life = g_cancellable_new ();
+    spotifygtk_ap_session_set_cancellable (session, ap_life);
+    g_object_set_data_full (G_OBJECT (session), "ap-lifetime-cancellable",
+                            ap_life, g_object_unref);
+  }
   g_message ("[live-test] device_id for this run: %s", state.device_id);
 
   /* retry_ap_connect() needs the session, and on_connected's user_data slot
@@ -2213,7 +2282,39 @@ run_live_test (const gchar *token, GCancellable *cancellable,
    * stashed it on the GMainLoop, which is not a GObject, so g_object_set_data
    * asserted and the retry could never find it. */
   state.pending_session = session;
-  spotifygtk_ap_session_connect (session, NULL, on_connected, &state);
+
+  if (reusing_ap) {
+    /*
+     * The expensive half skipped entirely: no apresolve, no TCP, no
+     * Diffie-Hellman, no login. Wire this run's state onto the live session
+     * and pick up where a fresh connection would have arrived anyway --
+     * on_login_result's continuation, which takes the cached credentials and
+     * goes straight to metadata.
+     *
+     * start_receiving is not called again: the receive loop from the original
+     * connection is still running, and starting a second would have two
+     * readers pulling from one Shannon stream, each advancing recv_nonce past
+     * the other's packets.
+     */
+    g_message ("[live-test] reusing the live AP connection -- skipping handshake "
+               "and login (~1.9s saved on this track).");
+    wire_session_to_state (&state, session);
+    report_progress (&state, SPOTIFYGTK_ENGINE_BUFFERING,
+                     "Connected to Spotify; preparing the streaming session.");
+
+    if (cred_cache_take (&state.bearer_token, &state.client_token)) {
+      proceed_with_credentials (&state);
+    } else {
+      /* Credentials expired while the connection stayed up. The AP is still
+       * good; only the HTTP tokens need re-minting. */
+      state.client_token_client = spotifygtk_client_token_new ();
+      spotifygtk_client_token_set_cancellable (state.client_token_client, cancellable);
+      spotifygtk_client_token_request (state.client_token_client, NATIVE_AUTH_CLIENT_ID,
+                                       state.device_id, on_client_token_result, &state);
+    }
+  } else {
+    spotifygtk_ap_session_connect (session, NULL, on_connected, &state);
+  }
 
   /* Bound how long we'll wait -- a hang here (e.g. SRV resolution
    * stalling, or a firewalled outbound connection) should fail
@@ -2283,7 +2384,10 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   g_clear_object (&state.login5_client);
   g_clear_object (&state.spclient);
   g_clear_object (&state.audio_key_client);
-  g_clear_object (&state.cdn_fetcher);
+  /* Borrowed from engine_cdn and shared across tracks -- unreffing it here is
+   * what left the next run with a freed fetcher and a failed type assertion.
+   * Just drop this run's pointer to it. */
+  state.cdn_fetcher = NULL;
   g_free (state.bearer_token);
   g_free (state.client_token);
   g_free (state.cdn_url);
@@ -2297,9 +2401,20 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     g_cond_clear (&state.queue_cond);
   }
   g_clear_object (&state.stream_decoder);
-  g_object_unref (session);
+
+  /*
+   * The session, the CDN fetcher and the context deliberately survive this
+   * function -- that is the whole point. What must not survive is a session
+   * that has been cancelled or dropped: cancelling the engine tears down the
+   * AP connection, and a dead session handed to the next track would fail
+   * every request on it. is_live() is false by then because disconnect()
+   * clears both flags, so the next run rebuilds rather than reusing.
+   *
+   * The handlers registered on it still point at this stack frame, which is
+   * safe only because wire_session_to_state() overwrites them on the next
+   * track before anything can arrive for it.
+   */
   g_main_context_pop_thread_default (context);
-  g_main_context_unref (context);
 
   return state.ok;
 }
