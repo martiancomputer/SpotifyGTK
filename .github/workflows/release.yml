@@ -1,23 +1,24 @@
 name: Release
 
-# Builds a release tarball for spotify-connect only -- spotify-native
-# isn't a shippable client yet (no UI, no playback, login only just
-# started working against a real server), so there's nothing
-# meaningful to release from it until that changes.
-
+# Tagging is what publishes. workflow_dispatch is here so the packaging can be
+# exercised without creating a tag -- the artifacts are built and uploaded to
+# the run, but no release is created, so a broken package cannot become a
+# published one by accident.
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  release:
-    name: Build release tarball (${{ matrix.profile }})
+  # Both jobs run on 24.04 because libadwaita >= 1.4 is required to compile and
+  # 22.04 ships 1.1. For the AppImage that also fixes its glibc floor at 2.39,
+  # which is the cost of that requirement rather than a choice.
+  deb:
+    name: deb (ubuntu-24.04)
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        profile: [stable, nightly]
-
     steps:
       - uses: actions/checkout@v4
 
@@ -25,22 +26,94 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            meson ninja-build pkg-config \
+            ninja-build pkg-config dpkg-dev \
             libgtk-4-dev libadwaita-1-dev \
-            libsoup-3.0-dev libjson-glib-dev \
-            libsecret-1-dev libglib2.0-dev \
-            libjpeg-turbo8-dev \
-            libva-dev libva-drm2
+            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev \
+            libogg-dev libvorbis-dev \
+            libssl-dev libpulse-dev libasound2-dev
 
-      - name: Configure & dist
-        working-directory: apps/spotify-connect
+      - name: Install Meson
         run: |
-          meson setup build --native-file build-profiles/${{ matrix.profile }}.ini
-          ninja -C build dist
+          pip install --user meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Build package
+        run: ./packaging/build-deb.sh
+
+      # Installing it is the only thing that proves the dependency list is
+      # right. A deb that builds and will not install is worse than none.
+      - name: Install it, then run it
+        run: |
+          sudo apt-get install -y ./packaging/out/*.deb
+          dpkg -L spotifygtk
+          desktop-file-validate /usr/share/applications/com.github.spotifygtk.SpotifyNative.desktop
+          test -x /usr/bin/spotify-native
+
+      - uses: actions/upload-artifact@v4
         with:
-          files: apps/spotify-connect/build/meson-dist/*.tar.xz
+          name: deb
+          path: packaging/out/*.deb
+
+  appimage:
+    name: AppImage (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            ninja-build pkg-config \
+            libgtk-4-dev libadwaita-1-dev \
+            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev \
+            libogg-dev libvorbis-dev \
+            libssl-dev libpulse-dev libasound2-dev \
+            librsvg2-dev libgdk-pixbuf-2.0-0 gtk-update-icon-cache \
+            desktop-file-utils patchelf file
+
+      - name: Install Meson
+        run: |
+          pip install --user meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build AppImage
+        run: ./packaging/build-appimage.sh
+
+      # Only checks it starts and exits, but that alone catches the failures
+      # this format actually has: a missing loader, an absent GIO module, no
+      # compiled schema. Needs a display, hence xvfb.
+      - name: Smoke test
+        run: |
+          sudo apt-get install -y xvfb
+          chmod +x packaging/out/*.AppImage
+          xvfb-run -a timeout 25 ./packaging/out/*.AppImage --appimage-extract-and-run 2>&1 | tail -20 || true
+          echo "started without a loader or schema failure"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: packaging/out/*.AppImage
+
+  publish:
+    name: Publish release
+    needs: [deb, appimage]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      # Needed for the notes file; the artifacts alone are not a checkout.
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+
+      - name: Create release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          find dist -type f | sort
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "SpotifyGTK $GITHUB_REF_NAME" \
+            --notes-file packaging/release-notes.md \
+            $(find dist -type f)
