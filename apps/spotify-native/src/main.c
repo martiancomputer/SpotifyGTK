@@ -1035,9 +1035,10 @@ stream_output_restart (LiveTestState *state)
 /* The seek window arrived: find a page, replay headers into a fresh decoder,
  * feed from that page, and resume normal read-ahead from just past the window. */
 static void
-on_seek_landing_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpointer user_data)
 {
   SeekLanding  *land   = user_data;
+  (void) offset;   /* single outstanding request; nothing to disambiguate */
   LiveTestState *state = land->state;
   guint    gen        = land->generation;
   gint64   target_ms  = land->target_ms;
@@ -1247,11 +1248,32 @@ do_seek (LiveTestState *state)
 static void on_read_ahead_restorage (SpclientCdnUrls *urls, GError *error, gpointer user_data);
 
 static void
-on_read_ahead_chunk (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
   if (!run_is_current (state))
     return;   /* the run that asked for this has already finished */
+
+  /*
+   * Only one read-ahead range is outstanding at a time, so the offset being
+   * awaited is next_download_offset -- it advances only when bytes land.
+   * Anything reporting a different offset is a request this run issued and
+   * has since moved past: a fetch that stalled, was retried at the same
+   * offset by the path below, and then had its own 45s deadline expire long
+   * afterwards. Its failure used to be attributed to whatever range was in
+   * flight at the time, which retried a perfectly healthy fetch and decoded
+   * the same bytes twice -- audible as a few seconds of music repeating. A
+   * late success is no better: it would splice bytes from the wrong part of
+   * the file into the stream. Neither is ours to act on.
+   */
+  if (offset != state->next_download_offset) {
+    g_message ("[live-test] ignoring a %s for logical offset %" G_GOFFSET_FORMAT
+               "; the read-ahead has moved on to %" G_GOFFSET_FORMAT ".",
+               decrypted_chunk ? "late range" : "stale failure",
+               offset, state->next_download_offset);
+    return;
+  }
+
   if (!decrypted_chunk) {
     /*
      * One refused range used to end the track outright. That is the wrong
@@ -1388,9 +1410,10 @@ on_aes_key_error (SpotifyApSession *session, ApCommandId cmd, const guint8 *payl
 }
 
 static void
-on_cdn_seek_probe_result (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+on_cdn_seek_probe_result (GBytes *decrypted_chunk, goffset offset, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  (void) offset;   /* single outstanding request; nothing to disambiguate */
   if (!run_is_current (state))
     return;   /* the run that asked for this has already finished */
 
@@ -1456,9 +1479,10 @@ on_cdn_seek_probe_result (GBytes *decrypted_chunk, GError *error, gpointer user_
 }
 
 static void
-on_cdn_initial_chunk_result (GBytes *decrypted_chunk, GError *error, gpointer user_data)
+on_cdn_initial_chunk_result (GBytes *decrypted_chunk, goffset offset, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  (void) offset;   /* single outstanding request; nothing to disambiguate */
   if (!run_is_current (state))
     return;   /* the run that asked for this has already finished */
 

@@ -17,7 +17,16 @@ G_BEGIN_DECLS
 
 #define CDN_CHUNK_SIZE (16 * 1024)   /* bytes per Range request */
 
-typedef void (*CdnChunkCallback) (GBytes *decrypted_chunk, GError *error, gpointer user_data);
+/*
+ * `offset` is the logical offset the completed request was for, and is
+ * supplied on failure as well as success. A caller that only ever has one
+ * request outstanding still needs it: a stalled request is reported when its
+ * deadline expires, which can be long after the caller has moved on, and
+ * without the offset it cannot tell that failure apart from one belonging to
+ * the range it is actually waiting on.
+ */
+typedef void (*CdnChunkCallback) (GBytes *decrypted_chunk, goffset offset,
+                                  GError *error, gpointer user_data);
 
 #define SPOTIFYGTK_TYPE_CDN_FETCHER (spotifygtk_cdn_fetcher_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, SPOTIFYGTK, CDN_FETCHER, GObject)

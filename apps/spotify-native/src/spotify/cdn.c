@@ -159,7 +159,7 @@ on_request_deadline (gpointer user_data)
                                          "no response within %ds for logical offset %"
                                          G_GOFFSET_FORMAT " (connection abandoned)",
                                          CDN_REQUEST_DEADLINE_S, offset);
-    callback (NULL, err, caller_data);
+    callback (NULL, offset, err, caller_data);
   }
 
   return G_SOURCE_REMOVE;
@@ -247,7 +247,7 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
                                "no response within %ds (connection abandoned)",
                                CDN_REQUEST_DEADLINE_S);
     }
-    cl->callback (NULL, timed_out ? synthetic : err, cl->user_data);
+    cl->callback (NULL, cl->offset, timed_out ? synthetic : err, cl->user_data);
     g_clear_object (&cl->message);
     g_free (cl);
     return;
@@ -260,7 +260,7 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
     g_warning ("cdn: logical offset %" G_GOFFSET_FORMAT ", length %" G_GSIZE_FORMAT
                " returned HTTP %u instead of 206 Partial Content",
                cl->offset, cl->length, status);
-    cl->callback (NULL, status_error, cl->user_data);
+    cl->callback (NULL, cl->offset, status_error, cl->user_data);
     g_error_free (status_error);
     g_bytes_unref (bytes);
     g_clear_object (&cl->message);
@@ -275,13 +275,13 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
              ", requested %" G_GSIZE_FORMAT ", received %" G_GSIZE_FORMAT " bytes",
              cl->offset, cl->length, len);
   GBytes *decrypted = aes_ctr_decrypt (cl->key, cl->offset + STREAM_HEADER_OFFSET, data, len);
-  cl->callback (decrypted, NULL, cl->user_data);
+  cl->callback (decrypted, cl->offset, NULL, cl->user_data);
   g_bytes_unref (decrypted);
 #else
   g_warning ("cdn.c: built without OpenSSL — cannot decrypt audio chunks");
   GError *no_ssl = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                                         "OpenSSL not available at build time");
-  cl->callback (NULL, no_ssl, cl->user_data);
+  cl->callback (NULL, cl->offset, no_ssl, cl->user_data);
   g_error_free (no_ssl);
 #endif
 
