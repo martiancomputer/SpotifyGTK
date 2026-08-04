@@ -87,6 +87,12 @@ on_scroll_settled (gpointer user_data)
     }
   }
 
+  /* Reported here because settling is the natural boundary: everything a
+   * gesture asked for has resolved by now. Behind G_MESSAGES_DEBUG so it costs
+   * nothing in a normal run. */
+  if (g_getenv ("SPOTIFY_COVER_STATS"))
+    spotifygtk_cover_log_stats ("scroll settled");
+
   return G_SOURCE_REMOVE;
 }
 

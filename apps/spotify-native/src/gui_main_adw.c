@@ -6,6 +6,15 @@
 #include "ui/window.h"
 #include "playback_probe.h"
 #include "log_file.h"
+#include "ui/cover_loader.h"
+
+static gboolean
+stats_tick (gpointer data)
+{
+  (void) data;
+  spotifygtk_cover_log_stats ("periodic");
+  return G_SOURCE_CONTINUE;
+}
 
 static void
 on_activate (GtkApplication *app, gpointer user_data)
@@ -23,6 +32,14 @@ on_activate (GtkApplication *app, gpointer user_data)
     (void) user_data;
     return;
   }
+
+  /* Periodic rather than at exit: the app is usually killed rather than closed
+   * cleanly -- a timeout, a window manager, Ctrl-C -- and none of those reach
+   * a shutdown path, so an exit-time report measures nothing most of the time.
+   * The scroll-settle hook has the opposite problem: it needs someone to
+   * scroll. */
+  if (g_getenv ("SPOTIFY_COVER_STATS"))
+    g_timeout_add_seconds (15, (GSourceFunc) stats_tick, NULL);
 
   SpotifyGtkNativeWindow *win = spotifygtk_native_window_new (app);
   gtk_window_present (GTK_WINDOW (win));
@@ -58,6 +75,7 @@ main (int argc, char *argv[])
   g_signal_connect (app, "activate", G_CALLBACK (on_activate), NULL);
 
   int status = g_application_run (G_APPLICATION (app), argc, argv);
+
   g_object_unref (app);
   spotifygtk_log_file_shutdown ();
   return status;

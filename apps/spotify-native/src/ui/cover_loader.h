@@ -76,4 +76,14 @@ gboolean spotifygtk_cover_get_deferred (void);
  * issued while scrolling costs nothing. */
 void spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px);
 
+/*
+ * Log what the cover path has been doing: how often the cache answered, how
+ * long fetches and decodes took, how large the images are.
+ *
+ * Reported on demand rather than per request, because per-request logging
+ * would drown the log during a scroll -- which is exactly when the numbers are
+ * interesting.
+ */
+void spotifygtk_cover_log_stats (const gchar *context);
+
 G_END_DECLS

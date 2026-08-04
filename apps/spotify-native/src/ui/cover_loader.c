@@ -3,6 +3,7 @@
  */
 
 #include "cover_loader.h"
+#include <stdlib.h>
 
 #include <libsoup/soup.h>
 
@@ -64,11 +65,149 @@ static GHashTable *in_flight = NULL;
 
 static SoupSession *cover_session = NULL;
 
+static struct {
+  guint  hits;          /* served from cache */
+  guint  misses;        /* required a fetch */
+  guint  joined;        /* deduplicated onto an in-flight fetch */
+  guint  deferred;      /* dropped because a scroll was in progress */
+  guint  failures;
+  guint  fetched;       /* completed fetches, denominator for the times below */
+  gint64 fetch_us;      /* cumulative network time */
+  gint64 decode_us;     /* cumulative decode time */
+  gint64 bytes;         /* cumulative payload */
+  gint64 worst_fetch_us;
+  gint64 queue_us;      /* enqueue -> connection assigned */
+  gint64 transfer_us;   /* first byte -> last byte */
+  guint  metered;       /* fetches with usable metrics */
+  guint  dropped;       /* queued, then every waiter went away before its turn */
+  guint  peak_queue;
+} cover_stats;
+
+/*
+ * Outstanding fetches are capped and the backlog is a stack, not a line.
+ *
+ * Requests used to go straight to libsoup as each row bound, so a scroll past
+ * three hundred rows issued three hundred fetches for the fifteen on screen.
+ * Virtualisation bounds widgets, not requests: a card is recycled, but the
+ * fetch it started outlives the binding and stays in the pipe.
+ *
+ * Measured before this: 257 fetches averaging 2.7 seconds each, of which only
+ * ~210ms was libsoup's own queue and ~48ms was on the wire. The remaining
+ * ~2.4s was the backlog we had handed it. The image CDN was never slow.
+ *
+ * LIFO is the part that matters. The newest request is for a row on screen
+ * now; the oldest is for one scrolled past long ago. Served first-in-first-out,
+ * every visible cover waits behind a queue of covers nobody will see -- which
+ * is exactly the "still loading what I already scrolled past" effect. A stack
+ * fixes that ordering without predicting anything.
+ */
+#define COVER_MAX_INFLIGHT 8
+
+typedef struct {
+  gchar *cache_key;
+  gint   target_px;
+} QueuedFetch;
+
+static GQueue cover_queue = G_QUEUE_INIT;   /* QueuedFetch*, newest at the tail */
+static guint  cover_active = 0;
+
+static void issue_fetch (const gchar *cache_key, gint target_px);
+static void on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data);
+
+static void
+queued_fetch_free (QueuedFetch *q)
+{
+  if (!q)
+    return;
+  g_free (q->cache_key);
+  g_free (q);
+}
+
+/* Start as many queued fetches as the cap allows, newest first. */
+static void
+cover_pump (void)
+{
+  while (cover_active < COVER_MAX_INFLIGHT) {
+    QueuedFetch *q = g_queue_pop_tail (&cover_queue);
+    if (!q)
+      return;
+
+    /* Every waiter for this cover has gone -- the rows were recycled while it
+     * sat in the queue. Dropping it here is the whole point of queueing in our
+     * own code rather than libsoup's, where it could not be reconsidered. */
+    if (!g_hash_table_contains (in_flight, q->cache_key)) {
+      cover_stats.dropped++;
+      queued_fetch_free (q);
+      continue;
+    }
+
+    cover_active++;
+    issue_fetch (q->cache_key, q->target_px);
+    queued_fetch_free (q);
+  }
+}
+
 typedef struct {
   SpotifyCoverCallback callback;
   gpointer             user_data;
   GCancellable        *cancellable;   /* owned, may be NULL */
 } PendingRequest;
+
+/*
+ * Cover-fetch statistics.
+ *
+ * Kept because the interesting questions about this path -- is the network or
+ * the decode the cost, does the cache actually hit, how big are these images --
+ * were all unanswerable. The counters are plain integers touched only from the
+ * main thread (requests start there and complete there), so no locking.
+ *
+ * Reported on demand rather than per request: one line per cover would drown
+ * the log during a scroll, which is exactly when the numbers matter.
+ */
+
+void
+spotifygtk_cover_log_stats (const gchar *context)
+{
+  guint asked = cover_stats.hits + cover_stats.misses +
+                cover_stats.joined + cover_stats.deferred;
+  if (asked == 0) {
+    g_message ("cover stats (%s): nothing requested yet", context ? context : "");
+    return;
+  }
+
+  g_message ("cover stats (%s): %u asked -- %u cached (%.0f%%), %u fetched, "
+             "%u joined, %u deferred, %u failed",
+             context ? context : "", asked,
+             cover_stats.hits, 100.0 * cover_stats.hits / asked,
+             cover_stats.misses, cover_stats.joined, cover_stats.deferred,
+             cover_stats.failures);
+  g_message ("cover stats (%s): %u dropped before issue, %u queued now, "
+             "peak queue %u, %u in flight (cap %d)",
+             context ? context : "", cover_stats.dropped,
+             g_queue_get_length (&cover_queue), cover_stats.peak_queue,
+             cover_active, COVER_MAX_INFLIGHT);
+
+  if (cover_stats.fetched > 0) {
+    g_message ("cover stats (%s): fetch avg %.0f ms, worst %.0f ms; "
+               "decode avg %.0f ms; avg payload %.1f KB; %u in cache, %.1f MB",
+               context ? context : "",
+               cover_stats.fetch_us  / 1000.0 / cover_stats.fetched,
+               cover_stats.worst_fetch_us / 1000.0,
+               cover_stats.decode_us / 1000.0 / cover_stats.fetched,
+               cover_stats.bytes / 1024.0 / cover_stats.fetched,
+               cover_cache ? g_hash_table_size (cover_cache) : 0,
+               cover_cache_bytes / 1048576.0);
+  }
+
+  if (cover_stats.metered > 0) {
+    g_message ("cover stats (%s): of that, queued avg %.0f ms, on the wire avg %.0f ms "
+               "(%u measured)",
+               context ? context : "",
+               cover_stats.queue_us    / 1000.0 / cover_stats.metered,
+               cover_stats.transfer_us / 1000.0 / cover_stats.metered,
+               cover_stats.metered);
+  }
+}
 
 static gboolean cover_deferred = FALSE;
 
@@ -123,7 +262,20 @@ ensure_initialised (void)
   cover_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
                                        g_free, g_object_unref);
   in_flight   = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-  cover_session = soup_session_new ();
+  /*
+   * Connection concurrency, overridable so it can be measured rather than
+   * argued about. libsoup defaults to 6 per host, and every cover comes from
+   * one host, so a few hundred requests queue behind those six -- which is why
+   * a 103 KB image appeared to take 1.6 seconds.
+   */
+  const gchar *conns_env = g_getenv ("SPOTIFY_COVER_CONNS");
+  guint conns = conns_env ? (guint) MAX (1, atoi (conns_env)) : 6;
+
+  cover_session = soup_session_new_with_options (
+    "max-conns-per-host", conns,
+    "max-conns", MAX (conns, 24),
+    NULL);
+  g_message ("cover: session using %u connections per host", conns);
 }
 
 static void
@@ -159,6 +311,9 @@ complete_waiters (const gchar *cover_id, GdkTexture *texture)
 typedef struct {
   gchar *cache_key;
   gint   target_px;
+  gint64 started_us;    /* request issued; split into network and decode below */
+  gint64 fetched_us;    /* bytes in hand, decode about to begin */
+  SoupMessage *message; /* owned, for its metrics */
 } FetchClosure;
 
 /* Runs on a worker thread: decode the JPEG at the target size and build a
@@ -205,7 +360,12 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError) error = NULL;
   g_autoptr(GdkTexture) texture = g_task_propagate_pointer (G_TASK (result), &error);
 
+  gint start_ms = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (result), "decode-start"));
+  if (start_ms > 0)
+    cover_stats.decode_us += (g_get_monotonic_time () - (gint64) start_ms * 1000);
+
   if (!texture) {
+    cover_stats.failures++;
     g_debug ("cover %s: decode failed: %s", cache_key,
              error ? error->message : "unknown");
     complete_waiters (cache_key, NULL);
@@ -236,31 +396,118 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
 }
 
 static void
+issue_fetch (const gchar *cache_key, gint target_px)
+{
+  g_autofree gchar *cover_id = g_strdup (cache_key);
+  gchar *at = strrchr (cover_id, '@');
+  if (at)
+    *at = '\0';
+
+  g_autofree gchar *url = spotifygtk_cover_build_url (cover_id);
+  if (!url) {
+    cover_active--;
+    complete_waiters (cache_key, NULL);
+    return;
+  }
+
+  FetchClosure *fetch = g_new0 (FetchClosure, 1);
+  fetch->cache_key = g_strdup (cache_key);
+  fetch->target_px = target_px;
+  fetch->started_us = g_get_monotonic_time ();
+
+  SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, url);
+  /* Metrics are what let queue wait be told apart from transfer time. Without
+   * them the only measurable span is enqueue-to-completion, which conflates
+   * the two. */
+  soup_message_add_flags (msg, SOUP_MESSAGE_COLLECT_METRICS);
+  fetch->message = g_object_ref (msg);
+  soup_session_send_and_read_async (cover_session, msg, G_PRIORITY_LOW, NULL,
+                                    on_cover_fetched, fetch);
+  g_object_unref (msg);
+}
+
+static void
 on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   FetchClosure *fetch = user_data;
   gchar *cache_key = fetch->cache_key;   /* ownership moves to the decode task */
   gint target_px = fetch->target_px;
-  g_free (fetch);
 
+  /*
+   * The closure is freed at the end, not here.
+   *
+   * It used to be freed on the line after these two locals were taken, and the
+   * timing block below then read it anyway -- a use-after-free that went
+   * unnoticed because freed memory usually still holds the old values, so the
+   * numbers looked plausible. The metrics work made it obvious, because it
+   * dereferences a GObject pointer out of the same freed struct.
+   */
   g_autoptr(GError) error = NULL;
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+
+  if (fetch->started_us) {
+    gint64 took = g_get_monotonic_time () - fetch->started_us;
+    if (bytes) {
+      cover_stats.fetched++;
+      cover_stats.fetch_us += took;
+      cover_stats.bytes += (gint64) g_bytes_get_size (bytes);
+      if (took > cover_stats.worst_fetch_us)
+        cover_stats.worst_fetch_us = took;
+
+      if (fetch->message) {
+        SoupMessageMetrics *m = soup_message_get_metrics (fetch->message);
+        if (m) {
+          guint64 fetch_start   = soup_message_metrics_get_fetch_start (m);
+          guint64 request_start = soup_message_metrics_get_request_start (m);
+          guint64 resp_start    = soup_message_metrics_get_response_start (m);
+          guint64 resp_end      = soup_message_metrics_get_response_end (m);
+          if (request_start > fetch_start && resp_end >= resp_start && resp_start > 0) {
+            cover_stats.queue_us    += (gint64) (request_start - fetch_start);
+            cover_stats.transfer_us += (gint64) (resp_end - resp_start);
+            cover_stats.metered++;
+          }
+        }
+      }
+    }
+  }
 
   if (!bytes) {
     g_debug ("cover %s: fetch failed: %s", cache_key,
              error ? error->message : "unknown");
     complete_waiters (cache_key, NULL);
     g_free (cache_key);
+    cover_stats.failures++;
+    g_clear_object (&fetch->message);
+    g_free (fetch);
+    cover_active--;
+    cover_pump ();
     return;
   }
 
   /* Decode off the main thread. The bytes and target size ride along; the
    * key is the callback's user_data. */
   GTask *task = g_task_new (NULL, NULL, on_cover_decoded, cache_key);
+  /* Carried on the task rather than accumulated in decode_in_thread: that runs
+   * on a worker and every other counter here is written from the main thread,
+   * so timing it from both ends of the hop keeps the whole struct single
+   * threaded and needs no atomics. It measures dispatch plus decode, which is
+   * the figure that matters anyway -- a decode that waits on a busy pool costs
+   * the user the same as a slow one. */
+  g_object_set_data (G_OBJECT (task), "decode-start",
+                     GINT_TO_POINTER ((gint) (g_get_monotonic_time () / 1000)));
   g_object_set_data (G_OBJECT (task), "target-px", GINT_TO_POINTER (target_px));
   g_task_set_task_data (task, bytes, (GDestroyNotify) g_bytes_unref);
   g_task_run_in_thread (task, decode_in_thread);
   g_object_unref (task);
+
+  g_clear_object (&fetch->message);
+  g_free (fetch);
+
+  /* Released once the bytes are in hand rather than after the decode: the
+   * decode is off-thread and 20ms, so holding the slot across it would idle
+   * the network for no reason. */
+  cover_active--;
+  cover_pump ();
 }
 
 void
@@ -299,6 +546,7 @@ spotifygtk_cover_load (const gchar          *cover_id,
 
   GdkTexture *cached = g_hash_table_lookup (cover_cache, cache_key);
   if (cached) {
+    cover_stats.hits++;
     callback (cached, user_data);
     return;
   }
@@ -306,6 +554,7 @@ spotifygtk_cover_load (const gchar          *cover_id,
   /* Deferred: a miss costs nothing rather than queueing a fetch for a row the
    * scroll is already past. The caller re-requests on settle. */
   if (cover_deferred) {
+    cover_stats.deferred++;
     callback (NULL, user_data);
     return;
   }
@@ -326,6 +575,7 @@ spotifygtk_cover_load (const gchar          *cover_id,
    * request. */
   GList *waiters = g_hash_table_lookup (in_flight, cache_key);
   if (waiters) {
+    cover_stats.joined++;
     waiters = g_list_prepend (waiters, req);
     g_hash_table_insert (in_flight, g_strdup (cache_key), waiters);
     return;
@@ -339,14 +589,14 @@ spotifygtk_cover_load (const gchar          *cover_id,
     return;
   }
 
+  cover_stats.misses++;
   g_hash_table_insert (in_flight, g_strdup (cache_key), g_list_prepend (NULL, req));
 
-  FetchClosure *fetch = g_new0 (FetchClosure, 1);
-  fetch->cache_key = g_strdup (cache_key);
-  fetch->target_px = target_px;
-
-  SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, url);
-  soup_session_send_and_read_async (cover_session, msg, G_PRIORITY_LOW, NULL,
-                                    on_cover_fetched, fetch);
-  g_object_unref (msg);
+  QueuedFetch *q = g_new0 (QueuedFetch, 1);
+  q->cache_key = g_strdup (cache_key);
+  q->target_px = target_px;
+  g_queue_push_tail (&cover_queue, q);
+  if (g_queue_get_length (&cover_queue) > cover_stats.peak_queue)
+    cover_stats.peak_queue = g_queue_get_length (&cover_queue);
+  cover_pump ();
 }

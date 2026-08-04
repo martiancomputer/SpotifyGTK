@@ -123,12 +123,68 @@ struct _SpotifyGtkAlbumGrid {
   GtkWidget  *scroller;   /* borrowed: owned by the box */
   GtkWidget  *view;       /* borrowed: owned by the scroller */
 
+  /* Scroll settle detection, mirroring track_list. Without it a fling through
+   * the grid fires a request for every card it passes -- each a 352px decode
+   * roughly thirteen times the size of a row cover, so a few hundred of them
+   * evict the entire cache and everything after misses. This is the page where
+   * covers took seconds to appear after scrolling far. */
+  GtkAdjustment *vadj;      /* borrowed */
+  guint          settle_id;
+  GPtrArray     *bound_cards;   /* borrowed GtkWidget*, live bindings */
+
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkAlbumGrid, spotifygtk_album_grid, GTK_TYPE_BOX)
 
 enum { ALBUM_ACTIVATED, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+#define GRID_SETTLE_MS 180
+
+static void cancel_and_unref (gpointer data);
+static void on_card_cover_loaded (GdkTexture *texture, gpointer user_data);
+
+/* Re-request the cover for one card if its load was skipped while scrolling. */
+static void
+card_retry_cover (GtkWidget *card)
+{
+  const gchar *cover_id = g_object_get_data (G_OBJECT (card), "cover-id");
+  GtkWidget   *art      = g_object_get_data (G_OBJECT (card), "art");
+  if (!cover_id || !art)
+    return;
+  if (g_object_get_data (G_OBJECT (card), "cover-shown"))
+    return;
+
+  GCancellable *cancel = g_cancellable_new ();
+  g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
+  spotifygtk_cover_load (cover_id, CARD_DECODE_PX, cancel,
+                         on_card_cover_loaded, art);
+}
+
+static gboolean
+on_grid_settled (gpointer user_data)
+{
+  SpotifyGtkAlbumGrid *self = user_data;
+  self->settle_id = 0;
+
+  spotifygtk_cover_set_deferred (FALSE);
+  for (guint i = 0; i < self->bound_cards->len; i++)
+    card_retry_cover (g_ptr_array_index (self->bound_cards, i));
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
+{
+  SpotifyGtkAlbumGrid *self = user_data;
+  (void) adj;
+
+  spotifygtk_cover_set_deferred (TRUE);
+  if (self->settle_id)
+    g_source_remove (self->settle_id);
+  self->settle_id = g_timeout_add (GRID_SETTLE_MS, on_grid_settled, self);
+}
 
 /* A pending cover load is cancelled when its card is recycled or destroyed, so
  * a late decode never paints onto a card now showing a different album. */
@@ -144,8 +200,14 @@ static void
 on_card_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
   GtkImage *art = user_data;
-  if (texture)
-    gtk_image_set_from_paintable (art, GDK_PAINTABLE (texture));
+  if (!texture)
+    return;   /* keep the placeholder; the settle pass may come back for it */
+
+  gtk_image_set_from_paintable (art, GDK_PAINTABLE (texture));
+
+  GtkWidget *card = gtk_widget_get_ancestor (GTK_WIDGET (art), GTK_TYPE_BUTTON);
+  if (card)
+    g_object_set_data (G_OBJECT (card), "cover-shown", GINT_TO_POINTER (1));
 }
 
 static void
@@ -209,6 +271,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
 static void
 factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
+  SpotifyGtkAlbumGrid *self = user_data;
   GtkWidget           *card = gtk_list_item_get_child (list_item);
   SpotifyGtkAlbumItem *item = gtk_list_item_get_item (list_item);
   if (!card || !item)
@@ -230,6 +293,13 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
   gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
 
+  g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
+  g_object_set_data_full (G_OBJECT (card), "cover-id",
+                          g_strdup (item->cover_id), g_free);
+
+  if (!g_ptr_array_find (self->bound_cards, card, NULL))
+    g_ptr_array_add (self->bound_cards, card);
+
   if (item->cover_id && *item->cover_id) {
     GCancellable *cancel = g_cancellable_new ();
     g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
@@ -242,7 +312,10 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
 static void
 factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
+  SpotifyGtkAlbumGrid *self = user_data;
   GtkWidget *card = gtk_list_item_get_child (list_item);
+  if (card && self->bound_cards)
+    g_ptr_array_remove_fast (self->bound_cards, card);
   if (!card)
     return;
 
@@ -312,6 +385,17 @@ static void
 spotifygtk_album_grid_dispose (GObject *object)
 {
   SpotifyGtkAlbumGrid *self = SPOTIFYGTK_ALBUM_GRID (object);
+
+  /* The settle timer holds a plain pointer to this grid, and deferral is
+   * global -- left set, the next page built would treat every miss as
+   * skippable and show no art at all. */
+  if (self->settle_id) {
+    g_source_remove (self->settle_id);
+    self->settle_id = 0;
+  }
+  spotifygtk_cover_set_deferred (FALSE);
+  g_clear_pointer (&self->bound_cards, g_ptr_array_unref);
+
   g_clear_object (&self->store);
   G_OBJECT_CLASS (spotifygtk_album_grid_parent_class)->dispose (object);
 }
@@ -429,6 +513,14 @@ album_grid_new (gboolean wrap)
 
   self->scroller = scroller;
   self->view     = view;
+
+  self->bound_cards = g_ptr_array_new ();
+  self->vadj = wrap
+    ? gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller))
+    : gtk_scrolled_window_get_hadjustment (GTK_SCROLLED_WINDOW (scroller));
+  if (self->vadj)
+    g_signal_connect (self->vadj, "value-changed",
+                      G_CALLBACK (on_grid_scrolled), self);
 
   return self;
 }
