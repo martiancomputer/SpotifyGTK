@@ -61,8 +61,28 @@ void spotifygtk_cover_load (const gchar          *cover_id,
 gchar *spotifygtk_cover_build_url (const gchar *cover_id);
 
 /*
- * While TRUE, a cache miss is dropped instead of fetched. Cache hits are still
- * served, so rows whose art is already known still paint.
+ * As above, but the request may be dropped outright while a scroll is in
+ * progress -- the callback is invoked with NULL and no fetch is issued.
+ *
+ * Only for callers with a settle path that re-requests: recycling rows and
+ * grid cards. A dropped request is never retried on its own, so a caller that
+ * asks once and keeps whatever it gets must use spotifygtk_cover_load(), which
+ * is never deferred. That distinction is the whole reason this is a separate
+ * entry point instead of a flag on the load: deferral was global state, so a
+ * track change during a scroll silently blanked the now-playing art and left
+ * the placeholder up until the *next* track change, because that panel has no
+ * settle hook and never asked again.
+ */
+void spotifygtk_cover_load_deferrable (const gchar          *cover_id,
+                                       gint                  target_px,
+                                       GCancellable         *cancellable,
+                                       SpotifyCoverCallback  callback,
+                                       gpointer              user_data);
+
+/*
+ * While TRUE, a cache miss from spotifygtk_cover_load_deferrable() is dropped
+ * instead of fetched. Cache hits are still served, so rows whose art is
+ * already known still paint.
  *
  * For use during a fast scroll: binding every row a fling passes over would
  * otherwise queue hundreds of fetches for rows nobody will look at, competing

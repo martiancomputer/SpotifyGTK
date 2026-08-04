@@ -157,8 +157,8 @@ card_retry_cover (GtkWidget *card)
 
   GCancellable *cancel = g_cancellable_new ();
   g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
-  spotifygtk_cover_load (cover_id, CARD_DECODE_PX, cancel,
-                         on_card_cover_loaded, art);
+  spotifygtk_cover_load_deferrable (cover_id, CARD_DECODE_PX, cancel,
+                                    on_card_cover_loaded, art);
 }
 
 static gboolean
@@ -303,8 +303,8 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   if (item->cover_id && *item->cover_id) {
     GCancellable *cancel = g_cancellable_new ();
     g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
-    spotifygtk_cover_load (item->cover_id, CARD_DECODE_PX, cancel,
-                           on_card_cover_loaded, art);
+    spotifygtk_cover_load_deferrable (item->cover_id, CARD_DECODE_PX, cancel,
+                                      on_card_cover_loaded, art);
   }
   (void) factory; (void) user_data;
 }

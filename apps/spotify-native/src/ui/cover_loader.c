@@ -211,6 +211,11 @@ spotifygtk_cover_log_stats (const gchar *context)
 
 static gboolean cover_deferred = FALSE;
 
+static void cover_load_internal (const gchar *cover_id, gint target_px,
+                                 GCancellable *cancellable,
+                                 SpotifyCoverCallback callback,
+                                 gpointer user_data, gboolean deferrable);
+
 static void
 prefetch_discard (GdkTexture *texture, gpointer user_data)
 {
@@ -222,7 +227,7 @@ spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px)
 {
   if (!cover_id || !*cover_id || cover_deferred)
     return;
-  spotifygtk_cover_load (cover_id, target_px, NULL, prefetch_discard, NULL);
+  cover_load_internal (cover_id, target_px, NULL, prefetch_discard, NULL, TRUE);
 }
 
 void
@@ -517,6 +522,27 @@ spotifygtk_cover_load (const gchar          *cover_id,
                        SpotifyCoverCallback  callback,
                        gpointer              user_data)
 {
+  cover_load_internal (cover_id, target_px, cancellable, callback, user_data, FALSE);
+}
+
+void
+spotifygtk_cover_load_deferrable (const gchar          *cover_id,
+                                  gint                  target_px,
+                                  GCancellable         *cancellable,
+                                  SpotifyCoverCallback  callback,
+                                  gpointer              user_data)
+{
+  cover_load_internal (cover_id, target_px, cancellable, callback, user_data, TRUE);
+}
+
+static void
+cover_load_internal (const gchar          *cover_id,
+                     gint                  target_px,
+                     GCancellable         *cancellable,
+                     SpotifyCoverCallback  callback,
+                     gpointer              user_data,
+                     gboolean              deferrable)
+{
   g_return_if_fail (callback != NULL);
 
   /* Text-only mode is enforced here rather than at each display site, so a
@@ -552,8 +578,9 @@ spotifygtk_cover_load (const gchar          *cover_id,
   }
 
   /* Deferred: a miss costs nothing rather than queueing a fetch for a row the
-   * scroll is already past. The caller re-requests on settle. */
-  if (cover_deferred) {
+   * scroll is already past. Only for callers that re-request on settle -- see
+   * spotifygtk_cover_load_deferrable(). */
+  if (deferrable && cover_deferred) {
     cover_stats.deferred++;
     callback (NULL, user_data);
     return;

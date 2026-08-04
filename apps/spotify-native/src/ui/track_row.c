@@ -188,8 +188,8 @@ spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
   if (self->cover_shown || !self->pending_cover_id)
     return;
 
-  spotifygtk_cover_load (self->pending_cover_id, 96, self->cover_cancellable,
-                         on_row_cover_loaded, self);
+  spotifygtk_cover_load_deferrable (self->pending_cover_id, 96, self->cover_cancellable,
+                                    on_row_cover_loaded, self);
 }
 
 /* Rows are rebuilt per listing, but a row can be re-set before its cover
@@ -209,8 +209,8 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
   g_free (self->pending_cover_id);
   self->pending_cover_id = g_strdup (cover_id);
   self->cover_shown = FALSE;
-  spotifygtk_cover_load (cover_id, 96, self->cover_cancellable,
-                         on_row_cover_loaded, self);
+  spotifygtk_cover_load_deferrable (cover_id, 96, self->cover_cancellable,
+                                    on_row_cover_loaded, self);
 }
 
 static void
