@@ -552,6 +552,21 @@ typedef struct {
  * So callbacks compare their state pointer against this before touching it.
  * Comparing a dangling pointer is well defined; dereferencing one is not, and
  * this check happens before any dereference.
+ *
+ * Every callback reached through a persistent object needs this, not just the
+ * ones handling audio. A crash was traced to on_login_result running with a
+ * previous run's state: the AP session outlives a track, so its login callback
+ * still pointed at a LiveTestState whose stack frame belonged to an engine
+ * thread that had already exited. state->progress read as 0x1 and the jump
+ * through it took the process down. The guard is cheap, so the rule is that
+ * anything taking LiveTestState from user_data checks first.
+ *
+ * The one exception is audio_output_thread, which the run creates and joins,
+ * so it cannot outlive the state it was handed. It is not an oversight.
+ *
+ * Publishing order makes this safe: engine_active_state is assigned before any
+ * connect or fetch is kicked off, so a callback belonging to the live run
+ * always passes and only a stale one is dropped.
  */
 static LiveTestState *engine_active_state = NULL;
 
@@ -1360,6 +1375,8 @@ static void
 on_read_ahead_restorage (SpclientCdnUrls *urls, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (!urls || urls->n_urls == 0) {
     g_warning ("[live-test] could not re-resolve CDN storage after a failed "
@@ -1397,6 +1414,8 @@ static void
 on_aes_key (SpotifyApSession *session, ApCommandId cmd, const guint8 *payload, gsize len, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
   g_message ("[live-test] received AP_CMD_AES_KEY (%" G_GSIZE_FORMAT " bytes); dispatching to audio-key client", len);
   spotifygtk_audio_key_handle_response (state->audio_key_client, payload, len);
 }
@@ -1405,6 +1424,8 @@ static void
 on_aes_key_error (SpotifyApSession *session, ApCommandId cmd, const guint8 *payload, gsize len, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
   g_warning ("[live-test] received AP_CMD_AES_KEY_ERROR (%" G_GSIZE_FORMAT " bytes); dispatching to audio-key client", len);
   spotifygtk_audio_key_handle_error (state->audio_key_client, payload, len);
 }
@@ -1568,6 +1589,8 @@ static gboolean
 on_audio_key_attempt_timeout (gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return G_SOURCE_REMOVE;   /* the run that armed this has already finished */
 
   /* Drop our ref here rather than via clear_key_timeout(): returning
    * G_SOURCE_REMOVE destroys the source, and GLib holds its own ref for the
@@ -1594,6 +1617,8 @@ static void
 on_audio_key_result (const guint8 key[AUDIO_KEY_LEN], GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   clear_key_timeout (state);
 
@@ -1759,6 +1784,8 @@ on_batch_probe_result (const SpclientTrackInfo *tracks, guint n_tracks,
                        GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (error || !tracks) {
     g_warning ("[probe] batched metadata FAILED: %s",
@@ -1790,6 +1817,8 @@ static void
 on_context_probe_result (JsonNode *context, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (error || !context) {
     g_warning ("[probe] context-resolve FAILED: %s",
@@ -2112,6 +2141,8 @@ static void
 on_login_result (gboolean success, const gchar *username, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;   /* the run that asked for this has already finished */
 
   if (!success) {
     g_warning ("[live-test] login failed: %s", error ? error->message : "unknown error");
@@ -2157,6 +2188,8 @@ static gboolean
 retry_ap_connect (gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return G_SOURCE_REMOVE;   /* the run that armed this has already finished */
   SpotifyApSession *session = state->pending_session;
 
   if (!session) {
@@ -2234,6 +2267,8 @@ static gboolean
 on_live_test_timeout (gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return G_SOURCE_REMOVE;   /* the run that armed this has already finished */
   g_warning ("[live-test] timed out after 25s waiting for a response -- "
              "cancelling all in-flight AP/auth/CDN operations; check network reachability "
              "to ap.spotify.com, or a firewall/proxy issue");
@@ -2255,6 +2290,8 @@ static gboolean
 on_engine_cancelled (GCancellable *cancellable, gpointer user_data)
 {
   LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return G_SOURCE_REMOVE;   /* the run that armed this has already finished */
   g_message ("[live-test] engine cancelled by the UI -- quitting the loop to unwind");
   g_main_loop_quit (state->loop);
   (void) cancellable;
