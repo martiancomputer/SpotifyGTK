@@ -7,12 +7,24 @@ a limitation of this client, and no setting changes it.
 
 ## Which download
 
-- **AppImage** — runs on any distribution with glibc 2.39 or newer, whatever
-  its libadwaita version, because the GTK stack is bundled. `chmod +x` and run.
-- **.deb** — smaller, links against the system GTK stack. Needs libadwaita
-  1.4 or newer: Ubuntu 24.04, Debian 13, or later. **Ubuntu 22.04 will not
-  work** — it ships libadwaita 1.1.
+- **.deb** — links the system GTK stack. Requires **GTK 4.22 and libadwaita
+  1.9 or newer**, which the package enforces rather than installing and looking
+  wrong. Arch, Fedora 42+, Debian sid and similar. **Ubuntu 24.04 will not
+  work** — it ships GTK 4.14.
+- **AppImage** — attached when available, and built by hand rather than by CI.
+  It bundles the GTK stack, so the machine it is built on decides how it looks;
+  built on an older base the layout differs from the screenshots. Reach for it
+  where the deb refuses to install.
 - **Windows** — a portable zip is built separately and is not attached here.
+
+## Why the version requirement is strict
+
+The UI is laid out against a specific GTK, not merely a minimum one. Widget
+metrics changed enough between 4.14 and 4.22 that the same source produces a
+visibly different window — cover art stops filling its panel, the playback and
+volume bars take other sizes. Rather than thread version-dependent handling
+through the UI, the build and the package both refuse rather than look wrong.
+`-Dallow_old_gtk=true` overrides it if you would rather have that than nothing.
 
 ## Known limitations
 

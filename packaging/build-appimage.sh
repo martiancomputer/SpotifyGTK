@@ -7,9 +7,20 @@
 # that stack, so it runs on any distribution whose glibc is new enough --
 # including ones whose libadwaita is far too old for the deb.
 #
-# That is also its limit. An AppImage cannot bundle glibc, so the build host's
-# glibc becomes the floor. Built on Ubuntu 24.04 (glibc 2.39) because
-# libadwaita >= 1.4 is required to compile at all, which rules out older bases.
+# Two limits follow from bundling, and they pull against each other.
+#
+# It cannot bundle glibc, so the build host's glibc is the floor -- an older
+# base reaches more distributions. But the bundled GTK *is* the runtime GTK, and
+# this UI is laid out against 4.22, so an older base produces a visibly
+# different window: cover art not filling its panel, different playback and
+# volume bar metrics. Built on Ubuntu 24.04 it looked wrong, which is why CI no
+# longer builds it.
+#
+# Run this on a host with GTK >= 4.22 and libadwaita >= 1.9 (Arch, Fedora 42+)
+# and attach the result to the release by hand. The build will refuse otherwise,
+# which is the version floor doing its job -- do not reach for
+# -Dallow_old_gtk=true here, because for an AppImage the build host is the
+# runtime and the result would be the wrong-looking image again.
 #
 #   ./packaging/build-appimage.sh       # builds into packaging/out/
 #

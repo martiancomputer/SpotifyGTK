@@ -13,9 +13,15 @@ permissions:
   contents: write
 
 jobs:
-  # Both jobs run on 24.04 because libadwaita >= 1.4 is required to compile and
-  # 22.04 ships 1.1. For the AppImage that also fixes its glibc floor at 2.39,
-  # which is the cost of that requirement rather than a choice.
+  # The AppImage is not built here. It bundles the GTK stack, so the build
+  # host's version becomes the runtime version, and no runner base has the
+  # GTK 4.22 the UI is laid out against -- it would only ever produce the
+  # older-toolkit look. It is built by hand from packaging/build-appimage.sh on
+  # a machine that does, and attached to the release separately.
+  #
+  # The deb has no such problem: it links the system GTK at runtime rather than
+  # bundling it, so where it is built does not decide how it looks. It declares
+  # the version it needs instead.
   deb:
     name: deb (ubuntu-24.04)
     runs-on: ubuntu-24.04
@@ -40,81 +46,35 @@ jobs:
       - name: Build package
         run: ./packaging/build-deb.sh
 
-      # Installing it is the only thing that proves the dependency list is
-      # right. A deb that builds and will not install is worse than none.
-      - name: Install it, then run it
+      # The runner cannot satisfy this package's own requirement -- 24.04 has
+      # GTK 4.14 and the package asks for 4.22 -- so a plain apt install would
+      # fail by design and prove nothing. Unpack it with --force-depends
+      # instead: that still verifies the payload lands correctly, while the
+      # dependency line is asserted separately rather than by installing.
+      - name: Verify the package
         run: |
-          sudo apt-get install -y ./packaging/out/*.deb
+          echo "--- declared dependencies ---"
+          dpkg-deb --field ./packaging/out/*.deb Depends | tr ',' '\n' | sed 's/^ *//'
+
+          if ! dpkg-deb --field ./packaging/out/*.deb Depends | grep -q "libgtk-4-1 (>= 4.22"; then
+            echo "::error::package does not require GTK >= 4.22, so it would install where the UI looks wrong"
+            exit 1
+          fi
+
+          sudo dpkg -i --force-depends ./packaging/out/*.deb
           dpkg -L spotifygtk
           desktop-file-validate /usr/share/applications/com.github.spotifygtk.SpotifyNative.desktop
           test -x /usr/bin/spotify-native
+          echo "payload correct; dependency floor present"
 
       - uses: actions/upload-artifact@v4
         with:
           name: deb
           path: packaging/out/*.deb
 
-  appimage:
-    name: AppImage (ubuntu-24.04)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            ninja-build pkg-config \
-            libgtk-4-dev libadwaita-1-dev \
-            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev \
-            libogg-dev libvorbis-dev \
-            libssl-dev libpulse-dev libasound2-dev \
-            librsvg2-dev libgdk-pixbuf-2.0-0 gtk-update-icon-cache \
-            glib-networking \
-            desktop-file-utils patchelf file
-
-      - name: Install Meson
-        run: |
-          pip install --user meson
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Build AppImage
-        run: ./packaging/build-appimage.sh
-
-      # Starting is not enough. The first AppImage started perfectly and had no
-      # TLS backend, so every HTTPS request failed and the session died one
-      # step after sign-in. The app reaches out over HTTPS during startup, so
-      # grepping its own output for that failure is a real check rather than a
-      # proxy for one.
-      - name: Smoke test
-        run: |
-          sudo apt-get install -y xvfb
-          chmod +x packaging/out/*.AppImage
-          set +e
-          xvfb-run -a timeout 30 ./packaging/out/*.AppImage --appimage-extract-and-run > run.log 2>&1
-          set -e
-          tail -30 run.log
-
-          if grep -q "TLS support is not available" run.log; then
-            echo "::error::AppImage has no GIO TLS backend -- glib-networking was not bundled"
-            exit 1
-          fi
-          for bad in "Failed to load module" "no such schema" "Settings schema .* is not installed"; do
-            if grep -qE "$bad" run.log; then
-              echo "::error::AppImage runtime problem: $bad"
-              exit 1
-            fi
-          done
-          echo "no TLS, loader or schema failures"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: appimage
-          path: packaging/out/*.AppImage
-
   publish:
     name: Publish release
-    needs: [deb, appimage]
+    needs: [deb]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:

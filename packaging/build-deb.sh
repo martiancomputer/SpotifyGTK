@@ -31,9 +31,17 @@ mkdir -p "$STAGE/DEBIAN"
 # whatever the working build directory happens to hold.
 BUILD="$OUT/build-deb"
 rm -rf "$BUILD"
+# allow_old_gtk is set deliberately, and only here.
+#
+# A deb links the system GTK at runtime rather than bundling it, so the version
+# present on the *build* host does not decide how the installed app looks -- the
+# version on the user's machine does. Building against older headers is safe
+# because nothing in this tree uses API newer than 4.14; the floor exists to
+# stop someone running a build that will look wrong, which for a deb is settled
+# by the dependency below rather than by the builder.
 meson setup "$BUILD" "$APP" \
   --native-file "$APP/build-profiles/stable.ini" \
-  --prefix /usr --buildtype release >/dev/null
+  --prefix /usr --buildtype release -Dallow_old_gtk=true >/dev/null
 meson compile -C "$BUILD" >/dev/null
 DESTDIR="$STAGE" meson install -C "$BUILD" --quiet >/dev/null
 
@@ -59,14 +67,26 @@ Description: Native Spotify client written in C
  protocol level, so a free account cannot play regardless of client.
 EOF
 
+# GTK_RUNTIME_MIN, not what the build host happened to have.
+#
+# shlibdeps derives the constraint from the symbols used, which on a 24.04
+# builder produces "libgtk-4-1 (>= 4.14)" -- true for linking and wrong for
+# this application, whose layout needs 4.22. Raising it means the package
+# refuses to install where it would look wrong instead of installing and
+# disappointing. Ubuntu 24.04 is below that line; the AppImage is the answer
+# there.
+GTK_RUNTIME_MIN="4.22"
+
 if command -v dpkg-shlibdeps >/dev/null; then
   ( cd "$STAGE" && dpkg-shlibdeps -O "usr/bin/spotify-native" 2>/dev/null ) \
-    | sed 's/^shlibs:Depends=/Depends: /' >> "$STAGE/DEBIAN/control" || {
+    | sed 's/^shlibs:Depends=/Depends: /' \
+    | sed "s/libgtk-4-1 (>= [0-9.]*)/libgtk-4-1 (>= $GTK_RUNTIME_MIN)/" \
+    | sed "s/libadwaita-1-0 (>= [0-9.]*)/libadwaita-1-0 (>= 1.9)/" >> "$STAGE/DEBIAN/control" || {
       echo "    dpkg-shlibdeps failed; falling back to a declared list" >&2
-      echo "Depends: libgtk-4-1, libadwaita-1-0 (>= 1.4), libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3, libssl3 | libssl3t64" >> "$STAGE/DEBIAN/control"
+      echo "Depends: libgtk-4-1 (>= $GTK_RUNTIME_MIN), libadwaita-1-0 (>= 1.9), libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3, libssl3 | libssl3t64" >> "$STAGE/DEBIAN/control"
     }
 else
-  echo "Depends: libgtk-4-1, libadwaita-1-0 (>= 1.4), libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3" >> "$STAGE/DEBIAN/control"
+  echo "Depends: libgtk-4-1 (>= $GTK_RUNTIME_MIN), libadwaita-1-0 (>= 1.9), libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3" >> "$STAGE/DEBIAN/control"
 fi
 
 # Trigger the caches a desktop needs refreshed; without these the launcher
