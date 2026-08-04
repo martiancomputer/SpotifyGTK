@@ -2443,8 +2443,20 @@ run_live_test (const gchar *token, GCancellable *cancellable,
    * a state that is about to go away. */
   engine_active_state = NULL;
 
-  if (state.cancellable)
-    g_cancellable_cancel (state.cancellable);
+  /*
+   * The caller's cancellable is deliberately NOT cancelled here.
+   *
+   * Doing that broke auto-advance. player_service decides what a finished run
+   * meant by asking g_cancellable_is_cancelled(), so cancelling on the way out
+   * made every successful track report CANCELLED -- "Playback stopped" --
+   * which the UI reads as the user having stopped, so it never started the
+   * next track. A clean end of stream looked identical to pressing stop.
+   *
+   * Cancelling was only ever belt-and-braces for late callbacks, and
+   * run_is_current() already covers those properly: anything still in flight
+   * finds the run gone and returns before touching it. Leaving those requests
+   * to finish on their own wastes a little work and costs nothing else.
+   */
 
   {
     gint64 deadline = g_get_monotonic_time () + 400 * G_TIME_SPAN_MILLISECOND;

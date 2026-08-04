@@ -139,11 +139,20 @@ on_request_deadline (gpointer user_data)
 
   g_cancellable_cancel (cl->cancel);
 
-  /* Purge the pool: the connection that went quiet is unusable, and libsoup
-   * would otherwise hand the same one to the retry. */
-  if (cl->self && cl->self->session)
-    soup_session_abort (cl->self->session);
-  /* `cl` may be freed from here on. */
+  /*
+   * The session is NOT aborted here, though purging the dead connection is
+   * tempting. soup_session_abort() takes down *every* in-flight request, and
+   * the engine usually has a healthy one outstanding: observed in a live log,
+   * a stalled request for an early offset hit its deadline and the abort
+   * cancelled the legitimate fetch for the offset actually being played. Both
+   * failures then reported, both retried the same range, and the same 256KB
+   * was fetched and decoded twice -- which is audible as a few seconds of
+   * music repeating.
+   *
+   * The dead connection is left for libsoup's own idle handling to reap. One
+   * request paying a stale connection is a far smaller cost than cancelling
+   * a good one.
+   */
 
   if (callback) {
     g_autoptr(GError) err = g_error_new (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
