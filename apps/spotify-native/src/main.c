@@ -2615,6 +2615,27 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
 
 after_write_probe:
 
+  /*
+   * Fragmentation probe. Sends a metadata GET carrying a padding body of
+   * SPOTIFY_PROBE_FRAG_BYTES. That endpoint ignores the body entirely, so the
+   * reply says nothing about the padding and everything about whether the
+   * message was reassembled: a 200 means the fragments were joined, silence
+   * means the framing is wrong. Read-only, so it can be run as often as needed
+   * without touching the library.
+   */
+  const gchar *frag = g_getenv ("SPOTIFY_PROBE_FRAG_BYTES");
+  if (frag && *frag && engine_mercury) {
+    gsize n = (gsize) atoi (frag);
+    g_autofree guint8 *pad = g_malloc0 (n);
+    for (gsize i = 0; i < n; i++) pad[i] = (guint8) (i & 0x7f);
+    g_autoptr(GBytes) body = g_bytes_new (pad, n);
+    /* A track that is known to resolve -- the same gid the earlier probe used. */
+    const gchar *uri = "hm://metadata/4/track/319e915e51dd44efbcef56ec7b23fb3d";
+    g_message ("[frag-probe] GET %s with a %" G_GSIZE_FORMAT "-byte body", uri, n);
+    spotifygtk_mercury_request (engine_mercury, MERCURY_METHOD_GET, uri, body,
+                                on_mercury_probe_result, state);
+  }
+
   const gchar *pl_add = g_getenv ("SPOTIFY_PROBE_PLAYLIST_ADD");
   if (pl_add && *pl_add && engine_mercury) {
     PlaylistAdd *pa = g_new0 (PlaylistAdd, 1);

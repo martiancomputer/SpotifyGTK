@@ -7,14 +7,30 @@ snapshot). 50 ids per request, oldest first so ordering is right even if a run
 is interrupted. Honours Retry-After on 429 rather than hammering, and records
 progress so a re-run resumes instead of starting over.
 """
-import json, os, sys, time, datetime, urllib.request, urllib.error
+import json, os, sys, time, datetime, subprocess, urllib.request, urllib.error
 
 TSV      = "/home/wrldmk2_/SpotifyGTK/.local-backups/liked-songs-4806.tsv"
 PROGRESS = "/home/wrldmk2_/SpotifyGTK/.local-backups/restore-progress.txt"
-TOKEN    = os.path.expanduser("~/.config/spotify-native/token")
+TOKEN    = os.path.expanduser("~/.config/spotifygtk/tokens")
 BATCH    = 50
 
 def token():
+    """
+    The connect-flow token, from the keyring first and the config file second --
+    the same order auth.c writes them in.
+
+    Deliberately NOT the native client's token at ~/.config/spotify-native/token.
+    That one comes from Spotify's desktop OAuth flow and api.spotify.com refuses
+    it with 429 on the very first request, before any traffic exists to rate
+    limit, which reads exactly like throttling and is not.
+    """
+    try:
+        out = subprocess.run(["secret-tool", "lookup", "type", "tokens"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.split("\n")[0].strip()
+    except Exception:
+        pass
     return open(TOKEN).read().split("\n")[0].strip()
 
 def load():
