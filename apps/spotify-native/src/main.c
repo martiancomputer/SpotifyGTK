@@ -61,6 +61,7 @@
 #include "spotify/audio_key.h"
 #include "spotify/cdn.h"
 #include "spotify/mercury.h"
+#include "spotify/collection.h"
 #include "spotify/protobuf_min.h"
 #include "audio/decoder.h"
 #include "audio/dsp.h"
@@ -2204,6 +2205,16 @@ wire_session_to_state (LiveTestState *state, SpotifyApSession *session)
 }
 
 static void
+on_collection_probe_result (gboolean ok, guint16 status, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;
+  g_message ("[collection-probe] write endpoint answered status %u (%s)",
+             status, ok ? "accepted" : "rejected");
+}
+
+static void
 on_login_result (gboolean success, const gchar *username, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
@@ -2215,6 +2226,47 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
     state->ok = FALSE;
     g_main_loop_quit (state->loop);
     return;
+  }
+
+  /*
+   * Subscription probe. Spotify pushes some events unprompted -- the pusher
+   * connection id arrives with no subscribe at all -- so the goal here is to
+   * find which URI carries collection changes when a track is liked on another
+   * device. A SUB that is accepted says the URI names a real service; the
+   * event that follows says what it publishes, which is the part no schema in
+   * any public tree records.
+   */
+  /*
+   * Write-endpoint probe. Sends a WriteRequest carrying *no items*, which is
+   * a well-formed request that cannot change the library whatever it hits.
+   * The status alone answers the only open question -- whether this URI
+   * accepts a collection write -- without betting a real like on a guess.
+   */
+  const gchar *write_probe = g_getenv ("SPOTIFY_PROBE_COLLECTION_WRITE");
+  if (write_probe && *write_probe && engine_mercury && username) {
+    g_autofree gchar *wep = strstr (write_probe, "%s")
+      ? g_strdup_printf (write_probe, username) : g_strdup (write_probe);
+    g_message ("[collection-probe] empty WriteRequest -> %s", wep);
+    spotifygtk_collection_write (engine_mercury, wep, username,
+                                 SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                 NULL, 0, FALSE,
+                                 on_collection_probe_result, state);
+  }
+
+  const gchar *sub_probe = g_getenv ("SPOTIFY_PROBE_MERCURY_SUB");
+  if (sub_probe && *sub_probe && engine_mercury) {
+    const gchar *user = username ? username : "";
+    g_auto(GStrv) uris = g_strsplit (sub_probe, ",", -1);
+    for (guint i = 0; uris[i]; i++) {
+      g_autofree gchar *expanded = NULL;
+      /* "%s" in a candidate is the username slot. Anything else printf would
+       * interpret is a caller error, but this is a developer-only probe. */
+      if (strstr (uris[i], "%s"))
+        expanded = g_strdup_printf (uris[i], user);
+      g_message ("[mercury-sub] subscribing to %s", expanded ? expanded : uris[i]);
+      spotifygtk_mercury_subscribe (engine_mercury, expanded ? expanded : uris[i],
+                                    on_mercury_probe_result, state);
+    }
   }
 
   g_message ("[live-test] LOGIN SUCCEEDED%s%s -- handshake, crypto, and login all verified "

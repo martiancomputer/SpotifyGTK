@@ -175,6 +175,16 @@ spotifygtk_mercury_request (SpotifyMercury *self, MercuryMethod method, const gc
                               packet->data, packet->len);
 }
 
+static void
+on_subscribe_reply (MercuryResponse *response, gpointer user_data)
+{
+  (void) user_data;
+  if (!response) return;
+  g_message ("mercury: SUB %s -> status %d (%u part(s))",
+             response->uri ? response->uri : "(no uri)",
+             response->status_code, response->parts ? response->parts->len : 0);
+}
+
 guint64
 spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,
                               MercuryCallback callback, gpointer user_data)
@@ -189,7 +199,14 @@ spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,
 
   g_hash_table_insert (self->subscriptions, g_strdup (uri), sub);
 
-  spotifygtk_mercury_request (self, MERCURY_METHOD_SUB, uri, NULL, NULL, NULL);
+  /*
+   * The SUB reply is logged rather than discarded. For a service whose
+   * endpoints are undocumented, whether a subscribe is accepted at all is
+   * itself the finding: a 200 says the URI names something real, and anything
+   * else says stop waiting for events that will never come.
+   */
+  spotifygtk_mercury_request (self, MERCURY_METHOD_SUB, uri, NULL,
+                              on_subscribe_reply, self);
   return sub->id;
 }
 
