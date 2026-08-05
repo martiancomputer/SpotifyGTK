@@ -2540,7 +2540,17 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
     gboolean     removing  = removeenv && *removeenv;
     g_autoptr(GByteArray) body = NULL;
 
-    if (g_strcmp0 (body_kind, "page") == 0) {
+    if (g_strcmp0 (body_kind, "delta") == 0) {
+      /* collection2v2 DeltaRequest { username = 1, set = 2, last_sync_token = 3 }.
+       * An empty sync token asks "give me everything and tell me where I am",
+       * which is how a client bootstraps a delta stream -- if this endpoint
+       * speaks delta at all, the reply should carry a sync token to quote back. */
+      body = g_byte_array_new ();
+      pb_write_bytes_field (body, 1, (const guint8 *) username, strlen (username));
+      pb_write_bytes_field (body, 2, (const guint8 *) SPOTIFYGTK_COLLECTION_SET_LIKED,
+                            strlen (SPOTIFYGTK_COLLECTION_SET_LIKED));
+      pb_write_bytes_field (body, 3, (const guint8 *) "", 0);
+    } else if (g_strcmp0 (body_kind, "page") == 0) {
       body = spotifygtk_collection_build_page_request (username,
                                                        SPOTIFYGTK_COLLECTION_SET_LIKED,
                                                        NULL, 200);
