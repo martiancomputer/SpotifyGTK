@@ -944,16 +944,9 @@ static const gchar *theme_body =
   ".transport-button:hover { color: @fg_strong; }"
   ".toggle-active { color: @accent; }"
   ".like-active { color: @accent; }"
-  /* The like slot is a fixed-width column; stop the button padding itself
-   * wider than the space reserved for it, or the hearts stop lining up. */
-  ".row-like { padding: 0; min-width: 24px; min-height: 24px; }"
-  ".row-like:not(.like-active) { opacity: 0.55; }"
-  ".row-like:hover { opacity: 1; }"
-  /* The like slot is a fixed column; keep the button from padding it wider
-   * than the space reserved for it or the hearts stop lining up. */
-  ".row-like { padding: 0; min-width: 24px; min-height: 24px; }"
-  ".row-like:not(.like-active) { opacity: 0.55; }"
-  ".row-like:hover { opacity: 1; }"
+  /* The row's liked mark is an indicator inside the duration column, not a
+   * control -- no padding, no hover state, nothing to click. */
+  ".row-like { padding: 0; }"
 
   /* ── Sliders ───────────────────────────────────────────────── */
   "scale { min-height: 18px; }"

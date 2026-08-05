@@ -5,7 +5,8 @@
 #include "track_row.h"
 
 /* Width of the like slot, so the hearts line up across rows. */
-#define ROW_LIKE_WIDTH 32
+#define ROW_LIKE_WIDTH 22
+#define ROW_LIKE_PX    14
 
 /*
  * Natural-width caps for the text labels. Not display limits -- the labels
@@ -18,7 +19,7 @@
 /* Wide enough for the longest duration ("10:05") and for EQ_WIDTH, so the two
  * states are the same size and the column does not twitch when one replaces
  * the other. */
-#define ROW_STATUS_WIDTH 44
+#define ROW_STATUS_WIDTH 66
 
 /* Pulls the column clear of the scrollbar gutter so it lines up with the rest
  * of the content rather than the very edge of the viewport. */
@@ -40,8 +41,8 @@ struct _SpotifyGtkTrackRow {
   GtkLabel *album_label;
   GtkWidget *status_slot;   /* holds duration OR the equaliser */
   GtkLabel *duration_label;
-  GtkButton *like_btn;
-  gboolean  liked;
+  GtkWidget *like_icon;     /* indicator only, not a control */
+  gboolean   liked;
   GtkButton *play_btn;
   GtkBox *action_box;
 
@@ -204,28 +205,27 @@ on_row_cover_loaded (GdkTexture *texture, gpointer user_data)
 }
 
 /*
- * Liked state. Filled + accent when liked, outline when not: colour alone is a
- * weak signal here because the accent *is* green, so the shape carries it too.
+ * Liked state. Shown only when liked -- a green heart means saved, nothing
+ * means not, which is all a list needs to say. The action lives in the context
+ * menu, where it can name what it will do rather than relying on the reader to
+ * infer it from a filled or hollow shape.
  *
- * No logic behind this yet -- nothing calls it during playback. It exists so
- * the row can be driven once a collection write lands.
+ * No logic behind this yet: nothing calls it, so every row reads unliked until
+ * a collection read is wired up.
  */
 void
 spotifygtk_track_row_set_liked (SpotifyGtkTrackRow *self, gboolean liked)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
-
   self->liked = liked;
-  gtk_button_set_icon_name (self->like_btn,
-                            liked ? "emblem-favorite-symbolic"
-                                  : "spotifygtk-heart-outline-symbolic");
-  if (liked)
-    gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "like-active");
-  else
-    gtk_widget_remove_css_class (GTK_WIDGET (self->like_btn), "like-active");
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->like_btn),
-                               liked ? "Remove from Liked Songs"
-                                     : "Add to Liked Songs");
+  gtk_widget_set_opacity (self->like_icon, liked ? 1.0 : 0.0);
+}
+
+gboolean
+spotifygtk_track_row_get_liked (SpotifyGtkTrackRow *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self), FALSE);
+  return self->liked;
 }
 
 /* Hidden on the Liked Songs page, where every row is liked by definition and a
@@ -235,8 +235,7 @@ void
 spotifygtk_track_row_set_like_visible (SpotifyGtkTrackRow *self, gboolean visible)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
-  gtk_widget_set_opacity (GTK_WIDGET (self->like_btn), visible ? 1.0 : 0.0);
-  gtk_widget_set_can_target (GTK_WIDGET (self->like_btn), visible);
+  gtk_widget_set_visible (self->like_icon, visible);
 }
 
 void
@@ -360,25 +359,6 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   gtk_box_append (GTK_BOX (self->root_box), info);
 
   /*
-   * Like toggle, in its own fixed-width slot immediately left of the duration
-   * so the hearts form a straight column down the list. Without the size
-   * request each row would centre its own button and they would wander with
-   * the title width.
-   *
-   * Always occupies space, even where it is hidden, so hiding it on the Liked
-   * Songs page does not shift every duration sideways.
-   */
-  self->like_btn = GTK_BUTTON (gtk_button_new_from_icon_name (
-                                 "spotifygtk-heart-outline-symbolic"));
-  gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "flat");
-  gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "row-like");
-  gtk_widget_set_valign (GTK_WIDGET (self->like_btn), GTK_ALIGN_CENTER);
-  gtk_widget_set_size_request (GTK_WIDGET (self->like_btn), ROW_LIKE_WIDTH, -1);
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->like_btn), "Add to Liked Songs");
-  gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->like_btn));
-
-  /* Duration */
-  /*
    * Duration and the now-playing equaliser occupy the same slot, one at a
    * time. Side by side they made the playing row wider than every other, so
    * its indicator sat outside the column the durations line up in. Swapping
@@ -389,6 +369,25 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   gtk_widget_set_halign (self->status_slot, GTK_ALIGN_END);
   gtk_widget_set_margin_end (self->status_slot, ROW_STATUS_MARGIN_END);
   gtk_widget_set_valign (self->status_slot, GTK_ALIGN_CENTER);
+
+  /*
+   * Liked indicator, inside the status slot rather than in the row flow.
+   *
+   * As a free-standing button it sat after the info box, whose width follows
+   * the title and artist text, so the hearts landed at a different x on every
+   * row. Anchored to the duration -- which is a fixed-width column -- text
+   * length cannot move it at all.
+   *
+   * Its space is reserved whether or not it is showing, so liking a track does
+   * not shift that row's duration relative to its neighbours.
+   */
+  self->like_icon = gtk_image_new_from_icon_name ("emblem-favorite-symbolic");
+  gtk_image_set_pixel_size (GTK_IMAGE (self->like_icon), ROW_LIKE_PX);
+  gtk_widget_add_css_class (self->like_icon, "like-active");
+  gtk_widget_set_valign (self->like_icon, GTK_ALIGN_CENTER);
+  gtk_widget_set_size_request (self->like_icon, ROW_LIKE_WIDTH, -1);
+  gtk_widget_set_opacity (self->like_icon, 0.0);   /* shown only when liked */
+  gtk_box_append (GTK_BOX (self->status_slot), self->like_icon);
 
   self->duration_label = GTK_LABEL (gtk_label_new ("0:00"));
   gtk_widget_add_css_class (GTK_WIDGET (self->duration_label), "row-duration");

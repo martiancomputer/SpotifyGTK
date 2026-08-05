@@ -42,10 +42,12 @@ void spotifygtk_track_row_set_show_artists (SpotifyGtkTrackRow *self,
                                             gboolean show);
 /* Re-request this row's cover if it was skipped because loading was deferred
  * during a scroll. No-op when the art is already showing. */
-/* Liked state: filled accent heart when liked, outline when not. */
-void spotifygtk_track_row_set_liked (SpotifyGtkTrackRow *self, gboolean liked);
+/* Liked state. Shown only when liked; the action itself lives in the context
+ * menu, so this is an indicator rather than a control. */
+void     spotifygtk_track_row_set_liked (SpotifyGtkTrackRow *self, gboolean liked);
+gboolean spotifygtk_track_row_get_liked (SpotifyGtkTrackRow *self);
 
-/* Hide the like control (Liked Songs page) while keeping its width. */
+/* Hide the like indicator (Liked Songs page), where every row is liked. */
 void spotifygtk_track_row_set_like_visible (SpotifyGtkTrackRow *self, gboolean visible);
 
 void spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self);
