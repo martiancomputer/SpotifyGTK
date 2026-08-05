@@ -75,6 +75,7 @@ GPtrArray *spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self);
  *   set_native_tracks(). A given list is only ever filled by one of them,
  *   so a page always knows which it is receiving.
  *
+ * - add-to-liked (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - add-to-queue (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - go-to-album  (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - go-to-artist (gpointer track)   — SpotifyNativeTrack*, right-click menu
