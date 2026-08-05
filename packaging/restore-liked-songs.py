@@ -109,12 +109,14 @@ def main():
 
     i = done
     consecutive_429 = 0
+    stuck = 0
     while i < len(tracks):
         batch = tracks[i:i + BATCH]
         try:
             st = put(batch)
             i += len(batch)
             consecutive_429 = 0
+            stuck = 0
             open(PROGRESS, "w").write(str(i))
             if (i // BATCH) % 5 == 0 or i >= len(tracks):
                 print(f"  {i}/{len(tracks)}  (HTTP {st})", flush=True)
@@ -146,13 +148,30 @@ def main():
                 print(f"  HTTP 403 at {i}: library writes are still clamped", flush=True)
                 return 2
             else:
+                stuck += 1
                 print(f"  HTTP {e.code} at {i}: {e.read().decode()[:200]}", flush=True)
+                if stuck >= 5:
+                    print("  same batch failed 5 times -- stopping", flush=True)
+                    return 1
                 time.sleep(5)
         except Exception as ex:
+            stuck += 1
             print(f"  {type(ex).__name__} at {i}: {ex}", flush=True)
+            if stuck >= 5:
+                print("  same batch failed 5 times -- stopping", flush=True)
+                return 1
             time.sleep(5)
 
-    print(f"DONE: {i}/{len(tracks)} restored", flush=True)
+    # Report what the server holds, not what was sent: a run can post 96
+    # accepted batches and still be wrong about the outcome.
+    try:
+        req = urllib.request.Request("https://api.spotify.com/v1/me/tracks?limit=1",
+                                     headers={"Authorization": "Bearer " + token()})
+        total = json.load(urllib.request.urlopen(req)).get("total")
+        print(f"DONE: sent {i}/{len(tracks)}; library now reports {total} saved tracks",
+              flush=True)
+    except Exception as ex:
+        print(f"DONE: sent {i}/{len(tracks)}; could not verify total ({ex})", flush=True)
     return 0
 
 sys.exit(main())
