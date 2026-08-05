@@ -66,6 +66,16 @@ void spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod metho
                                        GPtrArray *parts, MercuryCallback callback,
                                        gpointer user_data);
 
+/* As _full, plus Header.user_fields entries. Spotify's client uses these for
+ * collection writes ("Collection-Update-Id"); they are header metadata, not
+ * body fields. */
+void spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
+                                        const gchar *method_override, const gchar *uri,
+                                        GBytes *payload,
+                                        const gchar *const *field_keys,
+                                        const gchar *const *field_values, guint n_fields,
+                                        MercuryCallback callback, gpointer user_data);
+
 /* Long-lived subscription — callback fires on every published event
  * until spotifygtk_mercury_unsubscribe() is called. */
 guint64 spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,

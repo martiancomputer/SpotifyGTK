@@ -2523,10 +2523,39 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
 
           WriteProbe *wp = g_new0 (WriteProbe, 1);
           wp->state = state; wp->method = g_strdup (rm);
-          g_message ("[restore] %s %s", rm, rep);
-          spotifygtk_mercury_request_parts (engine_mercury, MERCURY_METHOD_SEND,
-                                            rm, rep, parts,
-                                            on_collection_write_probe, wp);
+
+          /*
+           * Collection-Update-Id, lifted from the official client's binary
+           * where it sits next to hm://collection/%s/. A client-generated id
+           * per update -- collection2v2 calls the same thing client_update_id.
+           */
+          const gchar *uid = g_getenv ("SPOTIFY_PROBE_UPDATE_ID");
+          g_autofree gchar *gen = NULL;
+          if (!uid || !*uid) {
+            gen = g_uuid_string_random ();
+            uid = gen;
+          }
+          const gchar *keys[]   = { "Collection-Update-Id" };
+          const gchar *values[] = { uid };
+          gboolean use_uid = !g_getenv ("SPOTIFY_PROBE_NO_UPDATE_ID");
+
+          g_message ("[restore] %s %s%s%s", rm, rep,
+                     use_uid ? "  Collection-Update-Id=" : "",
+                     use_uid ? uid : "");
+
+          g_autoptr(GByteArray) flat = g_byte_array_new ();
+          for (guint pi = 0; pi < parts->len; pi++) {
+            gsize pl = 0;
+            const guint8 *pd = g_bytes_get_data (g_ptr_array_index (parts, pi), &pl);
+            g_byte_array_append (flat, pd, pl);
+          }
+          g_autoptr(GBytes) flatb = g_bytes_new (flat->data, flat->len);
+          spotifygtk_mercury_request_fields (engine_mercury, MERCURY_METHOD_SEND,
+                                             rm, rep, flatb,
+                                             use_uid ? keys : NULL,
+                                             use_uid ? values : NULL,
+                                             use_uid ? 1 : 0,
+                                             on_collection_write_probe, wp);
         }
       } else {
         g_warning ("[restore] could not read %s", restore_file);

@@ -32,6 +32,11 @@
 #define MERCURY_HDR_CONTENT_TYPE 2
 #define MERCURY_HDR_METHOD       3
 #define MERCURY_HDR_STATUS_CODE  4
+#define MERCURY_HDR_USER_FIELDS  6
+
+/* UserField { key = 1 (string), value = 2 (bytes) } */
+#define MERCURY_UF_KEY   1
+#define MERCURY_UF_VALUE 2
 
 /* flags byte */
 #define MERCURY_FLAG_FINAL   1
@@ -109,7 +114,9 @@ append_u16_be (GByteArray *buf, guint16 v)
 
 static GByteArray *
 encode_mercury_packet (guint64 seq, MercuryMethod method, const gchar *method_override,
-                       const gchar *uri, GBytes *payload)
+                       const gchar *uri, GBytes *payload,
+                       const gchar *const *field_keys,
+                       const gchar *const *field_values, guint n_fields)
 {
   GByteArray *buf = g_byte_array_new ();
 
@@ -127,6 +134,21 @@ encode_mercury_packet (guint64 seq, MercuryMethod method, const gchar *method_ov
   const gchar *m = method_override ? method_override : method_string (method);
   pb_write_bytes_field (header, MERCURY_HDR_METHOD,
                         (const guint8 *) m, strlen (m));
+
+  /*
+   * Header.user_fields. Spotify's own client carries "Collection-Update-Id"
+   * here for collection writes -- the string sits directly beside
+   * hm://collection/%s/ in its binary. That is why every attempt to express an
+   * update through the *body* failed: the marker was never a body field.
+   */
+  for (guint i = 0; i < n_fields; i++) {
+    g_autoptr(GByteArray) uf = g_byte_array_new ();
+    pb_write_bytes_field (uf, MERCURY_UF_KEY,
+                          (const guint8 *) field_keys[i], strlen (field_keys[i]));
+    pb_write_bytes_field (uf, MERCURY_UF_VALUE,
+                          (const guint8 *) field_values[i], strlen (field_values[i]));
+    pb_write_message_field (header, MERCURY_HDR_USER_FIELDS, uf->data, uf->len);
+  }
 
   append_u16_be (buf, (guint16) header->len);
   g_byte_array_append (buf, header->data, header->len);
@@ -231,6 +253,18 @@ spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
                                  GBytes *payload, MercuryCallback callback,
                                  gpointer user_data)
 {
+  spotifygtk_mercury_request_fields (self, method, method_override, uri, payload,
+                                     NULL, NULL, 0, callback, user_data);
+}
+
+void
+spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
+                                   const gchar *method_override, const gchar *uri,
+                                   GBytes *payload,
+                                   const gchar *const *field_keys,
+                                   const gchar *const *field_values, guint n_fields,
+                                   MercuryCallback callback, gpointer user_data)
+{
   g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
   g_return_if_fail (uri != NULL);
 
@@ -285,7 +319,8 @@ spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
   }
 
   g_autoptr(GByteArray) packet =
-    encode_mercury_packet (seq, method, method_override, uri, payload);
+    encode_mercury_packet (seq, method, method_override, uri, payload,
+                           field_keys, field_values, n_fields);
 
   /*
    * The pending entry is filed even with no callback: a reply still arrives
