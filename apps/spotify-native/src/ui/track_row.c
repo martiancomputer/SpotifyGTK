@@ -20,6 +20,10 @@
  * the other. */
 #define ROW_STATUS_WIDTH 44
 
+/* Pulls the column clear of the scrollbar gutter so it lines up with the rest
+ * of the content rather than the very edge of the viewport. */
+#define ROW_STATUS_MARGIN_END 10
+
 #include <string.h>
 #include <math.h>
 
@@ -383,6 +387,7 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   self->status_slot = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_size_request (self->status_slot, ROW_STATUS_WIDTH, -1);
   gtk_widget_set_halign (self->status_slot, GTK_ALIGN_END);
+  gtk_widget_set_margin_end (self->status_slot, ROW_STATUS_MARGIN_END);
   gtk_widget_set_valign (self->status_slot, GTK_ALIGN_CENTER);
 
   self->duration_label = GTK_LABEL (gtk_label_new ("0:00"));
