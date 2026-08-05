@@ -104,6 +104,11 @@ void spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px);
  * would drown the log during a scroll -- which is exactly when the numbers are
  * interesting.
  */
+/* Drop cached art down to `max_bytes`, oldest first. Intended for moments when
+ * the art is demonstrably not visible -- the cache otherwise only evicts on
+ * insert and holds its ceiling forever. */
+void spotifygtk_cover_trim_to (gsize max_bytes);
+
 void spotifygtk_cover_log_stats (const gchar *context);
 
 G_END_DECLS

@@ -43,6 +43,8 @@
  * this loader creates. */
 static gsize cover_cache_bytes = 0;
 
+/* Evict oldest-first until the cache fits in `budget`. Shared by the insert
+ * path and by spotifygtk_cover_trim_to(). */
 static gsize
 texture_bytes (GdkTexture *texture)
 {
@@ -52,11 +54,28 @@ texture_bytes (GdkTexture *texture)
          (gsize) gdk_texture_get_height (texture) * 4;
 }
 
+
 static GHashTable *cover_cache = NULL;
 
 /* Insertion order of the ids in cover_cache, oldest at the head. Kept in
  * step with the table so eviction is O(1) at the front. */
 static GQueue cover_order = G_QUEUE_INIT;
+
+static void
+cover_evict_to (gsize budget)
+{
+  while (cover_cache_bytes > budget && !g_queue_is_empty (&cover_order)) {
+    g_autofree gchar *oldest = g_queue_pop_head (&cover_order);
+    if (!oldest)
+      break;
+    GdkTexture *victim = g_hash_table_lookup (cover_cache, oldest);
+    if (victim) {
+      gsize freed = texture_bytes (victim);
+      cover_cache_bytes -= MIN (freed, cover_cache_bytes);
+    }
+    g_hash_table_remove (cover_cache, oldest);
+  }
+}
 
 /* Requests already in flight, id -> GList of PendingRequest*. Two rows from
  * the same album ask for the same cover at once; without this they would
@@ -379,18 +398,8 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   gsize incoming = texture_bytes (texture);
 
-  while (cover_cache_bytes + incoming > COVER_CACHE_MAX_BYTES &&
-         !g_queue_is_empty (&cover_order)) {
-    g_autofree gchar *oldest = g_queue_pop_head (&cover_order);
-    if (!oldest)
-      break;
-    GdkTexture *victim = g_hash_table_lookup (cover_cache, oldest);
-    if (victim) {
-      gsize freed = texture_bytes (victim);
-      cover_cache_bytes -= MIN (freed, cover_cache_bytes);
-    }
-    g_hash_table_remove (cover_cache, oldest);
-  }
+  cover_evict_to (COVER_CACHE_MAX_BYTES > incoming
+                    ? COVER_CACHE_MAX_BYTES - incoming : 0);
 
   g_hash_table_insert (cover_cache, g_strdup (cache_key), g_object_ref (texture));
   g_queue_push_tail (&cover_order, g_strdup (cache_key));
@@ -626,4 +635,27 @@ cover_load_internal (const gchar          *cover_id,
   if (g_queue_get_length (&cover_queue) > cover_stats.peak_queue)
     cover_stats.peak_queue = g_queue_get_length (&cover_queue);
   cover_pump ();
+}
+
+/*
+ * Drop cached art down to `max_bytes`, oldest first.
+ *
+ * The cache only ever evicted on insert, so once it reached its ceiling it
+ * stayed there for the life of the process -- including while the window was
+ * minimised, where tens of megabytes of texture were held for nothing anyone
+ * could see. Nothing else releases it: these are GdkTextures held by this
+ * table alone, so no amount of malloc tuning touches them.
+ *
+ * Cheap to get wrong in the other direction, though: trim too eagerly and
+ * scrolling back up refetches everything. Only worth doing when the art is
+ * demonstrably not being looked at.
+ */
+void
+spotifygtk_cover_trim_to (gsize max_bytes)
+{
+  gsize before = cover_cache_bytes;
+  cover_evict_to (max_bytes);
+  if (before != cover_cache_bytes)
+    g_message ("cover: trimmed cache %.1f MB -> %.1f MB",
+               before / 1048576.0, cover_cache_bytes / 1048576.0);
 }

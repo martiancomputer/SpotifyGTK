@@ -20,6 +20,7 @@
  */
 
 #include "window.h"
+#include "cover_loader.h"
 #include "sidebar.h"
 #include "playback_bar.h"
 #include "now_playing_panel.h"
@@ -1419,9 +1420,45 @@ spotifygtk_native_window_class_init (SpotifyGtkNativeWindowClass *klass)
   object_class->dispose = spotifygtk_native_window_dispose;
 }
 
+
+/* Kept small enough to be worth reclaiming, large enough that restoring the
+ * window does not repaint from an empty cache. */
+#define COVER_SUSPENDED_BUDGET (4 * 1024 * 1024)
+
+/*
+ * GdkToplevel::suspended is true when the compositor says the surface is not
+ * visible -- minimised, on another workspace, fully occluded. That is the one
+ * moment cached art is provably not being looked at, so it is the one moment
+ * worth dropping it: the cache otherwise holds its 48MB ceiling for the life
+ * of the process.
+ *
+ * Deliberately not hooked to focus. Alt-tabbing away leaves the window on
+ * screen, and throwing away art someone is still looking at to save a few
+ * megabytes would trade a visible repaint for an invisible gain.
+ */
+static void
+on_toplevel_suspended (GdkToplevel *toplevel, GParamSpec *pspec, gpointer user_data)
+{
+  (void) pspec; (void) user_data;
+  if (gdk_toplevel_get_state (toplevel) & GDK_TOPLEVEL_STATE_SUSPENDED)
+    spotifygtk_cover_trim_to (COVER_SUSPENDED_BUDGET);
+}
+
+static void
+on_window_realize (GtkWidget *widget, gpointer user_data)
+{
+  (void) user_data;
+  GdkSurface *surface = gtk_native_get_surface (GTK_NATIVE (widget));
+  if (GDK_IS_TOPLEVEL (surface))
+    g_signal_connect (surface, "notify::state",
+                      G_CALLBACK (on_toplevel_suspended), NULL);
+}
+
 static void
 spotifygtk_native_window_init (SpotifyGtkNativeWindow *self)
 {
+  g_signal_connect (self, "realize", G_CALLBACK (on_window_realize), NULL);
+
   self->context_index = -1;
   self->user_queue = g_queue_new ();
   self->nav_history = g_ptr_array_new_with_free_func (nav_entry_free);
