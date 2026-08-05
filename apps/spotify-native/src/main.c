@@ -2206,7 +2206,7 @@ wire_session_to_state (LiveTestState *state, SpotifyApSession *session)
 
 /* Replies arrive out of order, so the method has to travel with the request
  * or a 400 among 405s cannot be attributed to the verb that earned it. */
-typedef struct { LiveTestState *state; const gchar *method; } WriteProbe;
+typedef struct { LiveTestState *state; gchar *method; } WriteProbe;
 
 static void
 on_collection_write_probe (MercuryResponse *response, gpointer user_data)
@@ -2242,6 +2242,7 @@ on_collection_write_probe (MercuryResponse *response, gpointer user_data)
   }
   if (response->parts && response->parts->len == 0)
     g_message ("[collection-probe]   (no payload parts at all)");
+  g_free (wp->method);
   g_free (wp);
 }
 
@@ -2328,13 +2329,66 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
     /* Which body to send: the write request by default, or a PageRequest when
      * chasing why a read returns 200 with nothing in it. */
     const gchar *body_kind = g_getenv ("SPOTIFY_PROBE_COLLECTION_BODY");
-    g_autoptr(GByteArray) body =
-      (g_strcmp0 (body_kind, "page") == 0)
-        ? spotifygtk_collection_build_page_request (username,
-                                                    SPOTIFYGTK_COLLECTION_SET_LIKED,
-                                                    NULL, 200)
-        : spotifygtk_collection_build_write (username, SPOTIFYGTK_COLLECTION_SET_LIKED,
-                                             NULL, 0, 0, FALSE);
+    const gchar *turi      = g_getenv ("SPOTIFY_PROBE_COLLECTION_URI");
+    const gchar *removeenv = g_getenv ("SPOTIFY_PROBE_COLLECTION_REMOVE");
+    gboolean     removing  = removeenv && *removeenv;
+    g_autoptr(GByteArray) body = NULL;
+
+    if (g_strcmp0 (body_kind, "page") == 0) {
+      body = spotifygtk_collection_build_page_request (username,
+                                                       SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                                       NULL, 200);
+    } else if (g_strcmp0 (body_kind, "write-gid") == 0 && turi) {
+      /*
+       * The item shape the *response* uses -- type/id/added_at at 1/2/5 with
+       * a raw GID -- rather than collection2v2's uri-string CollectionItem.
+       * Worth trying because the response proved that schema is not what this
+       * service speaks, even though its PageRequest is accepted.
+       */
+      const gchar *b62 = strrchr (turi, ':');
+      b62 = b62 ? b62 + 1 : turi;
+      guint8 gid[16] = { 0 };
+      for (int i = 0; i < 16; i++) gid[i] = 0;
+      /* base62 -> 16-byte big-endian, by repeated multiply-add. */
+      for (const gchar *c = b62; *c; c++) {
+        const gchar *digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+                              "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const gchar *at = strchr (digits, *c);
+        if (!at) continue;
+        guint carry = (guint) (at - digits);
+        for (int i = 15; i >= 0; i--) {
+          guint v = (guint) gid[i] * 62 + carry;
+          gid[i] = (guint8) (v & 0xff);
+          carry  = v >> 8;
+        }
+      }
+      g_autoptr(GByteArray) item = g_byte_array_new ();
+      pb_write_bytes_field (item, 2, gid, sizeof (gid));
+      pb_write_varint_field (item, 5, (guint64) time (NULL));
+      if (removing) {
+        const gchar *fenv = g_getenv ("SPOTIFY_PROBE_REMOVE_FIELD");
+        guint32 rf = fenv && *fenv ? (guint32) atoi (fenv) : 3;
+        pb_write_varint_field (item, rf, 1);   /* candidate is_removed slot */
+        g_message ("[collection-probe] is_removed candidate = field %u", rf);
+      }
+
+      body = g_byte_array_new ();
+      if (g_getenv ("SPOTIFY_PROBE_COLLECTION_BARE")) {
+        /* Symmetric with the response, which is a bare `repeated Item = 1`
+         * with no username/set envelope -- the URI already names the user. */
+        pb_write_message_field (body, 1, item->data, item->len);
+      } else {
+        pb_write_bytes_field (body, 1, (const guint8 *) username, strlen (username));
+        pb_write_bytes_field (body, 2, (const guint8 *) SPOTIFYGTK_COLLECTION_SET_LIKED,
+                              strlen (SPOTIFYGTK_COLLECTION_SET_LIKED));
+        pb_write_message_field (body, 3, item->data, item->len);
+      }
+    } else {
+      const gchar *uris[] = { turi, NULL };
+      body = spotifygtk_collection_build_write (username, SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                                turi ? uris : NULL, turi ? 1 : 0,
+                                                (gint32) time (NULL), removing);
+    }
     g_message ("[collection-probe] body=%s (%u bytes)",
                body_kind ? body_kind : "write", body->len);
     for (guint i = 0; paths[i]; i++) {
@@ -2343,7 +2397,9 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
       for (guint m = 0; methods[m]; m++) {
         g_autoptr(GBytes) payload = g_bytes_new (body->data, body->len);
         WriteProbe *wp = g_new0 (WriteProbe, 1);
-        wp->state = state; wp->method = methods[m];
+        /* Copied: the method list is a g_auto(GStrv) freed when this scope
+         * exits, long before an async reply lands on it. */
+        wp->state = state; wp->method = g_strdup (methods[m]);
         spotifygtk_mercury_request_full (engine_mercury, MERCURY_METHOD_SEND,
                                          methods[m], wep, payload,
                                          on_collection_write_probe, wp);
