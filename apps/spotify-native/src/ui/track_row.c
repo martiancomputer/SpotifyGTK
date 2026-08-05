@@ -7,6 +7,19 @@
 /* Width of the like slot, so the hearts line up across rows. */
 #define ROW_LIKE_WIDTH 32
 
+/*
+ * Natural-width caps for the text labels. Not display limits -- the labels
+ * still expand into whatever space the row has -- but a bound on what they ask
+ * for, so a long title cannot drag the window wider.
+ */
+#define ROW_TITLE_MAX_CHARS 48
+#define ROW_META_MAX_CHARS  28
+
+/* Wide enough for the longest duration ("10:05") and for EQ_WIDTH, so the two
+ * states are the same size and the column does not twitch when one replaces
+ * the other. */
+#define ROW_STATUS_WIDTH 44
+
 #include <string.h>
 #include <math.h>
 
@@ -21,6 +34,7 @@ struct _SpotifyGtkTrackRow {
   GtkLabel *title_label;
   GtkLabel *artist_label;
   GtkLabel *album_label;
+  GtkWidget *status_slot;   /* holds duration OR the equaliser */
   GtkLabel *duration_label;
   GtkButton *like_btn;
   gboolean  liked;
@@ -310,17 +324,32 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   self->title_label = GTK_LABEL (gtk_label_new ("Track"));
   gtk_label_set_xalign (self->title_label, 0.0);
   gtk_label_set_ellipsize (self->title_label, PANGO_ELLIPSIZE_END);
+  /*
+   * Ellipsizing alone does not bound a label: it changes what is drawn when
+   * space is short, while the *natural* width request stays the full text.
+   * GtkListView asks rows for their natural width, so one long title made the
+   * whole list -- and then the window -- grow to fit it. max_width_chars caps
+   * the request; hexpand still lets the label use whatever room exists, so
+   * wide windows are unaffected and only over-long text ellipsizes.
+   */
+  gtk_label_set_max_width_chars (self->title_label, ROW_TITLE_MAX_CHARS);
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->title_label));
 
   GtkWidget *meta_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   self->artist_label = GTK_LABEL (gtk_label_new ("Artist"));
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "dim-label");
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "caption");
+  gtk_label_set_xalign (self->artist_label, 0.0);
+  gtk_label_set_ellipsize (self->artist_label, PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars (self->artist_label, ROW_META_MAX_CHARS);
   gtk_box_append (GTK_BOX (meta_row), GTK_WIDGET (self->artist_label));
 
   self->album_label = GTK_LABEL (gtk_label_new ("Album"));
   gtk_widget_add_css_class (GTK_WIDGET (self->album_label), "dim-label");
   gtk_widget_add_css_class (GTK_WIDGET (self->album_label), "caption");
+  gtk_label_set_xalign (self->album_label, 0.0);
+  gtk_label_set_ellipsize (self->album_label, PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars (self->album_label, ROW_META_MAX_CHARS);
   gtk_box_append (GTK_BOX (meta_row), GTK_WIDGET (self->album_label));
 
   gtk_box_append (GTK_BOX (info), meta_row);
@@ -345,9 +374,22 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->like_btn));
 
   /* Duration */
+  /*
+   * Duration and the now-playing equaliser occupy the same slot, one at a
+   * time. Side by side they made the playing row wider than every other, so
+   * its indicator sat outside the column the durations line up in. Swapping
+   * them in place keeps that column straight whichever row is playing.
+   */
+  self->status_slot = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_size_request (self->status_slot, ROW_STATUS_WIDTH, -1);
+  gtk_widget_set_halign (self->status_slot, GTK_ALIGN_END);
+  gtk_widget_set_valign (self->status_slot, GTK_ALIGN_CENTER);
+
   self->duration_label = GTK_LABEL (gtk_label_new ("0:00"));
   gtk_widget_add_css_class (GTK_WIDGET (self->duration_label), "row-duration");
-  gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->duration_label));
+  gtk_label_set_xalign (self->duration_label, 1.0);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->duration_label), TRUE);
+  gtk_box_append (GTK_BOX (self->status_slot), GTK_WIDGET (self->duration_label));
 
   /* Equaliser, immediately right of the duration. Hidden unless this row is
    * the one playing. */
@@ -361,7 +403,12 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
     gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (self->eq_area),
                                     eq_draw, seconds, NULL);
   }
-  gtk_box_append (GTK_BOX (self->root_box), self->eq_area);
+  /* Right-aligned like the duration text it replaces, so the indicator lands
+   * in the same column rather than at the left of the slot. */
+  gtk_widget_set_halign (self->eq_area, GTK_ALIGN_END);
+  gtk_widget_set_hexpand (self->eq_area, TRUE);
+  gtk_box_append (GTK_BOX (self->status_slot), self->eq_area);
+  gtk_box_append (GTK_BOX (self->root_box), self->status_slot);
 
   /* Actions (hidden by default, shown on hover) */
   self->action_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4));
@@ -517,12 +564,17 @@ spotifygtk_track_row_set_playing (SpotifyGtkTrackRow *self, gboolean is_playing,
     gtk_widget_remove_css_class (GTK_WIDGET (self->title_label), "accent");
   }
 
-  /* Visible whenever this is the current track; animating only while it is
-   * actually advancing, so a paused row shows frozen bars. */
+  /*
+   * The equaliser replaces the duration rather than joining it: the seek bar
+   * already shows elapsed and total for whatever is playing, so repeating the
+   * length on the row it applies to is the one place it says nothing.
+   *
+   * Shown whenever this is the current track, animating only while it is
+   * actually advancing, so a paused row shows frozen bars.
+   */
   gtk_widget_set_visible (self->eq_area, is_playing);
+  gtk_widget_set_visible (GTK_WIDGET (self->duration_label), !is_playing);
   eq_set_running (self, is_playing && !is_paused);
-  if (is_playing && is_paused)
-    gtk_widget_set_visible (self->eq_area, TRUE);
 }
 
 const gchar *
