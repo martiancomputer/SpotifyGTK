@@ -108,7 +108,8 @@ append_u16_be (GByteArray *buf, guint16 v)
 }
 
 static GByteArray *
-encode_mercury_packet (guint64 seq, MercuryMethod method, const gchar *uri, GBytes *payload)
+encode_mercury_packet (guint64 seq, MercuryMethod method, const gchar *method_override,
+                       const gchar *uri, GBytes *payload)
 {
   GByteArray *buf = g_byte_array_new ();
 
@@ -123,7 +124,7 @@ encode_mercury_packet (guint64 seq, MercuryMethod method, const gchar *uri, GByt
   g_autoptr(GByteArray) header = g_byte_array_new ();
   pb_write_bytes_field (header, MERCURY_HDR_URI,
                         (const guint8 *) uri, strlen (uri));
-  const gchar *m = method_string (method);
+  const gchar *m = method_override ? method_override : method_string (method);
   pb_write_bytes_field (header, MERCURY_HDR_METHOD,
                         (const guint8 *) m, strlen (m));
 
@@ -154,11 +155,28 @@ void
 spotifygtk_mercury_request (SpotifyMercury *self, MercuryMethod method, const gchar *uri,
                             GBytes *payload, MercuryCallback callback, gpointer user_data)
 {
+  spotifygtk_mercury_request_full (self, method, NULL, uri, payload, callback, user_data);
+}
+
+/*
+ * The Header's `method` is a free-form string, not one of the four enum names.
+ * That distinction turns out to matter: a collection write to the right URI is
+ * refused with 405 (Method Not Allowed) when the string is "SEND", because the
+ * AP command that carries a write and the verb the service expects to read in
+ * the header are two different things.
+ */
+void
+spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
+                                 const gchar *method_override, const gchar *uri,
+                                 GBytes *payload, MercuryCallback callback,
+                                 gpointer user_data)
+{
   g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
   g_return_if_fail (uri != NULL);
 
   guint64 seq = self->next_seq++;
-  g_autoptr(GByteArray) packet = encode_mercury_packet (seq, method, uri, payload);
+  g_autoptr(GByteArray) packet =
+    encode_mercury_packet (seq, method, method_override, uri, payload);
 
   /*
    * The pending entry is filed even with no callback: a reply still arrives

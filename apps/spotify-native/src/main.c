@@ -2204,14 +2204,24 @@ wire_session_to_state (LiveTestState *state, SpotifyApSession *session)
   spotifygtk_ap_session_set_handler (session, AP_CMD_AES_KEY_ERROR, on_aes_key_error, state);
 }
 
+/* Replies arrive out of order, so the method has to travel with the request
+ * or a 400 among 405s cannot be attributed to the verb that earned it. */
+typedef struct { LiveTestState *state; const gchar *method; } WriteProbe;
+
 static void
-on_collection_probe_result (gboolean ok, guint16 status, gpointer user_data)
+on_collection_write_probe (MercuryResponse *response, gpointer user_data)
 {
-  LiveTestState *state = user_data;
-  if (!run_is_current (state))
-    return;
-  g_message ("[collection-probe] write endpoint answered status %u (%s)",
-             status, ok ? "accepted" : "rejected");
+  WriteProbe *wp = user_data;
+  if (!run_is_current (wp->state) || !response) { g_free (wp); return; }
+
+  const gchar *verdict = "";
+  if (response->status_code == 200)      verdict = "   *** ACCEPTED ***";
+  else if (response->status_code == 400) verdict = "   <- method OK, payload rejected";
+
+  g_message ("[collection-probe] %-6s -> status %d  %s%s",
+             wp->method, response->status_code,
+             response->uri ? response->uri : "(no uri)", verdict);
+  g_free (wp);
 }
 
 static void
@@ -2244,13 +2254,28 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
    */
   const gchar *write_probe = g_getenv ("SPOTIFY_PROBE_COLLECTION_WRITE");
   if (write_probe && *write_probe && engine_mercury && username) {
-    g_autofree gchar *wep = strstr (write_probe, "%s")
-      ? g_strdup_printf (write_probe, username) : g_strdup (write_probe);
-    g_message ("[collection-probe] empty WriteRequest -> %s", wep);
-    spotifygtk_collection_write (engine_mercury, wep, username,
-                                 SPOTIFYGTK_COLLECTION_SET_LIKED,
-                                 NULL, 0, FALSE,
-                                 on_collection_probe_result, state);
+    /*
+     * Sweeps the Header method string as well as the URI, because 405 says
+     * the URI was found and the verb was not accepted -- so holding the verb
+     * fixed at "SEND" while varying only the path cannot converge.
+     */
+    const gchar *methods[] = { "SEND", "POST", "PUT", "MODIFY", NULL };
+    g_auto(GStrv) paths = g_strsplit (write_probe, ",", -1);
+    g_autoptr(GByteArray) body =
+      spotifygtk_collection_build_write (username, SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                         NULL, 0, 0, FALSE);
+    for (guint i = 0; paths[i]; i++) {
+      g_autofree gchar *wep = strstr (paths[i], "%s")
+        ? g_strdup_printf (paths[i], username) : g_strdup (paths[i]);
+      for (guint m = 0; methods[m]; m++) {
+        g_autoptr(GBytes) payload = g_bytes_new (body->data, body->len);
+        WriteProbe *wp = g_new0 (WriteProbe, 1);
+        wp->state = state; wp->method = methods[m];
+        spotifygtk_mercury_request_full (engine_mercury, MERCURY_METHOD_SEND,
+                                         methods[m], wep, payload,
+                                         on_collection_write_probe, wp);
+      }
+    }
   }
 
   const gchar *sub_probe = g_getenv ("SPOTIFY_PROBE_MERCURY_SUB");

@@ -52,6 +52,13 @@ void spotifygtk_mercury_request (SpotifyMercury *self, MercuryMethod method,
                                  const gchar *uri, GBytes *payload,
                                  MercuryCallback callback, gpointer user_data);
 
+/* As above, but `method_override` replaces the string written into the
+ * Header's method field. NULL uses the name of `method`. */
+void spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
+                                      const gchar *method_override, const gchar *uri,
+                                      GBytes *payload, MercuryCallback callback,
+                                      gpointer user_data);
+
 /* Long-lived subscription — callback fires on every published event
  * until spotifygtk_mercury_unsubscribe() is called. */
 guint64 spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,
