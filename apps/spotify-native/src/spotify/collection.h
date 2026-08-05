@@ -32,14 +32,27 @@
  *
  * What can be said is the shape of its other endpoints,
  * `hm://<service>/v<n>/<resource>` (`hm://playlist/v2/playlist/`,
- * `hm://connect-state/v1/...`), which is what the candidate list in the
- * harness probe is built from.
+ * `hm://connect-state/v1/...`).
  *
  * That is why the endpoint is a *parameter* here rather than a constant baked
- * into the call: candidates can be tried from the harness without a rebuild,
- * and nothing in the UI is wired to a URI that has never returned 200. The
- * encoding, by contrast, is pinned byte-for-byte in tests/test_collection.c, so
- * a failing write can be attributed to the endpoint rather than the payload.
+ * into the call: candidates can be tried without a rebuild, and nothing in the
+ * UI is wired to a URI that has never returned 200. The encoding, by contrast,
+ * is pinned byte-for-byte in tests/test_collection.c, so a failing write can be
+ * attributed to the endpoint rather than the payload.
+ *
+ * NOTHING HERE HAS EVER BEEN SENT
+ *
+ * An earlier version of this comment described a "candidate list in the
+ * harness probe". No such probe exists, and one cannot be written yet: the
+ * Mercury layer is send-only. spotifygtk_mercury_request() encodes a packet,
+ * files the callback under its sequence number in `pending`, and hands it to
+ * the AP -- but no handler is registered for AP_CMD_MERCURY_REQ (0xb2) or
+ * AP_CMD_MERCURY_EVENT (0xb5), so nothing ever decodes a reply, drains
+ * `pending`, or invokes a callback. spotifygtk_mercury_new() is never called
+ * from anywhere either, so no instance exists at runtime.
+ *
+ * Implementing the receive half is therefore a prerequisite for testing any
+ * endpoint candidate, and for connect.c, which has the same problem.
  */
 
 #pragma once
