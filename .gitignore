@@ -44,3 +44,4 @@ apps/spotify-native-windows/build/
 # Session logs written beside the executable by log_file.c
 spotify-native.log
 spotify-native.prev.log
+.local-backups/

@@ -59,6 +59,13 @@ void spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method
                                       GBytes *payload, MercuryCallback callback,
                                       gpointer user_data);
 
+/* Send a payload split across several parts in one packet, for bodies over
+ * the 65535-byte per-part limit. Split at message boundaries. */
+void spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
+                                       const gchar *method_override, const gchar *uri,
+                                       GPtrArray *parts, MercuryCallback callback,
+                                       gpointer user_data);
+
 /* Long-lived subscription — callback fires on every published event
  * until spotifygtk_mercury_unsubscribe() is called. */
 guint64 spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,

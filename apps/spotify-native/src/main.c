@@ -2276,6 +2276,138 @@ on_collection_read_probe (gboolean ok, guint16 status,
   }
 }
 
+/* ── Playlist-op probe ─────────────────────────────────────────────────────
+ *
+ * Liked Songs is playlist 37i9dQZF1F5p3rmiWPIYgZ -- a GET on
+ * hm://playlist/v2/playlist/<id> returns a playlist4 SelectedListContent whose
+ * `length` tracked the collection count exactly. That matters because the
+ * collection endpoint only offers PUT, which *replaces*, and a replace stops
+ * working somewhere under 20KB -- far too small for a large library, so it
+ * cannot be how liking actually works. Playlist ops are additive, which is the
+ * shape a real client must be using.
+ *
+ *   ListChanges { base_revision = 1, deltas = 2 }
+ *   Delta       { base_version = 1, ops = 2 }
+ *   Op          { kind = 1 (ADD = 2), add = 2 }
+ *   Add         { from_index = 1, items = 2, add_last = 4 }
+ *   Item        { uri = 1 }
+ */
+typedef struct {
+  LiveTestState *state;
+  gchar         *playlist_id;
+  gchar         *file;
+  guint          offset, count;
+} PlaylistAdd;
+
+static void
+playlist_add_free (PlaylistAdd *pa)
+{
+  if (!pa) return;
+  g_free (pa->playlist_id);
+  g_free (pa->file);
+  g_free (pa);
+}
+
+static void
+on_playlist_changes_result (MercuryResponse *response, gpointer user_data)
+{
+  PlaylistAdd *pa = user_data;
+  if (response)
+    g_message ("[playlist-add] changes -> status %d (%u part(s))",
+               response->status_code, response->parts ? response->parts->len : 0);
+  playlist_add_free (pa);
+}
+
+static void
+on_playlist_head_result (MercuryResponse *response, gpointer user_data)
+{
+  PlaylistAdd *pa = user_data;
+  if (!run_is_current (pa->state) || !response || response->parts->len == 0) {
+    g_warning ("[playlist-add] could not read the playlist head");
+    playlist_add_free (pa);
+    return;
+  }
+
+  gsize hlen = 0;
+  const guint8 *hd = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &hlen);
+
+  const guint8 *rev = NULL; gsize rev_len = 0;
+  guint64 length = 0;
+  pb_find_bytes_field (hd, hlen, 1, &rev, &rev_len);
+  pb_find_varint_field (hd, hlen, 2, &length);
+  g_message ("[playlist-add] head: revision %" G_GSIZE_FORMAT " bytes, length %"
+             G_GUINT64_FORMAT, rev_len, length);
+  if (!rev) { playlist_add_free (pa); return; }
+
+  g_autofree gchar *raw = NULL; gsize raw_len = 0;
+  if (!pa->file || !g_file_get_contents (pa->file, &raw, &raw_len, NULL)) {
+    g_warning ("[playlist-add] no snapshot to read tracks from");
+    playlist_add_free (pa);
+    return;
+  }
+
+  g_autoptr(GByteArray) add = g_byte_array_new ();
+  pb_write_varint_field (add, 1, 0);              /* from_index */
+
+  guint idx = 0, taken = 0;
+  gsize pos = 0;
+  const guint8 *d = (const guint8 *) raw;
+  while (pos < raw_len) {
+    guint32 fn; PbWireType wt; const guint8 *fd; gsize fl; guint64 fv;
+    if (!pb_read_field (d, raw_len, &pos, &fn, &wt, &fd, &fl, &fv)) break;
+    if (fn != 1 || wt != PB_WIRE_LENGTH_DELIMITED) continue;
+    if (idx >= pa->offset && taken < pa->count) {
+      guint64 type = 0, added_at = 0; const guint8 *id = NULL; gsize id_len = 0;
+      pb_find_varint_field (fd, fl, 1, &type);
+      pb_find_varint_field (fd, fl, 5, &added_at);
+      if (type == 0 && pb_find_bytes_field (fd, fl, 2, &id, &id_len) && id_len == 16) {
+        g_autofree gchar *b62 = spotifygtk_gid_to_base62 (id, id_len);
+        g_autofree gchar *uri = g_strconcat ("spotify:track:", b62, NULL);
+        g_autoptr(GByteArray) item = g_byte_array_new ();
+        pb_write_bytes_field (item, 1, (const guint8 *) uri, strlen (uri));
+
+        /*
+         * ItemAttributes.timestamp = 2, in milliseconds. Carried so a restore
+         * keeps the original date-added rather than stamping the whole library
+         * with today -- for a 4806-track library that ordering is most of the
+         * value. Whether the server honours a client-supplied timestamp is the
+         * open question this probe answers.
+         */
+        if (added_at > 0) {
+          g_autoptr(GByteArray) attrs = g_byte_array_new ();
+          pb_write_varint_field (attrs, 2, added_at * 1000);
+          pb_write_message_field (item, 2, attrs->data, attrs->len);
+        }
+        pb_write_message_field (add, 2, item->data, item->len);
+        taken++;
+      }
+    }
+    idx++;
+  }
+  pb_write_varint_field (add, 4, 1);              /* add_last */
+
+  g_autoptr(GByteArray) op = g_byte_array_new ();
+  pb_write_varint_field (op, 1, 2);               /* Op.kind = ADD */
+  pb_write_message_field (op, 2, add->data, add->len);
+
+  g_autoptr(GByteArray) delta = g_byte_array_new ();
+  pb_write_bytes_field (delta, 1, rev, rev_len);  /* base_version */
+  pb_write_message_field (delta, 2, op->data, op->len);
+
+  g_autoptr(GByteArray) changes = g_byte_array_new ();
+  pb_write_bytes_field (changes, 1, rev, rev_len);   /* base_revision */
+  pb_write_message_field (changes, 2, delta->data, delta->len);
+
+  g_message ("[playlist-add] adding %u track(s), ListChanges is %u bytes",
+             taken, changes->len);
+
+  g_autofree gchar *curi = g_strdup_printf ("hm://playlist/v2/playlist/%s/changes",
+                                            pa->playlist_id);
+  g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
+  spotifygtk_mercury_request_full (engine_mercury, MERCURY_METHOD_SEND, "POST",
+                                   curi, body, on_playlist_changes_result, pa);
+}
+
 static void
 on_login_result (gboolean success, const gchar *username, GError *error, gpointer user_data)
 {
@@ -2328,6 +2460,80 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
 
     /* Which body to send: the write request by default, or a PageRequest when
      * chasing why a read returns 200 with nothing in it. */
+    /*
+     * Restore path: the captured collection dump is already exactly the body
+     * this endpoint wants -- a bare `repeated Item = 1`. So a slice of it can
+     * be replayed verbatim, which preserves every original added_at rather
+     * than stamping the whole library with today's date.
+     */
+    const gchar *restore_file = g_getenv ("SPOTIFY_PROBE_RESTORE_FILE");
+    if (restore_file && *restore_file) {
+      /* Exclusive with the sweep below: a restore must not be accompanied by
+       * probe writes, or it would be undone by whatever the sweep sends. */
+      g_autofree gchar *raw = NULL; gsize raw_len = 0;
+      if (g_file_get_contents (restore_file, &raw, &raw_len, NULL)) {
+        const gchar *offs = g_getenv ("SPOTIFY_PROBE_RESTORE_OFFSET");
+        const gchar *cnts = g_getenv ("SPOTIFY_PROBE_RESTORE_COUNT");
+        guint want_off = offs ? (guint) atoi (offs) : 0;
+        guint want_cnt = cnts ? (guint) atoi (cnts) : 0;
+
+        g_autoptr(GByteArray) slice = g_byte_array_new ();
+        const guint8 *d = (const guint8 *) raw;
+        gsize pos = 0; guint idx = 0, taken = 0;
+        while (pos < raw_len) {
+          gsize start = pos;
+          guint32 fn; PbWireType wt; const guint8 *fd; gsize fl; guint64 fv;
+          if (!pb_read_field (d, raw_len, &pos, &fn, &wt, &fd, &fl, &fv)) break;
+          if (fn != 1 || wt != PB_WIRE_LENGTH_DELIMITED) continue;
+          if (idx >= want_off && (want_cnt == 0 || taken < want_cnt)) {
+            g_byte_array_append (slice, d + start, pos - start);
+            taken++;
+          }
+          idx++;
+        }
+        g_message ("[restore] %u item(s) from index %u, %u bytes of body",
+                   taken, want_off, slice->len);
+        if (taken > 0) {
+          /* Split at item boundaries, never mid-message: each part must be a
+           * whole number of items for the concatenation to reassemble. */
+          g_autoptr(GPtrArray) parts =
+            g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+          const guint8 *sd = slice->data;
+          gsize sp = 0, part_start = 0;
+          while (sp < slice->len) {
+            gsize before = sp;
+            guint32 fn; PbWireType wt; const guint8 *fd; gsize fl; guint64 fv;
+            if (!pb_read_field (sd, slice->len, &sp, &fn, &wt, &fd, &fl, &fv)) break;
+            const gchar *psenv = g_getenv ("SPOTIFY_PROBE_PART_BYTES");
+            gsize part_max = psenv && *psenv ? (gsize) atoi (psenv) : 60000;
+            if (sp - part_start > part_max) {
+              g_ptr_array_add (parts, g_bytes_new (sd + part_start, before - part_start));
+              part_start = before;
+            }
+          }
+          if (slice->len > part_start)
+            g_ptr_array_add (parts, g_bytes_new (sd + part_start, slice->len - part_start));
+
+          const gchar *rm = g_getenv ("SPOTIFY_PROBE_RESTORE_METHOD");
+          if (!rm || !*rm) rm = "PUT";
+          const gchar *ru = g_getenv ("SPOTIFY_PROBE_RESTORE_URI");
+          g_autofree gchar *rep = (ru && *ru)
+            ? (strstr (ru, "%s") ? g_strdup_printf (ru, username) : g_strdup (ru))
+            : g_strdup_printf ("hm://collection/collection/%s", username);
+
+          WriteProbe *wp = g_new0 (WriteProbe, 1);
+          wp->state = state; wp->method = g_strdup (rm);
+          g_message ("[restore] %s %s", rm, rep);
+          spotifygtk_mercury_request_parts (engine_mercury, MERCURY_METHOD_SEND,
+                                            rm, rep, parts,
+                                            on_collection_write_probe, wp);
+        }
+      } else {
+        g_warning ("[restore] could not read %s", restore_file);
+      }
+      goto after_write_probe;
+    }
+
     const gchar *body_kind = g_getenv ("SPOTIFY_PROBE_COLLECTION_BODY");
     const gchar *turi      = g_getenv ("SPOTIFY_PROBE_COLLECTION_URI");
     const gchar *removeenv = g_getenv ("SPOTIFY_PROBE_COLLECTION_REMOVE");
@@ -2405,6 +2611,25 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
                                          on_collection_write_probe, wp);
       }
     }
+  }
+
+after_write_probe:
+
+  const gchar *pl_add = g_getenv ("SPOTIFY_PROBE_PLAYLIST_ADD");
+  if (pl_add && *pl_add && engine_mercury) {
+    PlaylistAdd *pa = g_new0 (PlaylistAdd, 1);
+    pa->state       = state;
+    pa->playlist_id = g_strdup (pl_add);
+    pa->file        = g_strdup (g_getenv ("SPOTIFY_PROBE_RESTORE_FILE"));
+    const gchar *o  = g_getenv ("SPOTIFY_PROBE_RESTORE_OFFSET");
+    const gchar *c  = g_getenv ("SPOTIFY_PROBE_RESTORE_COUNT");
+    pa->offset      = o ? (guint) atoi (o) : 0;
+    pa->count       = c ? (guint) atoi (c) : 100;
+
+    g_autofree gchar *huri = g_strdup_printf ("hm://playlist/v2/playlist/%s", pl_add);
+    g_message ("[playlist-add] reading head of %s", huri);
+    spotifygtk_mercury_request (engine_mercury, MERCURY_METHOD_GET, huri, NULL,
+                                on_playlist_head_result, pa);
   }
 
   const gchar *sub_probe = g_getenv ("SPOTIFY_PROBE_MERCURY_SUB");

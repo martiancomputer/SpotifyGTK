@@ -151,6 +151,59 @@ cmd_for_method (MercuryMethod method)
   }
 }
 
+#define MERCURY_MAX_CHUNK 8192   /* well under the u16 part limit */
+
+/*
+ * Send a payload as several parts in one packet. A part's length is a u16, so
+ * anything over 65535 bytes cannot travel as one; splitting at item
+ * boundaries works because concatenated protobuf messages with the same
+ * repeated field merge, so the server sees one list however it is divided.
+ */
+void
+spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
+                                  const gchar *method_override, const gchar *uri,
+                                  GPtrArray *parts, MercuryCallback callback,
+                                  gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
+  g_return_if_fail (uri != NULL && parts != NULL);
+
+  guint64 seq = self->next_seq++;
+
+  g_autoptr(GByteArray) buf = g_byte_array_new ();
+  guint8 seq_be[8];
+  for (int i = 0; i < 8; i++) seq_be[7 - i] = (guint8) (seq >> (8 * i));
+  append_u16_be (buf, sizeof (seq_be));
+  g_byte_array_append (buf, seq_be, sizeof (seq_be));
+  g_byte_array_append (buf, (const guint8[]) { MERCURY_FLAG_FINAL }, 1);
+  append_u16_be (buf, (guint16) (1 + parts->len));
+
+  g_autoptr(GByteArray) header = g_byte_array_new ();
+  pb_write_bytes_field (header, MERCURY_HDR_URI, (const guint8 *) uri, strlen (uri));
+  const gchar *m = method_override ? method_override : method_string (method);
+  pb_write_bytes_field (header, MERCURY_HDR_METHOD, (const guint8 *) m, strlen (m));
+  append_u16_be (buf, (guint16) header->len);
+  g_byte_array_append (buf, header->data, header->len);
+
+  for (guint i = 0; i < parts->len; i++) {
+    gsize plen = 0;
+    const guint8 *pd = g_bytes_get_data (g_ptr_array_index (parts, i), &plen);
+    append_u16_be (buf, (guint16) plen);
+    g_byte_array_append (buf, pd, plen);
+  }
+
+  MercuryPending *p = g_new0 (MercuryPending, 1);
+  p->parts     = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+  p->callback  = callback;
+  p->user_data = user_data;
+  g_hash_table_insert (self->pending, g_memdup2 (&seq, sizeof (seq)), p);
+
+  g_message ("mercury: sending %u payload part(s), %u bytes total",
+             parts->len, buf->len);
+  spotifygtk_ap_session_send (self->ap_session, cmd_for_method (method),
+                              buf->data, buf->len);
+}
+
 void
 spotifygtk_mercury_request (SpotifyMercury *self, MercuryMethod method, const gchar *uri,
                             GBytes *payload, MercuryCallback callback, gpointer user_data)
@@ -175,6 +228,14 @@ spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
   g_return_if_fail (uri != NULL);
 
   guint64 seq = self->next_seq++;
+
+  /*
+   * Outgoing fragmentation (flags = 2 across packets) was tried here and does
+   * not work: the server sent no reply at all and the connection stopped
+   * answering audio-key requests afterwards. librespot never fragments on the
+   * way out either -- only on the way in. Oversized payloads go as multiple
+   * parts instead, via spotifygtk_mercury_request_parts().
+   */
   g_autoptr(GByteArray) packet =
     encode_mercury_packet (seq, method, method_override, uri, payload);
 
