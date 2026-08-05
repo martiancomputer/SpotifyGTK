@@ -113,7 +113,7 @@ on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
 }
 
 enum { TRACK_ACTIVATED, ADD_TO_QUEUE, GO_TO_ALBUM, GO_TO_ARTIST,
-       ADD_TO_LIKED, N_SIGNALS };
+       ADD_TO_LIKED, REMOVE_FROM_LIKED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 /* === Right-click context menu === */
@@ -147,7 +147,8 @@ menu_emit_and_close (GtkButton *button, guint signal_id)
     gtk_popover_popdown (popover);
 }
 
-static void on_menu_add_to_liked (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_LIKED); }
+static void on_menu_add_to_liked      (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_LIKED); }
+static void on_menu_remove_from_liked (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, REMOVE_FROM_LIKED); }
 static void on_menu_add_to_queue (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_QUEUE); }
 static void on_menu_go_to_album  (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, GO_TO_ALBUM); }
 static void on_menu_go_to_artist (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, GO_TO_ARTIST); }
@@ -171,8 +172,18 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
 
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
 
-  spotifygtk_context_menu_add (menu, "Add to Liked Songs", TRUE, NULL,
-                               G_CALLBACK (on_menu_add_to_liked), NULL);
+  /*
+   * One entry that names what it will do, rather than a shape the reader has
+   * to interpret. This is why the row indicator can be passive: the menu says
+   * "Remove" when the track is already saved.
+   */
+  gboolean liked = spotifygtk_track_row_get_liked (SPOTIFYGTK_TRACK_ROW (row));
+  spotifygtk_context_menu_add (menu,
+                               liked ? "Remove from Liked Songs"
+                                     : "Add to Liked Songs",
+                               TRUE, NULL,
+                               liked ? G_CALLBACK (on_menu_remove_from_liked)
+                                     : G_CALLBACK (on_menu_add_to_liked), NULL);
   spotifygtk_context_menu_add (menu, "Add to Queue", TRUE, NULL,
                                G_CALLBACK (on_menu_add_to_queue), NULL);
   spotifygtk_context_menu_add (menu, "Go to Artist",
@@ -341,6 +352,10 @@ spotifygtk_track_list_class_init (SpotifyGtkTrackListClass *klass)
    * it needs is not implemented. The menu entry is live so the plumbing can be
    * exercised, but liking a track currently does nothing. */
   signals[ADD_TO_LIKED] = g_signal_new ("add-to-liked",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_POINTER);
+
+  signals[REMOVE_FROM_LIKED] = g_signal_new ("remove-from-liked",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_POINTER);
 }
