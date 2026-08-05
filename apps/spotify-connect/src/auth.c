@@ -390,9 +390,19 @@ g_slist_free_full(uris, (GDestroyNotify) g_uri_unref);
 
 g_message("Listener created successfully");
 
+  /*
+   * show_dialog=true, because without it an account that has approved this app
+   * before is re-authorised silently against the grant it already has -- no
+   * consent screen, and the scopes in the request are ignored in favour of the
+   * old set. Adding a scope then appears to work: sign-in succeeds, a fresh
+   * token is issued, and every call needing the new permission returns 403 with
+   * nothing to explain it. Forcing the dialog costs one extra click and makes a
+   * scope change actually take effect.
+   */
   g_autofree gchar *url =
     g_strdup_printf ("%s?response_type=code&client_id=%s&scope=%s&redirect_uri=%s"
-                     "&state=%s&code_challenge_method=S256&code_challenge=%s",
+                     "&state=%s&code_challenge_method=S256&code_challenge=%s"
+                     "&show_dialog=true",
                      SPOTIFY_AUTH_URL, client_id, SPOTIFY_SCOPES, REDIRECT_URI,
                      self->state_nonce, code_challenge);
 

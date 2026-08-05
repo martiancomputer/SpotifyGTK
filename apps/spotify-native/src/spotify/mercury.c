@@ -151,7 +151,14 @@ cmd_for_method (MercuryMethod method)
   }
 }
 
-#define MERCURY_MAX_CHUNK 8192   /* well under the u16 part limit */
+/*
+ * Measured against a live server, not guessed: a single Mercury request of
+ * 16000 bytes is answered and 16400 is not, so the ceiling is 16384 -- one
+ * KiB-aligned receive buffer. The frame also carries the sequence number,
+ * flags, part count, and the Header protobuf, so leave room for those.
+ */
+#define MERCURY_MAX_REQUEST   16384
+#define MERCURY_FRAME_OVERHEAD  128
 
 /*
  * Send a payload as several parts in one packet. A part's length is a u16, so
@@ -230,12 +237,53 @@ spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
   guint64 seq = self->next_seq++;
 
   /*
-   * Outgoing fragmentation (flags = 2 across packets) was tried here and does
-   * not work: the server sent no reply at all and the connection stopped
-   * answering audio-key requests afterwards. librespot never fragments on the
-   * way out either -- only on the way in. Oversized payloads go as multiple
-   * parts instead, via spotifygtk_mercury_request_parts().
+   * A part's length is a u16, so a payload over 65535 bytes cannot travel as
+   * one, and in practice anything past ~16KB in a single packet is dropped
+   * without a reply. Mercury's answer is fragmentation: one sequence number
+   * spans several packets, each flagged PARTIAL, and the receiver joins the
+   * trailing fragment of each packet to the head of the next.
+   *
+   * The layout is derived from librespot's dispatch loop, which is the only
+   * description of the format that is known to work:
+   *
+   *   packet 1  flags=PARTIAL count=2  [header][chunk 0]
+   *   packet n  flags=PARTIAL count=1  [chunk n]
+   *   last      flags=FINAL   count=1  [chunk N]
+   *
+   * At each packet the receiver takes the last part when flags is PARTIAL and
+   * holds it as `partial`; the next packet's first part is appended to it. So
+   * the header must be a complete part in packet 1 (it is not last there), and
+   * only the payload is ever split.
    */
+  gsize payload_len = 0;
+  if (payload) g_bytes_get_data (payload, &payload_len);
+
+  if (payload_len + strlen (uri) + MERCURY_FRAME_OVERHEAD > MERCURY_MAX_REQUEST) {
+    /*
+     * Refused rather than sent, because the failure mode otherwise is silence:
+     * the server drops an oversized request without any reply, the callback
+     * never fires, and the caller waits forever on something that was never
+     * going to be answered. Hours went into chasing that as a rate limit.
+     *
+     * Splitting is not an option. Fragmentation (flags = PARTIAL across
+     * packets, which the *receive* path handles for responses) is not
+     * reassembled for inbound requests -- proven by sending an identical
+     * 12000-byte body two ways to the same endpoint: one packet answered 200,
+     * two fragments got nothing. Multiple parts inside one packet do not help
+     * either, since the limit is on the whole frame.
+     */
+    g_warning ("mercury: refusing a %" G_GSIZE_FORMAT "-byte request to %s; the "
+               "server accepts at most %d bytes per request and does not "
+               "reassemble fragmented ones", payload_len, uri, MERCURY_MAX_REQUEST);
+    if (callback) {
+      MercuryResponse err = { .status_code = 413, .uri = (gchar *) uri,
+                              .parts = g_ptr_array_new () };
+      callback (&err, user_data);
+      g_ptr_array_unref (err.parts);
+    }
+    return;
+  }
+
   g_autoptr(GByteArray) packet =
     encode_mercury_packet (seq, method, method_override, uri, payload);
 
