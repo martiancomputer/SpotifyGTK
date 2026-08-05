@@ -2446,6 +2446,33 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
                                      NULL, 200, on_collection_read_probe, state);
   }
 
+  /*
+   * Destructive-probe interlock.
+   *
+   * PUT on the collection replaces the whole set, so a probe body of five
+   * items leaves a library of five. That is not a hazard to be careful around;
+   * it is one to be locked out of. On 2026-08-05 it cost a real account 4806
+   * liked songs, recovered only because Spotify still had a six-day-old
+   * backup.
+   *
+   * So collection writes require SPOTIFY_COLLECTION_WRITE_OK to name the
+   * account they are aimed at, and the name must match the session that is
+   * actually logged in. Pointing a probe at the wrong account now does
+   * nothing, and setting the variable is a deliberate act naming a throwaway.
+   */
+  const gchar *write_ok = g_getenv ("SPOTIFY_COLLECTION_WRITE_OK");
+  gboolean writes_allowed = (write_ok && *write_ok && username &&
+                             g_strcmp0 (write_ok, username) == 0);
+  if (!writes_allowed &&
+      (g_getenv ("SPOTIFY_PROBE_COLLECTION_WRITE") || g_getenv ("SPOTIFY_PROBE_RESTORE_FILE"))) {
+    g_warning ("[safety] collection writes are blocked for '%s'. These probes "
+               "REPLACE the entire set. To allow, set "
+               "SPOTIFY_COLLECTION_WRITE_OK to exactly this username -- and "
+               "only ever point them at a throwaway account.",
+               username ? username : "(unknown)");
+    goto after_write_probe;
+  }
+
   const gchar *write_probe = g_getenv ("SPOTIFY_PROBE_COLLECTION_WRITE");
   if (write_probe && *write_probe && engine_mercury && username) {
     /*
