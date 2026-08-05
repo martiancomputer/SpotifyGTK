@@ -13,6 +13,7 @@ G_BEGIN_DECLS
   "playlist-read-private " \
   "playlist-read-collaborative " \
   "user-library-read " \
+  "user-library-modify " \
   "user-top-read " \
   "user-follow-read " \
   "streaming"
