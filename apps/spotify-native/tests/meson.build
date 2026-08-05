@@ -54,6 +54,9 @@ if get_option('tests')
     'test_collection.c',
     '../src/spotify/collection.c',
     '../src/spotify/protobuf_min.c',
+    # The parser turns a raw 16-byte GID into a track URI, which is where the
+    # base62 encoder lives.
+    '../src/spotify/track_meta.c',
     include_directories: [config_inc, include_directories('../src')],
     dependencies: [glib_dep, gio_dep],
   )

@@ -6,6 +6,7 @@
  */
 
 #include "collection.h"
+#include "track_meta.h"
 #include "protobuf_min.h"
 
 #include <string.h>
@@ -178,21 +179,47 @@ spotifygtk_collection_parse_page_response (const guint8           *data,
                         &field_data, &field_len, &field_varint)) {
     if (field_num == 1 && wire_type == PB_WIRE_LENGTH_DELIMITED) {
       /* repeated CollectionItem items = 1 */
+      /*
+       * The item on the wire is NOT collection2v2's CollectionItem. That
+       * schema says uri = 1 (string), added_at = 2, is_removed = 3, and
+       * parsing a live 134KB response against it yields zero items, silently.
+       * What the server actually sends is:
+       *
+       *     type     = 1  varint   0 = catalogue track, 2 = local file
+       *     id       = 2  bytes    raw 16-byte GID, or for a local file the
+       *                            "artist:album:title:duration" key
+       *     added_at = 5  varint   seconds since epoch
+       *
+       * Confirmed against a real account: 4806 items, GIDs base62-encoding to
+       * track ids that resolve. collection2v2.proto is a captured schema that
+       * this endpoint does not speak.
+       */
       SpotifyCollectionItem item = { 0 };
 
-      const guint8 *uri_data = NULL;
-      gsize         uri_len  = 0;
-      if (pb_find_bytes_field (field_data, field_len, 1, &uri_data, &uri_len))
-        item.uri = g_strndup ((const gchar *) uri_data, uri_len);
+      guint64 type = 0;
+      pb_find_varint_field (field_data, field_len, 1, &type);
+
+      const guint8 *id_data = NULL;
+      gsize         id_len  = 0;
+      if (pb_find_bytes_field (field_data, field_len, 2, &id_data, &id_len)) {
+        if (type == 0 && id_len == 16) {
+          g_autofree gchar *b62 = spotifygtk_gid_to_base62 (id_data, id_len);
+          if (b62)
+            item.uri = g_strconcat ("spotify:track:", b62, NULL);
+        } else {
+          /* Local files have no catalogue id; keep the key so the count is
+           * honest rather than dropping them and under-reporting the set. */
+          g_autofree gchar *key = g_strndup ((const gchar *) id_data, id_len);
+          item.uri = g_strconcat ("spotify:local:", key, NULL);
+        }
+      }
 
       guint64 raw = 0;
       /* added_at is int32, not sint32 -- plain varint, no zigzag. Getting that
        * backwards would halve every timestamp, which is the same class of
        * mistake that once doubled every track duration. */
-      if (pb_find_varint_field (field_data, field_len, 2, &raw))
+      if (pb_find_varint_field (field_data, field_len, 5, &raw))
         item.added_at = (gint32) raw;
-      if (pb_find_varint_field (field_data, field_len, 3, &raw))
-        item.is_removed = (raw != 0);
 
       if (item.uri)
         g_array_append_val (out, item);

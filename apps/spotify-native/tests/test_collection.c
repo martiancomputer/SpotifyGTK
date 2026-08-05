@@ -190,24 +190,33 @@ test_page_request_carries_token (void)
 static void
 test_page_response_decoding (void)
 {
-  /* Two items and a next-page token, hand-built to the schema:
-   *   items { uri: "spotify:track:aaa" added_at: 1700000000 }
-   *   items { uri: "spotify:track:bbb" is_removed: true }
+  /*
+   * Built to the schema the server actually sends, captured from a live
+   * account -- not to collection2v2's PageResponse, which this endpoint does
+   * not speak. The previous fixture here encoded uri as a string at field 1
+   * and added_at at field 2, and passed against a parser written to match it;
+   * both were wrong together, so the test confirmed nothing. A real response
+   * decoded to zero items under it.
+   *
+   *   items { type: 0  id: <16-byte gid>  added_at: 1700000000 }
+   *   items { type: 2  id: "Artist:Album:Title:123" }
    *   next_page_token: "nxt"
    */
   GByteArray *msg = g_byte_array_new ();
 
-  const gchar *uri_a = "spotify:track:aaa";
+  /* GID of a real track; base62-encodes to 007jnVFWpKwecqskY4FfFN. */
+  const guint8 gid[16] = { 0x00,0x10,0x00,0x5e,0x26,0x47,0x46,0x27,
+                           0x98,0xe0,0xd5,0xab,0xae,0x17,0xfe,0xd3 };
   GByteArray *item_a = g_byte_array_new ();
-  pb_write_bytes_field (item_a, 1, (const guint8 *) uri_a, strlen (uri_a));
-  pb_write_varint_field (item_a, 2, 1700000000u);
+  pb_write_bytes_field (item_a, 2, gid, sizeof (gid));
+  pb_write_varint_field (item_a, 5, 1700000000u);
   pb_write_message_field (msg, 1, item_a->data, item_a->len);
   g_byte_array_unref (item_a);
 
-  const gchar *uri_b = "spotify:track:bbb";
+  const gchar *local = "Artist:Album:Title:123";
   GByteArray *item_b = g_byte_array_new ();
-  pb_write_bytes_field (item_b, 1, (const guint8 *) uri_b, strlen (uri_b));
-  pb_write_varint_field (item_b, 3, 1);
+  pb_write_varint_field (item_b, 1, 2);   /* type 2 = local file */
+  pb_write_bytes_field (item_b, 2, (const guint8 *) local, strlen (local));
   pb_write_message_field (msg, 1, item_b->data, item_b->len);
   g_byte_array_unref (item_b);
 
@@ -220,12 +229,10 @@ test_page_response_decoding (void)
   g_assert_true (spotifygtk_collection_parse_page_response (msg->data, msg->len,
                                                             &items, &n, &token));
   g_assert_cmpuint (n, ==, 2);
-  g_assert_cmpstr (items[0].uri, ==, uri_a);
+  g_assert_cmpstr (items[0].uri, ==, "spotify:track:007jnVFWpKwecqskY4FfFN");
   g_assert_cmpint (items[0].added_at, ==, 1700000000);
-  g_assert_false (items[0].is_removed);
-  g_assert_cmpstr (items[1].uri, ==, uri_b);
+  g_assert_cmpstr (items[1].uri, ==, "spotify:local:Artist:Album:Title:123");
   g_assert_cmpint (items[1].added_at, ==, 0);
-  g_assert_true (items[1].is_removed);
   g_assert_cmpstr (token, ==, "nxt");
 
   spotifygtk_collection_items_free (items, n);
@@ -240,8 +247,9 @@ test_page_response_added_at_is_not_zigzag (void)
    * invisible without a check like this because the result stays plausible. */
   GByteArray *msg = g_byte_array_new ();
   GByteArray *item = g_byte_array_new ();
-  pb_write_bytes_field (item, 1, (const guint8 *) "spotify:track:x", 15);
-  pb_write_varint_field (item, 2, 1000000000u);
+  const guint8 gid[16] = { 0 };
+  pb_write_bytes_field (item, 2, gid, sizeof (gid));
+  pb_write_varint_field (item, 5, 1000000000u);
   pb_write_message_field (msg, 1, item->data, item->len);
   g_byte_array_unref (item);
 

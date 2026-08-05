@@ -155,8 +155,8 @@ dup_name_from_submessage (const guint8 *data, gsize len)
  * 16-byte gid is rejected — a short or long buffer is not a SpotifyId and
  * must not be silently truncated into a plausible-looking wrong id.
  */
-static gchar *
-gid_to_base62 (const guint8 *gid, gsize len)
+gchar *
+spotifygtk_gid_to_base62 (const guint8 *gid, gsize len)
 {
   static const char ALPHABET[] =
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -197,7 +197,7 @@ dup_uri_from_submessage (const guint8 *data, gsize len, const gchar *kind)
   if (!pb_find_bytes_field (data, len, NAMED_MESSAGE_FIELD_GID, &gid_data, &gid_len))
     return NULL;
 
-  g_autofree gchar *id = gid_to_base62 (gid_data, gid_len);
+  g_autofree gchar *id = spotifygtk_gid_to_base62 (gid_data, gid_len);
   if (!id)
     return NULL;
 

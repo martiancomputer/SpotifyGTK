@@ -93,4 +93,8 @@ gboolean spotifygtk_track_meta_parse (const guint8     *track_data,
 
 void spotifygtk_track_meta_clear (SpotifyTrackMeta *meta);
 
+/* Encode a 16-byte SpotifyId gid as its canonical 22-character base62 id.
+ * Returns NULL unless `len` is 16. Free with g_free(). */
+gchar *spotifygtk_gid_to_base62 (const guint8 *gid, gsize len);
+
 G_END_DECLS

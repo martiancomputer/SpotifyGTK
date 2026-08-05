@@ -2221,7 +2221,58 @@ on_collection_write_probe (MercuryResponse *response, gpointer user_data)
   g_message ("[collection-probe] %-6s -> status %d  %s%s",
              wp->method, response->status_code,
              response->uri ? response->uri : "(no uri)", verdict);
+
+  /* Raw bytes: a 200 that decodes to nothing is either an encoding fault on
+   * the way out or a parse fault on the way back, and only the wire tells
+   * which. */
+  for (guint i = 0; response->parts && i < response->parts->len; i++) {
+    gsize len = 0;
+    const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, i), &len);
+    g_autoptr(GString) hex = g_string_new (NULL);
+    for (gsize b = 0; b < len && b < 96; b++)
+      g_string_append_printf (hex, "%02x", d[b]);
+    g_message ("[collection-probe]   part %u: %" G_GSIZE_FORMAT " bytes  %s%s",
+               i, len, hex->str, len > 96 ? "..." : "");
+    const gchar *dump = g_getenv ("SPOTIFY_PROBE_DUMP_DIR");
+    if (dump) {
+      g_autofree gchar *fn = g_strdup_printf ("%s/part-%s-%u.bin", dump, wp->method, i);
+      g_file_set_contents (fn, (const gchar *) d, (gssize) len, NULL);
+      g_message ("[collection-probe]   wrote %s", fn);
+    }
+  }
+  if (response->parts && response->parts->len == 0)
+    g_message ("[collection-probe]   (no payload parts at all)");
   g_free (wp);
+}
+
+/* Reads a page of the collection. Safe -- no mutation -- and doubles as the
+ * membership check that makes a like/unlike round trip non-destructive: a
+ * track already in the set must not be removed on the way out. */
+static void
+on_collection_read_probe (gboolean ok, guint16 status,
+                          SpotifyCollectionItem *items, guint n_items,
+                          const gchar *next_page_token, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;
+
+  g_message ("[collection-read] status %u (%s), %u item(s), next=%s",
+             status, ok ? "ok" : "failed", n_items,
+             next_page_token ? next_page_token : "(none)");
+
+  const gchar *probe_uri = g_getenv ("SPOTIFY_PROBE_COLLECTION_MEMBER");
+  for (guint i = 0; i < n_items && i < 5; i++)
+    g_message ("[collection-read]   %s  added_at=%d%s", items[i].uri,
+               items[i].added_at, items[i].is_removed ? " (removed)" : "");
+
+  if (probe_uri) {
+    gboolean found = FALSE;
+    for (guint i = 0; i < n_items; i++)
+      if (g_strcmp0 (items[i].uri, probe_uri) == 0 && !items[i].is_removed) { found = TRUE; break; }
+    g_message ("[collection-read] MEMBERSHIP: %s is %sin this page", probe_uri,
+               found ? "" : "NOT ");
+  }
 }
 
 static void
@@ -2252,6 +2303,16 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
    * The status alone answers the only open question -- whether this URI
    * accepts a collection write -- without betting a real like on a guess.
    */
+  const gchar *read_probe = g_getenv ("SPOTIFY_PROBE_COLLECTION_READ");
+  if (read_probe && *read_probe && engine_mercury && username) {
+    g_autofree gchar *rep = strstr (read_probe, "%s")
+      ? g_strdup_printf (read_probe, username) : g_strdup (read_probe);
+    g_message ("[collection-read] PageRequest -> %s", rep);
+    spotifygtk_collection_read_page (engine_mercury, rep, username,
+                                     SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                     NULL, 200, on_collection_read_probe, state);
+  }
+
   const gchar *write_probe = g_getenv ("SPOTIFY_PROBE_COLLECTION_WRITE");
   if (write_probe && *write_probe && engine_mercury && username) {
     /*
@@ -2259,11 +2320,23 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
      * the URI was found and the verb was not accepted -- so holding the verb
      * fixed at "SEND" while varying only the path cannot converge.
      */
-    const gchar *methods[] = { "SEND", "POST", "PUT", "MODIFY", NULL };
+    const gchar *mlist = g_getenv ("SPOTIFY_PROBE_COLLECTION_METHODS");
+    g_auto(GStrv) mv = g_strsplit (mlist && *mlist ? mlist : "SEND,POST,PUT,MODIFY", ",", -1);
+    const gchar **methods = (const gchar **) mv;
     g_auto(GStrv) paths = g_strsplit (write_probe, ",", -1);
+
+    /* Which body to send: the write request by default, or a PageRequest when
+     * chasing why a read returns 200 with nothing in it. */
+    const gchar *body_kind = g_getenv ("SPOTIFY_PROBE_COLLECTION_BODY");
     g_autoptr(GByteArray) body =
-      spotifygtk_collection_build_write (username, SPOTIFYGTK_COLLECTION_SET_LIKED,
-                                         NULL, 0, 0, FALSE);
+      (g_strcmp0 (body_kind, "page") == 0)
+        ? spotifygtk_collection_build_page_request (username,
+                                                    SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                                    NULL, 200)
+        : spotifygtk_collection_build_write (username, SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                             NULL, 0, 0, FALSE);
+    g_message ("[collection-probe] body=%s (%u bytes)",
+               body_kind ? body_kind : "write", body->len);
     for (guint i = 0; paths[i]; i++) {
       g_autofree gchar *wep = strstr (paths[i], "%s")
         ? g_strdup_printf (paths[i], username) : g_strdup (paths[i]);
