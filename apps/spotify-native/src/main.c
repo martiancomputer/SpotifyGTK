@@ -60,6 +60,8 @@
 #include "spotify/session.h"
 #include "spotify/audio_key.h"
 #include "spotify/cdn.h"
+#include "spotify/mercury.h"
+#include "spotify/protobuf_min.h"
 #include "audio/decoder.h"
 #include "audio/dsp.h"
 #include "audio/resampler.h"
@@ -1717,6 +1719,54 @@ static GMainContext     *engine_context = NULL;
 static SpotifyApSession  *engine_ap      = NULL;
 static SpotifyCdnFetcher *engine_cdn     = NULL;
 
+/*
+ * Mercury rides the AP connection, so it is only valid for the session it was
+ * built against. Tracked alongside so a reconnect rebuilds it rather than
+ * leaving handlers registered on a session that is gone.
+ */
+static SpotifyMercury    *engine_mercury         = NULL;
+static SpotifyApSession  *engine_mercury_session = NULL;
+
+/*
+ * Mercury probe, gated behind SPOTIFY_PROBE_MERCURY.
+ *
+ * hm://metadata/4/track/<gid> is used because its correct answer is already
+ * known -- the same track metadata arrives over spclient -- so a 200 with a
+ * plausible payload proves the framing, the Header encoding and the reply
+ * matching all work. Probing an unknown endpoint first could not distinguish
+ * "wrong URI" from "our packets are malformed".
+ */
+static void
+on_mercury_probe_result (MercuryResponse *response, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return;
+
+  if (!response) {
+    g_warning ("[mercury-probe] no response");
+    return;
+  }
+
+  g_message ("[mercury-probe] status %d for %s, %u payload part(s)",
+             response->status_code, response->uri ? response->uri : "(no uri)",
+             response->parts ? response->parts->len : 0);
+
+  for (guint i = 0; response->parts && i < response->parts->len; i++) {
+    gsize len = 0;
+    const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, i), &len);
+    /* The name field is a string at field 2 of the Track message; printing it
+     * is the cheapest proof the bytes are real metadata and not noise. */
+    const guint8 *name = NULL; gsize name_len = 0;
+    if (pb_find_bytes_field (d, len, 2, &name, &name_len)) {
+      g_autofree gchar *n = g_strndup ((const gchar *) name, name_len);
+      g_message ("[mercury-probe]   part %u: %" G_GSIZE_FORMAT " bytes, name=\"%s\"", i, len, n);
+    } else {
+      g_message ("[mercury-probe]   part %u: %" G_GSIZE_FORMAT " bytes", i, len);
+    }
+  }
+}
+
 static void
 on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError *error, gpointer user_data)
 {
@@ -1744,6 +1794,16 @@ on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError 
       
       memcpy (state->file_id, files[best_idx].file_id, 20);
       memcpy (state->track_gid, files[best_idx].track_gid, 16);
+
+      if (g_getenv ("SPOTIFY_PROBE_MERCURY") && engine_mercury) {
+        gchar hex[33];
+        for (int i = 0; i < 16; i++)
+          g_snprintf (hex + i * 2, 3, "%02x", state->track_gid[i]);
+        g_autofree gchar *muri = g_strdup_printf ("hm://metadata/4/track/%s", hex);
+        g_message ("[mercury-probe] GET %s", muri);
+        spotifygtk_mercury_request (engine_mercury, MERCURY_METHOD_GET, muri,
+                                    NULL, on_mercury_probe_result, state);
+      }
       
       spotifygtk_spclient_get_audio_storage (state->spclient,
                                              files[best_idx].file_id, 20,
@@ -2128,6 +2188,12 @@ wire_session_to_state (LiveTestState *state, SpotifyApSession *session)
   /* Reused across tracks so its connections stay warm. A fresh fetcher opened
    * a new TLS connection for the first chunk of every track, which measured
    * ~1s for 64KB against ~10ms once a connection exists. */
+  if (engine_mercury_session != session) {
+    g_clear_object (&engine_mercury);
+    engine_mercury = spotifygtk_mercury_new (session);
+    engine_mercury_session = session;
+  }
+
   if (!engine_cdn)
     engine_cdn = spotifygtk_cdn_fetcher_new ();
   state->cdn_fetcher = engine_cdn;
