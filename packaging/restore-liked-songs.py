@@ -7,12 +7,22 @@ snapshot). 50 ids per request, oldest first so ordering is right even if a run
 is interrupted. Honours Retry-After on 429 rather than hammering, and records
 progress so a re-run resumes instead of starting over.
 """
-import json, os, sys, time, datetime, subprocess, urllib.request, urllib.error
+import json, os, sys, time, datetime, subprocess, urllib.request, urllib.error, urllib.parse
 
 TSV      = "~/SpotifyGTK/.local-backups/liked-songs-4806.tsv"
 PROGRESS = "~/SpotifyGTK/.local-backups/restore-progress.txt"
 TOKEN    = os.path.expanduser("~/.config/spotifygtk/tokens")
 BATCH    = 50
+CLIENT_ID = "<set SPOTIFY_CLIENT_ID>"
+
+def keyring_blob():
+    try:
+        out = subprocess.run(["secret-tool", "lookup", "type", "tokens"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
 
 def token():
     """
@@ -32,6 +42,40 @@ def token():
     except Exception:
         pass
     return open(TOKEN).read().split("\n")[0].strip()
+
+def refresh_token():
+    """
+    Exchange the stored refresh token for a new access token and write it back.
+
+    Access tokens last an hour, and this restore may sit waiting far longer than
+    that for a clamp to lift, so expecting a human to re-run the sign-in at the
+    right moment is the wrong design. The refresh grant needs no consent -- the
+    user already approved these scopes.
+    """
+    blob = keyring_blob()
+    parts = blob.split("\n") if blob else []
+    if len(parts) < 2 or not parts[1].strip():
+        return None
+    data = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "refresh_token": parts[1].strip(),
+        "client_id": CLIENT_ID}).encode()
+    req = urllib.request.Request("https://accounts.spotify.com/api/token",
+                                 data=data, method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        d = json.load(urllib.request.urlopen(req))
+    except Exception as e:
+        print(f"  token refresh failed: {e}", flush=True)
+        return None
+    new = d["access_token"]
+    keep = d.get("refresh_token", parts[1].strip())
+    exp = int(time.time()) + int(d.get("expires_in", 3600))
+    subprocess.run(["secret-tool", "store", "--label=SpotifyGTK tokens", "type", "tokens"],
+                   input=f"{new}\n{keep}\n{exp}\n", text=True, capture_output=True)
+    print("  refreshed access token", flush=True)
+    return new
+
 
 def load():
     rows = [l.rstrip("\n").split("\t") for l in open(TSV)][1:]
@@ -88,10 +132,19 @@ def main():
                 print(f"  429 #{consecutive_429} at {i}; sleeping {wait}s", flush=True)
                 time.sleep(wait)
                 continue
-            elif e.code in (401, 403):
-                print(f"  HTTP {e.code} at {i}: {e.read().decode()[:200]}", flush=True)
-                print("  token lacks scope or expired -- stopping", flush=True)
+            elif e.code == 401:
+                if refresh_token():
+                    continue
+                print("  401 and refresh failed -- sign in again", flush=True)
                 return 1
+            elif e.code == 403:
+                # Not a scope problem: a refreshed token was confirmed to carry
+                # user-library-modify and still got 403 here, while the same
+                # account's Mercury library writes kept returning 201. It is an
+                # account-side clamp on Web API library mutation, and it lifts
+                # on its own -- so stop cleanly and let a later run resume.
+                print(f"  HTTP 403 at {i}: library writes are still clamped", flush=True)
+                return 2
             else:
                 print(f"  HTTP {e.code} at {i}: {e.read().decode()[:200]}", flush=True)
                 time.sleep(5)
