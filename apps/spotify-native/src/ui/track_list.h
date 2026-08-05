@@ -20,6 +20,9 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list,
                       SPOTIFYGTK, TRACK_LIST, GtkBox)
 
+/* Show or hide the per-row like control. Hidden on the Liked Songs page. */
+void spotifygtk_track_list_set_show_like (SpotifyGtkTrackList *self, gboolean show);
+
 SpotifyGtkTrackList *spotifygtk_track_list_new (void);
 
 

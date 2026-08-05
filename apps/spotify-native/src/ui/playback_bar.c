@@ -323,7 +323,7 @@ build_left_column (SpotifyGtkPlaybackBar *self)
 
   gtk_box_append (GTK_BOX (box), info);
 
-  self->like_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("emblem-favorite-symbolic"));
+  self->like_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("spotifygtk-heart-outline-symbolic"));
   gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "flat");
   gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "circular");
   gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "transport-button");
@@ -579,13 +579,20 @@ spotifygtk_playback_bar_set_liked (SpotifyGtkPlaybackBar *self, gboolean liked)
   g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
 
   self->liked = liked;
-  /* One icon, not a pair. The ternary here chose the same name on both
-   * branches, so it never did anything -- found by cppcheck, which is the only
-   * reason anyone noticed. Adwaita ships no outline heart to pair with
-   * emblem-favorite-symbolic (only the starred/non-starred pair, which is a
-   * different visual language), so the state is carried entirely by the
-   * like-active CSS class below. */
-  gtk_button_set_icon_name (self->like_btn, "emblem-favorite-symbolic");
+  /*
+   * A real pair now. Adwaita ships no outline heart to go with
+   * emblem-favorite-symbolic (only starred/non-starred, a different visual
+   * language), so one is compiled in -- see src/ui/icons/. Carrying the state
+   * in colour alone was weak here because the accent colour *is* green: a
+   * filled grey heart and a filled green heart differ only in hue, while a
+   * stroked outline reads as unset at a glance.
+   */
+  gtk_button_set_icon_name (self->like_btn,
+                            liked ? "emblem-favorite-symbolic"
+                                  : "spotifygtk-heart-outline-symbolic");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->like_btn),
+                               liked ? "Remove from Liked Songs"
+                                     : "Add to Liked Songs");
   if (liked)
     gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "like-active");
   else

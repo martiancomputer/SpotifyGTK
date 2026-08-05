@@ -31,6 +31,7 @@ struct _SpotifyGtkTrackList {
   GListStore  *store;
 
   gboolean numbered;
+  gboolean show_like;   /* hearts hidden on the Liked Songs page */
 
   /* Scroll settle detection. Cover loading is suppressed while the adjustment
    * is moving and resumed once it has been still for SETTLE_MS. */
@@ -245,6 +246,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   spotifygtk_track_row_set_playing (row,
     spotifygtk_track_item_get_playing (item),
     spotifygtk_track_item_get_paused (item));
+  spotifygtk_track_row_set_like_visible (row, self->show_like);
 
   /* Connect for the lifetime of this binding; disconnected in unbind. The
    * item ref is stashed so play-clicked knows which track it is. */
@@ -346,6 +348,7 @@ spotifygtk_track_list_class_init (SpotifyGtkTrackListClass *klass)
 static void
 spotifygtk_track_list_init (SpotifyGtkTrackList *self)
 {
+  self->show_like = TRUE;
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_box_set_spacing (GTK_BOX (self), 8);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
@@ -401,6 +404,23 @@ spotifygtk_track_list_set_top_inset (SpotifyGtkTrackList *self, gint px)
    * clears the header rather than hiding behind it. */
   gtk_widget_set_margin_top (GTK_WIDGET (self->list), px);
   gtk_widget_set_margin_top (GTK_WIDGET (self->status), px);
+}
+
+/*
+ * Hearts are hidden on the Liked Songs page: every row there is liked by
+ * definition, so a column of identical filled hearts carries no information
+ * and only invites a misclick. Everywhere else -- albums, playlists, search --
+ * the state varies and the control earns its place.
+ */
+void
+spotifygtk_track_list_set_show_like (SpotifyGtkTrackList *self, gboolean show)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  self->show_like = show;
+
+  for (guint i = 0; self->bound_rows && i < self->bound_rows->len; i++)
+    spotifygtk_track_row_set_like_visible (
+      SPOTIFYGTK_TRACK_ROW (g_ptr_array_index (self->bound_rows, i)), show);
 }
 
 SpotifyGtkTrackList *

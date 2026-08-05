@@ -424,6 +424,10 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   refresh_sort_labels (self);
 
   self->list = spotifygtk_track_list_new ();
+
+  /* This page IS the liked set, so a heart on every row is noise -- see
+   * spotifygtk_track_list_set_show_like(). */
+  spotifygtk_track_list_set_show_like (self->list, FALSE);
   spotifygtk_track_list_set_numbered (self->list, TRUE);
   g_signal_connect (self->list, "track-activated", G_CALLBACK (on_track_activated), self);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->list));

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/github/spotifygtk/SpotifyNative/icons/scalable/actions">
+    <file preprocess="xml-stripblanks" alias="spotifygtk-heart-outline-symbolic.svg">icons/spotifygtk-heart-outline-symbolic.svg</file>
+  </gresource>
+</gresources>
