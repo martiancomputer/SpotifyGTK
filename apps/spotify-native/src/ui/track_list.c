@@ -17,6 +17,7 @@
  */
 
 #include "track_list.h"
+#include "context_menu.h"
 #include "track_row.h"
 #include "cover_loader.h"
 #include "track_item.h"
@@ -110,7 +111,8 @@ on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
   self->settle_id = g_timeout_add (SETTLE_MS, on_scroll_settled, self);
 }
 
-enum { TRACK_ACTIVATED, ADD_TO_QUEUE, GO_TO_ALBUM, GO_TO_ARTIST, N_SIGNALS };
+enum { TRACK_ACTIVATED, ADD_TO_QUEUE, GO_TO_ALBUM, GO_TO_ARTIST,
+       ADD_TO_LIKED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 /* === Right-click context menu === */
@@ -134,35 +136,20 @@ menu_ctx_free (gpointer data)
 static void
 menu_emit_and_close (GtkButton *button, guint signal_id)
 {
-  GtkPopover *popover = GTK_POPOVER (gtk_widget_get_ancestor (GTK_WIDGET (button),
-                                                              GTK_TYPE_POPOVER));
-  MenuCtx *ctx = g_object_get_data (G_OBJECT (popover), "menu-ctx");
+  GtkWidget *w = GTK_WIDGET (button);
+  MenuCtx *ctx = spotifygtk_context_menu_get_context (w);
   if (ctx)
     g_signal_emit (ctx->list, signals[signal_id], 0, (gpointer) ctx->track);
-  gtk_popover_popdown (popover);
+
+  GtkPopover *popover = spotifygtk_context_menu_get_popover (w);
+  if (popover)
+    gtk_popover_popdown (popover);
 }
 
+static void on_menu_add_to_liked (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_LIKED); }
 static void on_menu_add_to_queue (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_QUEUE); }
 static void on_menu_go_to_album  (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, GO_TO_ALBUM); }
 static void on_menu_go_to_artist (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, GO_TO_ARTIST); }
-
-/* A single flat, left-aligned menu entry. `enabled` is false for actions the
- * track cannot support (a track with no album/artist gid, or Add to Playlist,
- * which has no library-write endpoint yet) — shown but insensitive, matching
- * the rest of the UI's "say it cannot rather than silently do nothing" rule. */
-static GtkWidget *
-menu_button (const gchar *label, gboolean enabled, GCallback cb, gpointer data)
-{
-  GtkWidget *button = gtk_button_new_with_label (label);
-  gtk_widget_add_css_class (button, "flat");
-  gtk_button_set_has_frame (GTK_BUTTON (button), FALSE);
-  if (GTK_IS_LABEL (gtk_button_get_child (GTK_BUTTON (button))))
-    gtk_label_set_xalign (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (button))), 0.0);
-  gtk_widget_set_sensitive (button, enabled);
-  if (enabled && cb)
-    g_signal_connect (button, "clicked", cb, data);
-  return button;
-}
 
 static void
 on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
@@ -181,36 +168,25 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
   ctx->list  = self;
   ctx->track = spotifygtk_native_track_copy (track);
 
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
-  gtk_widget_set_size_request (box, 200, -1);
-  gtk_box_append (GTK_BOX (box),
-                  menu_button ("Add to Queue", TRUE,
-                               G_CALLBACK (on_menu_add_to_queue), NULL));
-  /* No library-write endpoint yet — see the README status table. */
-  GtkWidget *add_pl = menu_button ("Add to Playlist", FALSE, NULL, NULL);
-  gtk_widget_set_tooltip_text (add_pl, "Needs a library-write endpoint, which isn’t implemented yet");
-  gtk_box_append (GTK_BOX (box), add_pl);
-  gtk_box_append (GTK_BOX (box),
-                  menu_button ("Go to Artist", ctx->track->artist_uri != NULL,
-                               G_CALLBACK (on_menu_go_to_artist), NULL));
-  gtk_box_append (GTK_BOX (box),
-                  menu_button ("Go to Album", ctx->track->album_uri != NULL,
-                               G_CALLBACK (on_menu_go_to_album), NULL));
+  SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
 
-  GtkWidget *popover = gtk_popover_new ();
-  gtk_widget_add_css_class (popover, "menu");
-  gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
-  gtk_widget_set_halign (popover, GTK_ALIGN_START);
-  gtk_popover_set_child (GTK_POPOVER (popover), box);
-  gtk_widget_set_parent (popover, row);
-  gtk_popover_set_pointing_to (GTK_POPOVER (popover),
-                               &(GdkRectangle){ (int) x, (int) y, 1, 1 });
-  g_object_set_data_full (G_OBJECT (popover), "menu-ctx", ctx, menu_ctx_free);
-  /* Own destruction once dismissed, so the widget and its MenuCtx are freed. */
-  g_signal_connect (popover, "closed", G_CALLBACK (gtk_widget_unparent), NULL);
+  spotifygtk_context_menu_add (menu, "Add to Liked Songs", TRUE, NULL,
+                               G_CALLBACK (on_menu_add_to_liked), NULL);
+  spotifygtk_context_menu_add (menu, "Add to Queue", TRUE, NULL,
+                               G_CALLBACK (on_menu_add_to_queue), NULL);
+  spotifygtk_context_menu_add (menu, "Go to Artist",
+                               ctx->track->artist_uri != NULL, NULL,
+                               G_CALLBACK (on_menu_go_to_artist), NULL);
+  spotifygtk_context_menu_add (menu, "Go to Album",
+                               ctx->track->album_uri != NULL, NULL,
+                               G_CALLBACK (on_menu_go_to_album), NULL);
+  spotifygtk_context_menu_add_separator (menu);
+  spotifygtk_context_menu_add (menu, "Share track", FALSE,
+                               "Not implemented yet", NULL, NULL);
+
+  spotifygtk_context_menu_present (menu, row, x, y, ctx, menu_ctx_free);
 
   gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
-  gtk_popover_popup (GTK_POPOVER (popover));
   (void) n_press;
 }
 
@@ -356,6 +332,13 @@ spotifygtk_track_list_class_init (SpotifyGtkTrackListClass *klass)
     G_TYPE_NONE, 1, G_TYPE_POINTER);
 
   signals[GO_TO_ARTIST] = g_signal_new ("go-to-artist",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_POINTER);
+
+  /* Emitted with the track; nothing is connected yet -- the collection write
+   * it needs is not implemented. The menu entry is live so the plumbing can be
+   * exercised, but liking a track currently does nothing. */
+  signals[ADD_TO_LIKED] = g_signal_new ("add-to-liked",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_POINTER);
 }

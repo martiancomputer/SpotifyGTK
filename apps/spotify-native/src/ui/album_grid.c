@@ -37,6 +37,7 @@
  */
 
 #include "album_grid.h"
+#include "context_menu.h"
 #include "cover_loader.h"
 #include "smooth_scroll.h"
 
@@ -136,7 +137,7 @@ struct _SpotifyGtkAlbumGrid {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkAlbumGrid, spotifygtk_album_grid, GTK_TYPE_BOX)
 
-enum { ALBUM_ACTIVATED, N_SIGNALS };
+enum { ALBUM_ACTIVATED, ALBUM_ADD_TO_LIKED, ALBUM_ADD_TO_QUEUE, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 #define GRID_SETTLE_MS 180
@@ -221,6 +222,83 @@ on_card_clicked (GtkButton *button, gpointer user_data)
 }
 
 /* Build the reusable card shell once per recycled widget, not once per album. */
+
+/* === Right-click context menu ===
+ *
+ * Mirrors the track row menu so the two behave the same way. The card is a
+ * GtkButton, so a secondary-click gesture has to claim the sequence or the
+ * button swallows it and activates the album instead.
+ *
+ * The album's identity is copied into the menu's context: a card is recycled
+ * as the grid scrolls, and the menu can outlive the card it came from.
+ */
+typedef struct {
+  SpotifyGtkAlbumGrid *grid;
+  gchar               *uri;
+  gchar               *name;
+} AlbumMenuCtx;
+
+static void
+album_menu_ctx_free (gpointer data)
+{
+  AlbumMenuCtx *ctx = data;
+  g_free (ctx->uri);
+  g_free (ctx->name);
+  g_free (ctx);
+}
+
+static void
+album_menu_emit_and_close (GtkButton *button, guint signal_id)
+{
+  GtkWidget *w = GTK_WIDGET (button);
+  AlbumMenuCtx *ctx = spotifygtk_context_menu_get_context (w);
+  if (ctx)
+    g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri);
+
+  GtkPopover *popover = spotifygtk_context_menu_get_popover (w);
+  if (popover)
+    gtk_popover_popdown (popover);
+}
+
+static void on_album_menu_like  (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_ADD_TO_LIKED); }
+static void on_album_menu_queue (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_ADD_TO_QUEUE); }
+
+static void
+on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
+                           gdouble x, gdouble y, gpointer user_data)
+{
+  SpotifyGtkAlbumGrid *self = user_data;
+  GtkWidget *card = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+
+  const gchar *uri = g_object_get_data (G_OBJECT (card), "album-uri");
+  if (!uri)
+    return;   /* card not bound to an album yet */
+
+  AlbumMenuCtx *ctx = g_new0 (AlbumMenuCtx, 1);
+  ctx->grid = self;
+  ctx->uri  = g_strdup (uri);
+  ctx->name = g_strdup (g_object_get_data (G_OBJECT (card), "album-name"));
+
+  SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
+  spotifygtk_context_menu_add (menu, "Add to Liked Songs", TRUE, NULL,
+                               G_CALLBACK (on_album_menu_like), NULL);
+  spotifygtk_context_menu_add (menu, "Add to Queue", TRUE, NULL,
+                               G_CALLBACK (on_album_menu_queue), NULL);
+  /* The grid model carries the artist's display name but not its URI, so
+   * there is nothing to navigate to yet. */
+  spotifygtk_context_menu_add (menu, "Go to Artist", FALSE,
+                               "The album list does not carry an artist id yet",
+                               NULL, NULL);
+  spotifygtk_context_menu_add_separator (menu);
+  spotifygtk_context_menu_add (menu, "Share album", FALSE,
+                               "Not implemented yet", NULL, NULL);
+
+  spotifygtk_context_menu_present (menu, card, x, y, ctx, album_menu_ctx_free);
+
+  gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+  (void) n_press;
+}
+
 static void
 factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
@@ -233,6 +311,13 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_widget_set_size_request (card, CARD_WIDTH, -1);
   gtk_widget_set_valign (card, GTK_ALIGN_START);
   g_signal_connect (card, "clicked", G_CALLBACK (on_card_clicked), self);
+
+  /* Added once per pooled card; the handler reads whichever album is bound at
+   * click time, so it follows the card through recycling. */
+  GtkGesture *secondary = gtk_gesture_click_new ();
+  gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (secondary), GDK_BUTTON_SECONDARY);
+  g_signal_connect (secondary, "pressed", G_CALLBACK (on_card_secondary_pressed), self);
+  gtk_widget_add_controller (card, GTK_EVENT_CONTROLLER (secondary));
 
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   gtk_widget_set_margin_start (box, 8);
@@ -408,6 +493,18 @@ spotifygtk_album_grid_class_init (SpotifyGtkAlbumGridClass *klass)
   signals[ALBUM_ACTIVATED] = g_signal_new (
     "album-activated", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
     NULL, NULL, NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_STRING);
+
+  /* Both carry the album URI. Nothing is connected yet: the collection write
+   * behind "Add to Liked Songs" is not implemented, and queueing an album
+   * needs its track list resolved first. The menu is wired so the plumbing
+   * can be exercised before either lands. */
+  signals[ALBUM_ADD_TO_LIKED] = g_signal_new (
+    "album-add-to-liked", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+    NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  signals[ALBUM_ADD_TO_QUEUE] = g_signal_new (
+    "album-add-to-queue", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+    NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 
 static void

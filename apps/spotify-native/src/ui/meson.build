@@ -1,6 +1,7 @@
 # UI module for spotify-native - matching mockup design
 
 ui_sources = files(
+  'context_menu.c',
   'window.c',
   'sidebar.c',
   'playback_bar.c',
