@@ -943,6 +943,16 @@ static const gchar *theme_body =
   ".transport-button:hover { color: @fg_strong; }"
   ".toggle-active { color: @accent; }"
   ".like-active { color: @accent; }"
+  /* The like slot is a fixed-width column; stop the button padding itself
+   * wider than the space reserved for it, or the hearts stop lining up. */
+  ".row-like { padding: 0; min-width: 24px; min-height: 24px; }"
+  ".row-like:not(.like-active) { opacity: 0.55; }"
+  ".row-like:hover { opacity: 1; }"
+  /* The like slot is a fixed column; keep the button from padding it wider
+   * than the space reserved for it or the hearts stop lining up. */
+  ".row-like { padding: 0; min-width: 24px; min-height: 24px; }"
+  ".row-like:not(.like-active) { opacity: 0.55; }"
+  ".row-like:hover { opacity: 1; }"
 
   /* ── Sliders ───────────────────────────────────────────────── */
   "scale { min-height: 18px; }"
@@ -1078,6 +1088,12 @@ palette_for (SpotifyGtkTheme theme)
 static void
 apply_theme (SpotifyGtkTheme theme)
 {
+  /* Icons compiled into the binary -- the theme ships no outline heart. Added
+   * before any widget asks for one; repeat calls are harmless. */
+  gtk_icon_theme_add_resource_path (
+    gtk_icon_theme_get_for_display (gdk_display_get_default ()),
+    "/com/github/spotifygtk/SpotifyNative/icons");
+
   static GtkCssProvider *provider = NULL;
   if (!provider) {
     provider = gtk_css_provider_new ();

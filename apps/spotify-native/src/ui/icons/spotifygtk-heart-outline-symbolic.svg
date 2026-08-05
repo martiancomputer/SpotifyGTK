@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Outline heart, for the unliked state.
+
+  The icon theme ships only emblem-favorite-symbolic, which is filled, so
+  "liked" and "unliked" could previously differ by colour alone. A stroked
+  path reads as unset at a glance, without relying on the user noticing a
+  hue - which matters because the accent colour is also green.
+
+  Sized and stroked to sit beside Adwaita symbolics at 16px.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path d="M8 13.5 2.7 8.4a3.2 3.2 0 0 1 0-4.6 3.3 3.3 0 0 1 4.6 0L8 4.5l.7-.7a3.3 3.3 0 0 1 4.6 0 3.2 3.2 0 0 1 0 4.6z"
+        fill="none" stroke="currentColor" stroke-width="1.3"
+        stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

@@ -194,7 +194,7 @@ spotifygtk_now_playing_bar_init (SpotifyGtkNowPlayingBar *self)
   gtk_box_append (GTK_BOX (info_box), GTK_WIDGET (self->track_label));
   gtk_box_append (GTK_BOX (info_box), GTK_WIDGET (self->artist_label));
 
-  self->like_button = create_icon_button ("heart-outline-symbolic", "Save to Library");
+  self->like_button = create_icon_button ("spotifygtk-heart-outline-symbolic", "Add to Liked Songs");
   gtk_box_append (GTK_BOX (info_box), self->like_button);
 
   gtk_box_append (GTK_BOX (left), info_box);
