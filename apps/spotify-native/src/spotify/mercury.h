@@ -24,9 +24,20 @@ typedef enum {
   MERCURY_METHOD_SEND = 3,
 } MercuryMethod;
 
+/*
+ * `status_code` is signed because the wire field is sint32: Spotify returns
+ * negative codes for some failures, and reading it as unsigned turns those
+ * into large positives.
+ *
+ * `uri` is the one from the response Header, which for a subscription event is
+ * the URI actually published to -- often more specific than the one
+ * subscribed. NULL if the header carried none. Both it and `parts` are owned
+ * by the caller of the callback and valid only for its duration.
+ */
 typedef struct {
-  guint16  status_code;
-  GPtrArray *parts;   /* array of GBytes* */
+  gint32     status_code;
+  gchar     *uri;
+  GPtrArray *parts;   /* array of GBytes*, payload only -- the header is removed */
 } MercuryResponse;
 
 typedef void (*MercuryCallback) (MercuryResponse *response, gpointer user_data);
