@@ -2486,7 +2486,25 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
           if (!pb_read_field (d, raw_len, &pos, &fn, &wt, &fd, &fl, &fv)) break;
           if (fn != 1 || wt != PB_WIRE_LENGTH_DELIMITED) continue;
           if (idx >= want_off && (want_cnt == 0 || taken < want_cnt)) {
-            g_byte_array_append (slice, d + start, pos - start);
+            /*
+             * Change events published by the server carry a field the GET
+             * response never does: field 6, always 1. It is the one structural
+             * difference between what Spotify sends and what we send, and the
+             * natural candidate for the add/remove flag -- collection2v2 calls
+             * that is_removed. SPOTIFY_PROBE_FIELD6 appends it so the effect
+             * on write semantics can be measured.
+             */
+            const gchar *f6 = g_getenv ("SPOTIFY_PROBE_FIELD6");
+            if (f6 && *f6) {
+              const guint8 *item = fd;   /* the submessage body */
+              gsize ilen = fl;
+              g_autoptr(GByteArray) rebuilt = g_byte_array_new ();
+              g_byte_array_append (rebuilt, item, ilen);
+              pb_write_varint_field (rebuilt, 6, (guint64) atoi (f6));
+              pb_write_message_field (slice, 1, rebuilt->data, rebuilt->len);
+            } else {
+              g_byte_array_append (slice, d + start, pos - start);
+            }
             taken++;
           }
           idx++;

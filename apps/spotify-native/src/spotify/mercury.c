@@ -436,6 +436,27 @@ complete_message (SpotifyMercury *self, ApCommandId cmd, MercuryPending *p)
   };
   g_ptr_array_remove_index (response.parts, 0);   /* drop the header part */
 
+  /*
+   * Event payloads can be dumped for inspection. A published event is the
+   * server describing a change in its own words, which is the closest thing
+   * available to a specification for the update format -- worth capturing
+   * rather than counting parts and discarding.
+   */
+  if (cmd == AP_CMD_MERCURY_EVENT) {
+    const gchar *dir = g_getenv ("SPOTIFY_DUMP_EVENTS");
+    if (dir && *dir && response.parts) {
+      for (guint i = 0; i < response.parts->len; i++) {
+        gsize len = 0;
+        const guint8 *d = g_bytes_get_data (g_ptr_array_index (response.parts, i), &len);
+        g_autofree gchar *safe = g_strdup (uri ? uri : "no-uri");
+        for (gchar *c = safe; *c; c++) if (*c == '/' || *c == ':') *c = '_';
+        g_autofree gchar *fn = g_strdup_printf ("%s/evt-%s-%u.bin", dir, safe, i);
+        g_file_set_contents (fn, (const gchar *) d, (gssize) len, NULL);
+        g_message ("mercury: event payload %" G_GSIZE_FORMAT " bytes -> %s", len, fn);
+      }
+    }
+  }
+
   if (p->callback) {
     p->callback (&response, p->user_data);
   } else if (cmd == AP_CMD_MERCURY_EVENT) {
