@@ -334,7 +334,6 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   self->play_context = spotifygtk_track_list_snapshot (list);
   self->context_index = -1;
-  self->liked_uris = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
   for (guint i = 0; i < self->play_context->len; i++) {
     const SpotifyNativeTrack *t = g_ptr_array_index (self->play_context, i);
@@ -479,12 +478,22 @@ static gboolean
 like_result_to_ui (gpointer data)
 {
   LikeUiCtx *ctx = data;
-  /* Only reached when the write failed: revert the optimistic update. */
+  /*
+   * Only reached when the write failed. The heart and the set are put back by
+   * hand; the page is refetched rather than reconstructed, because a row that
+   * was removed locally cannot be restored to its old position from here --
+   * only the server knows the order.
+   */
   set_row_liked_for_uri (ctx->window, ctx->uri, !ctx->liked);
   if (ctx->liked)
     g_hash_table_remove (ctx->window->liked_uris, ctx->uri);
   else
     g_hash_table_add (ctx->window->liked_uris, g_strdup (ctx->uri));
+
+  if (ctx->window->liked_page) {
+    spotifygtk_liked_songs_page_invalidate (ctx->window->liked_page);
+    spotifygtk_liked_songs_page_refresh (ctx->window->liked_page);
+  }
   g_free (ctx->uri);
   g_free (ctx);
   return G_SOURCE_REMOVE;
@@ -499,9 +508,12 @@ liked_pages_invalidate (gpointer data)
   /* The set has changed, so the cached page is stale. Marked rather than
    * refetched: reloading a page nobody is looking at wastes a round trip, and
    * navigating to it will refresh. */
+  /* The action already moved the UI; this reconciles it with the server once
+   * the write is known to have landed. Only for a page being looked at --
+   * reloading one nobody is on wastes a round trip, and it is invalidated
+   * anyway so navigating there will refetch. */
   spotifygtk_liked_songs_page_invalidate (self->liked_page);
-  if (gtk_stack_get_visible_child_name (self->page_stack) &&
-      g_strcmp0 (gtk_stack_get_visible_child_name (self->page_stack), "liked") == 0)
+  if (g_strcmp0 (gtk_stack_get_visible_child_name (self->page_stack), "liked") == 0)
     spotifygtk_liked_songs_page_refresh (self->liked_page);
   return G_SOURCE_REMOVE;
 }
@@ -533,6 +545,25 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
     g_hash_table_add (self->liked_uris, g_strdup (track->uri));
   else
     g_hash_table_remove (self->liked_uris, track->uri);
+
+  /*
+   * Drive the page from the action rather than from the write callback.
+   *
+   * Hanging the refresh off the response meant nothing moved until a round
+   * trip completed, and nothing at all if that callback never arrived. The
+   * user has just said what they want; the list can say it back immediately.
+   *
+   * An unlike removes the row outright instead of refetching, because a
+   * refetch fired now races the server: the write and the read are different
+   * services, and the read can still return the old set and put the row back.
+   * The page is invalidated either way, so the next visit reconciles.
+   */
+  SpotifyGtkTrackList *liked_list =
+    self->liked_page ? spotifygtk_liked_songs_page_get_list (self->liked_page) : NULL;
+  if (liked_list && !liked)
+    spotifygtk_track_list_remove_uri (liked_list, track->uri);
+  if (self->liked_page)
+    spotifygtk_liked_songs_page_invalidate (self->liked_page);
 
   LikeUiCtx *ctx = g_new0 (LikeUiCtx, 1);
   ctx->window = self;
@@ -1710,6 +1741,7 @@ spotifygtk_native_window_init (SpotifyGtkNativeWindow *self)
   g_signal_connect (self, "realize", G_CALLBACK (on_window_realize), NULL);
 
   self->context_index = -1;
+  self->liked_uris = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   self->user_queue = g_queue_new ();
   self->nav_history = g_ptr_array_new_with_free_func (nav_entry_free);
   self->nav_pos = -1;

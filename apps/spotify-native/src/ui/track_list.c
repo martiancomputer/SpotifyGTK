@@ -477,6 +477,32 @@ spotifygtk_track_list_set_liked_uri (SpotifyGtkTrackList *self,
   }
 }
 
+/*
+ * Drop every row for `uri` from the model.
+ *
+ * For the Liked Songs page after an unlike. Refetching instead would race the
+ * server -- the write and the read are different services, and a refetch fired
+ * immediately can still return the old set, putting the row straight back.
+ * Removing locally is instant and cannot disagree with what the user just did;
+ * the page is invalidated as well, so the next visit reconciles with the
+ * server anyway.
+ */
+void
+spotifygtk_track_list_remove_uri (SpotifyGtkTrackList *self, const gchar *uri)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  g_return_if_fail (uri != NULL);
+
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  for (guint i = n; i > 0; i--) {
+    g_autoptr(SpotifyGtkTrackItem) item =
+      g_list_model_get_item (G_LIST_MODEL (self->store), i - 1);
+    const SpotifyNativeTrack *t = item ? spotifygtk_track_item_get_track (item) : NULL;
+    if (t && t->uri && g_strcmp0 (t->uri, uri) == 0)
+      g_list_store_remove (self->store, i - 1);
+  }
+}
+
 SpotifyGtkTrackList *
 spotifygtk_track_list_new (void)
 {
