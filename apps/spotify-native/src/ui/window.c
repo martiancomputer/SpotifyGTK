@@ -266,6 +266,9 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
   const gchar *album   = track->album   ? track->album   : "";
 
   spotifygtk_playback_bar_set_track (self->playback_bar, name, artists);
+  /* The bar's heart follows whatever is playing. */
+  spotifygtk_playback_bar_set_liked (self->playback_bar,
+    track->uri && g_hash_table_contains (self->liked_uris, track->uri));
   spotifygtk_now_playing_panel_set_track (self->now_playing_panel, name, artists, album);
 
   spotifygtk_playback_bar_set_cover (self->playback_bar, track->cover_id);
@@ -443,6 +446,12 @@ liked_page_to_ui (gpointer data)
      * is exactly when a stale refetch would otherwise put it back.
      */
     spotifygtk_liked_songs_page_set_liked_filter (self->liked_page, self->liked_uris);
+
+    /* The bar may be showing a track whose state just arrived, or changed on
+     * another device. */
+    if (self->current_track_uri)
+      spotifygtk_playback_bar_set_liked (self->playback_bar,
+        g_hash_table_contains (self->liked_uris, self->current_track_uri));
   }
 
   g_ptr_array_unref (r->uris);
@@ -648,6 +657,29 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
   const gchar *uris[] = { track->uri };
   spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
                                   uris, 1, !liked, on_like_write_done, ctx);
+}
+
+
+/*
+ * The playback bar's heart, for whatever is playing.
+ *
+ * Shares list_set_liked()'s path so the bar, the rows and the context menus
+ * cannot disagree: one write, one set, one fan-out.
+ */
+static void
+on_playback_like_toggled (SpotifyGtkPlaybackBar *bar, gboolean liked, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) bar;
+
+  if (!self->current_track_uri) {
+    spotifygtk_playback_bar_set_liked (self->playback_bar, FALSE);
+    return;
+  }
+
+  SpotifyNativeTrack t = { 0 };
+  t.uri = self->current_track_uri;
+  list_set_liked (self, &t, liked);
 }
 
 static void
@@ -1685,6 +1717,8 @@ spotifygtk_native_window_constructed (GObject *object)
    * transport buttons), and an 80px request clipped it against the bottom
    * of the window -- it now sizes to its content. */
   gtk_widget_add_css_class (GTK_WIDGET (self->playback_bar), "playback-bar");
+  g_signal_connect (self->playback_bar, "like-toggled",
+                    G_CALLBACK (on_playback_like_toggled), self);
   g_signal_connect (self->playback_bar, "play-clicked",
                     G_CALLBACK (on_play_clicked), self);
   g_signal_connect (self->playback_bar, "pause-clicked",
