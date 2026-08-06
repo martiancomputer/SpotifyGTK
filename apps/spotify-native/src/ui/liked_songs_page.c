@@ -30,6 +30,10 @@ struct _SpotifyGtkLikedSongsPage {
    * list from it without re-fetching. Owned (a ref on the loaded array). */
   GPtrArray *all_tracks;
 
+  /* Borrowed from the window: URIs known to be liked, read from collection v2.
+   * Authoritative; see set_liked_filter(). */
+  GHashTable *liked_filter;
+
   /*
    * Filtering and sorting precomputation, both keyed by track pointer so the
    * sort order can change without invalidating them.
@@ -316,7 +320,31 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   self->retry_after = 0;
   g_clear_pointer (&self->all_tracks, g_ptr_array_unref);
-  self->all_tracks = g_ptr_array_ref (tracks);
+
+  /*
+   * Drop anything the liked set says is not liked. NULL until the read has
+   * completed, so an empty set here means nothing is liked rather than nothing
+   * is known -- which matters, because unliking the last track is precisely
+   * when a stale refetch would put it back.
+   */
+  if (self->liked_filter) {
+    GPtrArray *kept = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_track_free);
+    guint dropped = 0;
+    for (guint i = 0; i < tracks->len; i++) {
+      const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
+      if (t && t->uri && g_hash_table_contains (self->liked_filter, t->uri))
+        g_ptr_array_add (kept, spotifygtk_native_track_copy (t));
+      else
+        dropped++;
+    }
+    if (dropped)
+      g_message ("liked-page: dropped %u stale row(s) the collection no longer lists",
+                 dropped);
+    self->all_tracks = kept;
+  } else {
+    self->all_tracks = g_ptr_array_ref (tracks);
+  }
   /* Both derived from the tracks, so they are built here and not touched again
    * until the collection reloads. */
   build_track_indexes (self);
@@ -461,6 +489,31 @@ spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
  * navigation and wrong after a like: the page kept showing the set as it was
  * at sign-in, and only a restart revealed a track added since.
  */
+
+/*
+ * The set of URIs actually liked, owned by the window and borrowed here.
+ *
+ * This page is populated from /context-resolve, which lags collection v2 by
+ * around a second after a write -- long enough that a refetch triggered by the
+ * change event returns the track that was just removed and puts the row back.
+ * That is the "it vanishes then reappears" flicker.
+ *
+ * Filtering the fetched list through the set fixes it at the source rather
+ * than by delaying the refetch, which would only make the race less likely.
+ * The set comes from collection v2, is updated the moment the user acts, and
+ * is never behind.
+ *
+ * Removal only: a track liked elsewhere is in the set but has no metadata here
+ * yet, and appears on the next fetch.
+ */
+void
+spotifygtk_liked_songs_page_set_liked_filter (SpotifyGtkLikedSongsPage *self,
+                                              GHashTable *liked_uris)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
+  self->liked_filter = liked_uris;
+}
+
 void
 spotifygtk_liked_songs_page_invalidate (SpotifyGtkLikedSongsPage *self)
 {
