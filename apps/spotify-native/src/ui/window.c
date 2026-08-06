@@ -81,6 +81,7 @@ struct _SpotifyGtkNativeWindow {
    * for the rows they show; this is the authority. */
   GHashTable *liked_uris;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
+  guint playlists_generation;            /* stale in-flight card lookups */
   GtkWidget  *playlists_status;
   guint64     collection_sub;   /* Mercury subscription for external changes */
 
@@ -705,18 +706,23 @@ on_list_remove_from_liked (SpotifyGtkTrackList *list, gpointer track_ptr, gpoint
 
 /* ── Playlists page ─────────────────────────────────────────────────────────
  *
- * Cards, like albums. The rootlist carries URIs only, so each card is completed
- * by two follow-ups: the playlist head for its name, and its first track for a
- * cover. Playlists have no cover of their own -- their attributes hold a name
- * and nothing else -- so one is borrowed from the first track, which is what an
- * auto-generated playlist image amounts to.
+ * A card is added once, complete. It was previously added immediately and then
+ * patched twice -- once with its name, once with its cover -- by splicing the
+ * model. That is what "the images refresh and then it crashes" was: each
+ * splice destroys the item a card is bound to, so the view unbinds and rebinds
+ * mid-flight while a cover load is still holding a borrowed pointer to that
+ * card's image. Clicking during the churn walked a widget tree that was being
+ * rebuilt underneath it.
  *
- * Cards appear immediately with the URI as a placeholder title rather than
- * waiting on the follow-ups, so the page is never blank while it fills.
+ * So the name and the cover are resolved first and the card is built from the
+ * finished pieces. Cards appear one at a time as their lookups land, which
+ * looks near enough the same and cannot tear anything down.
  */
 typedef struct {
   SpotifyGtkNativeWindow *window;
   gchar                  *uri;
+  gchar                  *name;      /* from the playlist head */
+  guint                   generation;
 } PlaylistCard;
 
 static void
@@ -724,6 +730,7 @@ playlist_card_free (gpointer data)
 {
   PlaylistCard *c = data;
   g_free (c->uri);
+  g_free (c->name);
   g_free (c);
 }
 
@@ -737,6 +744,7 @@ on_playlist_card_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
     navigate_to_context (self, uri, name && *name ? name : "Playlist", "Playlist");
 }
 
+/* Second step: the first track, for a cover. Adds the finished card. */
 static void
 on_playlist_cover_tracks (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -745,35 +753,49 @@ on_playlist_cover_tracks (GObject *source, GAsyncResult *result, gpointer user_d
   g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
     SPOTIFYGTK_NATIVE_SESSION (source), result, &err);
 
-  if (tracks && tracks->len > 0 && c->window->playlists_grid) {
-    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, 0);
-    if (t && t->cover_id)
-      spotifygtk_album_grid_set_card_cover (c->window->playlists_grid,
-                                            c->uri, t->cover_id);
+  /* A reload started while this was in flight owns the grid now; anything from
+   * the previous pass would append duplicates. */
+  if (!c->window->playlists_grid || c->generation != c->window->playlists_generation) {
+    playlist_card_free (c);
+    return;
   }
+
+  const gchar *cover = NULL;
+  if (tracks && tracks->len > 0) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, 0);
+    if (t) cover = t->cover_id;
+  }
+
+  spotifygtk_album_grid_add_card (c->window->playlists_grid, c->uri,
+                                  c->name ? c->name : c->uri, "Playlist", cover);
   playlist_card_free (c);
 }
 
+/* First step: the playlist head, for a name. */
 static void
 on_playlist_card_name (MercuryResponse *response, gpointer user_data)
 {
   PlaylistCard *c = user_data;
 
-  if (response && response->parts && response->parts->len > 0 &&
-      c->window->playlists_grid) {
+  if (!c->window->playlists_grid || c->generation != c->window->playlists_generation) {
+    playlist_card_free (c);
+    return;
+  }
+
+  if (response && response->parts && response->parts->len > 0) {
     gsize len = 0;
     const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
     const guint8 *attrs = NULL; gsize alen = 0;
     const guint8 *name = NULL; gsize nlen = 0;
     if (pb_find_bytes_field (d, len, 3, &attrs, &alen) &&
-        pb_find_bytes_field (attrs, alen, 1, &name, &nlen)) {
-      g_autofree gchar *n = g_strndup ((const gchar *) name, nlen);
-      /* Re-add rather than mutate: the model holds plain objects, so replacing
-       * the card is what makes the view pick the new title up. */
-      spotifygtk_album_grid_set_card_title (c->window->playlists_grid, c->uri, n);
-    }
+        pb_find_bytes_field (attrs, alen, 1, &name, &nlen))
+      c->name = g_strndup ((const gchar *) name, nlen);
   }
-  playlist_card_free (c);
+
+  /* One track is enough for a cover, and asking for one keeps this cheap on a
+   * library of many playlists. */
+  spotifygtk_native_session_load_tracks (c->window->session, c->uri, 1, NULL,
+                                         on_playlist_cover_tracks, c);
 }
 
 static void
@@ -784,6 +806,8 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
   if (!self->playlists_grid)
     return;
 
+  /* Invalidates anything still in flight from a previous load. */
+  self->playlists_generation++;
   spotifygtk_album_grid_clear (self->playlists_grid);
 
   if (!ok) {
@@ -799,29 +823,22 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
   gtk_label_set_text (GTK_LABEL (self->playlists_status), "");
 
   SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  if (!m)
+    return;
 
   for (guint i = 0; i < n_entries; i++) {
     if (!entries[i].uri)
       continue;
-    spotifygtk_album_grid_add_card (self->playlists_grid, entries[i].uri,
-                                    entries[i].uri, "Playlist", NULL);
+    PlaylistCard *c = g_new0 (PlaylistCard, 1);
+    c->window     = self;
+    c->uri        = g_strdup (entries[i].uri);
+    c->generation = self->playlists_generation;
 
-    if (m) {
-      PlaylistCard *nc = g_new0 (PlaylistCard, 1);
-      nc->window = self; nc->uri = g_strdup (entries[i].uri);
-      const gchar *id = strrchr (entries[i].uri, ':');
-      g_autofree gchar *head =
-        g_strdup_printf ("hm://playlist/v2/playlist/%s", id ? id + 1 : entries[i].uri);
-      spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", head, NULL,
-                                       on_playlist_card_name, nc);
-    }
-
-    /* One track is enough for a cover, and asking for one keeps this cheap
-     * even on a library of many playlists. */
-    PlaylistCard *cc = g_new0 (PlaylistCard, 1);
-    cc->window = self; cc->uri = g_strdup (entries[i].uri);
-    spotifygtk_native_session_load_tracks (self->session, entries[i].uri, 1, NULL,
-                                           on_playlist_cover_tracks, cc);
+    const gchar *id = strrchr (entries[i].uri, ':');
+    g_autofree gchar *head =
+      g_strdup_printf ("hm://playlist/v2/playlist/%s", id ? id + 1 : entries[i].uri);
+    spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", head, NULL,
+                                     on_playlist_card_name, c);
   }
 }
 
