@@ -34,11 +34,14 @@ struct _SpotifyGtkTrackList {
   gboolean show_like;   /* hearts hidden on the Liked Songs page */
 
   /*
-   * URIs known to be liked. Held here rather than on the row because rows are
-   * recycled: a row scrolled off and reused for another track would otherwise
-   * keep the previous one's heart.
+   * URIs known to be liked -- BORROWED from the window, not owned.
+   *
+   * Each list used to keep its own copy, filled by fanning every liked URI out
+   * to every list as the collection was read. On a 4806-track library that is
+   * five hash tables holding five copies of every string, built by a loop over
+   * (URIs x lists x bound rows). One shared table costs one copy and no fan-out.
    */
-  GHashTable *liked_uris;
+  GHashTable *liked_set;
 
   /* Scroll settle detection. Cover loading is suppressed while the adjustment
    * is moving and resumed once it has been still for SETTLE_MS. */
@@ -271,7 +274,8 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
 
   const SpotifyNativeTrack *bt = spotifygtk_track_item_get_track (item);
   spotifygtk_track_row_set_liked (row,
-    bt && bt->uri && g_hash_table_contains (self->liked_uris, bt->uri));
+    self->liked_set && bt && bt->uri &&
+    g_hash_table_contains (self->liked_set, bt->uri));
 
   /* Connect for the lifetime of this binding; disconnected in unbind. The
    * item ref is stashed so play-clicked knows which track it is. */
@@ -382,7 +386,6 @@ static void
 spotifygtk_track_list_init (SpotifyGtkTrackList *self)
 {
   self->show_like = TRUE;
-  self->liked_uris = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_box_set_spacing (GTK_BOX (self), 8);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
@@ -458,41 +461,49 @@ spotifygtk_track_list_set_show_like (SpotifyGtkTrackList *self, gboolean show)
 }
 
 /*
- * Record a track's liked state and update any row currently showing it.
- *
- * Keyed by URI rather than by row so the mark survives scrolling: the set is
- * consulted again every time a row is bound.
+ * Borrow the window's set of liked URIs. Consulted whenever a row binds, so
+ * scrolling shows the right hearts without this list holding any state of its
+ * own.
  */
 void
-spotifygtk_track_list_set_liked_uri (SpotifyGtkTrackList *self,
-                                     const gchar *uri, gboolean liked)
+spotifygtk_track_list_set_liked_set (SpotifyGtkTrackList *self, GHashTable *set)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
-  g_return_if_fail (uri != NULL);
+  self->liked_set = set;
+}
 
-  if (liked)
-    g_hash_table_add (self->liked_uris, g_strdup (uri));
-  else
-    g_hash_table_remove (self->liked_uris, uri);
+/*
+ * Repaint the hearts of rows currently on screen.
+ *
+ * For after the shared set changes. Touches only live bindings -- a handful of
+ * rows -- rather than walking the collection, which is what made loading a
+ * large library crawl.
+ */
+void
+spotifygtk_track_list_refresh_liked (SpotifyGtkTrackList *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  if (!self->liked_set || !self->bound_rows)
+    return;
 
-  for (guint i = 0; self->bound_rows && i < self->bound_rows->len; i++) {
+  for (guint i = 0; i < self->bound_rows->len; i++) {
     GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
     SpotifyGtkTrackItem *item = g_object_get_data (G_OBJECT (row), "bound-item");
     const SpotifyNativeTrack *t = item ? spotifygtk_track_item_get_track (item) : NULL;
-    if (t && t->uri && g_strcmp0 (t->uri, uri) == 0)
-      spotifygtk_track_row_set_liked (SPOTIFYGTK_TRACK_ROW (row), liked);
+    if (t && t->uri)
+      spotifygtk_track_row_set_liked (SPOTIFYGTK_TRACK_ROW (row),
+                                      g_hash_table_contains (self->liked_set, t->uri));
   }
 }
 
 /*
  * Drop every row for `uri` from the model.
  *
- * For the Liked Songs page after an unlike. Refetching instead would race the
- * server -- the write and the read are different services, and a refetch fired
- * immediately can still return the old set, putting the row straight back.
- * Removing locally is instant and cannot disagree with what the user just did;
- * the page is invalidated as well, so the next visit reconciles with the
- * server anyway.
+ * For the Liked Songs page after an unlike. Refetching instead would mean
+ * pulling the whole collection again -- thousands of tracks and their art --
+ * to reflect one removal, and would race the server besides: the write and the
+ * read are different services, and a read issued straight after a write can
+ * still return the old set.
  */
 void
 spotifygtk_track_list_remove_uri (SpotifyGtkTrackList *self, const gchar *uri)

@@ -82,6 +82,8 @@ struct _SpotifyGtkNativeWindow {
   GHashTable *liked_uris;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
+  guint collection_change_id;            /* coalesces change events */
+  gboolean playlists_loaded;             /* the grid holds cards already */
   GtkWidget  *playlists_status;
   guint64     collection_sub;   /* Mercury subscription for external changes */
 
@@ -375,19 +377,45 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
  * The event says something changed, not what, so the response is to re-read
  * the set and mark the page stale rather than to trust its payload.
  */
+/*
+ * Coalesce collection change events.
+ *
+ * Spotify publishes several per change -- the collection URI, its /json twin,
+ * and a per-artist list -- and our own writes produce them too. Reacting to
+ * each one meant re-reading the whole collection ten pages at a time, per
+ * event. On a 4806-track library that is most of a minute of round trips to
+ * learn something already known.
+ */
+#define COLLECTION_CHANGE_SETTLE_MS 2000
+
+static gboolean
+on_collection_settled (gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  self->collection_change_id = 0;
+
+  /*
+   * Re-read the set, because a change elsewhere is the only way to learn about
+   * it -- but do NOT refetch the Liked Songs page. That is thousands of tracks
+   * and their art to reflect a single addition, and the page is marked stale
+   * so the next visit pays for it only if there is someone to see it.
+   */
+  spotifygtk_native_window_reload_liked (self);
+  if (self->liked_page)
+    spotifygtk_liked_songs_page_invalidate (self->liked_page);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_collection_changed (MercuryResponse *response, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   (void) response;
 
-  g_message ("liked: collection changed elsewhere; reloading");
-  spotifygtk_native_window_reload_liked (self);
-  if (self->liked_page) {
-    spotifygtk_liked_songs_page_invalidate (self->liked_page);
-    if (g_strcmp0 (gtk_stack_get_visible_child_name (self->page_stack), "liked") == 0)
-      spotifygtk_liked_songs_page_refresh (self->liked_page);
-  }
+  if (self->collection_change_id)
+    g_source_remove (self->collection_change_id);
+  self->collection_change_id =
+    g_timeout_add (COLLECTION_CHANGE_SETTLE_MS, on_collection_settled, self);
 }
 
 static void
@@ -427,7 +455,6 @@ static void liked_fetch_page (SpotifyGtkNativeWindow *self, const gchar *token);
 
 typedef struct {
   SpotifyGtkNativeWindow *window;
-  GPtrArray              *uris;      /* owned gchar* */
   gchar                  *next;
 } LikedPageResult;
 
@@ -437,8 +464,11 @@ liked_page_to_ui (gpointer data)
   LikedPageResult *r = data;
   SpotifyGtkNativeWindow *self = r->window;
 
-  for (guint i = 0; i < r->uris->len; i++)
-    set_row_liked_for_uri (self, g_ptr_array_index (r->uris, i), TRUE);
+  /* The set was filled as the page arrived; only what is on screen needs
+   * repainting. Fanning every URI out to every list is what made a large
+   * library take tens of seconds to sign in. */
+  for (guint i = 0; self->track_lists && i < self->track_lists->len; i++)
+    spotifygtk_track_list_refresh_liked (g_ptr_array_index (self->track_lists, i));
 
   if (r->next && *r->next)
     liked_fetch_page (self, r->next);
@@ -460,7 +490,6 @@ liked_page_to_ui (gpointer data)
         g_hash_table_contains (self->liked_uris, self->current_track_uri));
   }
 
-  g_ptr_array_unref (r->uris);
   g_free (r->next);
   g_free (r);
   return G_SOURCE_REMOVE;
@@ -478,14 +507,12 @@ on_liked_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
 
   LikedPageResult *r = g_new0 (LikedPageResult, 1);
   r->window = self;
-  r->uris   = g_ptr_array_new_with_free_func (g_free);
   r->next   = g_strdup (next_token);
 
   for (guint i = 0; i < n_items; i++) {
     if (!items[i].uri || items[i].is_removed)
       continue;
     g_hash_table_add (self->liked_uris, g_strdup (items[i].uri));
-    g_ptr_array_add (r->uris, g_strdup (items[i].uri));
   }
 
   /* The read runs off the main loop; widgets are only touched from it. */
@@ -526,9 +553,15 @@ spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self)
 static void
 set_row_liked_for_uri (SpotifyGtkNativeWindow *self, const gchar *uri, gboolean liked)
 {
+  /* The shared set is the state; the lists only need their visible rows
+   * repainted. Nothing here walks the collection. */
+  if (liked)
+    g_hash_table_add (self->liked_uris, g_strdup (uri));
+  else
+    g_hash_table_remove (self->liked_uris, uri);
+
   for (guint i = 0; self->track_lists && i < self->track_lists->len; i++)
-    spotifygtk_track_list_set_liked_uri (g_ptr_array_index (self->track_lists, i),
-                                         uri, liked);
+    spotifygtk_track_list_refresh_liked (g_ptr_array_index (self->track_lists, i));
 }
 
 /*
@@ -821,6 +854,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
     return;
   }
   gtk_label_set_text (GTK_LABEL (self->playlists_status), "");
+  self->playlists_loaded = TRUE;
 
   SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
   if (!m)
@@ -1139,13 +1173,9 @@ wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
   if (!g_ptr_array_find (self->track_lists, list, NULL))
     g_ptr_array_add (self->track_lists, list);
 
-  /* Seed from what is already known: a page built after the read has finished
-   * would otherwise show every row unliked. */
-  GHashTableIter it;
-  gpointer k;
-  g_hash_table_iter_init (&it, self->liked_uris);
-  while (g_hash_table_iter_next (&it, &k, NULL))
-    spotifygtk_track_list_set_liked_uri (list, k, TRUE);
+  /* Borrowed, not copied: a list consults it on every bind, so a page built
+   * before or after the read finishes is equally correct. */
+  spotifygtk_track_list_set_liked_set (list, self->liked_uris);
 
   g_signal_connect (list, "track-activated", G_CALLBACK (on_list_track_activated), self);
   g_signal_connect (list, "add-to-queue",    G_CALLBACK (on_list_add_to_queue),    self);
@@ -1523,9 +1553,14 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
    * refresh once it holds data. Home and Library are static for now. */
   if (g_strcmp0 (page_name, "liked") == 0)
     spotifygtk_liked_songs_page_refresh (self->liked_page);
-  /* Cheap and always current: the rootlist is small and a playlist created
-   * elsewhere should not need a restart to appear. */
-  if (g_strcmp0 (page_name, "playlists") == 0)
+  /*
+   * Only if it has nothing yet. Reloading on every visit cleared the grid and
+   * rebuilt it from two requests per playlist, so the page visibly emptied and
+   * refilled each time it was opened -- the "playlists get unloaded" effect.
+   * A playlist made elsewhere still appears, via the collection change
+   * subscription and the next sign-in.
+   */
+  if (g_strcmp0 (page_name, "playlists") == 0 && !self->playlists_loaded)
     reload_playlists (self);
 
   /* A page that has just (re)built its rows does not know what is playing. */
