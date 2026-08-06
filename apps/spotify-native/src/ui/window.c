@@ -90,6 +90,14 @@ struct _SpotifyGtkNativeWindow {
    */
   GHashTable *liked_building;
   gint64      last_local_write_us;
+
+  /*
+   * Likes made while the connection was down. The optimistic update already
+   * happened, so dropping them would leave the UI asserting something the
+   * server never heard -- which is what "it updated here but not on the web
+   * player" was. Replayed when the session comes back.
+   */
+  GPtrArray *pending_likes;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
   guint collection_change_id;            /* coalesces change events */
@@ -470,6 +478,56 @@ subscribe_collection_changes (SpotifyGtkNativeWindow *self)
 static void set_row_liked_for_uri (SpotifyGtkNativeWindow *self,
                                   const gchar *uri, gboolean liked);
 
+
+typedef struct {
+  gchar   *uri;
+  gboolean liked;
+} PendingLike;
+
+static void
+pending_like_free (gpointer data)
+{
+  PendingLike *p = data;
+  g_free (p->uri);
+  g_free (p);
+}
+
+/*
+ * Replay likes made while the connection was down. Called when the session
+ * reaches READY, which is the first moment a write can succeed.
+ *
+ * Runs before the reconnect's own reload of the liked set, so the writes are
+ * on the wire before the read that races them. That read can still land first
+ * and show pre-write state, which is why this deliberately does not stamp
+ * last_local_write_us: the grace window exists to suppress re-reads caused by
+ * our own writes during normal use, but here a re-read is exactly what
+ * resolves the race. The change event these writes provoke is left free to
+ * trigger one, and the set settles a couple of seconds later.
+ */
+static void
+flush_pending_likes (SpotifyGtkNativeWindow *self)
+{
+  if (!self->pending_likes || self->pending_likes->len == 0)
+    return;
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (self->session)
+                             : NULL;
+  if (!m || !user)
+    return;
+
+  g_autoptr(GPtrArray) queued = g_steal_pointer (&self->pending_likes);
+  g_message ("replaying %u liked-songs change(s) held while offline",
+             queued->len);
+
+  for (guint i = 0; i < queued->len; i++) {
+    PendingLike *p = g_ptr_array_index (queued, i);
+    const gchar *uris[] = { p->uri };
+    spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                    uris, 1, !p->liked, NULL, NULL);
+  }
+}
+
 /* ── Liked Songs state ──────────────────────────────────────────────────────
  *
  * Every list shows a heart and every context menu offers "Add" or "Remove"
@@ -735,11 +793,25 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
   g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (self->session)
                              : NULL;
   if (!m || !user) {
-    /* Almost always a dropped AP connection rather than a genuine signed-out
-     * state; get_mercury() kicks a reconnect when it sees one. */
-    g_warning ("cannot change Liked Songs: no live connection (reconnecting)");
-    set_row_liked_for_uri (self, track->uri, !liked);
-    if (liked) g_hash_table_remove (self->liked_uris, track->uri);
+    /*
+     * Almost always a dropped AP connection rather than a genuine signed-out
+     * state; get_mercury() kicks a reconnect when it sees one.
+     *
+     * Held rather than discarded. The optimistic update has already happened,
+     * so throwing the click away leaves the UI showing a change the server was
+     * never told about -- and the user has no way to know. It is replayed once
+     * the session is back.
+     */
+    PendingLike *p = g_new0 (PendingLike, 1);
+    p->uri   = g_strdup (track->uri);
+    p->liked = liked;
+    if (!self->pending_likes)
+      self->pending_likes = g_ptr_array_new_with_free_func (pending_like_free);
+    g_ptr_array_add (self->pending_likes, p);
+
+    g_warning ("no live connection; holding %s of %s until the session is back",
+               liked ? "add" : "remove", track->uri);
+    SPOTIFYGTK_DEBUG ("like: queued (%u pending)", self->pending_likes->len);
     g_free (ctx->uri);
     g_free (ctx);
     return;
@@ -1536,6 +1608,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
 
     /* Liked state for every list and every context menu. Paged, so the size of
      * the collection does not matter. */
+    flush_pending_likes (self);
     spotifygtk_native_window_reload_liked (self);
     subscribe_collection_changes (self);
     reload_playlists (self);
@@ -2249,6 +2322,9 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->current_track_uri, g_free);
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   g_clear_pointer (&self->nav_history, g_ptr_array_unref);
+  g_clear_pointer (&self->pending_likes, g_ptr_array_unref);
+  g_clear_pointer (&self->liked_uris, g_hash_table_unref);
+  g_clear_pointer (&self->liked_building, g_hash_table_unref);
   g_clear_object (&self->auth);
   if (self->user_queue) {
     g_queue_free_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
