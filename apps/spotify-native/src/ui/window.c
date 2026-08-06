@@ -38,6 +38,7 @@
 #include "../native_engine.h"
 #include "../spotify/collection.h"
 #include "../spotify/playlist.h"
+#include "smooth_scroll.h"
 #include "../spotify/protobuf_min.h"
 #include "../spotify/session.h"
 
@@ -79,6 +80,8 @@ struct _SpotifyGtkNativeWindow {
   /* Every liked track URI, read at sign-in. The lists keep their own copies
    * for the rows they show; this is the authority. */
   GHashTable *liked_uris;
+  GtkWidget  *playlists_box;      /* rows for the rootlist */
+  GtkWidget  *playlists_status;
   guint64     collection_sub;   /* Mercury subscription for external changes */
 
   SpotifyGtkHomePage *home_page;
@@ -699,6 +702,101 @@ on_list_remove_from_liked (SpotifyGtkTrackList *list, gpointer track_ptr, gpoint
 }
 
 
+
+/* ── Playlists page ─────────────────────────────────────────────────────────
+ *
+ * Populated from the rootlist. Names are a second request per playlist because
+ * the rootlist carries only URIs; rows appear immediately and relabel as those
+ * return, so the page is usable while it fills.
+ */
+static void
+on_playlist_row_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  const gchar *uri = g_object_get_data (G_OBJECT (button), "playlist-uri");
+  if (uri)
+    navigate_to_context (self, uri, gtk_button_get_label (button), "Playlist");
+}
+
+static void
+on_page_playlist_name (MercuryResponse *response, gpointer user_data)
+{
+  GtkWidget *button = user_data;
+  if (response && response->parts && response->parts->len > 0) {
+    gsize len = 0;
+    const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
+    const guint8 *attrs = NULL; gsize alen = 0;
+    const guint8 *name = NULL; gsize nlen = 0;
+    if (pb_find_bytes_field (d, len, 3, &attrs, &alen) &&
+        pb_find_bytes_field (attrs, alen, 1, &name, &nlen)) {
+      g_autofree gchar *n = g_strndup ((const gchar *) name, nlen);
+      gtk_button_set_label (GTK_BUTTON (button), n);
+    }
+  }
+  g_object_unref (button);
+}
+
+static void
+on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entries,
+                          guint n_entries, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+
+  if (!self->playlists_box)
+    return;
+
+  GtkWidget *child;
+  while ((child = gtk_widget_get_first_child (self->playlists_box)))
+    gtk_box_remove (GTK_BOX (self->playlists_box), child);
+
+  if (!ok) {
+    gtk_label_set_text (GTK_LABEL (self->playlists_status),
+                        "Couldn\u2019t load your playlists.");
+    g_warning ("playlists: rootlist read failed (status %d)", status);
+    return;
+  }
+  if (n_entries == 0) {
+    gtk_label_set_text (GTK_LABEL (self->playlists_status), "No playlists yet.");
+    return;
+  }
+  gtk_label_set_text (GTK_LABEL (self->playlists_status), "");
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+
+  for (guint i = 0; i < n_entries; i++) {
+    if (!entries[i].uri)
+      continue;
+    GtkWidget *row = gtk_button_new_with_label (entries[i].uri);
+    gtk_button_set_has_frame (GTK_BUTTON (row), FALSE);
+    gtk_widget_add_css_class (row, "flat");
+    if (GTK_IS_LABEL (gtk_button_get_child (GTK_BUTTON (row))))
+      gtk_label_set_xalign (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (row))), 0.0);
+    g_object_set_data_full (G_OBJECT (row), "playlist-uri",
+                            g_strdup (entries[i].uri), g_free);
+    g_signal_connect (row, "clicked", G_CALLBACK (on_playlist_row_clicked), self);
+    gtk_box_append (GTK_BOX (self->playlists_box), row);
+
+    if (m) {
+      const gchar *id = strrchr (entries[i].uri, ':');
+      g_autofree gchar *head =
+        g_strdup_printf ("hm://playlist/v2/playlist/%s", id ? id + 1 : entries[i].uri);
+      spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", head, NULL,
+                                       on_page_playlist_name, g_object_ref (row));
+    }
+  }
+}
+
+static void
+reload_playlists (SpotifyGtkNativeWindow *self)
+{
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (self->session)
+                             : NULL;
+  if (!m || !user)
+    return;
+  spotifygtk_playlist_list (m, user, on_page_playlists_listed, self);
+}
+
 /* ── Add to Playlist ────────────────────────────────────────────────────────
  *
  * The rootlist gives URIs but no names, so a chooser that showed only URIs
@@ -1298,6 +1396,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
      * the collection does not matter. */
     spotifygtk_native_window_reload_liked (self);
     subscribe_collection_changes (self);
+    reload_playlists (self);
 
     /* Development aid: open straight onto a page so its load can be watched
      * without driving the UI by hand. */
@@ -1368,6 +1467,10 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
    * refresh once it holds data. Home and Library are static for now. */
   if (g_strcmp0 (page_name, "liked") == 0)
     spotifygtk_liked_songs_page_refresh (self->liked_page);
+  /* Cheap and always current: the rootlist is small and a playlist created
+   * elsewhere should not need a restart to appear. */
+  if (g_strcmp0 (page_name, "playlists") == 0)
+    reload_playlists (self);
 
   /* A page that has just (re)built its rows does not know what is playing. */
   gboolean is_playing =
@@ -1857,17 +1960,25 @@ spotifygtk_native_window_constructed (GObject *object)
     gtk_label_set_xalign (GTK_LABEL (pl_title), 0.0);
     gtk_box_append (GTK_BOX (pl), pl_title);
 
-    GtkWidget *pl_note = gtk_label_new (
-      "Your playlists aren\u2019t available in this client yet.");
-    gtk_widget_add_css_class (pl_note, "dim-text");
-    gtk_label_set_xalign (GTK_LABEL (pl_note), 0.0);
-    gtk_label_set_wrap (GTK_LABEL (pl_note), TRUE);
-    gtk_label_set_max_width_chars (GTK_LABEL (pl_note), 74);
-    gtk_widget_set_tooltip_text (pl_note,
-      "Needs spclient\u2019s rootlist endpoint, which returns playlist4_external "
-      "protobuf \u2014 a larger schema than the track metadata the rest of the "
-      "catalog uses, and the one remaining piece of this migration.");
-    gtk_box_append (GTK_BOX (pl), pl_note);
+    /*
+     * Filled from the rootlist once signed in. It carries URIs but no names,
+     * so each row starts labelled with its URI and is relabelled when that
+     * playlist's head returns -- rows are usable immediately rather than after
+     * every lookup has come back.
+     */
+    GtkWidget *pl_scroller = gtk_scrolled_window_new ();
+    gtk_widget_set_vexpand (pl_scroller, TRUE);
+    self->playlists_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+    gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (pl_scroller),
+                                   self->playlists_box);
+    spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (pl_scroller),
+                                     GTK_ORIENTATION_VERTICAL);
+    gtk_box_append (GTK_BOX (pl), pl_scroller);
+
+    self->playlists_status = gtk_label_new ("Not signed in yet.");
+    gtk_widget_add_css_class (self->playlists_status, "dim-text");
+    gtk_label_set_xalign (GTK_LABEL (self->playlists_status), 0.0);
+    gtk_box_append (GTK_BOX (pl), self->playlists_status);
 
     gtk_stack_add_named (self->page_stack, pl, "playlists");
   }
