@@ -509,6 +509,52 @@ load_op_free (LoadTracksOp *op)
   g_free (op);
 }
 
+/*
+ * Finish everyone who joined the in-flight collection load, and clear the
+ * marker that made them join.
+ *
+ * Every completion path for a collection load has to come through here. The
+ * empty-context path did not, so a collection that resolved to zero tracks
+ * left collection_inflight_uri set with nobody left to clear it: from then on
+ * every load of that URI joined a queue that could never be satisfied, the
+ * tasks piled up unreturned, and the page they belonged to waited forever.
+ *
+ * `tracks` NULL means failure and `message` says why; otherwise each waiter
+ * gets its own copy, since callers own what they receive and some sort it in
+ * place.
+ */
+static void
+collection_drain_waiters (SpotifyNativeSession *self, GPtrArray *tracks,
+                          const gchar *message)
+{
+  g_clear_pointer (&self->collection_inflight_uri, g_free);
+
+  GList *waiters = self->collection_waiters;
+  self->collection_waiters = NULL;
+  if (!waiters)
+    return;
+
+  for (GList *l = waiters; l; l = l->next) {
+    GTask *waiting = l->data;
+    if (tracks) {
+      GPtrArray *copy = g_ptr_array_new_with_free_func (
+        (GDestroyNotify) spotifygtk_native_track_free);
+      for (guint i = 0; i < tracks->len; i++)
+        g_ptr_array_add (copy, spotifygtk_native_track_copy (
+          g_ptr_array_index (tracks, i)));
+      g_task_return_pointer (waiting, copy, (GDestroyNotify) g_ptr_array_unref);
+    } else {
+      g_task_return_new_error (waiting, G_IO_ERROR, G_IO_ERROR_FAILED, "%s",
+                               message ? message : "collection load failed");
+    }
+    g_object_unref (waiting);
+  }
+
+  g_message ("session: satisfied %u joined collection request(s) from the "
+             "same load", g_list_length (waiters));
+  g_list_free (waiters);
+}
+
 /* Hand the accumulated tracks back and finish the task. */
 static void
 load_op_finish (LoadTracksOp *op)
@@ -529,26 +575,16 @@ load_op_finish (LoadTracksOp *op)
       g_ptr_array_add (self->collection_cache,
                        spotifygtk_native_track_copy (g_ptr_array_index (out, i)));
 
-    /* Everyone who joined this load gets their own copy, since callers own
-     * what they receive and some sort it in place. */
-    g_clear_pointer (&self->collection_inflight_uri, g_free);
-    GList *waiters = self->collection_waiters;
-    self->collection_waiters = NULL;
-    for (GList *l = waiters; l; l = l->next) {
-      GTask *waiting = l->data;
-      GPtrArray *copy = g_ptr_array_new_with_free_func (
-        (GDestroyNotify) spotifygtk_native_track_free);
-      for (guint i = 0; i < out->len; i++)
-        g_ptr_array_add (copy, spotifygtk_native_track_copy (g_ptr_array_index (out, i)));
-      g_task_return_pointer (waiting, copy, (GDestroyNotify) g_ptr_array_unref);
-      g_object_unref (waiting);
-    }
-    if (waiters) {
-      g_message ("session: satisfied %u joined collection request(s) from the "
-                 "same load", g_list_length (waiters));
-      g_list_free (waiters);
-    }
   }
+
+  /*
+   * Outside the cache block on purpose: a collection load that returned
+   * nothing still has to release whoever joined it. Guarded on the URI rather
+   * than on `out`, which is what decides whether anyone could have joined in
+   * the first place.
+   */
+  if (op->context_uri && strstr (op->context_uri, ":collection"))
+    collection_drain_waiters (op->session, out, NULL);
 
   g_task_return_pointer (op->task, out, (GDestroyNotify) g_ptr_array_unref);
   g_object_unref (op->task);
@@ -577,17 +613,9 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     }
     /* Fail the joined requests too, or they would wait for a completion that
      * is never coming. */
-    SpotifyNativeSession *sess = op->session;
-    g_clear_pointer (&sess->collection_inflight_uri, g_free);
-    GList *waiters = sess->collection_waiters;
-    sess->collection_waiters = NULL;
-    for (GList *l = waiters; l; l = l->next) {
-      g_task_return_new_error (l->data, G_IO_ERROR, G_IO_ERROR_FAILED,
-        "could not load track metadata: %s",
-        error ? error->message : "no tracks returned");
-      g_object_unref (l->data);
-    }
-    g_list_free (waiters);
+    g_autofree gchar *why = g_strdup_printf ("could not load track metadata: %s",
+      error ? error->message : "no tracks returned");
+    collection_drain_waiters (op->session, NULL, why);
 
     g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_FAILED,
       "could not load track metadata: %s",
@@ -735,6 +763,12 @@ on_context_resolved (JsonNode *context, GError *error, gpointer user_data)
     g_ptr_array_unref (uris);
     GPtrArray *empty = g_ptr_array_new_with_free_func (
       (GDestroyNotify) spotifygtk_native_track_free);
+
+    /* An empty collection is still a completed collection load. Skipping this
+     * is what wedged the marker and stranded every later request. */
+    if (op->context_uri && strstr (op->context_uri, ":collection"))
+      collection_drain_waiters (op->session, empty, NULL);
+
     g_task_return_pointer (op->task, empty, (GDestroyNotify) g_ptr_array_unref);
     g_object_unref (op->task);
     load_op_free (op);
@@ -993,6 +1027,10 @@ spotifygtk_native_session_dispose (GObject *object)
   g_clear_pointer (&self->loop, g_main_loop_unref);
   g_clear_pointer (&self->context, g_main_context_unref);
   g_clear_pointer (&self->caller_context, g_main_context_unref);
+
+  /* Anything still queued behind an in-flight load would otherwise never be
+   * returned, and GTask warns loudly when one is finalized unreturned. */
+  collection_drain_waiters (self, NULL, "the session was shut down");
 
   g_clear_object (&self->mercury);
   g_clear_object (&self->ap);
