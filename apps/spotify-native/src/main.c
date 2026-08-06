@@ -2339,8 +2339,10 @@ on_playlist_head_result (MercuryResponse *response, gpointer user_data)
              G_GUINT64_FORMAT, rev_len, length);
   if (!rev) { playlist_add_free (pa); return; }
 
+  const gchar *literal = g_getenv ("SPOTIFY_PROBE_PLAYLIST_ITEM");
+
   g_autofree gchar *raw = NULL; gsize raw_len = 0;
-  if (!pa->file || !g_file_get_contents (pa->file, &raw, &raw_len, NULL)) {
+  if (!literal && (!pa->file || !g_file_get_contents (pa->file, &raw, &raw_len, NULL))) {
     g_warning ("[playlist-add] no snapshot to read tracks from");
     playlist_add_free (pa);
     return;
@@ -2354,9 +2356,19 @@ on_playlist_head_result (MercuryResponse *response, gpointer user_data)
     pb_write_varint_field (add, 1, 0);            /* from_index */
 
   guint idx = 0, taken = 0;
+
+  /* A single URI given directly, for adding a playlist to the rootlist rather
+   * than tracks to a playlist. */
+  if (literal && *literal) {
+    g_autoptr(GByteArray) item = g_byte_array_new ();
+    pb_write_bytes_field (item, 1, (const guint8 *) literal, strlen (literal));
+    pb_write_message_field (add, 2, item->data, item->len);
+    taken = 1;
+  }
+
   gsize pos = 0;
   const guint8 *d = (const guint8 *) raw;
-  while (pos < raw_len) {
+  while (!literal && pos < raw_len) {
     guint32 fn; PbWireType wt; const guint8 *fd; gsize fl; guint64 fv;
     if (!pb_read_field (d, raw_len, &pos, &fn, &wt, &fd, &fl, &fv)) break;
     if (fn != 1 || wt != PB_WIRE_LENGTH_DELIMITED) continue;
@@ -2388,7 +2400,7 @@ on_playlist_head_result (MercuryResponse *response, gpointer user_data)
     }
     idx++;
   }
-  if (minimal)
+  if (minimal || (literal && *literal))
     pb_write_varint_field (add, 4, 1);            /* add_last */
 
   g_autoptr(GByteArray) op = g_byte_array_new ();
@@ -2406,8 +2418,9 @@ on_playlist_head_result (MercuryResponse *response, gpointer user_data)
   g_message ("[playlist-add] adding %u track(s), ListChanges is %u bytes",
              taken, changes->len);
 
-  g_autofree gchar *curi = g_strdup_printf ("hm://playlist/v2/playlist/%s/changes",
-                                            pa->playlist_id);
+  g_autofree gchar *curi = strstr (pa->playlist_id, "hm://")
+    ? g_strdup_printf ("%s/changes", pa->playlist_id)
+    : g_strdup_printf ("hm://playlist/v2/playlist/%s/changes", pa->playlist_id);
   g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
   spotifygtk_mercury_request_full (engine_mercury, MERCURY_METHOD_SEND, "POST",
                                    curi, body, on_playlist_changes_result, pa);
@@ -2839,7 +2852,9 @@ after_write_probe:
     pa->offset      = o ? (guint) atoi (o) : 0;
     pa->count       = c ? (guint) atoi (c) : 100;
 
-    g_autofree gchar *huri = g_strdup_printf ("hm://playlist/v2/playlist/%s", pl_add);
+    g_autofree gchar *huri = strstr (pl_add, "hm://")
+      ? g_strdup (pl_add)
+      : g_strdup_printf ("hm://playlist/v2/playlist/%s", pl_add);
     g_message ("[playlist-add] reading head of %s", huri);
     spotifygtk_mercury_request (engine_mercury, MERCURY_METHOD_GET, huri, NULL,
                                 on_playlist_head_result, pa);
