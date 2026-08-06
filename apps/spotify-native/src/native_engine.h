@@ -75,4 +75,22 @@ gboolean spotifygtk_native_engine_run (GCancellable *cancellable,
                                        SpotifyNativeEngineControl *control,
                                        const gchar *track_uri);
 
+/*
+ * Add or remove a track from Liked Songs.
+ *
+ * Goes over the collection v2 service on the live AP connection, which is
+ * additive -- it names only what changes. Returns FALSE without doing anything
+ * if there is no session yet: Mercury rides the AP connection, so nothing can
+ * be written before something has played.
+ *
+ * `callback` runs on the engine thread, not the main loop.
+ */
+typedef void (*SpotifyNativeLikeCallback) (gboolean ok, guint16 status,
+                                           gpointer user_data);
+
+gboolean spotifygtk_native_engine_set_track_liked (const gchar *track_uri,
+                                                   gboolean liked,
+                                                   SpotifyNativeLikeCallback callback,
+                                                   gpointer user_data);
+
 G_END_DECLS

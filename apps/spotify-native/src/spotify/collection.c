@@ -308,3 +308,141 @@ spotifygtk_collection_read_page (SpotifyMercury                *mercury,
   spotifygtk_mercury_request (mercury, MERCURY_METHOD_GET, endpoint,
                               payload, on_page_response, ctx);
 }
+
+/* ── collection v2 ───────────────────────────────────────────────────────── */
+
+#define V2_URI_WRITE  "hm://collection/v2/write"
+#define V2_URI_PAGING "hm://collection/v2/paging"
+
+/* CollectionItem, field numbers from the official client's embedded
+ * descriptors: uri = 1, added_at = 2, is_removed = 3. */
+static GByteArray *
+v2_build_write (const gchar *username, const gchar *set,
+                const gchar *const *uris, guint n_uris, gboolean is_removed)
+{
+  GByteArray *body = g_byte_array_new ();
+  pb_write_bytes_field (body, 1, (const guint8 *) username, strlen (username));
+  pb_write_bytes_field (body, 2, (const guint8 *) set, strlen (set));
+
+  gint64 now = (gint64) time (NULL);
+  for (guint i = 0; i < n_uris; i++) {
+    if (!uris[i] || !*uris[i])
+      continue;
+    g_autoptr(GByteArray) item = g_byte_array_new ();
+    pb_write_bytes_field (item, 1, (const guint8 *) uris[i], strlen (uris[i]));
+    pb_write_varint_field (item, 2, (guint64) now);
+    if (is_removed)
+      pb_write_varint_field (item, 3, 1);
+    pb_write_message_field (body, 3, item->data, item->len);
+  }
+
+  /* client_update_id. The server tolerates a random one; the official client
+   * carries the same value in a Collection-Update-Id header. */
+  g_autofree gchar *update_id = g_uuid_string_random ();
+  pb_write_bytes_field (body, 4, (const guint8 *) update_id, strlen (update_id));
+  return body;
+}
+
+static void
+on_v2_write_response (MercuryResponse *response, gpointer user_data)
+{
+  WriteCtx *ctx = user_data;
+  gboolean ok = response && response->status_code >= 200 && response->status_code < 300;
+  if (ctx->callback)
+    ctx->callback (ok, response ? (guint16) response->status_code : 0, ctx->user_data);
+  g_free (ctx);
+}
+
+void
+spotifygtk_collection_v2_write (SpotifyMercury *mercury, const gchar *username,
+                                const gchar *set, const gchar *const *uris,
+                                guint n_uris, gboolean is_removed,
+                                SpotifyCollectionCallback callback, gpointer user_data)
+{
+  g_return_if_fail (mercury != NULL && username != NULL);
+
+  g_autoptr(GByteArray) body =
+    v2_build_write (username, set ? set : SPOTIFYGTK_COLLECTION_SET_LIKED,
+                    uris, n_uris, is_removed);
+  g_autoptr(GBytes) payload = g_bytes_new (body->data, body->len);
+
+  WriteCtx *ctx = g_new0 (WriteCtx, 1);
+  ctx->callback = callback;
+  ctx->user_data = user_data;
+
+  spotifygtk_mercury_set_content_type (mercury, SPOTIFYGTK_COLLECTION_V2_CONTENT_TYPE);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_SEND, "POST",
+                                   V2_URI_WRITE, payload,
+                                   on_v2_write_response, ctx);
+}
+
+/* PageResponse: items = 1 (CollectionItem), next_page_token = 2. */
+static void
+on_v2_page_response (MercuryResponse *response, gpointer user_data)
+{
+  PageCtx *ctx = user_data;
+  gboolean ok = response && response->status_code >= 200 && response->status_code < 300;
+  GArray *out = g_array_new (FALSE, TRUE, sizeof (SpotifyCollectionItem));
+  g_autofree gchar *token = NULL;
+
+  if (ok && response->parts && response->parts->len > 0) {
+    gsize len = 0;
+    const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
+    gsize pos = 0;
+    guint32 fn; PbWireType wt; const guint8 *fd; gsize fl; guint64 fv;
+    while (pb_read_field (d, len, &pos, &fn, &wt, &fd, &fl, &fv)) {
+      if (fn == 1 && wt == PB_WIRE_LENGTH_DELIMITED) {
+        SpotifyCollectionItem item = { 0 };
+        const guint8 *u = NULL; gsize ul = 0; guint64 raw = 0;
+        if (pb_find_bytes_field (fd, fl, 1, &u, &ul))
+          item.uri = g_strndup ((const gchar *) u, ul);
+        if (pb_find_varint_field (fd, fl, 2, &raw))
+          item.added_at = (gint32) raw;
+        if (pb_find_varint_field (fd, fl, 3, &raw))
+          item.is_removed = (raw != 0);
+        if (item.uri)
+          g_array_append_val (out, item);
+        else
+          g_free (item.uri);
+      } else if (fn == 2 && wt == PB_WIRE_LENGTH_DELIMITED) {
+        token = g_strndup ((const gchar *) fd, fl);
+      }
+    }
+  }
+
+  if (ctx->callback)
+    ctx->callback (ok, response ? (guint16) response->status_code : 0,
+                   (SpotifyCollectionItem *) out->data, out->len, token, ctx->user_data);
+
+  for (guint i = 0; i < out->len; i++)
+    g_free (g_array_index (out, SpotifyCollectionItem, i).uri);
+  g_array_free (out, TRUE);
+  g_free (ctx);
+}
+
+void
+spotifygtk_collection_v2_read_page (SpotifyMercury *mercury, const gchar *username,
+                                    const gchar *set, const gchar *pagination_token,
+                                    gint32 limit,
+                                    SpotifyCollectionPageCallback callback,
+                                    gpointer user_data)
+{
+  g_return_if_fail (mercury != NULL && username != NULL);
+
+  g_autoptr(GByteArray) body =
+    spotifygtk_collection_build_page_request (username,
+                                              set ? set : SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                              pagination_token, limit);
+  if (!body)
+    return;
+  g_autoptr(GBytes) payload = g_bytes_new (body->data, body->len);
+
+  PageCtx *ctx = g_new0 (PageCtx, 1);
+  ctx->callback = callback;
+  ctx->user_data = user_data;
+
+  spotifygtk_mercury_set_content_type (mercury, SPOTIFYGTK_COLLECTION_V2_CONTENT_TYPE);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_SEND, "POST",
+                                   V2_URI_PAGING, payload,
+                                   on_v2_page_response, ctx);
+}

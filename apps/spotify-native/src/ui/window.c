@@ -35,6 +35,7 @@
 #include "track_list.h"
 
 #include "../player_service.h"
+#include "../native_engine.h"
 #include "../spotify/session.h"
 
 #include <string.h>
@@ -67,6 +68,11 @@ struct _SpotifyGtkNativeWindow {
 
   /* Pages */
   GtkStack *page_stack;
+  /* Every track list wired through wire_track_list(), so a liked mark can be
+   * fanned out to all of them: one track can be on screen in more than one
+   * list at a time. Borrowed -- the lists belong to their pages. */
+  GPtrArray *track_lists;
+
   SpotifyGtkHomePage *home_page;
   SpotifyGtkSearchPage *search_page;
   SpotifyGtkLikedSongsPage *liked_page;
@@ -338,6 +344,98 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
     play_native_track (self, track);   /* not found in snapshot; play it alone */
 }
 
+
+/*
+ * Apply a liked mark to every list that might be showing the track. The window
+ * keeps several -- album, playlist, search, liked -- and a track can appear in
+ * more than one at a time, so this fans out rather than guessing which is
+ * frontmost.
+ */
+static void
+set_row_liked_for_uri (SpotifyGtkNativeWindow *self, const gchar *uri, gboolean liked)
+{
+  for (guint i = 0; self->track_lists && i < self->track_lists->len; i++)
+    spotifygtk_track_list_set_liked_uri (g_ptr_array_index (self->track_lists, i),
+                                         uri, liked);
+}
+
+/*
+ * Liked Songs, from the row context menu.
+ *
+ * The write goes over collection v2, which is additive -- it names one track
+ * and leaves the rest alone. The row indicator is updated straight away rather
+ * than waiting for the round trip: the write is a delta the server accepts or
+ * refuses outright, and a heart that lags a click by 200ms reads as broken.
+ * A refusal puts it back.
+ */
+typedef struct {
+  SpotifyGtkNativeWindow *window;
+  gchar                  *uri;
+  gboolean                liked;
+} LikeUiCtx;
+
+static gboolean
+like_result_to_ui (gpointer data)
+{
+  LikeUiCtx *ctx = data;
+  /* Only reached when the write failed: revert the optimistic update. */
+  set_row_liked_for_uri (ctx->window, ctx->uri, !ctx->liked);
+  g_free (ctx->uri);
+  g_free (ctx);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_like_write_done (gboolean ok, guint16 status, gpointer user_data)
+{
+  LikeUiCtx *ctx = user_data;
+  if (ok) {
+    g_free (ctx->uri);
+    g_free (ctx);
+    return;
+  }
+  g_warning ("collection write refused (status %u); reverting", status);
+  g_idle_add (like_result_to_ui, ctx);   /* back to the main loop to touch widgets */
+}
+
+static void
+list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked)
+{
+  const SpotifyNativeTrack *track = track_ptr;
+  if (!track || !track->uri)
+    return;
+
+  set_row_liked_for_uri (self, track->uri, liked);
+
+  LikeUiCtx *ctx = g_new0 (LikeUiCtx, 1);
+  ctx->window = self;
+  ctx->uri    = g_strdup (track->uri);
+  ctx->liked  = liked;
+
+  if (!spotifygtk_native_engine_set_track_liked (track->uri, liked,
+                                                 on_like_write_done, ctx)) {
+    /* No session yet -- undo the optimistic change rather than leave the UI
+     * asserting something that never reached the server. */
+    set_row_liked_for_uri (self, track->uri, !liked);
+    g_free (ctx->uri);
+    g_free (ctx);
+  }
+}
+
+static void
+on_list_add_to_liked (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
+{
+  (void) list;
+  list_set_liked (user_data, track_ptr, TRUE);
+}
+
+static void
+on_list_remove_from_liked (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
+{
+  (void) list;
+  list_set_liked (user_data, track_ptr, FALSE);
+}
+
 static void
 on_list_add_to_queue (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
 {
@@ -414,10 +512,17 @@ wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
 {
   if (!list)
     return;
+  if (!self->track_lists)
+    self->track_lists = g_ptr_array_new ();
+  if (!g_ptr_array_find (self->track_lists, list, NULL))
+    g_ptr_array_add (self->track_lists, list);
+
   g_signal_connect (list, "track-activated", G_CALLBACK (on_list_track_activated), self);
   g_signal_connect (list, "add-to-queue",    G_CALLBACK (on_list_add_to_queue),    self);
   g_signal_connect (list, "go-to-album",     G_CALLBACK (on_list_go_to_album),     self);
   g_signal_connect (list, "go-to-artist",    G_CALLBACK (on_list_go_to_artist),    self);
+  g_signal_connect (list, "add-to-liked",      G_CALLBACK (on_list_add_to_liked),      self);
+  g_signal_connect (list, "remove-from-liked", G_CALLBACK (on_list_remove_from_liked), self);
 }
 
 /* === Sidebar callbacks === */
