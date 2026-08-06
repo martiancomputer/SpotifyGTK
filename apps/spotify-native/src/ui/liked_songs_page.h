@@ -22,6 +22,9 @@ SpotifyGtkLikedSongsPage *spotifygtk_liked_songs_page_new (void);
 
 void spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
                                               SpotifyNativeSession     *session);
+/* Force the next refresh to refetch, after the collection has changed. */
+void spotifygtk_liked_songs_page_invalidate (SpotifyGtkLikedSongsPage *self);
+
 void spotifygtk_liked_songs_page_refresh (SpotifyGtkLikedSongsPage *self);
 
 /* The track list, for play-context and the row context menu — see

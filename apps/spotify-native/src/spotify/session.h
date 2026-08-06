@@ -38,6 +38,7 @@
 
 #include <gio/gio.h>
 #include <glib-object.h>
+#include "mercury.h"
 
 G_BEGIN_DECLS
 
@@ -92,6 +93,17 @@ gchar *spotifygtk_native_session_dup_username (SpotifyNativeSession *self);
 /* Build the liked-songs context URI for the signed-in user, or NULL if
  * the session is not READY yet. */
 gchar *spotifygtk_native_session_dup_collection_uri (SpotifyNativeSession *self);
+
+/*
+ * Mercury on this session's AP connection, created on first use.
+ *
+ * The engine builds its own for the duration of a track, which meant anything
+ * needing Mercury -- reading Liked Songs, writing one -- could not happen until
+ * something had played. This one exists from sign-in.
+ *
+ * NULL before the session is READY. Owned by the session.
+ */
+SpotifyMercury *spotifygtk_native_session_get_mercury (SpotifyNativeSession *self);
 
 /*
  * Resolve a context URI to renderable tracks (both round trips).
