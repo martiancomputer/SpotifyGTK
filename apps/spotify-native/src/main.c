@@ -62,6 +62,7 @@
 #include "spotify/cdn.h"
 #include "spotify/mercury.h"
 #include "spotify/collection.h"
+#include "spotify/playlist.h"
 #include "spotify/protobuf_min.h"
 #include "audio/decoder.h"
 #include "audio/dsp.h"
