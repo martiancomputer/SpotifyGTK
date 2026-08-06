@@ -43,6 +43,21 @@ struct _SpotifyGtkEqGraph {
   GtkDrawingArea parent_instance;
 
   gdouble gains[SPOTIFYGTK_EQ_BANDS];
+
+  /*
+   * The grid, its labels and the panel behind them do not change while a
+   * handle is dragged, but they were redrawn on every motion event -- including
+   * every label through cairo's toy text API, which re-resolves a font each
+   * call. Rendered once into a surface and blitted instead, so a drag costs the
+   * curve and nothing else.
+   */
+  cairo_surface_t *bg;
+  gint             bg_w, bg_h;
+
+  /* Frequency per pixel column. Depends only on width, so it is not rebuilt
+   * with the curve. */
+  gdouble *freqs;
+  gint     freqs_len;
   gint    active_band;      /* -1 when not dragging */
   gint    hover_band;       /* -1 when the pointer is away */
   gdouble drag_start_y;
@@ -114,15 +129,31 @@ rebuild_curve (SpotifyGtkEqGraph *self, gdouble w)
     self->curve_len = n;
   }
 
-  g_autofree gdouble *freqs = g_new (gdouble, n);
-  for (gint i = 0; i < n; i++)
-    freqs[i] = x_to_freq (PAD_L + i, w);
+  if (self->freqs_len != n) {
+    g_free (self->freqs);
+    self->freqs = g_new (gdouble, n);
+    for (gint i = 0; i < n; i++)
+      self->freqs[i] = x_to_freq (PAD_L + i, w);
+    self->freqs_len = n;
+  }
 
-  spotifygtk_eq_response_curve (self->gains, DISPLAY_RATE, freqs, self->curve, n);
+  spotifygtk_eq_response_curve (self->gains, DISPLAY_RATE, self->freqs,
+                                self->curve, n);
   self->curve_dirty = FALSE;
 }
 
 /* --- drawing --- */
+
+static void
+rounded_rect (cairo_t *cr, gdouble x, gdouble y, gdouble w, gdouble h, gdouble r)
+{
+  cairo_new_sub_path (cr);
+  cairo_arc (cr, x + w - r, y + r,     r, -G_PI / 2, 0);
+  cairo_arc (cr, x + w - r, y + h - r, r, 0,          G_PI / 2);
+  cairo_arc (cr, x + r,     y + h - r, r, G_PI / 2,   G_PI);
+  cairo_arc (cr, x + r,     y + r,     r, G_PI,       1.5 * G_PI);
+  cairo_close_path (cr);
+}
 
 static void
 draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data)
@@ -144,42 +175,64 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   gtk_widget_get_color (GTK_WIDGET (area), &fg);
   const gdouble ar = 0.114, ag = 0.725, ab = 0.329;   /* @accent #1db954 */
 
-  cairo_select_font_face (cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size (cr, 10.0);
-  cairo_set_line_width (cr, 1.0);
+  /* Static layer: panel, grid and labels. Redrawn only when the size changes. */
+  if (!self->bg || self->bg_w != width || self->bg_h != height) {
+    g_clear_pointer (&self->bg, cairo_surface_destroy);
+    self->bg = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, width, height);
+    self->bg_w = width; self->bg_h = height;
 
-  /* Frequency guides: decades bright, the labelled bands faint. */
-  for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b += 2) {
-    gdouble x = freq_to_x (spotifygtk_eq_frequencies[b], w);
-    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.07);
-    cairo_move_to (cr, x, plot_top);
-    cairo_line_to (cr, x, plot_bot);
-    cairo_stroke (cr);
+    cairo_t *bc = cairo_create (self->bg);
+    cairo_select_font_face (bc, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size (bc, 10.0);
+    cairo_set_line_width (bc, 1.0);
 
-    g_autofree gchar *lbl = freq_label (spotifygtk_eq_frequencies[b]);
-    cairo_text_extents_t ext;
-    cairo_text_extents (cr, lbl, &ext);
-    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.45);
-    cairo_move_to (cr, x - ext.width / 2.0, h - 8.0);
-    cairo_show_text (cr, lbl);
+    /* A recessed plot area, the way a mixing EQ reads: the curve sits inside a
+     * darker well rather than floating on the page. */
+    cairo_set_source_rgba (bc, 0, 0, 0, 0.22);
+    rounded_rect (bc, x0, plot_top, x1 - x0, plot_bot - plot_top, 6.0);
+    cairo_fill (bc);
+
+    /* Decade lines carry the eye; the intermediate bands are hints. */
+    for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++) {
+      gdouble f = spotifygtk_eq_frequencies[b];
+      gdouble x = freq_to_x (f, w);
+      gboolean decade = (b % 2) == 0;
+      cairo_set_source_rgba (bc, fg.red, fg.green, fg.blue, decade ? 0.10 : 0.045);
+      cairo_move_to (bc, x, plot_top);
+      cairo_line_to (bc, x, plot_bot);
+      cairo_stroke (bc);
+
+      if (!decade)
+        continue;
+      g_autofree gchar *lbl = freq_label (f);
+      cairo_text_extents_t ext;
+      cairo_text_extents (bc, lbl, &ext);
+      cairo_set_source_rgba (bc, fg.red, fg.green, fg.blue, 0.42);
+      cairo_move_to (bc, x - ext.width / 2.0, h - 8.0);
+      cairo_show_text (bc, lbl);
+    }
+
+    for (gdouble db = EQ_MIN_DB; db <= EQ_MAX_DB + 0.1; db += 6.0) {
+      gdouble y = db_to_y (db, h);
+      gboolean zero = fabs (db) < 0.001;
+      cairo_set_source_rgba (bc, fg.red, fg.green, fg.blue, zero ? 0.30 : 0.085);
+      cairo_set_line_width (bc, zero ? 1.4 : 1.0);
+      cairo_move_to (bc, x0, y);
+      cairo_line_to (bc, x1, y);
+      cairo_stroke (bc);
+
+      g_autofree gchar *lbl = g_strdup_printf ("%+g", db);
+      cairo_text_extents_t ext;
+      cairo_text_extents (bc, lbl, &ext);
+      cairo_set_source_rgba (bc, fg.red, fg.green, fg.blue, 0.42);
+      cairo_move_to (bc, PAD_L - 8.0 - ext.width, y + 3.5);
+      cairo_show_text (bc, lbl);
+    }
+    cairo_destroy (bc);
   }
 
-  /* dB gridlines, 0 dB emphasised, labels right-aligned in the gutter. */
-  for (gdouble db = EQ_MIN_DB; db <= EQ_MAX_DB + 0.1; db += 6.0) {
-    gdouble y = db_to_y (db, h);
-    gboolean zero = fabs (db) < 0.001;
-    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, zero ? 0.28 : 0.10);
-    cairo_move_to (cr, x0, y);
-    cairo_line_to (cr, x1, y);
-    cairo_stroke (cr);
-
-    g_autofree gchar *lbl = g_strdup_printf ("%+g", db);
-    cairo_text_extents_t ext;
-    cairo_text_extents (cr, lbl, &ext);
-    cairo_set_source_rgba (cr, fg.red, fg.green, fg.blue, 0.45);
-    cairo_move_to (cr, PAD_L - 8.0 - ext.width, y + 3.5);
-    cairo_show_text (cr, lbl);
-  }
+  cairo_set_source_surface (cr, self->bg, 0, 0);
+  cairo_paint (cr);
 
   /* Clip so the fill and curve cannot bleed into the label gutters. */
   cairo_save (cr);
@@ -210,15 +263,40 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   cairo_fill (cr);
   cairo_pattern_destroy (grad);
 
+  /* A soft wide pass under a crisp one: the curve glows the way a plugin's
+   * response trace does, instead of reading as a flat vector line. */
+  cairo_new_path (cr);
+  cairo_append_path (cr, curve);
+  cairo_set_source_rgba (cr, ar, ag, ab, 0.18);
+  cairo_set_line_width (cr, 6.0);
+  cairo_set_line_join (cr, CAIRO_LINE_JOIN_ROUND);
+  cairo_stroke (cr);
+
   cairo_new_path (cr);
   cairo_append_path (cr, curve);
   cairo_path_destroy (curve);
-  cairo_set_source_rgba (cr, ar, ag, ab, 0.95);
+  cairo_set_source_rgba (cr, ar, ag, ab, 0.98);
   cairo_set_line_width (cr, 2.0);
   cairo_set_line_join (cr, CAIRO_LINE_JOIN_ROUND);
   cairo_stroke (cr);
 
   cairo_restore (cr);
+
+  /* A guide down the band being touched, so the frequency being changed is
+   * unambiguous while dragging. */
+  gint focus = self->active_band >= 0 ? self->active_band : self->hover_band;
+  if (focus >= 0 && focus < SPOTIFYGTK_EQ_BANDS) {
+    gdouble fx = freq_to_x (spotifygtk_eq_frequencies[focus], w);
+    cairo_save (cr);
+    cairo_rectangle (cr, x0, plot_top, x1 - x0, plot_bot - plot_top);
+    cairo_clip (cr);
+    cairo_set_source_rgba (cr, ar, ag, ab, 0.22);
+    cairo_set_line_width (cr, 1.0);
+    cairo_move_to (cr, fx, plot_top);
+    cairo_line_to (cr, fx, plot_bot);
+    cairo_stroke (cr);
+    cairo_restore (cr);
+  }
 
   /* Handles sit on the curve at each band centre. */
   for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++) {
@@ -237,6 +315,28 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
     cairo_arc (cr, x, y, r, 0, 2 * G_PI);
     cairo_stroke (cr);
   }
+  /* Numeric readout for the focused band. A curve says the shape; the number
+   * says what was actually set, which is the thing a mix decision needs. */
+  if (focus >= 0 && focus < SPOTIFYGTK_EQ_BANDS) {
+    g_autofree gchar *fl = freq_label (spotifygtk_eq_frequencies[focus]);
+    g_autofree gchar *txt =
+      g_strdup_printf ("%s   %+.1f dB", fl, self->gains[focus]);
+
+    cairo_select_font_face (cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size (cr, 11.0);
+    cairo_text_extents_t ext;
+    cairo_text_extents (cr, txt, &ext);
+
+    gdouble bx = x1 - ext.width - 12.0, by = plot_top + 8.0;
+    cairo_set_source_rgba (cr, 0, 0, 0, 0.45);
+    rounded_rect (cr, bx - 7.0, by - 2.0, ext.width + 14.0, ext.height + 10.0, 4.0);
+    cairo_fill (cr);
+
+    cairo_set_source_rgba (cr, ar, ag, ab, 1.0);
+    cairo_move_to (cr, bx, by + ext.height + 2.0);
+    cairo_show_text (cr, txt);
+  }
+
   (void) data;
 }
 
@@ -346,6 +446,8 @@ static void
 spotifygtk_eq_graph_finalize (GObject *object)
 {
   SpotifyGtkEqGraph *self = SPOTIFYGTK_EQ_GRAPH (object);
+  g_clear_pointer (&self->bg, cairo_surface_destroy);
+  g_clear_pointer (&self->freqs, g_free);
   g_clear_pointer (&self->curve, g_free);
   G_OBJECT_CLASS (spotifygtk_eq_graph_parent_class)->finalize (object);
 }

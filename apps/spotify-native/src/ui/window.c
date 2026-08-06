@@ -80,6 +80,15 @@ struct _SpotifyGtkNativeWindow {
   /* Every liked track URI, read at sign-in. The lists keep their own copies
    * for the rows they show; this is the authority. */
   GHashTable *liked_uris;
+
+  /*
+   * The set under construction while a read is in flight. The live set is only
+   * replaced once the last page lands: clearing it up front left it empty for
+   * the length of the read -- ten round trips on a large library -- during
+   * which every heart read unliked and every menu offered "Add".
+   */
+  GHashTable *liked_building;
+  gint64      last_local_write_us;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
   guint collection_change_id;            /* coalesces change events */
@@ -388,6 +397,9 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
  */
 #define COLLECTION_CHANGE_SETTLE_MS 2000
 
+/* How long after our own write an incoming change is assumed to be its echo. */
+#define LOCAL_WRITE_GRACE_US (8 * G_TIME_SPAN_SECOND)
+
 static gboolean
 on_collection_settled (gpointer user_data)
 {
@@ -400,6 +412,23 @@ on_collection_settled (gpointer user_data)
    * and their art to reflect a single addition, and the page is marked stale
    * so the next visit pays for it only if there is someone to see it.
    */
+  /*
+   * Skip the re-read when this change was ours. Our own write already updated
+   * the set and the rows, so re-reading the whole collection to learn it costs
+   * ten round trips to arrive back where we started -- and every like fires
+   * this, because the subscription cannot tell whose change it is.
+   *
+   * An external change inside the same window is missed and picked up by the
+   * next event or the next sign-in, which is a fair trade against making every
+   * like re-read the library.
+   */
+  gint64 since = g_get_monotonic_time () - self->last_local_write_us;
+  if (self->last_local_write_us != 0 && since < LOCAL_WRITE_GRACE_US) {
+    if (self->liked_page)
+      spotifygtk_liked_songs_page_invalidate (self->liked_page);
+    return G_SOURCE_REMOVE;
+  }
+
   spotifygtk_native_window_reload_liked (self);
   if (self->liked_page)
     spotifygtk_liked_songs_page_invalidate (self->liked_page);
@@ -473,6 +502,19 @@ liked_page_to_ui (gpointer data)
   if (r->next && *r->next)
     liked_fetch_page (self, r->next);
   else {
+    /*
+     * Swap, do not merge. A track unliked elsewhere has to disappear from the
+     * set, and only a wholesale replacement expresses that -- but the old set
+     * stays live until this instant, so nothing ever observes a partial one.
+     */
+    if (self->liked_building) {
+      GHashTable *old = self->liked_uris;
+      self->liked_uris = g_steal_pointer (&self->liked_building);
+      for (guint li = 0; self->track_lists && li < self->track_lists->len; li++)
+        spotifygtk_track_list_set_liked_set (
+          g_ptr_array_index (self->track_lists, li), self->liked_uris);
+      g_hash_table_unref (old);
+    }
     g_message ("liked: %u track(s) known", g_hash_table_size (self->liked_uris));
     /*
      * Armed only now. Before the read completes an empty set means "not yet
@@ -512,7 +554,8 @@ on_liked_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
   for (guint i = 0; i < n_items; i++) {
     if (!items[i].uri || items[i].is_removed)
       continue;
-    g_hash_table_add (self->liked_uris, g_strdup (items[i].uri));
+    g_hash_table_add (self->liked_building ? self->liked_building : self->liked_uris,
+                      g_strdup (items[i].uri));
   }
 
   /* The read runs off the main loop; widgets are only touched from it. */
@@ -540,7 +583,10 @@ static void
 spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_NATIVE_WINDOW (self));
-  g_hash_table_remove_all (self->liked_uris);
+
+  g_clear_pointer (&self->liked_building, g_hash_table_unref);
+  self->liked_building = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                g_free, NULL);
   liked_fetch_page (self, NULL);
 }
 
@@ -692,6 +738,8 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
     g_free (ctx);
     return;
   }
+
+  self->last_local_write_us = g_get_monotonic_time ();
 
   const gchar *uris[] = { track->uri };
   spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
