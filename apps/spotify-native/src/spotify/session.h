@@ -84,6 +84,15 @@ SpotifyNativeSession *spotifygtk_native_session_new (void);
  */
 void spotifygtk_native_session_start (SpotifyNativeSession *self);
 
+/*
+ * Drop the connection and sign in again.
+ *
+ * start() returns early once its thread exists, so there was no way back from
+ * a dropped AP link: everything riding on it failed silently for the life of
+ * the process.
+ */
+void spotifygtk_native_session_reconnect (SpotifyNativeSession *self);
+
 SpotifyNativeSessionState spotifygtk_native_session_get_state (SpotifyNativeSession *self);
 
 /* Canonical username from APWelcome. NULL until the session is READY.

@@ -17,6 +17,13 @@ is_nightly      = (profile == 'nightly')
 enable_pipewire = get_option('enable_pipewire')
 enable_gui      = get_option('enable_gui')
 
+# Diagnostics that were previously added to chase a bug and then stripped out
+# again, which meant the next bug started from nothing. They stay in the source
+# and compile away unless asked for.
+if get_option('verbose_logging')
+  add_project_arguments('-DSPOTIFYGTK_VERBOSE', language: 'c')
+endif
+
 # ── Core dependencies ────────────────────────────────────────────────────────
 glib_dep       = dependency('glib-2.0',      version: '>= 2.76')
 gio_dep        = dependency('gio-2.0',       version: '>= 2.76')

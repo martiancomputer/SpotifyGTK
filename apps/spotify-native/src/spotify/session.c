@@ -343,6 +343,9 @@ on_ap_login_result (gboolean success, const gchar *username,
 #define AP_CONNECT_MAX_ATTEMPTS 4
 
 static void on_ap_connected (GObject *source, GAsyncResult *result, gpointer user_data);
+static gboolean begin_signin (gpointer user_data);
+static void collection_drain_waiters (SpotifyNativeSession *self,
+                                      GPtrArray *tracks, const gchar *message);
 
 static gboolean
 retry_ap_connect (gpointer user_data)
@@ -467,6 +470,29 @@ session_thread (gpointer user_data)
 
   g_main_context_pop_thread_default (self->context);
   return NULL;
+}
+
+/*
+ * Tear the connection down and start it again.
+ *
+ * The session had no path back from a dropped AP link: start() returns early
+ * once a thread exists, so calling it again did nothing. Mercury is dropped
+ * with the connection because it rides on it and would otherwise keep sending
+ * into a closed socket.
+ */
+void
+spotifygtk_native_session_reconnect (SpotifyNativeSession *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+
+  g_clear_object (&self->mercury);
+  g_clear_object (&self->ap);
+
+  /* Anything queued behind a load that will never finish. */
+  collection_drain_waiters (self, NULL, "the connection was lost");
+
+  if (self->context)
+    g_main_context_invoke (self->context, begin_signin, self);
 }
 
 void
@@ -966,8 +992,25 @@ spotifygtk_native_session_get_mercury (SpotifyNativeSession *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self), NULL);
 
-  /* Only once the AP handshake and login are through: Mercury rides that
-   * connection and has nothing to send on before then. */
+  /*
+   * Only once the AP handshake and login are through: Mercury rides that
+   * connection and has nothing to send on before then.
+   *
+   * A dropped connection used to be permanent. Nothing here watched for one
+   * and nothing reconnected, so once the AP went away this returned NULL for
+   * the rest of the process and every write that depended on it failed
+   * silently -- "cannot change Liked Songs: not signed in yet", repeatedly,
+   * with no request ever leaving. Noticing it here is the earliest point that
+   * anything asks.
+   */
+  if (self->ap && !spotifygtk_ap_session_is_live (self->ap) &&
+      self->state == SPOTIFYGTK_SESSION_READY) {
+    g_warning ("session: the AP connection is gone; reconnecting");
+    set_state (self, SPOTIFYGTK_SESSION_CONNECTING, "Reconnecting…");
+    spotifygtk_native_session_reconnect (self);
+    return NULL;
+  }
+
   if (!self->ap || !spotifygtk_ap_session_is_live (self->ap))
     return NULL;
 

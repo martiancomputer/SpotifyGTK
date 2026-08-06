@@ -6,6 +6,7 @@
  */
 
 #include "collection.h"
+#include "../log_verbose.h"
 #include "track_meta.h"
 #include "protobuf_min.h"
 
@@ -348,6 +349,8 @@ on_v2_write_response (MercuryResponse *response, gpointer user_data)
 {
   WriteCtx *ctx = user_data;
   gboolean ok = response && response->status_code >= 200 && response->status_code < 300;
+  SPOTIFYGTK_DEBUG ("collection v2: write -> status %d",
+                    response ? response->status_code : -1);
   if (ctx->callback)
     ctx->callback (ok, response ? (guint16) response->status_code : 0, ctx->user_data);
   g_free (ctx);
@@ -370,6 +373,8 @@ spotifygtk_collection_v2_write (SpotifyMercury *mercury, const gchar *username,
   ctx->callback = callback;
   ctx->user_data = user_data;
 
+  SPOTIFYGTK_DEBUG ("collection v2: POST %s, %u item(s), is_removed=%d",
+                    V2_URI_WRITE, n_uris, is_removed);
   spotifygtk_mercury_set_content_type (mercury, SPOTIFYGTK_COLLECTION_V2_CONTENT_TYPE);
   spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_SEND, "POST",
                                    V2_URI_WRITE, payload,
