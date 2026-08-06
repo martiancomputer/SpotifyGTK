@@ -503,6 +503,29 @@ spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self, JsonObject *track_data
   g_free (dur);
 }
 
+/*
+ * The row's ordinal. Split out from set_native_track() because in a numbered
+ * list the number is a property of the row's position, not of the track: a
+ * removal renumbers everything below it without any of those tracks changing.
+ */
+void
+spotifygtk_track_row_set_number (SpotifyGtkTrackRow *self, gint track_number)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+
+  if (track_number > 0) {
+    g_autofree gchar *num_text = g_strdup_printf ("%d", track_number);
+    gtk_label_set_text (self->track_num, num_text);
+    gtk_widget_set_visible (GTK_WIDGET (self->track_num), TRUE);
+    gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
+  } else {
+    /* No number: hide the column entirely rather than leaving a blank 24px
+     * indent, which made unnumbered lists sit further right than numbered
+     * ones. */
+    gtk_widget_set_visible (GTK_WIDGET (self->track_num), FALSE);
+  }
+}
+
 void
 spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
                                        const SpotifyNativeTrack *track,
@@ -523,14 +546,7 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
   gtk_label_set_text (self->artist_label, track->artists ? track->artists : "");
   gtk_label_set_text (self->album_label, track->album ? track->album : "");
 
-  if (track_number > 0) {
-    g_autofree gchar *num_text = g_strdup_printf ("%d", track_number);
-    gtk_label_set_text (self->track_num, num_text);
-    gtk_widget_set_visible (GTK_WIDGET (self->track_num), TRUE);
-    gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
-  } else {
-    gtk_widget_set_visible (GTK_WIDGET (self->track_num), FALSE);
-  }
+  spotifygtk_track_row_set_number (self, track_number);
 
   gint total_secs = (gint) (track->duration_ms / 1000);
   g_autofree gchar *dur = g_strdup_printf ("%d:%02d", total_secs / 60, total_secs % 60);

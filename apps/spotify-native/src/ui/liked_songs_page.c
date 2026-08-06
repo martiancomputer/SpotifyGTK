@@ -588,6 +588,35 @@ spotifygtk_liked_songs_page_invalidate (SpotifyGtkLikedSongsPage *self)
  * list is numbered, so inserting at the top renumbers everything below it
  * anyway.
  */
+/*
+ * Where `target` sits among the rows currently on screen, or -1 if the filter
+ * is hiding it. Walks the sorted order applying the same test apply_filter()
+ * does, so the answer is an index into the visible list rather than into
+ * all_tracks.
+ */
+static gint
+visible_index_of (SpotifyGtkLikedSongsPage *self, const SpotifyNativeTrack *target)
+{
+  if (!self->sorted_tracks)
+    return -1;
+
+  const gchar *query     = gtk_editable_get_text (GTK_EDITABLE (self->filter_entry));
+  gboolean     filtering = query && *query;
+  g_autofree gchar *cf   = filtering ? g_utf8_casefold (query, -1) : NULL;
+  g_auto(GStrv) terms    = filtering ? g_strsplit (cf, " ", -1) : NULL;
+
+  gint visible = 0;
+  for (guint i = 0; i < self->sorted_tracks->len; i++) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (self->sorted_tracks, i);
+    if (filtering && !track_matches (self, t, (const gchar *const *) terms))
+      continue;
+    if (t == target)
+      return visible;
+    visible++;
+  }
+  return -1;
+}
+
 static gint
 find_track_index (SpotifyGtkLikedSongsPage *self, const gchar *uri)
 {
@@ -641,8 +670,16 @@ spotifygtk_liked_songs_page_add_track (SpotifyGtkLikedSongsPage *self,
   g_ptr_array_insert (self->all_tracks, 0, copy);
   index_one_track (self, copy);
 
+  /* Resort so the new track lands wherever the current key puts it -- cheap,
+   * since it touches pointers and no widgets. */
   rebuild_sorted (self);
-  apply_filter (self);
+
+  /* Then splice in just its row. A full apply_filter() here would rebuild
+   * every row and lose the scroll position. -1 means the filter hides it, in
+   * which case there is no row to add. */
+  gint at = visible_index_of (self, copy);
+  if (at >= 0)
+    spotifygtk_track_list_insert_native_track (self->list, (guint) at, copy);
 }
 
 void
@@ -659,15 +696,30 @@ spotifygtk_liked_songs_page_remove_track (SpotifyGtkLikedSongsPage *self,
   if (at < 0)
     return;
 
-  /* Drop the index entries first: they are keyed by the track pointer, which
-   * the removal is about to free. */
   SpotifyNativeTrack *t = g_ptr_array_index (self->all_tracks, at);
+
+  /* Before anything is torn down: the lookup needs the sort order and the
+   * indexes still intact, both of which are about to change. */
+  gint visible = visible_index_of (self, t);
+
+  /* remove(), not remove_fast(): the fast one swaps the last element into the
+   * hole, which would silently scramble the sort order. Borrowed pointers, so
+   * nothing is freed here. */
+  if (self->sorted_tracks)
+    g_ptr_array_remove (self->sorted_tracks, t);
+
+  /* Index entries are keyed by the track pointer, which the removal frees. */
   if (self->haystacks)    g_hash_table_remove (self->haystacks, t);
   if (self->collate_keys) g_hash_table_remove (self->collate_keys, t);
   g_ptr_array_remove_index (self->all_tracks, at);
 
-  rebuild_sorted (self);
-  apply_filter (self);
+  if (visible >= 0)
+    spotifygtk_track_list_remove_position (self->list, (guint) visible);
+
+  /* Emptied by that removal: apply_filter is what knows which message to show,
+   * and rebuilding nothing costs nothing. */
+  if (self->sorted_tracks && self->sorted_tracks->len == 0)
+    apply_filter (self);
 }
 
 void

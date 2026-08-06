@@ -218,6 +218,19 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
 /* === Factory === */
 
 static void
+on_list_item_position (GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+  GtkListItem         *list_item = GTK_LIST_ITEM (object);
+  SpotifyGtkTrackList *self      = user_data;
+  GtkWidget           *child     = gtk_list_item_get_child (list_item);
+  (void) pspec;
+
+  if (self->numbered && SPOTIFYGTK_IS_TRACK_ROW (child))
+    spotifygtk_track_row_set_number (SPOTIFYGTK_TRACK_ROW (child),
+                                     (gint) gtk_list_item_get_position (list_item) + 1);
+}
+
+static void
 factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
   GtkWidget *row = GTK_WIDGET (spotifygtk_track_row_new ());
@@ -229,6 +242,15 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (click), GDK_BUTTON_SECONDARY);
   g_signal_connect (click, "pressed", G_CALLBACK (on_row_secondary_pressed), user_data);
   gtk_widget_add_controller (row, GTK_EVENT_CONTROLLER (click));
+
+  /*
+   * A row whose position shifts under a splice is not re-bound by GTK -- the
+   * same item is still there, just further up -- so the number has to follow
+   * the property. Connected here rather than in bind: the list item is pooled,
+   * so a per-bind connect would stack up a handler per recycle.
+   */
+  g_signal_connect (list_item, "notify::position",
+                    G_CALLBACK (on_list_item_position), user_data);
 
   gtk_list_item_set_child (list_item, row);
   (void) factory;
@@ -254,6 +276,7 @@ on_row_play_clicked (SpotifyGtkTrackRow *row, gpointer user_data)
                    (gpointer) spotifygtk_track_item_get_track (item));
 }
 
+
 static void
 factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
@@ -264,9 +287,18 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   if (!g_ptr_array_find (self->bound_rows, row, NULL))
     g_ptr_array_add (self->bound_rows, row);
 
+  /*
+   * Number from the position in the model, not from the item.
+   *
+   * The item's number is fixed when the list is built, so it only stays right
+   * as long as nothing is ever inserted or removed. Deriving it here means a
+   * single-row splice renumbers correctly, which is what lets an unlike remove
+   * one row instead of rebuilding the whole list.
+   */
   spotifygtk_track_row_set_native_track (row,
-    spotifygtk_track_item_get_track (item),
-    self->numbered ? (gint) (spotifygtk_track_item_get_number (item)) : 0);
+    spotifygtk_track_item_get_track (item), 0);
+  spotifygtk_track_row_set_number (row,
+    self->numbered ? (gint) gtk_list_item_get_position (list_item) + 1 : 0);
   spotifygtk_track_row_set_playing (row,
     spotifygtk_track_item_get_playing (item),
     spotifygtk_track_item_get_paused (item));
@@ -505,6 +537,43 @@ spotifygtk_track_list_refresh_liked (SpotifyGtkTrackList *self)
  * read are different services, and a read issued straight after a write can
  * still return the old set.
  */
+
+/*
+ * Single-row splices, for a list whose membership changed by exactly one.
+ *
+ * The alternative is handing set_native_tracks() the new full listing, which
+ * rebuilds every row and drops the scroll position -- on a 4800-track library
+ * that throws the user from wherever they were back to the top. Row numbers
+ * follow the position property, so the rows below renumber themselves.
+ */
+void
+spotifygtk_track_list_insert_native_track (SpotifyGtkTrackList      *self,
+                                           guint                     position,
+                                           const SpotifyNativeTrack *track)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  g_return_if_fail (track != NULL);
+
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  position = MIN (position, n);
+
+  /* The number is set from the position on bind, so the value passed here is
+   * only a placeholder. */
+  g_autoptr(SpotifyGtkTrackItem) item = spotifygtk_track_item_new (track, position + 1);
+  g_list_store_insert (self->store, position, item);
+
+  spotifygtk_track_list_set_status (self, NULL);
+}
+
+void
+spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+
+  if (position >= g_list_model_get_n_items (G_LIST_MODEL (self->store)))
+    return;
+  g_list_store_remove (self->store, position);
+}
 
 SpotifyGtkTrackList *
 spotifygtk_track_list_new (void)
