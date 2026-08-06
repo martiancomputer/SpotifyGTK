@@ -80,7 +80,7 @@ struct _SpotifyGtkNativeWindow {
   /* Every liked track URI, read at sign-in. The lists keep their own copies
    * for the rows they show; this is the authority. */
   GHashTable *liked_uris;
-  GtkWidget  *playlists_box;      /* rows for the rootlist */
+  SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   GtkWidget  *playlists_status;
   guint64     collection_sub;   /* Mercury subscription for external changes */
 
@@ -705,24 +705,62 @@ on_list_remove_from_liked (SpotifyGtkTrackList *list, gpointer track_ptr, gpoint
 
 /* ── Playlists page ─────────────────────────────────────────────────────────
  *
- * Populated from the rootlist. Names are a second request per playlist because
- * the rootlist carries only URIs; rows appear immediately and relabel as those
- * return, so the page is usable while it fills.
+ * Cards, like albums. The rootlist carries URIs only, so each card is completed
+ * by two follow-ups: the playlist head for its name, and its first track for a
+ * cover. Playlists have no cover of their own -- their attributes hold a name
+ * and nothing else -- so one is borrowed from the first track, which is what an
+ * auto-generated playlist image amounts to.
+ *
+ * Cards appear immediately with the URI as a placeholder title rather than
+ * waiting on the follow-ups, so the page is never blank while it fills.
  */
+typedef struct {
+  SpotifyGtkNativeWindow *window;
+  gchar                  *uri;
+} PlaylistCard;
+
 static void
-on_playlist_row_clicked (GtkButton *button, gpointer user_data)
+playlist_card_free (gpointer data)
 {
-  SpotifyGtkNativeWindow *self = user_data;
-  const gchar *uri = g_object_get_data (G_OBJECT (button), "playlist-uri");
-  if (uri)
-    navigate_to_context (self, uri, gtk_button_get_label (button), "Playlist");
+  PlaylistCard *c = data;
+  g_free (c->uri);
+  g_free (c);
 }
 
 static void
-on_page_playlist_name (MercuryResponse *response, gpointer user_data)
+on_playlist_card_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
+                            const gchar *name, gpointer user_data)
 {
-  GtkWidget *button = user_data;
-  if (response && response->parts && response->parts->len > 0) {
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) grid;
+  if (uri)
+    navigate_to_context (self, uri, name && *name ? name : "Playlist", "Playlist");
+}
+
+static void
+on_playlist_cover_tracks (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  PlaylistCard *c = user_data;
+  g_autoptr(GError) err = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &err);
+
+  if (tracks && tracks->len > 0 && c->window->playlists_grid) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, 0);
+    if (t && t->cover_id)
+      spotifygtk_album_grid_set_card_cover (c->window->playlists_grid,
+                                            c->uri, t->cover_id);
+  }
+  playlist_card_free (c);
+}
+
+static void
+on_playlist_card_name (MercuryResponse *response, gpointer user_data)
+{
+  PlaylistCard *c = user_data;
+
+  if (response && response->parts && response->parts->len > 0 &&
+      c->window->playlists_grid) {
     gsize len = 0;
     const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
     const guint8 *attrs = NULL; gsize alen = 0;
@@ -730,10 +768,12 @@ on_page_playlist_name (MercuryResponse *response, gpointer user_data)
     if (pb_find_bytes_field (d, len, 3, &attrs, &alen) &&
         pb_find_bytes_field (attrs, alen, 1, &name, &nlen)) {
       g_autofree gchar *n = g_strndup ((const gchar *) name, nlen);
-      gtk_button_set_label (GTK_BUTTON (button), n);
+      /* Re-add rather than mutate: the model holds plain objects, so replacing
+       * the card is what makes the view pick the new title up. */
+      spotifygtk_album_grid_set_card_title (c->window->playlists_grid, c->uri, n);
     }
   }
-  g_object_unref (button);
+  playlist_card_free (c);
 }
 
 static void
@@ -741,13 +781,10 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
                           guint n_entries, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
-
-  if (!self->playlists_box)
+  if (!self->playlists_grid)
     return;
 
-  GtkWidget *child;
-  while ((child = gtk_widget_get_first_child (self->playlists_box)))
-    gtk_box_remove (GTK_BOX (self->playlists_box), child);
+  spotifygtk_album_grid_clear (self->playlists_grid);
 
   if (!ok) {
     gtk_label_set_text (GTK_LABEL (self->playlists_status),
@@ -766,23 +803,25 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
   for (guint i = 0; i < n_entries; i++) {
     if (!entries[i].uri)
       continue;
-    GtkWidget *row = gtk_button_new_with_label (entries[i].uri);
-    gtk_button_set_has_frame (GTK_BUTTON (row), FALSE);
-    gtk_widget_add_css_class (row, "flat");
-    if (GTK_IS_LABEL (gtk_button_get_child (GTK_BUTTON (row))))
-      gtk_label_set_xalign (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (row))), 0.0);
-    g_object_set_data_full (G_OBJECT (row), "playlist-uri",
-                            g_strdup (entries[i].uri), g_free);
-    g_signal_connect (row, "clicked", G_CALLBACK (on_playlist_row_clicked), self);
-    gtk_box_append (GTK_BOX (self->playlists_box), row);
+    spotifygtk_album_grid_add_card (self->playlists_grid, entries[i].uri,
+                                    entries[i].uri, "Playlist", NULL);
 
     if (m) {
+      PlaylistCard *nc = g_new0 (PlaylistCard, 1);
+      nc->window = self; nc->uri = g_strdup (entries[i].uri);
       const gchar *id = strrchr (entries[i].uri, ':');
       g_autofree gchar *head =
         g_strdup_printf ("hm://playlist/v2/playlist/%s", id ? id + 1 : entries[i].uri);
       spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", head, NULL,
-                                       on_page_playlist_name, g_object_ref (row));
+                                       on_playlist_card_name, nc);
     }
+
+    /* One track is enough for a cover, and asking for one keeps this cheap
+     * even on a library of many playlists. */
+    PlaylistCard *cc = g_new0 (PlaylistCard, 1);
+    cc->window = self; cc->uri = g_strdup (entries[i].uri);
+    spotifygtk_native_session_load_tracks (self->session, entries[i].uri, 1, NULL,
+                                           on_playlist_cover_tracks, cc);
   }
 }
 
@@ -1961,19 +2000,19 @@ spotifygtk_native_window_constructed (GObject *object)
     gtk_box_append (GTK_BOX (pl), pl_title);
 
     /*
-     * Filled from the rootlist once signed in. It carries URIs but no names,
-     * so each row starts labelled with its URI and is relabelled when that
-     * playlist's head returns -- rows are usable immediately rather than after
-     * every lookup has come back.
+     * Presented as cards, like albums. The rootlist gives only URIs, so a card
+     * starts with its URI as the title and is completed as two further
+     * requests land: the playlist's head for its name, and its first track for
+     * a cover. Playlists carry no picture of their own -- the attributes hold
+     * a name and nothing else -- so the cover is borrowed from the first track,
+     * which is what an auto-generated playlist image is anyway.
      */
-    GtkWidget *pl_scroller = gtk_scrolled_window_new ();
-    gtk_widget_set_vexpand (pl_scroller, TRUE);
-    self->playlists_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
-    gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (pl_scroller),
-                                   self->playlists_box);
-    spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (pl_scroller),
-                                     GTK_ORIENTATION_VERTICAL);
-    gtk_box_append (GTK_BOX (pl), pl_scroller);
+    self->playlists_grid = spotifygtk_album_grid_new_grid ();
+    gtk_widget_set_vexpand (GTK_WIDGET (self->playlists_grid), TRUE);
+    spotifygtk_album_grid_set_content_margins (self->playlists_grid, 0, 0);
+    g_signal_connect (self->playlists_grid, "album-activated",
+                      G_CALLBACK (on_playlist_card_activated), self);
+    gtk_box_append (GTK_BOX (pl), GTK_WIDGET (self->playlists_grid));
 
     self->playlists_status = gtk_label_new ("Not signed in yet.");
     gtk_widget_add_css_class (self->playlists_status, "dim-text");

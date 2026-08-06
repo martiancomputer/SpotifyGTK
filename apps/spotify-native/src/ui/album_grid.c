@@ -425,6 +425,79 @@ spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self)
   g_list_store_remove_all (self->store);
 }
 
+
+/*
+ * Add one card directly, rather than deriving it from a track list.
+ *
+ * Playlists are not albums: they have no album URI to group by, and their
+ * cover is not carried anywhere in the playlist itself. The caller supplies
+ * the pieces it has -- and may supply a NULL cover_id and fill it in later
+ * with spotifygtk_album_grid_set_card_cover(), since a playlist's cover has to
+ * be fetched separately from its name.
+ */
+void
+spotifygtk_album_grid_add_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
+                                const gchar *title, const gchar *subtitle,
+                                const gchar *cover_id)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (uri != NULL);
+
+  g_autoptr(SpotifyGtkAlbumItem) item =
+    album_item_new (uri, title ? title : uri, subtitle ? subtitle : "",
+                               cover_id);
+  g_list_store_append (self->store, item);
+}
+
+/*
+ * Attach a cover to an existing card, matched by URI.
+ *
+ * The item's own notify would be the tidy way to do this, but the model holds
+ * plain objects with no properties; replacing the item in place is what makes
+ * the bound card rebind and pick the art up.
+ */
+/* Replace a card's title, matched by URI. Playlist names arrive after the card
+ * does, so the placeholder has to be replaceable. */
+void
+spotifygtk_album_grid_set_card_title (SpotifyGtkAlbumGrid *self, const gchar *uri,
+                                      const gchar *title)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (uri != NULL && title != NULL);
+
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  for (guint i = 0; i < n; i++) {
+    g_autoptr(SpotifyGtkAlbumItem) it =
+      g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    if (!it || g_strcmp0 (it->uri, uri) != 0)
+      continue;
+    g_autoptr(SpotifyGtkAlbumItem) replacement =
+      album_item_new (it->uri, title, it->artist, it->cover_id);
+    g_list_store_splice (self->store, i, 1, (gpointer *) &replacement, 1);
+    return;
+  }
+}
+
+void
+spotifygtk_album_grid_set_card_cover (SpotifyGtkAlbumGrid *self, const gchar *uri,
+                                      const gchar *cover_id)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (uri != NULL && cover_id != NULL);
+
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  for (guint i = 0; i < n; i++) {
+    g_autoptr(SpotifyGtkAlbumItem) it =
+      g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    if (!it || g_strcmp0 (it->uri, uri) != 0)
+      continue;
+    g_autoptr(SpotifyGtkAlbumItem) replacement =
+      album_item_new (it->uri, it->name, it->artist, cover_id);
+    g_list_store_splice (self->store, i, 1, (gpointer *) &replacement, 1);
+    return;
+  }
+}
+
 guint
 spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
                                        GPtrArray           *tracks,
