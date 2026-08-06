@@ -329,11 +329,7 @@ build_left_column (SpotifyGtkPlaybackBar *self)
   gtk_widget_add_css_class (GTK_WIDGET (self->like_btn), "transport-button");
   gtk_widget_set_valign (GTK_WIDGET (self->like_btn), GTK_ALIGN_CENTER);
   g_signal_connect (self->like_btn, "clicked", G_CALLBACK (on_like_clicked), self);
-  /* Saving to the library needs a write endpoint the native stack does not
-   * have yet, so this would only ever change its own colour. */
-  gtk_widget_set_sensitive (GTK_WIDGET (self->like_btn), FALSE);
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->like_btn),
-                               "Saving to your library isn\u2019t implemented yet");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->like_btn), "Add to Liked Songs");
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->like_btn));
 
   return box;
@@ -588,7 +584,7 @@ spotifygtk_playback_bar_set_liked (SpotifyGtkPlaybackBar *self, gboolean liked)
    * stroked outline reads as unset at a glance.
    */
   gtk_button_set_icon_name (self->like_btn,
-                            liked ? "emblem-favorite-symbolic"
+                            liked ? "spotifygtk-heart-filled-symbolic"
                                   : "spotifygtk-heart-outline-symbolic");
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->like_btn),
                                liked ? "Remove from Liked Songs"

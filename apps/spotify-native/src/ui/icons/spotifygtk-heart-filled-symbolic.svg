@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Filled heart, for the liked state.
+
+  Adwaita's emblem-favorite-symbolic is a stroked outline in current versions,
+  so using it for "liked" and a hand-drawn outline for "not liked" made the two
+  states differ only in colour. This is the same geometry as
+  spotifygtk-heart-outline-symbolic, filled rather than stroked, so the pair
+  reads as set/unset by shape.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path d="M8 13.9 2.35 8.75a3.55 3.55 0 0 1 0-5.15 3.65 3.65 0 0 1 5.05 0L8 4.2l.6-.6a3.65 3.65 0 0 1 5.05 0 3.55 3.55 0 0 1 0 5.15z"
+        fill="currentColor"/>
+</svg>

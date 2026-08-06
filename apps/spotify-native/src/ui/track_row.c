@@ -381,7 +381,7 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
    * Its space is reserved whether or not it is showing, so liking a track does
    * not shift that row's duration relative to its neighbours.
    */
-  self->like_icon = gtk_image_new_from_icon_name ("emblem-favorite-symbolic");
+  self->like_icon = gtk_image_new_from_icon_name ("spotifygtk-heart-filled-symbolic");
   gtk_image_set_pixel_size (GTK_IMAGE (self->like_icon), ROW_LIKE_PX);
   gtk_widget_add_css_class (self->like_icon, "like-active");
   gtk_widget_set_valign (self->like_icon, GTK_ALIGN_CENTER);
