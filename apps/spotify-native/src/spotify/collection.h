@@ -203,4 +203,40 @@ void spotifygtk_collection_v2_read_page (SpotifyMercury                *mercury,
                                          SpotifyCollectionPageCallback  callback,
                                          gpointer                       user_data);
 
+/* ── Playlists: what is known so far ───────────────────────────────────────
+ *
+ * Probed read-only against a live account; no write has been attempted.
+ *
+ *   GET  hm://playlist/v2/user/<user>/rootlist           -> 200
+ *   GET  hm://playlist/v2/user/<user>/publishedrootlist  -> 200
+ *   GET  hm://playlist/user/<user>/rootlist              -> 200  (older form)
+ *   GET  hm://playlist/v2/playlist/<id>                  -> 200
+ *   GET  hm://playlist/v2/rootlist                       -> 404
+ *
+ * Responses are playlist4 SelectedListContent: a revision, a length, list
+ * attributes, then contents. Liked Songs is itself a playlist under this
+ * service (37i9dQZF1F5p3rmiWPIYgZ) and reads correctly, but a playlist4 ADD op
+ * against it returns 200 and changes nothing -- a pseudo-playlist that accepts
+ * writes and discards them. A real playlist is expected to behave differently
+ * and has not been tried.
+ *
+ * Mutation looks like playlist4 ops posted to <playlist uri>/changes:
+ *
+ *   ListChanges { base_revision = 1, deltas = 2 }
+ *   Delta       { base_version = 1, ops = 2 }
+ *   Op          { kind = 1 (ADD = 2), add = 2 }
+ *   Add         { from_index = 1, items = 2, add_last = 4 }
+ *   Item        { uri = 1, attributes = 2 }
+ *   ItemAttributes { added_by = 1, timestamp = 2, ... }
+ *
+ * ItemAttributes.timestamp means a playlist add can carry its own date, which
+ * the collection write cannot express for anything but the current time.
+ *
+ * The official binary names the operations at its internal layer --
+ * playlist_create, playlist_add_tracks -- and carries
+ * PlaylistModificationInfo { uri = 1, new_revision = 2, parent_revision = 3 },
+ * whose revision pair is the optimistic-concurrency scheme: a change names the
+ * revision it was based on, and is rejected if the list has moved on.
+ */
+
 G_END_DECLS
