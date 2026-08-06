@@ -954,6 +954,23 @@ spotifygtk_native_session_load_tracks (SpotifyNativeSession *self,
   g_main_context_invoke (self->context, start_load_tracks, op);
 }
 
+void
+spotifygtk_native_session_invalidate_context (SpotifyNativeSession *self,
+                                              const gchar          *context_uri)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+
+  if (!self->collection_cache_uri)
+    return;
+  if (context_uri && g_strcmp0 (context_uri, self->collection_cache_uri) != 0)
+    return;
+
+  g_message ("session: dropped the cached listing for %s",
+             self->collection_cache_uri);
+  g_clear_pointer (&self->collection_cache, g_ptr_array_unref);
+  g_clear_pointer (&self->collection_cache_uri, g_free);
+}
+
 GPtrArray *
 spotifygtk_native_session_load_tracks_finish (SpotifyNativeSession *self,
                                               GAsyncResult         *result,

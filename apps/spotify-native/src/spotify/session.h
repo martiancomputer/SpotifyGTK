@@ -139,6 +139,19 @@ GPtrArray *spotifygtk_native_session_load_tracks_finish (SpotifyNativeSession *s
                                                          GAsyncResult         *result,
                                                          GError              **error);
 
+/*
+ * Drop the cached resolution of a context, so the next load of it goes to the
+ * network.
+ *
+ * The collection is cached for the life of the session, which is right for
+ * navigation -- returning to Liked Songs should not refetch thousands of
+ * tracks -- but wrong after the collection has been written to. Without this,
+ * a caller that marks its page stale still gets served the pre-write set and
+ * concludes nothing changed. Pass NULL to drop whatever is cached.
+ */
+void spotifygtk_native_session_invalidate_context (SpotifyNativeSession *self,
+                                                   const gchar          *context_uri);
+
 /* Default and ceiling for max_tracks.
  *
  * The ceiling is the largest batch the server has actually been observed to
