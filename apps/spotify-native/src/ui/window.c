@@ -36,6 +36,7 @@
 
 #include "../player_service.h"
 #include "../native_engine.h"
+#include "../log_verbose.h"
 #include "../spotify/collection.h"
 #include "../spotify/playlist.h"
 #include "smooth_scroll.h"
@@ -422,6 +423,7 @@ on_collection_settled (gpointer user_data)
    * next event or the next sign-in, which is a fair trade against making every
    * like re-read the library.
    */
+  SPOTIFYGTK_DEBUG ("collection: change event settled");
   gint64 since = g_get_monotonic_time () - self->last_local_write_us;
   if (self->last_local_write_us != 0 && since < LOCAL_WRITE_GRACE_US) {
     if (self->liked_page)
@@ -675,6 +677,8 @@ static void
 on_like_write_done (gboolean ok, guint16 status, gpointer user_data)
 {
   LikeUiCtx *ctx = user_data;
+  SPOTIFYGTK_DEBUG ("like: write returned ok=%d status=%u for %s",
+                    ok, status, ctx->uri);
   if (ok) {
     g_idle_add (liked_pages_invalidate, ctx->window);
     g_free (ctx->uri);
@@ -731,7 +735,9 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
   g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (self->session)
                              : NULL;
   if (!m || !user) {
-    g_warning ("cannot change Liked Songs: not signed in yet");
+    /* Almost always a dropped AP connection rather than a genuine signed-out
+     * state; get_mercury() kicks a reconnect when it sees one. */
+    g_warning ("cannot change Liked Songs: no live connection (reconnecting)");
     set_row_liked_for_uri (self, track->uri, !liked);
     if (liked) g_hash_table_remove (self->liked_uris, track->uri);
     g_free (ctx->uri);
@@ -739,6 +745,8 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
     return;
   }
 
+  SPOTIFYGTK_DEBUG ("like: %s %s (set now %u)", liked ? "add" : "remove",
+                    track->uri, g_hash_table_size (self->liked_uris));
   self->last_local_write_us = g_get_monotonic_time ();
 
   const gchar *uris[] = { track->uri };

@@ -23,3 +23,12 @@ option('allow_old_gtk',
   type: 'boolean',
   value: false,
   description: 'Build against a GTK/libadwaita older than the UI was designed for. The layout will differ visibly -- cover art sizing, the playback bar and spacing all changed across those versions. Off by default so an unnoticed downgrade cannot ship as a broken-looking build.')
+
+option('verbose_logging',
+  type: 'boolean',
+  value: false,
+  description: 'Compile in the per-operation diagnostics (liked-set reads, ' +
+               'collection writes, playlist lookups). Off by default because ' +
+               'they are noisy; -Dverbose_logging=true keeps them in the ' +
+               'binary rather than deleting them from the source every time ' +
+               'a bug is closed.')
