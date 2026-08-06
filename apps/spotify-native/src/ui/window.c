@@ -37,6 +37,8 @@
 #include "../player_service.h"
 #include "../native_engine.h"
 #include "../spotify/collection.h"
+#include "../spotify/playlist.h"
+#include "../spotify/protobuf_min.h"
 #include "../spotify/session.h"
 
 #include <string.h>
@@ -696,6 +698,212 @@ on_list_remove_from_liked (SpotifyGtkTrackList *list, gpointer track_ptr, gpoint
   list_set_liked (user_data, track_ptr, FALSE);
 }
 
+
+/* ── Add to Playlist ────────────────────────────────────────────────────────
+ *
+ * The rootlist gives URIs but no names, so a chooser that showed only URIs
+ * would be useless. Names come from reading each playlist's head, which is one
+ * request per entry -- fine for a personal library, and the rows fill in as
+ * they arrive rather than blocking the dialog on all of them.
+ */
+typedef struct {
+  SpotifyGtkNativeWindow *window;
+  gchar                  *track_uri;
+  GtkWindow              *dialog;
+  GtkWidget              *list_box;
+} PlaylistPick;
+
+static void
+playlist_pick_free (gpointer data)
+{
+  PlaylistPick *p = data;
+  g_free (p->track_uri);
+  g_free (p);
+}
+
+static void
+on_playlist_add_done (gboolean ok, gint32 status, gpointer user_data)
+{
+  gchar *name = user_data;
+  if (ok)
+    g_message ("playlist: added to %s", name);
+  else
+    g_warning ("playlist: add to %s failed (status %d)", name, status);
+  g_free (name);
+}
+
+static void
+on_pick_row_activated (GtkButton *button, gpointer user_data)
+{
+  PlaylistPick *p = user_data;
+  const gchar *uri = g_object_get_data (G_OBJECT (button), "playlist-uri");
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (p->window->session);
+  if (m && uri) {
+    const gchar *tracks[] = { p->track_uri };
+    spotifygtk_playlist_add_tracks (m, uri, tracks, 1, on_playlist_add_done,
+                                    g_strdup (gtk_button_get_label (button)));
+  }
+  gtk_window_destroy (p->dialog);
+}
+
+static void
+on_playlist_name_read (MercuryResponse *response, gpointer user_data)
+{
+  GtkWidget *button = user_data;
+
+  if (!response || !response->parts || response->parts->len == 0) {
+    g_object_unref (button);
+    return;
+  }
+  gsize len = 0;
+  const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
+
+  /* SelectedListContent.attributes(3) -> ListAttributes.name(1) */
+  const guint8 *attrs = NULL; gsize alen = 0;
+  const guint8 *name = NULL; gsize nlen = 0;
+  if (pb_find_bytes_field (d, len, 3, &attrs, &alen) &&
+      pb_find_bytes_field (attrs, alen, 1, &name, &nlen)) {
+    g_autofree gchar *n = g_strndup ((const gchar *) name, nlen);
+    gtk_button_set_label (GTK_BUTTON (button), n);
+  }
+  g_object_unref (button);
+}
+
+static void
+on_new_playlist_response (gboolean ok, gint32 status, const gchar *uri,
+                          gpointer user_data)
+{
+  PlaylistPick *p = user_data;
+  if (!ok) {
+    g_warning ("playlist: create failed (status %d)", status);
+  } else {
+    g_message ("playlist: created %s", uri);
+    SpotifyMercury *m = spotifygtk_native_session_get_mercury (p->window->session);
+    if (m) {
+      const gchar *tracks[] = { p->track_uri };
+      spotifygtk_playlist_add_tracks (m, uri, tracks, 1, on_playlist_add_done,
+                                      g_strdup ("the new playlist"));
+    }
+  }
+  playlist_pick_free (p);
+}
+
+static void
+on_new_playlist_clicked (GtkButton *button, gpointer user_data)
+{
+  PlaylistPick *p = user_data;
+  (void) button;
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (p->window->session);
+  g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (p->window->session)
+                             : NULL;
+  if (!m || !user) {
+    gtk_window_destroy (p->dialog);
+    return;
+  }
+
+  /* Carried over so the track can be added once the playlist exists. */
+  PlaylistPick *owned = g_new0 (PlaylistPick, 1);
+  owned->window    = p->window;
+  owned->track_uri = g_strdup (p->track_uri);
+
+  g_autoptr(GDateTime) now = g_date_time_new_now_local ();
+  g_autofree gchar *stamp = g_date_time_format (now, "%Y-%m-%d %H:%M");
+  g_autofree gchar *name = g_strdup_printf ("New Playlist %s", stamp);
+
+  spotifygtk_playlist_create (m, user, name, on_new_playlist_response, owned);
+  gtk_window_destroy (p->dialog);
+}
+
+static void
+on_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entries,
+                     guint n_entries, gpointer user_data)
+{
+  PlaylistPick *p = user_data;
+
+  if (!ok)
+    g_warning ("playlist: could not read the rootlist (status %d)", status);
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (p->window->session);
+
+  for (guint i = 0; i < n_entries; i++) {
+    if (!entries[i].uri)
+      continue;
+    /* Labelled with the URI until the name arrives, so the row is clickable
+     * immediately rather than after every lookup has returned. */
+    GtkWidget *row = gtk_button_new_with_label (entries[i].uri);
+    gtk_button_set_has_frame (GTK_BUTTON (row), FALSE);
+    gtk_widget_add_css_class (row, "flat");
+    if (GTK_IS_LABEL (gtk_button_get_child (GTK_BUTTON (row))))
+      gtk_label_set_xalign (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (row))), 0.0);
+    g_object_set_data_full (G_OBJECT (row), "playlist-uri",
+                            g_strdup (entries[i].uri), g_free);
+    g_signal_connect (row, "clicked", G_CALLBACK (on_pick_row_activated), p);
+    gtk_box_append (GTK_BOX (p->list_box), row);
+
+    if (m) {
+      const gchar *id = strrchr (entries[i].uri, ':');
+      g_autofree gchar *head =
+        g_strdup_printf ("hm://playlist/v2/playlist/%s", id ? id + 1 : entries[i].uri);
+      spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", head, NULL,
+                                       on_playlist_name_read, g_object_ref (row));
+    }
+  }
+}
+
+static void
+on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
+{
+  SpotifyGtkNativeWindow   *self  = user_data;
+  const SpotifyNativeTrack *track = track_ptr;
+  (void) list;
+  if (!track || !track->uri)
+    return;
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (self->session)
+                             : NULL;
+  if (!m || !user) {
+    g_warning ("cannot add to a playlist: not signed in yet");
+    return;
+  }
+
+  GtkWidget *dialog = gtk_window_new ();
+  gtk_window_set_title (GTK_WINDOW (dialog), "Add to Playlist");
+  gtk_window_set_modal (GTK_WINDOW (dialog), TRUE);
+  gtk_window_set_transient_for (GTK_WINDOW (dialog), GTK_WINDOW (self));
+  gtk_window_set_default_size (GTK_WINDOW (dialog), 320, 400);
+
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_set_margin_start (box, 12);
+  gtk_widget_set_margin_end (box, 12);
+  gtk_widget_set_margin_top (box, 12);
+  gtk_widget_set_margin_bottom (box, 12);
+
+  PlaylistPick *p = g_new0 (PlaylistPick, 1);
+  p->window    = self;
+  p->track_uri = g_strdup (track->uri);
+  p->dialog    = GTK_WINDOW (dialog);
+
+  GtkWidget *new_btn = gtk_button_new_with_label ("New Playlist");
+  g_signal_connect (new_btn, "clicked", G_CALLBACK (on_new_playlist_clicked), p);
+  gtk_box_append (GTK_BOX (box), new_btn);
+  gtk_box_append (GTK_BOX (box), gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
+
+  GtkWidget *scroller = gtk_scrolled_window_new ();
+  gtk_widget_set_vexpand (scroller, TRUE);
+  p->list_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), p->list_box);
+  gtk_box_append (GTK_BOX (box), scroller);
+
+  gtk_window_set_child (GTK_WINDOW (dialog), box);
+  g_object_set_data_full (G_OBJECT (dialog), "pick", p, playlist_pick_free);
+
+  spotifygtk_playlist_list (m, user, on_playlists_listed, p);
+  gtk_window_present (GTK_WINDOW (dialog));
+}
+
 static void
 on_list_add_to_queue (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer user_data)
 {
@@ -791,6 +999,7 @@ wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
   g_signal_connect (list, "go-to-artist",    G_CALLBACK (on_list_go_to_artist),    self);
   g_signal_connect (list, "add-to-liked",      G_CALLBACK (on_list_add_to_liked),      self);
   g_signal_connect (list, "remove-from-liked", G_CALLBACK (on_list_remove_from_liked), self);
+  g_signal_connect (list, "add-to-playlist",   G_CALLBACK (on_list_add_to_playlist),   self);
 }
 
 /* === Sidebar callbacks === */

@@ -13,6 +13,7 @@ spotify_proto_sources = files(
   'session.c',
   'ap.c',
   'mercury.c',
+  'playlist.c',
   'audio_key.c',
   'cdn.c',
   'connect.c',

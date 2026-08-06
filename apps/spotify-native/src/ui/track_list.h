@@ -88,6 +88,7 @@ GPtrArray *spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self);
  *
  * - add-to-liked (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - remove-from-liked (gpointer track) — the same entry when already saved
+ * - add-to-playlist (gpointer track)  — opens the playlist chooser
  * - add-to-queue (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - go-to-album  (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - go-to-artist (gpointer track)   — SpotifyNativeTrack*, right-click menu

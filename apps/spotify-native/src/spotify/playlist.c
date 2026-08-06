@@ -1,0 +1,351 @@
+/*
+ * playlist.c — see playlist.h.
+ */
+
+#include "playlist.h"
+#include "protobuf_min.h"
+#include <string.h>
+
+/* playlist4_external.proto field numbers. */
+#define PL_SLC_REVISION    1
+#define PL_SLC_LENGTH      2
+#define PL_SLC_ATTRIBUTES  3
+#define PL_SLC_CONTENTS    5
+#define PL_LISTATTR_NAME   1
+#define PL_ITEMS_ITEMS     2
+#define PL_ITEM_URI        1
+#define PL_ADD_FROM_INDEX  1
+#define PL_ADD_ITEMS       2
+#define PL_ADD_ADD_LAST    4
+#define PL_OP_KIND         1
+#define PL_OP_ADD          2
+#define PL_OP_KIND_ADD     2
+#define PL_DELTA_OPS       2
+#define PL_CHANGES_BASE    1
+#define PL_CHANGES_DELTAS  2
+#define PL_CREATEREPLY_URI 1
+
+static gboolean
+status_ok (MercuryResponse *r)
+{
+  return r && r->status_code >= 200 && r->status_code < 300;
+}
+
+/* "spotify:playlist:<id>" or "<id>" -> "<id>" */
+static const gchar *
+playlist_id_of (const gchar *uri)
+{
+  const gchar *last = strrchr (uri, ':');
+  return last ? last + 1 : uri;
+}
+
+/* ── Create ──────────────────────────────────────────────────────────────── */
+
+typedef struct {
+  SpotifyMercury               *mercury;
+  gchar                        *username;
+  gchar                        *uri;        /* filled once created */
+  SpotifyPlaylistCreateCallback callback;
+  gpointer                      user_data;
+} CreateCtx;
+
+static void
+create_ctx_free (CreateCtx *ctx)
+{
+  g_clear_object (&ctx->mercury);
+  g_free (ctx->username);
+  g_free (ctx->uri);
+  g_free (ctx);
+}
+
+static void
+on_rootlist_filed (MercuryResponse *response, gpointer user_data)
+{
+  CreateCtx *ctx = user_data;
+  gboolean ok = status_ok (response);
+
+  /* The playlist exists either way; without this it is simply not in the
+   * library, which is worth saying rather than reporting a clean success. */
+  if (!ok)
+    g_warning ("playlist: created %s but could not file it into the rootlist "
+               "(status %d)", ctx->uri, response ? response->status_code : 0);
+
+  if (ctx->callback)
+    ctx->callback (ok, response ? response->status_code : 0, ctx->uri, ctx->user_data);
+  create_ctx_free (ctx);
+}
+
+static void
+on_rootlist_head (MercuryResponse *response, gpointer user_data)
+{
+  CreateCtx *ctx = user_data;
+
+  if (!status_ok (response) || !response->parts || response->parts->len == 0) {
+    if (ctx->callback)
+      ctx->callback (FALSE, response ? response->status_code : 0, ctx->uri, ctx->user_data);
+    create_ctx_free (ctx);
+    return;
+  }
+
+  gsize hlen = 0;
+  const guint8 *hd = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &hlen);
+  const guint8 *rev = NULL; gsize rev_len = 0;
+  pb_find_bytes_field (hd, hlen, PL_SLC_REVISION, &rev, &rev_len);
+
+  g_autoptr(GByteArray) item = g_byte_array_new ();
+  pb_write_bytes_field (item, PL_ITEM_URI, (const guint8 *) ctx->uri, strlen (ctx->uri));
+
+  g_autoptr(GByteArray) add = g_byte_array_new ();
+  pb_write_message_field (add, PL_ADD_ITEMS, item->data, item->len);
+  /* add_last only. from_index is the alternative to it, and sending both is
+   * refused with a bare 400 that names neither. */
+  pb_write_varint_field (add, PL_ADD_ADD_LAST, 1);
+
+  g_autoptr(GByteArray) op = g_byte_array_new ();
+  pb_write_varint_field (op, PL_OP_KIND, PL_OP_KIND_ADD);
+  pb_write_message_field (op, PL_OP_ADD, add->data, add->len);
+
+  g_autoptr(GByteArray) delta = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (delta, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (delta, PL_DELTA_OPS, op->data, op->len);
+
+  g_autoptr(GByteArray) changes = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (changes, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (changes, PL_CHANGES_DELTAS, delta->data, delta->len);
+
+  g_autofree gchar *uri = g_strdup_printf (
+    "hm://playlist/v2/user/%s/rootlist/changes", ctx->username);
+  g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
+  spotifygtk_mercury_request_full (ctx->mercury, MERCURY_METHOD_SEND, "POST",
+                                   uri, body, on_rootlist_filed, ctx);
+}
+
+static void
+on_create_reply (MercuryResponse *response, gpointer user_data)
+{
+  CreateCtx *ctx = user_data;
+
+  if (!status_ok (response) || !response->parts || response->parts->len == 0) {
+    if (ctx->callback)
+      ctx->callback (FALSE, response ? response->status_code : 0, NULL, ctx->user_data);
+    create_ctx_free (ctx);
+    return;
+  }
+
+  gsize len = 0;
+  const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
+  const guint8 *uri = NULL; gsize ulen = 0;
+  if (!pb_find_bytes_field (d, len, PL_CREATEREPLY_URI, &uri, &ulen)) {
+    if (ctx->callback)
+      ctx->callback (FALSE, response->status_code, NULL, ctx->user_data);
+    create_ctx_free (ctx);
+    return;
+  }
+  ctx->uri = g_strndup ((const gchar *) uri, ulen);
+
+  /* Now file it, or it exists and is invisible. */
+  g_autofree gchar *rl = g_strdup_printf ("hm://playlist/v2/user/%s/rootlist",
+                                          ctx->username);
+  spotifygtk_mercury_request_full (ctx->mercury, MERCURY_METHOD_GET, "GET",
+                                   rl, NULL, on_rootlist_head, ctx);
+}
+
+void
+spotifygtk_playlist_create (SpotifyMercury *mercury, const gchar *username,
+                            const gchar *name,
+                            SpotifyPlaylistCreateCallback callback,
+                            gpointer user_data)
+{
+  g_return_if_fail (mercury != NULL && username != NULL && name != NULL);
+
+  g_autoptr(GByteArray) attrs = g_byte_array_new ();
+  pb_write_bytes_field (attrs, PL_LISTATTR_NAME, (const guint8 *) name, strlen (name));
+
+  g_autoptr(GByteArray) body = g_byte_array_new ();
+  pb_write_message_field (body, PL_SLC_ATTRIBUTES, attrs->data, attrs->len);
+
+  CreateCtx *ctx = g_new0 (CreateCtx, 1);
+  ctx->mercury   = g_object_ref (mercury);
+  ctx->username  = g_strdup (username);
+  ctx->callback  = callback;
+  ctx->user_data = user_data;
+
+  g_autoptr(GBytes) payload = g_bytes_new (body->data, body->len);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_SEND, "POST",
+                                   "hm://playlist/v2/playlist", payload,
+                                   on_create_reply, ctx);
+}
+
+/* ── Add tracks ──────────────────────────────────────────────────────────── */
+
+typedef struct {
+  SpotifyMercury            *mercury;
+  gchar                     *id;
+  GPtrArray                 *uris;      /* owned gchar* */
+  SpotifyPlaylistOpCallback  callback;
+  gpointer                   user_data;
+} AddCtx;
+
+static void
+add_ctx_free (AddCtx *ctx)
+{
+  g_clear_object (&ctx->mercury);
+  g_free (ctx->id);
+  g_clear_pointer (&ctx->uris, g_ptr_array_unref);
+  g_free (ctx);
+}
+
+static void
+on_add_done (MercuryResponse *response, gpointer user_data)
+{
+  AddCtx *ctx = user_data;
+  if (ctx->callback)
+    ctx->callback (status_ok (response), response ? response->status_code : 0,
+                   ctx->user_data);
+  add_ctx_free (ctx);
+}
+
+static void
+on_add_head (MercuryResponse *response, gpointer user_data)
+{
+  AddCtx *ctx = user_data;
+
+  if (!status_ok (response) || !response->parts || response->parts->len == 0) {
+    if (ctx->callback)
+      ctx->callback (FALSE, response ? response->status_code : 0, ctx->user_data);
+    add_ctx_free (ctx);
+    return;
+  }
+
+  gsize hlen = 0;
+  const guint8 *hd = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &hlen);
+  const guint8 *rev = NULL; gsize rev_len = 0;
+  pb_find_bytes_field (hd, hlen, PL_SLC_REVISION, &rev, &rev_len);
+
+  g_autoptr(GByteArray) add = g_byte_array_new ();
+  for (guint i = 0; i < ctx->uris->len; i++) {
+    const gchar *u = g_ptr_array_index (ctx->uris, i);
+    g_autoptr(GByteArray) item = g_byte_array_new ();
+    pb_write_bytes_field (item, PL_ITEM_URI, (const guint8 *) u, strlen (u));
+    pb_write_message_field (add, PL_ADD_ITEMS, item->data, item->len);
+  }
+  pb_write_varint_field (add, PL_ADD_ADD_LAST, 1);
+
+  g_autoptr(GByteArray) op = g_byte_array_new ();
+  pb_write_varint_field (op, PL_OP_KIND, PL_OP_KIND_ADD);
+  pb_write_message_field (op, PL_OP_ADD, add->data, add->len);
+
+  g_autoptr(GByteArray) delta = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (delta, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (delta, PL_DELTA_OPS, op->data, op->len);
+
+  g_autoptr(GByteArray) changes = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (changes, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (changes, PL_CHANGES_DELTAS, delta->data, delta->len);
+
+  g_autofree gchar *uri =
+    g_strdup_printf ("hm://playlist/v2/playlist/%s/changes", ctx->id);
+  g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
+  spotifygtk_mercury_request_full (ctx->mercury, MERCURY_METHOD_SEND, "POST",
+                                   uri, body, on_add_done, ctx);
+}
+
+void
+spotifygtk_playlist_add_tracks (SpotifyMercury *mercury, const gchar *playlist_uri,
+                                const gchar *const *track_uris, guint n_tracks,
+                                SpotifyPlaylistOpCallback callback,
+                                gpointer user_data)
+{
+  g_return_if_fail (mercury != NULL && playlist_uri != NULL);
+  if (n_tracks == 0) {
+    if (callback) callback (TRUE, 200, user_data);
+    return;
+  }
+
+  AddCtx *ctx = g_new0 (AddCtx, 1);
+  ctx->mercury   = g_object_ref (mercury);
+  ctx->id        = g_strdup (playlist_id_of (playlist_uri));
+  ctx->uris      = g_ptr_array_new_with_free_func (g_free);
+  ctx->callback  = callback;
+  ctx->user_data = user_data;
+  for (guint i = 0; i < n_tracks; i++)
+    if (track_uris[i] && *track_uris[i])
+      g_ptr_array_add (ctx->uris, g_strdup (track_uris[i]));
+
+  /* Head first: the change must name the revision it is based on. */
+  g_autofree gchar *head = g_strdup_printf ("hm://playlist/v2/playlist/%s", ctx->id);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_GET, "GET",
+                                   head, NULL, on_add_head, ctx);
+}
+
+/* ── List ────────────────────────────────────────────────────────────────── */
+
+typedef struct {
+  SpotifyPlaylistListCallback callback;
+  gpointer                    user_data;
+} ListCtx;
+
+void
+spotifygtk_playlist_entries_free (SpotifyPlaylistEntry *entries, guint n)
+{
+  if (!entries) return;
+  for (guint i = 0; i < n; i++) {
+    g_free (entries[i].uri);
+    g_free (entries[i].name);
+  }
+  g_free (entries);
+}
+
+static void
+on_rootlist_read (MercuryResponse *response, gpointer user_data)
+{
+  ListCtx *ctx = user_data;
+  GArray *out = g_array_new (FALSE, TRUE, sizeof (SpotifyPlaylistEntry));
+
+  if (status_ok (response) && response->parts && response->parts->len > 0) {
+    gsize len = 0;
+    const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
+
+    /* SelectedListContent.contents -> ListItems.items -> Item.uri */
+    const guint8 *contents = NULL; gsize clen = 0;
+    if (pb_find_bytes_field (d, len, PL_SLC_CONTENTS, &contents, &clen)) {
+      gsize pos = 0;
+      guint32 fn; PbWireType wt; const guint8 *fd; gsize fl; guint64 fv;
+      while (pb_read_field (contents, clen, &pos, &fn, &wt, &fd, &fl, &fv)) {
+        if (fn != PL_ITEMS_ITEMS || wt != PB_WIRE_LENGTH_DELIMITED)
+          continue;
+        const guint8 *u = NULL; gsize ul = 0;
+        if (!pb_find_bytes_field (fd, fl, PL_ITEM_URI, &u, &ul))
+          continue;
+        SpotifyPlaylistEntry e = { 0 };
+        e.uri = g_strndup ((const gchar *) u, ul);
+        g_array_append_val (out, e);
+      }
+    }
+  }
+
+  if (ctx->callback)
+    ctx->callback (status_ok (response), response ? response->status_code : 0,
+                   (SpotifyPlaylistEntry *) out->data, out->len, ctx->user_data);
+
+  for (guint i = 0; i < out->len; i++)
+    g_free (g_array_index (out, SpotifyPlaylistEntry, i).uri);
+  g_array_free (out, TRUE);
+  g_free (ctx);
+}
+
+void
+spotifygtk_playlist_list (SpotifyMercury *mercury, const gchar *username,
+                          SpotifyPlaylistListCallback callback, gpointer user_data)
+{
+  g_return_if_fail (mercury != NULL && username != NULL);
+
+  ListCtx *ctx = g_new0 (ListCtx, 1);
+  ctx->callback  = callback;
+  ctx->user_data = user_data;
+
+  g_autofree gchar *uri = g_strdup_printf ("hm://playlist/v2/user/%s/rootlist",
+                                           username);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_GET, "GET",
+                                   uri, NULL, on_rootlist_read, ctx);
+}
