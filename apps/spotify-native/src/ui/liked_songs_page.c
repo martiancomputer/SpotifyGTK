@@ -474,16 +474,10 @@ spotifygtk_liked_songs_page_refresh (SpotifyGtkLikedSongsPage *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
 
-  if (self->loaded || self->in_flight) {
-    g_message ("liked-page: refresh skipped (loaded=%d in_flight=%d)",
-               self->loaded, self->in_flight != NULL);
+  if (self->loaded || self->in_flight)
     return;
-  }
-  if (self->retry_after && g_get_monotonic_time () < self->retry_after) {
-    g_message ("liked-page: refresh skipped (backing off)");
+  if (self->retry_after && g_get_monotonic_time () < self->retry_after)
     return;
-  }
-  g_message ("liked-page: refetching");
 
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {

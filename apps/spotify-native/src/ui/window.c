@@ -77,6 +77,7 @@ struct _SpotifyGtkNativeWindow {
   /* Every liked track URI, read at sign-in. The lists keep their own copies
    * for the rows they show; this is the authority. */
   GHashTable *liked_uris;
+  guint64     collection_sub;   /* Mercury subscription for external changes */
 
   SpotifyGtkHomePage *home_page;
   SpotifyGtkSearchPage *search_page;
@@ -117,6 +118,7 @@ G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, GTK_TYPE_
 static void spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *self,
                                                       const gchar *status);
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
+static void spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self);
 static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
                                  const gchar *title, const gchar *kind);
@@ -351,6 +353,52 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
 
 
 
+
+/*
+ * Collection changes made anywhere else.
+ *
+ * Liking on a phone, the web player, or the official client leaves this one
+ * showing whatever it read at sign-in -- the page keeps its list and every
+ * heart keeps its state, and only a restart corrects them. Spotify publishes a
+ * change event to the collection URI, so subscribing is the difference between
+ * a client that reflects the account and one that reflects a snapshot of it.
+ *
+ * The event says something changed, not what, so the response is to re-read
+ * the set and mark the page stale rather than to trust its payload.
+ */
+static void
+on_collection_changed (MercuryResponse *response, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) response;
+
+  g_message ("liked: collection changed elsewhere; reloading");
+  spotifygtk_native_window_reload_liked (self);
+  if (self->liked_page) {
+    spotifygtk_liked_songs_page_invalidate (self->liked_page);
+    if (g_strcmp0 (gtk_stack_get_visible_child_name (self->page_stack), "liked") == 0)
+      spotifygtk_liked_songs_page_refresh (self->liked_page);
+  }
+}
+
+static void
+subscribe_collection_changes (SpotifyGtkNativeWindow *self)
+{
+  if (self->collection_sub)
+    return;
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (self->session)
+                             : NULL;
+  if (!m || !user)
+    return;
+
+  g_autofree gchar *uri =
+    g_strdup_printf ("hm://collection/collection/%s/json", user);
+  self->collection_sub =
+    spotifygtk_mercury_subscribe (m, uri, on_collection_changed, self);
+}
+
 static void set_row_liked_for_uri (SpotifyGtkNativeWindow *self,
                                   const gchar *uri, gboolean liked);
 
@@ -437,7 +485,7 @@ liked_fetch_page (SpotifyGtkNativeWindow *self, const gchar *token)
                                       on_liked_page, self);
 }
 
-void
+static void
 spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_NATIVE_WINDOW (self));
@@ -524,7 +572,6 @@ static void
 on_like_write_done (gboolean ok, guint16 status, gpointer user_data)
 {
   LikeUiCtx *ctx = user_data;
-  g_message ("liked: write callback ok=%d status=%u", ok, status);
   if (ok) {
     g_idle_add (liked_pages_invalidate, ctx->window);
     g_free (ctx->uri);
@@ -590,7 +637,6 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
   }
 
   const gchar *uris[] = { track->uri };
-  g_message ("liked: writing %s for %s", liked ? "add" : "remove", track->uri);
   spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
                                   uris, 1, !liked, on_like_write_done, ctx);
 }
@@ -1001,6 +1047,13 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     /* Liked state for every list and every context menu. Paged, so the size of
      * the collection does not matter. */
     spotifygtk_native_window_reload_liked (self);
+    subscribe_collection_changes (self);
+
+    /* Development aid: open straight onto a page so its load can be watched
+     * without driving the UI by hand. */
+    const gchar *start = g_getenv ("SPOTIFY_DEV_START_PAGE");
+    if (start && *start)
+      navigate_raw (self, start);
     spotifygtk_library_page_set_session (self->library_page, session);
 
     const gchar *visible = gtk_stack_get_visible_child_name (self->page_stack);
