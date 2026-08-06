@@ -20,6 +20,9 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list,
                       SPOTIFYGTK, TRACK_LIST, GtkBox)
 
+/* Drop every row showing `uri`. For a list whose membership is the liked set. */
+void spotifygtk_track_list_remove_uri (SpotifyGtkTrackList *self, const gchar *uri);
+
 /* Record a track's liked state and update any row showing it. Keyed by URI so
  * the mark survives row recycling. */
 void spotifygtk_track_list_set_liked_uri (SpotifyGtkTrackList *self,
