@@ -20,6 +20,11 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list,
                       SPOTIFYGTK, TRACK_LIST, GtkBox)
 
+/* Record a track's liked state and update any row showing it. Keyed by URI so
+ * the mark survives row recycling. */
+void spotifygtk_track_list_set_liked_uri (SpotifyGtkTrackList *self,
+                                          const gchar *uri, gboolean liked);
+
 /* Show or hide the per-row like control. Hidden on the Liked Songs page. */
 void spotifygtk_track_list_set_show_like (SpotifyGtkTrackList *self, gboolean show);
 

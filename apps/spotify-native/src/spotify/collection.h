@@ -160,4 +160,47 @@ void spotifygtk_collection_write (SpotifyMercury            *mercury,
                                   SpotifyCollectionCallback  callback,
                                   gpointer                   user_data);
 
+/* ── collection v2 ─────────────────────────────────────────────────────────
+ *
+ * The service the official client uses, recovered from its binary and proven
+ * live. Everything above this line talks to hm://collection/collection/<user>,
+ * which is legacy: it replaces the whole set on every write, caps out around
+ * 576 items, and answers in a schema no published proto matches.
+ *
+ * This one is additive, paginated, and speaks collection2v2 exactly:
+ *
+ *     POST hm://collection/v2/{write,paging,initialized}
+ *     Header.content_type = SPOTIFYGTK_COLLECTION_V2_CONTENT_TYPE
+ *
+ * The content type is not optional -- without it the server answers in the
+ * legacy shape.
+ */
+
+#define SPOTIFYGTK_COLLECTION_V2_CONTENT_TYPE \
+  "application/vnd.collection-v2.spotify.proto"
+
+/*
+ * Add or remove `uris`. Additive: a write names only what changes and leaves
+ * the rest of the collection alone, which is the whole difference from the
+ * legacy endpoint.
+ */
+void spotifygtk_collection_v2_write (SpotifyMercury            *mercury,
+                                     const gchar               *username,
+                                     const gchar               *set,
+                                     const gchar *const        *uris,
+                                     guint                      n_uris,
+                                     gboolean                   is_removed,
+                                     SpotifyCollectionCallback  callback,
+                                     gpointer                   user_data);
+
+/* One page of the collection. `pagination_token` is NULL for the first page;
+ * the callback receives the next one, or NULL at the end. */
+void spotifygtk_collection_v2_read_page (SpotifyMercury                *mercury,
+                                         const gchar                   *username,
+                                         const gchar                   *set,
+                                         const gchar                   *pagination_token,
+                                         gint32                         limit,
+                                         SpotifyCollectionPageCallback  callback,
+                                         gpointer                       user_data);
+
 G_END_DECLS

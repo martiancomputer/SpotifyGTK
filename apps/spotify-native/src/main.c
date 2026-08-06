@@ -2622,7 +2622,30 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
     gboolean     removing  = removeenv && *removeenv;
     g_autoptr(GByteArray) body = NULL;
 
-    if (g_strcmp0 (body_kind, "initialized") == 0) {
+    if (g_strcmp0 (body_kind, "write-v2") == 0) {
+      /*
+       * collection2v2 WriteRequest { username=1, set=2, items=3,
+       * client_update_id=4 }, field numbers from the official binary's
+       * descriptors. SPOTIFY_PROBE_COLLECTION_URI adds one item; with none it
+       * is a well-formed request that cannot change anything, which is how the
+       * operation name is discovered without writing.
+       */
+      body = g_byte_array_new ();
+      pb_write_bytes_field (body, 1, (const guint8 *) username, strlen (username));
+      pb_write_bytes_field (body, 2, (const guint8 *) SPOTIFYGTK_COLLECTION_SET_LIKED,
+                            strlen (SPOTIFYGTK_COLLECTION_SET_LIKED));
+      const gchar *wuri = g_getenv ("SPOTIFY_PROBE_COLLECTION_URI");
+      if (wuri && *wuri) {
+        g_autoptr(GByteArray) it = g_byte_array_new ();
+        pb_write_bytes_field (it, 1, (const guint8 *) wuri, strlen (wuri));
+        pb_write_varint_field (it, 2, (guint64) time (NULL));
+        if (g_getenv ("SPOTIFY_PROBE_COLLECTION_REMOVE"))
+          pb_write_varint_field (it, 3, 1);          /* is_removed */
+        pb_write_message_field (body, 3, it->data, it->len);
+      }
+      g_autofree gchar *cuid = g_uuid_string_random ();
+      pb_write_bytes_field (body, 4, (const guint8 *) cuid, strlen (cuid));
+    } else if (g_strcmp0 (body_kind, "initialized") == 0) {
       /* InitializedRequest { username = 1, set = 2 } -- the smallest message in
        * collection2v2, so the least that can be wrong about it. */
       body = g_byte_array_new ();
@@ -3311,6 +3334,60 @@ spotifygtk_native_engine_run (GCancellable *cancellable,
   return live_ok;
 }
 
+/* ── Liked Songs, from the UI ───────────────────────────────────────────── */
+
+typedef struct {
+  SpotifyNativeLikeCallback callback;
+  gpointer                  user_data;
+} LikeCtx;
+
+static void
+on_engine_like_done (gboolean ok, guint16 status, gpointer user_data)
+{
+  LikeCtx *ctx = user_data;
+  g_message ("[collection] write %s (status %u)", ok ? "accepted" : "REFUSED", status);
+  if (ctx->callback)
+    ctx->callback (ok, status, ctx->user_data);
+  g_free (ctx);
+}
+
+gboolean
+spotifygtk_native_engine_set_track_liked (const gchar *track_uri, gboolean liked,
+                                          SpotifyNativeLikeCallback callback,
+                                          gpointer user_data)
+{
+  g_return_val_if_fail (track_uri != NULL, FALSE);
+
+  /*
+   * Mercury rides the AP connection, so this only works once a session exists.
+   * Reported rather than queued: silently deferring a like would leave the UI
+   * claiming something happened that had not.
+   */
+  if (!engine_mercury || !engine_mercury_session) {
+    g_warning ("[collection] cannot write: no AP session yet (play something first)");
+    return FALSE;
+  }
+
+  const gchar *username =
+    spotifygtk_ap_session_get_username (engine_mercury_session);
+  if (!username || !*username) {
+    g_warning ("[collection] cannot write: session has no username");
+    return FALSE;
+  }
+
+  const gchar *uris[] = { track_uri };
+  LikeCtx *ctx = g_new0 (LikeCtx, 1);
+  ctx->callback = callback;
+  ctx->user_data = user_data;
+
+  g_message ("[collection] %s %s", liked ? "adding" : "removing", track_uri);
+  spotifygtk_collection_v2_write (engine_mercury, username,
+                                  SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                  uris, 1, !liked,
+                                  on_engine_like_done, ctx);
+  return TRUE;
+}
+
 #ifndef SPOTIFYGTK_ENGINE_LIBRARY
 
 /* ── Session probe ───────────────────────────────────────────────────────── */
@@ -3440,6 +3517,7 @@ run_session_probe (const gchar *query)
   g_free (probe.query);
   return probe.ok ? 0 : 1;
 }
+
 
 int
 main (int argc, char *argv[])

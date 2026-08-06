@@ -30,6 +30,22 @@ spotifygtk_mercury_request (SpotifyMercury *self, MercuryMethod method,
   (void) callback; (void) user_data;
 }
 
+void
+spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
+                                 const gchar *method_override, const gchar *uri,
+                                 GBytes *payload, MercuryCallback callback,
+                                 gpointer user_data)
+{
+  (void) self; (void) method; (void) method_override; (void) uri;
+  (void) payload; (void) callback; (void) user_data;
+}
+
+void
+spotifygtk_mercury_set_content_type (SpotifyMercury *self, const gchar *content_type)
+{
+  (void) self; (void) content_type;
+}
+
 GType
 spotifygtk_mercury_get_type (void)
 {

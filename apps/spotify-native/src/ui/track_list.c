@@ -33,6 +33,13 @@ struct _SpotifyGtkTrackList {
   gboolean numbered;
   gboolean show_like;   /* hearts hidden on the Liked Songs page */
 
+  /*
+   * URIs known to be liked. Held here rather than on the row because rows are
+   * recycled: a row scrolled off and reused for another track would otherwise
+   * keep the previous one's heart.
+   */
+  GHashTable *liked_uris;
+
   /* Scroll settle detection. Cover loading is suppressed while the adjustment
    * is moving and resumed once it has been still for SETTLE_MS. */
   GtkAdjustment *vadj;         /* borrowed */
@@ -259,6 +266,10 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     spotifygtk_track_item_get_paused (item));
   spotifygtk_track_row_set_like_visible (row, self->show_like);
 
+  const SpotifyNativeTrack *bt = spotifygtk_track_item_get_track (item);
+  spotifygtk_track_row_set_liked (row,
+    bt && bt->uri && g_hash_table_contains (self->liked_uris, bt->uri));
+
   /* Connect for the lifetime of this binding; disconnected in unbind. The
    * item ref is stashed so play-clicked knows which track it is. */
   g_object_set_data_full (G_OBJECT (row), "bound-item",
@@ -364,6 +375,7 @@ static void
 spotifygtk_track_list_init (SpotifyGtkTrackList *self)
 {
   self->show_like = TRUE;
+  self->liked_uris = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_box_set_spacing (GTK_BOX (self), 8);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
@@ -436,6 +448,33 @@ spotifygtk_track_list_set_show_like (SpotifyGtkTrackList *self, gboolean show)
   for (guint i = 0; self->bound_rows && i < self->bound_rows->len; i++)
     spotifygtk_track_row_set_like_visible (
       SPOTIFYGTK_TRACK_ROW (g_ptr_array_index (self->bound_rows, i)), show);
+}
+
+/*
+ * Record a track's liked state and update any row currently showing it.
+ *
+ * Keyed by URI rather than by row so the mark survives scrolling: the set is
+ * consulted again every time a row is bound.
+ */
+void
+spotifygtk_track_list_set_liked_uri (SpotifyGtkTrackList *self,
+                                     const gchar *uri, gboolean liked)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  g_return_if_fail (uri != NULL);
+
+  if (liked)
+    g_hash_table_add (self->liked_uris, g_strdup (uri));
+  else
+    g_hash_table_remove (self->liked_uris, uri);
+
+  for (guint i = 0; self->bound_rows && i < self->bound_rows->len; i++) {
+    GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
+    SpotifyGtkTrackItem *item = g_object_get_data (G_OBJECT (row), "bound-item");
+    const SpotifyNativeTrack *t = item ? spotifygtk_track_item_get_track (item) : NULL;
+    if (t && t->uri && g_strcmp0 (t->uri, uri) == 0)
+      spotifygtk_track_row_set_liked (SPOTIFYGTK_TRACK_ROW (row), liked);
+  }
 }
 
 SpotifyGtkTrackList *
