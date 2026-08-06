@@ -76,6 +76,14 @@ void spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod meth
                                         const gchar *const *field_values, guint n_fields,
                                         MercuryCallback callback, gpointer user_data);
 
+/*
+ * Content type for subsequent requests, written into Header.content_type.
+ * NULL clears it. A service uses this to pick which schema it answers in --
+ * the collection endpoint speaks one shape with
+ * "application/vnd.collection-v2.spotify.proto" and an older one without.
+ */
+void spotifygtk_mercury_set_content_type (SpotifyMercury *self, const gchar *content_type);
+
 /* Long-lived subscription — callback fires on every published event
  * until spotifygtk_mercury_unsubscribe() is called. */
 guint64 spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,

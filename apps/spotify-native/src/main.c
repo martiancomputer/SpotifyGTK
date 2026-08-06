@@ -2436,6 +2436,14 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
    * The status alone answers the only open question -- whether this URI
    * accepts a collection write -- without betting a real like on a guess.
    */
+  /* Selects which schema the collection service answers in -- see
+   * spotifygtk_mercury_set_content_type(). */
+  const gchar *ct = g_getenv ("SPOTIFY_MERCURY_CONTENT_TYPE");
+  if (ct && *ct && engine_mercury) {
+    g_message ("[mercury] content-type: %s", ct);
+    spotifygtk_mercury_set_content_type (engine_mercury, ct);
+  }
+
   const gchar *read_probe = g_getenv ("SPOTIFY_PROBE_COLLECTION_READ");
   if (read_probe && *read_probe && engine_mercury && username) {
     g_autofree gchar *rep = strstr (read_probe, "%s")
@@ -2614,7 +2622,14 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
     gboolean     removing  = removeenv && *removeenv;
     g_autoptr(GByteArray) body = NULL;
 
-    if (g_strcmp0 (body_kind, "delta") == 0) {
+    if (g_strcmp0 (body_kind, "initialized") == 0) {
+      /* InitializedRequest { username = 1, set = 2 } -- the smallest message in
+       * collection2v2, so the least that can be wrong about it. */
+      body = g_byte_array_new ();
+      pb_write_bytes_field (body, 1, (const guint8 *) username, strlen (username));
+      pb_write_bytes_field (body, 2, (const guint8 *) SPOTIFYGTK_COLLECTION_SET_LIKED,
+                            strlen (SPOTIFYGTK_COLLECTION_SET_LIKED));
+    } else if (g_strcmp0 (body_kind, "delta") == 0) {
       /* collection2v2 DeltaRequest { username = 1, set = 2, last_sync_token = 3 }.
        * An empty sync token asks "give me everything and tell me where I am",
        * which is how a client bootstraps a delta stream -- if this endpoint
@@ -2623,7 +2638,11 @@ on_login_result (gboolean success, const gchar *username, GError *error, gpointe
       pb_write_bytes_field (body, 1, (const guint8 *) username, strlen (username));
       pb_write_bytes_field (body, 2, (const guint8 *) SPOTIFYGTK_COLLECTION_SET_LIKED,
                             strlen (SPOTIFYGTK_COLLECTION_SET_LIKED));
-      pb_write_bytes_field (body, 3, (const guint8 *) "", 0);
+      /* Omitted when empty: proto3 drops a default-valued field, and sending
+       * an explicit empty sync token made the server answer 500. */
+      const gchar *tok = g_getenv ("SPOTIFY_PROBE_SYNC_TOKEN");
+      if (tok && *tok)
+        pb_write_bytes_field (body, 3, (const guint8 *) tok, strlen (tok));
     } else if (g_strcmp0 (body_kind, "page") == 0) {
       body = spotifygtk_collection_build_page_request (username,
                                                        SPOTIFYGTK_COLLECTION_SET_LIKED,
