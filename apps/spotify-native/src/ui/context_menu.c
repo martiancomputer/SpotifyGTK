@@ -53,6 +53,27 @@ spotifygtk_context_menu_add_separator (SpotifyGtkContextMenu *menu)
                   gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
 }
 
+/*
+ * Drop a dismissed popover once GTK has finished with it. See the connect site
+ * for why this cannot happen inside the "closed" handler.
+ */
+static gboolean
+menu_unparent_idle (gpointer data)
+{
+  GtkWidget *popover = data;
+  if (GTK_IS_WIDGET (popover))
+    gtk_widget_unparent (popover);
+  g_object_unref (popover);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+menu_close_deferred (GtkPopover *popover, gpointer user_data)
+{
+  (void) user_data;
+  g_idle_add (menu_unparent_idle, g_object_ref (popover));
+}
+
 void
 spotifygtk_context_menu_present (SpotifyGtkContextMenu *menu, GtkWidget *anchor,
                                  gdouble x, gdouble y,
@@ -72,9 +93,21 @@ spotifygtk_context_menu_present (SpotifyGtkContextMenu *menu, GtkWidget *anchor,
   if (ctx)
     g_object_set_data_full (G_OBJECT (popover), "menu-ctx", ctx, ctx_free);
 
-  /* Unparent on dismissal so the popover and its context are freed. Without
-   * this the menu leaks and, worse, outlives the row it was anchored to. */
-  g_signal_connect (popover, "closed", G_CALLBACK (gtk_widget_unparent), NULL);
+  /*
+   * Unparent on dismissal so the popover and its context are freed -- without
+   * it the menu leaks and outlives the row it was anchored to.
+   *
+   * Deferred to an idle rather than done in the handler. "closed" is emitted
+   * from inside gtk_widget_hide(), so unparenting there destroys the widget
+   * while GTK is still walking it: the renderer is unrealized underneath the
+   * hide that is still in progress, and it aborts in malloc with heap
+   * corruption. Two cores showed exactly that chain -- notify -> hide ->
+   * closed -> unparent -> unrealize -> abort.
+   *
+   * By the time the idle runs the emission has unwound and the widget is
+   * merely hidden, which is a safe moment to take it apart.
+   */
+  g_signal_connect (popover, "closed", G_CALLBACK (menu_close_deferred), NULL);
 
   gtk_popover_popup (GTK_POPOVER (popover));
   g_free (menu);
