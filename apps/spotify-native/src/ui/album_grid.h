@@ -30,6 +30,22 @@ guint spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
                                              GPtrArray           *tracks,
                                              guint                max_albums);
 
+/* Add one card directly. For things that are not albums -- playlists have no
+ * album to group by and carry no cover of their own. `cover_id` may be NULL
+ * and supplied later. */
+void spotifygtk_album_grid_add_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
+                                     const gchar *title, const gchar *subtitle,
+                                     const gchar *cover_id);
+
+/* Replace a card's title, matched by URI. For titles that arrive after the
+ * card does. */
+void spotifygtk_album_grid_set_card_title (SpotifyGtkAlbumGrid *self,
+                                           const gchar *uri, const gchar *title);
+
+/* Attach a cover to an already-added card, matched by URI. */
+void spotifygtk_album_grid_set_card_cover (SpotifyGtkAlbumGrid *self,
+                                           const gchar *uri, const gchar *cover_id);
+
 void spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self);
 
 /* Inset the cards while leaving the scrollbar flush with the widget edge.
