@@ -434,11 +434,16 @@ on_collection_settled (gpointer user_data)
   SPOTIFYGTK_DEBUG ("collection: change event settled");
   gint64 since = g_get_monotonic_time () - self->last_local_write_us;
   if (self->last_local_write_us != 0 && since < LOCAL_WRITE_GRACE_US) {
-    if (self->liked_page)
-      spotifygtk_liked_songs_page_invalidate (self->liked_page);
+    /* Our own echo. The set and the page were updated when the action was
+     * taken, so there is nothing here to learn and nothing to invalidate. */
     return G_SOURCE_REMOVE;
   }
 
+  /*
+   * A change from somewhere else -- another device, or the web player. Only
+   * here is a refetch worth its cost: the URI arrived without any metadata, so
+   * a row for it cannot be built locally the way a local like can.
+   */
   spotifygtk_native_window_reload_liked (self);
   if (self->liked_page)
     spotifygtk_liked_songs_page_invalidate (self->liked_page);
@@ -710,27 +715,6 @@ like_result_to_ui (gpointer data)
   return G_SOURCE_REMOVE;
 }
 
-static gboolean
-liked_pages_invalidate (gpointer data)
-{
-  SpotifyGtkNativeWindow *self = data;
-
-  /*
-   * Mark stale; do not refetch.
-   *
-   * The row was already removed locally when the action was taken, so the page
-   * is correct. Refetching here would undo that: the write and the read are
-   * different services, and a read issued the moment a write is acknowledged
-   * can still return the set as it was, putting the row straight back. That is
-   * exactly what "it refreshes but the row stays" looked like.
-   *
-   * Navigating to the page later refetches and reconciles, by which point the
-   * services agree.
-   */
-  spotifygtk_liked_songs_page_invalidate (self->liked_page);
-  return G_SOURCE_REMOVE;
-}
-
 static void
 on_like_write_done (gboolean ok, guint16 status, gpointer user_data)
 {
@@ -738,7 +722,15 @@ on_like_write_done (gboolean ok, guint16 status, gpointer user_data)
   SPOTIFYGTK_DEBUG ("like: write returned ok=%d status=%u for %s",
                     ok, status, ctx->uri);
   if (ok) {
-    g_idle_add (liked_pages_invalidate, ctx->window);
+    /*
+     * Nothing to do. The row, the heart and the liked set were all updated
+     * when the action was taken, and this only confirms it.
+     *
+     * This used to invalidate the page, which looked harmless and was not: an
+     * invalidate drops the session's cached listing, so the next visit to
+     * Liked Songs refetched several thousand tracks and their art to learn
+     * something already known. One like made the page slow to open again.
+     */
     g_free (ctx->uri);
     g_free (ctx);
     return;
@@ -767,17 +759,23 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
    * trip completed, and nothing at all if that callback never arrived. The
    * user has just said what they want; the list can say it back immediately.
    *
-   * An unlike removes the row outright instead of refetching, because a
+   * The row is added or removed outright instead of refetching, because a
    * refetch fired now races the server: the write and the read are different
-   * services, and the read can still return the old set and put the row back.
-   * The page is invalidated either way, so the next visit reconciles.
+   * services, and the read can still return the old set and undo it. We have
+   * the whole track here, not just its URI, so the row can be built without
+   * asking anyone.
+   *
+   * The page is deliberately not invalidated afterwards. It is already correct,
+   * and invalidating would throw away the session's cached listing and make the
+   * next visit refetch the whole library. Reconciliation happens on the next
+   * genuine change from elsewhere, or the next sign-in.
    */
-  SpotifyGtkTrackList *liked_list =
-    self->liked_page ? spotifygtk_liked_songs_page_get_list (self->liked_page) : NULL;
-  if (liked_list && !liked)
-    spotifygtk_track_list_remove_uri (liked_list, track->uri);
-  if (self->liked_page)
-    spotifygtk_liked_songs_page_invalidate (self->liked_page);
+  if (self->liked_page) {
+    if (liked)
+      spotifygtk_liked_songs_page_add_track (self->liked_page, track);
+    else
+      spotifygtk_liked_songs_page_remove_track (self->liked_page, track->uri);
+  }
 
   LikeUiCtx *ctx = g_new0 (LikeUiCtx, 1);
   ctx->window = self;

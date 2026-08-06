@@ -505,21 +505,6 @@ spotifygtk_track_list_refresh_liked (SpotifyGtkTrackList *self)
  * read are different services, and a read issued straight after a write can
  * still return the old set.
  */
-void
-spotifygtk_track_list_remove_uri (SpotifyGtkTrackList *self, const gchar *uri)
-{
-  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
-  g_return_if_fail (uri != NULL);
-
-  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
-  for (guint i = n; i > 0; i--) {
-    g_autoptr(SpotifyGtkTrackItem) item =
-      g_list_model_get_item (G_LIST_MODEL (self->store), i - 1);
-    const SpotifyNativeTrack *t = item ? spotifygtk_track_item_get_track (item) : NULL;
-    if (t && t->uri && g_strcmp0 (t->uri, uri) == 0)
-      g_list_store_remove (self->store, i - 1);
-  }
-}
 
 SpotifyGtkTrackList *
 spotifygtk_track_list_new (void)

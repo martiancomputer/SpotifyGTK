@@ -319,7 +319,11 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   }
 
   self->retry_after = 0;
-  g_clear_pointer (&self->all_tracks, g_ptr_array_unref);
+
+  /* Held across the rebuild below so rows this listing has not caught up on can
+   * be carried over. See the carry-over loop. */
+  g_autoptr(GPtrArray) previous = self->all_tracks;
+  self->all_tracks = NULL;
 
   /*
    * Drop anything the liked set says is not liked. NULL until the read has
@@ -330,17 +334,53 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   if (self->liked_filter) {
     GPtrArray *kept = g_ptr_array_new_with_free_func (
       (GDestroyNotify) spotifygtk_native_track_free);
+    g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
     guint dropped = 0;
     for (guint i = 0; i < tracks->len; i++) {
       const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
-      if (t && t->uri && g_hash_table_contains (self->liked_filter, t->uri))
+      if (t && t->uri && g_hash_table_contains (self->liked_filter, t->uri)) {
         g_ptr_array_add (kept, spotifygtk_native_track_copy (t));
-      else
+        g_hash_table_add (seen, t->uri);
+      } else {
         dropped++;
+      }
     }
     if (dropped)
       g_message ("liked-page: dropped %u stale row(s) the collection no longer lists",
                  dropped);
+
+    /*
+     * The mirror image of that drop: keep rows this listing has not caught up
+     * on yet.
+     *
+     * A track liked a moment ago is in the liked set immediately but reaches
+     * the listing service later, and the listing may also be served from the
+     * session's cache, which predates the write entirely. Without this, a
+     * just-liked row appeared, survived until the user navigated away, and
+     * then vanished on the way back -- which reads as the like having failed.
+     *
+     * Guarded by the liked set, so this can only reinstate something still
+     * genuinely liked; once the listing catches up the row is already in
+     * `seen` and this does nothing.
+     */
+    guint carried = 0;
+    for (guint i = 0; previous && i < previous->len; i++) {
+      const SpotifyNativeTrack *t = g_ptr_array_index (previous, i);
+      if (!t || !t->uri)
+        continue;
+      if (g_hash_table_contains (seen, t->uri))
+        continue;
+      if (!g_hash_table_contains (self->liked_filter, t->uri))
+        continue;
+      /* At `carried`, not at 0: these are already newest-first in `previous`,
+       * and inserting each at the front would reverse them. */
+      g_ptr_array_insert (kept, (gint) carried, spotifygtk_native_track_copy (t));
+      carried++;
+    }
+    if (carried)
+      g_message ("liked-page: carried over %u row(s) the listing has not caught up on",
+                 carried);
+
     self->all_tracks = kept;
   } else {
     self->all_tracks = g_ptr_array_ref (tracks);
@@ -520,6 +560,114 @@ spotifygtk_liked_songs_page_invalidate (SpotifyGtkLikedSongsPage *self)
   g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
   self->loaded      = FALSE;
   self->retry_after = 0;
+
+  /*
+   * Drop the session's cached listing too, or this promises a refetch it
+   * cannot deliver: the collection is cached for the life of the session, so
+   * the "refetch" was served from memory and returned the same set as before.
+   * Marking the page stale then achieved nothing at all.
+   */
+  if (self->session) {
+    g_autofree gchar *uri =
+      spotifygtk_native_session_dup_collection_uri (self->session);
+    if (uri)
+      spotifygtk_native_session_invalidate_context (self->session, uri);
+  }
+}
+
+/*
+ * Add and remove a single track without refetching.
+ *
+ * Both go through all_tracks rather than the visible list, because the visible
+ * list is a derived view: it is rebuilt from all_tracks on every keystroke in
+ * the filter box and on every sort change. Touching only the rows meant an
+ * unliked track came back the moment the user typed anything.
+ *
+ * The whole view is then rebuilt, which sounds heavy for one row and is not:
+ * it is the same single splice that clearing the filter already does, and the
+ * list is numbered, so inserting at the top renumbers everything below it
+ * anyway.
+ */
+static gint
+find_track_index (SpotifyGtkLikedSongsPage *self, const gchar *uri)
+{
+  if (!self->all_tracks || !uri)
+    return -1;
+  for (guint i = 0; i < self->all_tracks->len; i++) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (self->all_tracks, i);
+    if (t && t->uri && g_strcmp0 (t->uri, uri) == 0)
+      return (gint) i;
+  }
+  return -1;
+}
+
+/* Index entries for one track, matching what build_track_indexes() produces. */
+static void
+index_one_track (SpotifyGtkLikedSongsPage *self, SpotifyNativeTrack *t)
+{
+  if (!self->haystacks || !self->collate_keys)
+    return;
+
+  g_autofree gchar *hay = g_strdup_printf ("%s\t%s\t%s",
+    t->name ? t->name : "", t->artists ? t->artists : "", t->album ? t->album : "");
+  g_hash_table_insert (self->haystacks, t, g_utf8_casefold (hay, -1));
+  g_hash_table_insert (self->collate_keys, t,
+                       g_utf8_collate_key (t->name ? t->name : "", -1));
+}
+
+void
+spotifygtk_liked_songs_page_add_track (SpotifyGtkLikedSongsPage *self,
+                                       const SpotifyNativeTrack *track)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
+  g_return_if_fail (track != NULL && track->uri != NULL);
+
+  /*
+   * Nothing to insert into. An unloaded page fetches the truth when it opens,
+   * and seeding it with one row would claim the library holds only that.
+   *
+   * Keyed on all_tracks rather than `loaded`: `loaded` means "not stale", and
+   * the caller invalidates the page right after each of these, so testing it
+   * would let the first like through and silently drop every one after it.
+   */
+  if (!self->all_tracks)
+    return;
+  if (find_track_index (self, track->uri) >= 0)
+    return;
+
+  /* Position 0 is newest: the collection arrives newest-first and SORT_ADDED
+   * is that arrival order. See the sort-key enum. */
+  SpotifyNativeTrack *copy = spotifygtk_native_track_copy (track);
+  g_ptr_array_insert (self->all_tracks, 0, copy);
+  index_one_track (self, copy);
+
+  rebuild_sorted (self);
+  apply_filter (self);
+}
+
+void
+spotifygtk_liked_songs_page_remove_track (SpotifyGtkLikedSongsPage *self,
+                                          const gchar *uri)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
+  g_return_if_fail (uri != NULL);
+
+  if (!self->all_tracks)   /* see add_track() on why this is not `loaded` */
+    return;
+
+  gint at = find_track_index (self, uri);
+  if (at < 0)
+    return;
+
+  /* Drop the index entries first: they are keyed by the track pointer, which
+   * the removal is about to free. */
+  SpotifyNativeTrack *t = g_ptr_array_index (self->all_tracks, at);
+  if (self->haystacks)    g_hash_table_remove (self->haystacks, t);
+  if (self->collate_keys) g_hash_table_remove (self->collate_keys, t);
+  g_ptr_array_remove_index (self->all_tracks, at);
+
+  rebuild_sorted (self);
+  apply_filter (self);
 }
 
 void
