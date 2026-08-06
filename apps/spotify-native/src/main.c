@@ -2347,7 +2347,11 @@ on_playlist_head_result (MercuryResponse *response, gpointer user_data)
   }
 
   g_autoptr(GByteArray) add = g_byte_array_new ();
-  pb_write_varint_field (add, 1, 0);              /* from_index */
+  /* from_index and add_last are alternatives -- Add carries one or the other,
+   * and sending both is rejected. */
+  gboolean minimal = g_getenv ("SPOTIFY_PROBE_PLAYLIST_MINIMAL") != NULL;
+  if (!minimal)
+    pb_write_varint_field (add, 1, 0);            /* from_index */
 
   guint idx = 0, taken = 0;
   gsize pos = 0;
@@ -2373,7 +2377,7 @@ on_playlist_head_result (MercuryResponse *response, gpointer user_data)
          * value. Whether the server honours a client-supplied timestamp is the
          * open question this probe answers.
          */
-        if (added_at > 0) {
+        if (added_at > 0 && !minimal) {
           g_autoptr(GByteArray) attrs = g_byte_array_new ();
           pb_write_varint_field (attrs, 2, added_at * 1000);
           pb_write_message_field (item, 2, attrs->data, attrs->len);
@@ -2384,7 +2388,8 @@ on_playlist_head_result (MercuryResponse *response, gpointer user_data)
     }
     idx++;
   }
-  pb_write_varint_field (add, 4, 1);              /* add_last */
+  if (minimal)
+    pb_write_varint_field (add, 4, 1);            /* add_last */
 
   g_autoptr(GByteArray) op = g_byte_array_new ();
   pb_write_varint_field (op, 1, 2);               /* Op.kind = ADD */
@@ -2406,6 +2411,49 @@ on_playlist_head_result (MercuryResponse *response, gpointer user_data)
   g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
   spotifygtk_mercury_request_full (engine_mercury, MERCURY_METHOD_SEND, "POST",
                                    curi, body, on_playlist_changes_result, pa);
+}
+
+/*
+ * Playlist creation probe.
+ *
+ * SelectedListContent { attributes = 3 } carrying ListAttributes { name = 1 },
+ * which is the shape the playlist service reads when asked to make a list. The
+ * reply is CreateListReply { uri = 1, revision = 2 }, so the new playlist's URI
+ * comes straight back and can be used to exercise an ADD against a real list
+ * rather than the Liked Songs pseudo-playlist, which accepts ops and discards
+ * them.
+ */
+static void
+on_playlist_create_result (MercuryResponse *response, gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  if (!run_is_current (state) || !response)
+    return;
+
+  g_message ("[playlist-create] status %d (%u part(s))", response->status_code,
+             response->parts ? response->parts->len : 0);
+
+  if (!response->parts || response->parts->len == 0)
+    return;
+
+  gsize len = 0;
+  const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
+  const guint8 *uri = NULL; gsize ulen = 0;
+  {
+    g_autoptr(GString) hex = g_string_new (NULL);
+    for (gsize i = 0; i < len && i < 80; i++)
+      g_string_append_printf (hex, "%02x", d[i]);
+    g_message ("[playlist-create] raw %" G_GSIZE_FORMAT " bytes: %s", len, hex->str);
+  }
+  if (pb_find_bytes_field (d, len, 1, &uri, &ulen)) {
+    g_autofree gchar *u = g_strndup ((const gchar *) uri, ulen);
+    g_message ("[playlist-create] created %s (uri field %" G_GSIZE_FORMAT " bytes)", u, ulen);
+  } else {
+    g_autoptr(GString) hex = g_string_new (NULL);
+    for (gsize i = 0; i < len && i < 64; i++)
+      g_string_append_printf (hex, "%02x", d[i]);
+    g_message ("[playlist-create] reply %" G_GSIZE_FORMAT " bytes: %s", len, hex->str);
+  }
 }
 
 static void
@@ -2760,6 +2808,24 @@ after_write_probe:
     g_message ("[frag-probe] GET %s with a %" G_GSIZE_FORMAT "-byte body", uri, n);
     spotifygtk_mercury_request (engine_mercury, MERCURY_METHOD_GET, uri, body,
                                 on_mercury_probe_result, state);
+  }
+
+  const gchar *pl_new = g_getenv ("SPOTIFY_PROBE_PLAYLIST_CREATE");
+  if (pl_new && *pl_new && engine_mercury) {
+    g_autoptr(GByteArray) attrs = g_byte_array_new ();
+    pb_write_bytes_field (attrs, 1, (const guint8 *) pl_new, strlen (pl_new));
+
+    g_autoptr(GByteArray) body = g_byte_array_new ();
+    pb_write_message_field (body, 3, attrs->data, attrs->len);   /* attributes */
+
+    g_autoptr(GBytes) payload = g_bytes_new (body->data, body->len);
+    const gchar *method = g_getenv ("SPOTIFY_PROBE_PLAYLIST_METHOD");
+    if (!method || !*method) method = "PUT";
+    g_message ("[playlist-create] %s hm://playlist/v2/playlist name=\"%s\"",
+               method, pl_new);
+    spotifygtk_mercury_request_full (engine_mercury, MERCURY_METHOD_SEND, method,
+                                     "hm://playlist/v2/playlist", payload,
+                                     on_playlist_create_result, state);
   }
 
   const gchar *pl_add = g_getenv ("SPOTIFY_PROBE_PLAYLIST_ADD");

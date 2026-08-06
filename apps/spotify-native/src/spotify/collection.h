@@ -237,6 +237,30 @@ void spotifygtk_collection_v2_read_page (SpotifyMercury                *mercury,
  * PlaylistModificationInfo { uri = 1, new_revision = 2, parent_revision = 3 },
  * whose revision pair is the optimistic-concurrency scheme: a change names the
  * revision it was based on, and is rejected if the list has moved on.
+ *
+ * CREATE AND ADD, BOTH PROVEN
+ *
+ *   POST hm://playlist/v2/playlist
+ *   body: SelectedListContent { attributes = 3 { name = 1 } }
+ *   -> 200, CreateListReply { uri = 1, revision = 2 }
+ *
+ * PUT is refused with 405; POST is the verb. The reply carries the new URI in
+ * full ("spotify:playlist:<22 chars>") and a 24-byte revision.
+ *
+ * A created list is NOT in the user's library. The rootlist stays empty until
+ * the new URI is added to it -- making the list and filing it are separate
+ * operations, which is worth knowing before wondering why a successful create
+ * leaves nothing on screen.
+ *
+ *   POST hm://playlist/v2/playlist/<id>/changes
+ *   body: ListChanges { base_revision, deltas[ Delta { ops[ Op { kind=ADD,
+ *         add { items[ Item { uri } ], add_last = true } } ] } ] }
+ *   -> 200, and the list's length moves 0 -> 3
+ *
+ * Add.from_index and Add.add_last are ALTERNATIVES. Sending both is a 400 with
+ * nothing to say which field is at fault; sending only add_last works. That one
+ * detail is the difference between the op being accepted and rejected, and it
+ * is not stated in the schema.
  */
 
 G_END_DECLS
