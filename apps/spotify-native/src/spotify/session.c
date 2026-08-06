@@ -34,6 +34,7 @@ struct _SpotifyNativeSession {
 
   /* Worker-owned protocol objects. */
   SpotifyApSession   *ap;
+  SpotifyMercury     *mercury;   /* lazily built on `ap` */
   SpotifyClientToken *client_token_client;
   SpotifyLogin5      *login5_client;
   SpotifySpclient    *spclient;
@@ -926,6 +927,21 @@ spotifygtk_native_session_dup_username (SpotifyNativeSession *self)
   return username;
 }
 
+SpotifyMercury *
+spotifygtk_native_session_get_mercury (SpotifyNativeSession *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self), NULL);
+
+  /* Only once the AP handshake and login are through: Mercury rides that
+   * connection and has nothing to send on before then. */
+  if (!self->ap || !spotifygtk_ap_session_is_live (self->ap))
+    return NULL;
+
+  if (!self->mercury)
+    self->mercury = spotifygtk_mercury_new (self->ap);
+  return self->mercury;
+}
+
 gchar *
 spotifygtk_native_session_dup_collection_uri (SpotifyNativeSession *self)
 {
@@ -978,6 +994,7 @@ spotifygtk_native_session_dispose (GObject *object)
   g_clear_pointer (&self->context, g_main_context_unref);
   g_clear_pointer (&self->caller_context, g_main_context_unref);
 
+  g_clear_object (&self->mercury);
   g_clear_object (&self->ap);
   g_clear_object (&self->client_token_client);
   g_clear_object (&self->login5_client);

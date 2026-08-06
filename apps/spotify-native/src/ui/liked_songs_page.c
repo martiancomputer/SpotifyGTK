@@ -453,6 +453,22 @@ spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
   self->retry_after = 0;
 }
 
+/*
+ * Force the next refresh to refetch.
+ *
+ * refresh() deliberately no-ops once the page holds data, so visiting it
+ * repeatedly does not re-download the collection. That is right for
+ * navigation and wrong after a like: the page kept showing the set as it was
+ * at sign-in, and only a restart revealed a track added since.
+ */
+void
+spotifygtk_liked_songs_page_invalidate (SpotifyGtkLikedSongsPage *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
+  self->loaded      = FALSE;
+  self->retry_after = 0;
+}
+
 void
 spotifygtk_liked_songs_page_refresh (SpotifyGtkLikedSongsPage *self)
 {
