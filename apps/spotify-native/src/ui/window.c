@@ -503,18 +503,20 @@ static gboolean
 liked_pages_invalidate (gpointer data)
 {
   SpotifyGtkNativeWindow *self = data;
-  const gchar *vis = gtk_stack_get_visible_child_name (self->page_stack);
-  g_message ("liked: invalidating (visible page: %s)", vis ? vis : "(none)");
-  /* The set has changed, so the cached page is stale. Marked rather than
-   * refetched: reloading a page nobody is looking at wastes a round trip, and
-   * navigating to it will refresh. */
-  /* The action already moved the UI; this reconciles it with the server once
-   * the write is known to have landed. Only for a page being looked at --
-   * reloading one nobody is on wastes a round trip, and it is invalidated
-   * anyway so navigating there will refetch. */
+
+  /*
+   * Mark stale; do not refetch.
+   *
+   * The row was already removed locally when the action was taken, so the page
+   * is correct. Refetching here would undo that: the write and the read are
+   * different services, and a read issued the moment a write is acknowledged
+   * can still return the set as it was, putting the row straight back. That is
+   * exactly what "it refreshes but the row stays" looked like.
+   *
+   * Navigating to the page later refetches and reconciles, by which point the
+   * services agree.
+   */
   spotifygtk_liked_songs_page_invalidate (self->liked_page);
-  if (g_strcmp0 (gtk_stack_get_visible_child_name (self->page_stack), "liked") == 0)
-    spotifygtk_liked_songs_page_refresh (self->liked_page);
   return G_SOURCE_REMOVE;
 }
 
