@@ -114,7 +114,7 @@ append_u16_be (GByteArray *buf, guint16 v)
 
 static GByteArray *
 encode_mercury_packet (guint64 seq, MercuryMethod method, const gchar *method_override,
-                       const gchar *uri, GBytes *payload,
+                       const gchar *uri, const gchar *content_type, GBytes *payload,
                        const gchar *const *field_keys,
                        const gchar *const *field_values, guint n_fields)
 {
@@ -134,6 +134,18 @@ encode_mercury_packet (guint64 seq, MercuryMethod method, const gchar *method_ov
   const gchar *m = method_override ? method_override : method_string (method);
   pb_write_bytes_field (header, MERCURY_HDR_METHOD,
                         (const guint8 *) m, strlen (m));
+
+  /*
+   * Header.content_type. Never set until now, and it appears to be how a
+   * service selects a schema: the official client carries
+   * "application/vnd.collection-v2.spotify.proto" for collection traffic,
+   * which is a string that exists in its binary and nowhere in any public
+   * schema. Without it the collection endpoint answers in an older shape that
+   * matches no published proto.
+   */
+  if (content_type && *content_type)
+    pb_write_bytes_field (header, MERCURY_HDR_CONTENT_TYPE,
+                          (const guint8 *) content_type, strlen (content_type));
 
   /*
    * Header.user_fields. Spotify's own client carries "Collection-Update-Id"
@@ -189,6 +201,14 @@ cmd_for_method (MercuryMethod method)
  * repeated field merge, so the server sees one list however it is divided.
  */
 void
+spotifygtk_mercury_set_content_type (SpotifyMercury *self, const gchar *content_type)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
+  g_object_set_data_full (G_OBJECT (self), "content-type",
+                          g_strdup (content_type), g_free);
+}
+
+void
 spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
                                   const gchar *method_override, const gchar *uri,
                                   GPtrArray *parts, MercuryCallback callback,
@@ -211,6 +231,11 @@ spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
   pb_write_bytes_field (header, MERCURY_HDR_URI, (const guint8 *) uri, strlen (uri));
   const gchar *m = method_override ? method_override : method_string (method);
   pb_write_bytes_field (header, MERCURY_HDR_METHOD, (const guint8 *) m, strlen (m));
+  const gchar *ct = g_object_get_data (G_OBJECT (self), "content-type");
+  if (ct && *ct)
+    pb_write_bytes_field (header, MERCURY_HDR_CONTENT_TYPE,
+                          (const guint8 *) ct, strlen (ct));
+
   append_u16_be (buf, (guint16) header->len);
   g_byte_array_append (buf, header->data, header->len);
 
@@ -319,8 +344,9 @@ spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
   }
 
   g_autoptr(GByteArray) packet =
-    encode_mercury_packet (seq, method, method_override, uri, payload,
-                           field_keys, field_values, n_fields);
+    encode_mercury_packet (seq, method, method_override, uri,
+                           g_object_get_data (G_OBJECT (self), "content-type"),
+                           payload, field_keys, field_values, n_fields);
 
   /*
    * The pending entry is filed even with no callback: a reply still arrives
