@@ -22,6 +22,11 @@ SpotifyGtkLikedSongsPage *spotifygtk_liked_songs_page_new (void);
 
 void spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
                                               SpotifyNativeSession     *session);
+/* Borrow the window's set of liked URIs, used to drop rows the collection no
+ * longer lists. See the implementation for why this is needed. */
+void spotifygtk_liked_songs_page_set_liked_filter (SpotifyGtkLikedSongsPage *self,
+                                                   GHashTable *liked_uris);
+
 /* Force the next refresh to refetch, after the collection has changed. */
 void spotifygtk_liked_songs_page_invalidate (SpotifyGtkLikedSongsPage *self);
 

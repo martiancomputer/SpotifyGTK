@@ -433,8 +433,17 @@ liked_page_to_ui (gpointer data)
 
   if (r->next && *r->next)
     liked_fetch_page (self, r->next);
-  else
+  else {
     g_message ("liked: %u track(s) known", g_hash_table_size (self->liked_uris));
+    /*
+     * Armed only now. Before the read completes an empty set means "not yet
+     * known", and filtering against it would blank the page; once the last
+     * page has arrived an empty set genuinely means nothing is liked, which is
+     * a state the filter has to be able to express -- removing the last track
+     * is exactly when a stale refetch would otherwise put it back.
+     */
+    spotifygtk_liked_songs_page_set_liked_filter (self->liked_page, self->liked_uris);
+  }
 
   g_ptr_array_unref (r->uris);
   g_free (r->next);
