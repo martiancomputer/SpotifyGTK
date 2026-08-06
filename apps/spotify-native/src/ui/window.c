@@ -494,6 +494,8 @@ static gboolean
 liked_pages_invalidate (gpointer data)
 {
   SpotifyGtkNativeWindow *self = data;
+  const gchar *vis = gtk_stack_get_visible_child_name (self->page_stack);
+  g_message ("liked: invalidating (visible page: %s)", vis ? vis : "(none)");
   /* The set has changed, so the cached page is stale. Marked rather than
    * refetched: reloading a page nobody is looking at wastes a round trip, and
    * navigating to it will refresh. */
@@ -508,6 +510,7 @@ static void
 on_like_write_done (gboolean ok, guint16 status, gpointer user_data)
 {
   LikeUiCtx *ctx = user_data;
+  g_message ("liked: write callback ok=%d status=%u", ok, status);
   if (ok) {
     g_idle_add (liked_pages_invalidate, ctx->window);
     g_free (ctx->uri);
@@ -554,6 +557,7 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
   }
 
   const gchar *uris[] = { track->uri };
+  g_message ("liked: writing %s for %s", liked ? "add" : "remove", track->uri);
   spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
                                   uris, 1, !liked, on_like_write_done, ctx);
 }
