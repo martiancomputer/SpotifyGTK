@@ -29,6 +29,21 @@ void spotifygtk_track_list_refresh_liked (SpotifyGtkTrackList *self);
 /* Show or hide the per-row like control. Hidden on the Liked Songs page. */
 void spotifygtk_track_list_set_show_like (SpotifyGtkTrackList *self, gboolean show);
 
+/*
+ * Splice one row in or out, leaving the rest of the list alone.
+ *
+ * For a membership change of exactly one row -- a like or an unlike. Handing
+ * set_native_tracks() the new listing instead rebuilds every row and loses the
+ * scroll position, which on a large library is a jump from wherever the user
+ * was back to the top. Numbering follows automatically.
+ *
+ * The caller is responsible for the position matching its own model.
+ */
+void spotifygtk_track_list_insert_native_track (SpotifyGtkTrackList      *self,
+                                                guint                     position,
+                                                const SpotifyNativeTrack *track);
+void spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position);
+
 SpotifyGtkTrackList *spotifygtk_track_list_new (void);
 
 

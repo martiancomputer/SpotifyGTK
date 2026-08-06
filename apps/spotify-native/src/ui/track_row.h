@@ -33,6 +33,10 @@ void spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self,
 /* Set track data from the native session (spclient context + extended
  * metadata). This is the path spotify-native uses; the JSON variant above
  * remains for the Web API shape. */
+/* The row's ordinal, or 0 to hide the column. Position-derived in numbered
+ * lists, so it changes without the track changing. */
+void spotifygtk_track_row_set_number (SpotifyGtkTrackRow *self, gint track_number);
+
 void spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
                                             const SpotifyNativeTrack *track,
                                             gint                      track_number);
