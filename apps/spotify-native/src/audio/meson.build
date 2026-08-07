@@ -1,6 +1,7 @@
 audio_engine_sources = files(
   'dsp.c',
   'resampler.c',
+  'sink.c',
   'decoder.c',
   'output.c',
 )
