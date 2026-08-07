@@ -414,19 +414,23 @@ begin_signin (gpointer user_data)
   return G_SOURCE_REMOVE;
 }
 
-static gpointer
-session_thread (gpointer user_data)
+/*
+ * Obtain a fresh access token for AP login. Must run on the session context:
+ * it can block, and it drives an async refresh through a nested loop.
+ *
+ * Always re-reads from NativeAuth rather than trusting what is already in
+ * login_token. The AP rejects an expired token with BadCredentials, and the
+ * token lives an hour while a session lives as long as the window does -- so
+ * on any sign-in after the first, the cached one is more likely stale than
+ * good.
+ */
+static gboolean
+acquire_login_token (SpotifyNativeSession *self)
 {
-  SpotifyNativeSession *self = user_data;
-
-  g_main_context_push_thread_default (self->context);
-
-  /* Token acquisition can block (it may run a browser flow), so it happens
-   * here rather than on the caller's thread. */
+  /* Token acquisition can block (it may run a browser flow), so it happens on
+   * the session context rather than the caller's thread. */
   NativeAuth *auth = native_auth_new ();
-  if (native_auth_has_valid_token (auth)) {
-    self->login_token = g_strdup (native_auth_get_token (auth));
-  } else {
+  if (!native_auth_has_valid_token (auth)) {
     /* native_auth_refresh() handles both cases: refresh a stored-but-expired
      * token, or fall through to the browser flow when there is none. It is
      * async, so drive it on this thread's context via its own nested loop. */
@@ -437,13 +441,25 @@ session_thread (gpointer user_data)
     g_main_loop_run (token_loop);
     g_signal_handler_disconnect (auth, handler);
     g_main_loop_unref (token_loop);
+  }
 
-    if (native_auth_has_valid_token (auth))
-      self->login_token = g_strdup (native_auth_get_token (auth));
+  if (native_auth_has_valid_token (auth)) {
+    g_clear_pointer (&self->login_token, g_free);
+    self->login_token = g_strdup (native_auth_get_token (auth));
   }
   g_object_unref (auth);
 
-  if (!self->login_token) {
+  return self->login_token != NULL;
+}
+
+static gpointer
+session_thread (gpointer user_data)
+{
+  SpotifyNativeSession *self = user_data;
+
+  g_main_context_push_thread_default (self->context);
+
+  if (!acquire_login_token (self)) {
     fail_session (self, "could not obtain an access token for AP login");
     g_main_context_pop_thread_default (self->context);
     return NULL;
@@ -473,6 +489,27 @@ session_thread (gpointer user_data)
 }
 
 /*
+ * Re-sign-in after a drop, with a token good at the time of use.
+ *
+ * Not begin_signin() directly. That reuses login_token, which was fetched when
+ * the session started and is good for an hour; a session outlives that easily,
+ * so a reconnect an hour in presented an expired token and the AP answered
+ * BadCredentials -- which surfaced as being signed out at random, triggered by
+ * whatever first needed Mercury.
+ */
+static gboolean
+resignin (gpointer user_data)
+{
+  SpotifyNativeSession *self = user_data;
+
+  if (!acquire_login_token (self)) {
+    fail_session (self, "could not refresh the access token to reconnect");
+    return G_SOURCE_REMOVE;
+  }
+  return begin_signin (self);
+}
+
+/*
  * Tear the connection down and start it again.
  *
  * The session had no path back from a dropped AP link: start() returns early
@@ -492,7 +529,7 @@ spotifygtk_native_session_reconnect (SpotifyNativeSession *self)
   collection_drain_waiters (self, NULL, "the connection was lost");
 
   if (self->context)
-    g_main_context_invoke (self->context, begin_signin, self);
+    g_main_context_invoke (self->context, resignin, self);
 }
 
 void
