@@ -555,6 +555,20 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
   row_request_cover (self, track->cover_id);
 }
 
+/* Drop this row's artwork and cancel any fetch for it. The pending id stays,
+ * so binding or scrolling back requests it again. */
+void
+spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+
+  if (self->cover_cancellable) {
+    g_cancellable_cancel (self->cover_cancellable);
+    g_clear_object (&self->cover_cancellable);
+  }
+  gtk_image_clear (self->album_art);
+}
+
 void
 spotifygtk_track_row_set_show_album (SpotifyGtkTrackRow *self, gboolean show)
 {

@@ -44,6 +44,10 @@ void spotifygtk_track_list_insert_native_track (SpotifyGtkTrackList      *self,
                                                 const SpotifyNativeTrack *track);
 void spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position);
 
+/* Release the artwork of every bound row, for a page that is no longer
+ * visible. Ids are kept, so the art returns when the page does. */
+void spotifygtk_track_list_release_covers (SpotifyGtkTrackList *self);
+
 SpotifyGtkTrackList *spotifygtk_track_list_new (void);
 
 

@@ -534,6 +534,36 @@ spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
   }
 }
 
+/*
+ * Drop the artwork of every bound card.
+ *
+ * A card holds a reference to its texture, so the cover cache cannot free one
+ * that any card is still showing -- including cards on a page the user
+ * navigated away from, which GTK keeps realised. Measured on a full library,
+ * every cached cover sat at three references: the cache, the widget, and the
+ * renderer. Clearing the widget's is what actually lets the memory go.
+ *
+ * The cover id is left in place, so scrolling back reloads it.
+ */
+void
+spotifygtk_album_grid_release_covers (SpotifyGtkAlbumGrid *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  if (!self->bound_cards)
+    return;
+
+  for (guint i = 0; i < self->bound_cards->len; i++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+    GtkWidget *art  = g_object_get_data (G_OBJECT (card), "art");
+    if (!art)
+      continue;
+    g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);   /* cancels in flight */
+    g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
+    gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
+    gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
+  }
+}
+
 void
 spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self)
 {

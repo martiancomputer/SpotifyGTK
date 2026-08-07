@@ -60,6 +60,11 @@ void spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar 
                                          const gchar *title, const gchar *subtitle,
                                          const gchar *cover_id);
 
+/* Release the artwork of every bound card, so the cover cache can actually
+ * free it. For a page that is no longer visible; the ids are kept, so the art
+ * reloads when it is looked at again. */
+void spotifygtk_album_grid_release_covers (SpotifyGtkAlbumGrid *self);
+
 void spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self);
 
 /* Inset the cards while leaving the scrollbar flush with the widget edge.
