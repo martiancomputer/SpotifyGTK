@@ -4,6 +4,11 @@
 
 #include "cover_loader.h"
 #include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#ifdef __GLIBC__
+# include <malloc.h>   /* malloc_trim, after the idle sweep */
+#endif
 
 #include <libsoup/soup.h>
 
@@ -60,6 +65,88 @@ static GHashTable *cover_cache = NULL;
 /* Insertion order of the ids in cover_cache, oldest at the head. Kept in
  * step with the table so eviction is O(1) at the front. */
 static GQueue cover_order = G_QUEUE_INIT;
+
+/* Pixel buffers are mapped one at a time so that freeing one returns it to
+ * the kernel; see the decode path for why the heap does not. */
+typedef struct {
+  gpointer addr;
+  gsize    len;
+} MappedPixels;
+
+static gsize mapped_live_bytes = 0;   /* pixel memory actually still mapped */
+
+static void
+mapped_pixels_free (gpointer data)
+{
+  MappedPixels *m = data;
+  mapped_live_bytes -= MIN (m->len, mapped_live_bytes);
+  munmap (m->addr, m->len);
+  g_free (m);
+}
+
+/*
+ * Idle trim.
+ *
+ * The cache only ever evicted on insert, so it shrank when it was being used
+ * and never otherwise. Sitting on one album page for five minutes held every
+ * cover from wherever the user had been, at the high-water mark, with nothing
+ * arriving to push it down. The budget was the wrong question: reaching 48 MB
+ * while scrolling a library is fine, still holding it once the scrolling
+ * stopped is not.
+ *
+ * Evicting a cover that is still on screen is harmless -- the widget holds its
+ * own reference, so only the cache entry goes and a later request refetches
+ * it. Pages that are no longer visible drop their references separately, via
+ * the release_covers() calls in window.c; without that this frees the entry
+ * and the widget keeps the pixels alive regardless.
+ */
+#define COVER_IDLE_TRIM_MS  (30 * 1000)
+#define COVER_IDLE_BUDGET   (8 * 1024 * 1024)
+
+static guint cover_idle_id = 0;
+static void  cover_evict_to (gsize budget);
+
+static gboolean
+cover_idle_trim (gpointer data)
+{
+  (void) data;
+  cover_idle_id = 0;
+
+  gsize before = cover_cache_bytes;
+  cover_evict_to (COVER_IDLE_BUDGET);
+  if (before == cover_cache_bytes)
+    return G_SOURCE_REMOVE;
+
+  /*
+   * Give the pages back to the kernel, not just to the allocator.
+   *
+   * A decoded thumbnail is around 36 KB, under glibc's mmap threshold, so it
+   * comes from the heap and freeing it only returns it to a free list -- RSS
+   * does not move. Releasing 40 MB of covers changed the process size by
+   * nothing at all until this was added.
+   *
+   * Only worth doing here. Trimming after every free would fight the allocator
+   * for pages it is about to reuse; after an idle sweep there is by definition
+   * nothing about to reuse them.
+   */
+  g_message ("cover: idle trim %.1f MB -> %.1f MB cached; %.1f MB of pixels "
+             "still mapped (held by widgets, not the cache)",
+             before / 1048576.0, cover_cache_bytes / 1048576.0,
+             mapped_live_bytes / 1048576.0);
+#ifdef __GLIBC__
+  malloc_trim (0);
+#endif
+  return G_SOURCE_REMOVE;
+}
+
+/* Restart the idle countdown. Called on every request, so the trim only fires
+ * once nothing has asked for a cover for a while. */
+static void
+cover_defer_idle_trim (void)
+{
+  g_clear_handle_id (&cover_idle_id, g_source_remove);
+  cover_idle_id = g_timeout_add (COVER_IDLE_TRIM_MS, cover_idle_trim, NULL);
+}
 
 static void
 cover_evict_to (gsize budget)
@@ -368,19 +455,35 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   gboolean has_alpha = gdk_pixbuf_get_has_alpha (pixbuf);
 
   /*
-   * Hand the pixbuf's own buffer to the texture rather than copying it.
+   * Decoded pixels get their own mapping rather than coming off the heap.
    *
-   * g_bytes_new() duplicates, so every decode briefly held the pixels twice --
-   * once in the pixbuf and once in the copy the texture kept. With several
-   * decodes in flight that doubling is the peak, and the copy was pure
-   * overhead: the pixbuf is discarded immediately afterwards, so its buffer
-   * was already free for the taking. Keeping a reference to it instead lets
-   * the texture own the pixels outright.
+   * A thumbnail is around 36 KB, under glibc's mmap threshold, so freeing one
+   * returns it to a free list and not to the kernel. That is why evicting 40 MB
+   * of covers moved RSS by six: the memory was genuinely free and genuinely
+   * still resident, stranded among live allocations. Mapping each buffer
+   * separately means eviction unmaps it and the process actually shrinks.
+   *
+   * Worth the copy this reintroduces -- one memcpy of a few tens of KB against
+   * a page that stays resident for the life of the process otherwise.
    */
+  gsize  pix_len = (gsize) rowstride * h;
+  guchar *mapped = mmap (NULL, pix_len, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (mapped == MAP_FAILED) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
+                             "could not map %" G_GSIZE_FORMAT " bytes for a cover",
+                             pix_len);
+    return;
+  }
+  memcpy (mapped, gdk_pixbuf_get_pixels (pixbuf), pix_len);
+
+  MappedPixels *owner = g_new0 (MappedPixels, 1);
+  owner->addr = mapped;
+  owner->len  = pix_len;
+  mapped_live_bytes += pix_len;
+
   g_autoptr(GBytes) pixels =
-    g_bytes_new_with_free_func (gdk_pixbuf_get_pixels (pixbuf),
-                                (gsize) rowstride * h,
-                                g_object_unref, g_object_ref (pixbuf));
+    g_bytes_new_with_free_func (mapped, pix_len, mapped_pixels_free, owner);
   GdkTexture *texture = gdk_memory_texture_new (
     w, h, has_alpha ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8, pixels, rowstride);
 
@@ -565,6 +668,9 @@ cover_load_internal (const gchar          *cover_id,
                      gboolean              deferrable)
 {
   g_return_if_fail (callback != NULL);
+
+  /* Any request means browsing is still happening, so push the idle trim out. */
+  cover_defer_idle_trim ();
 
   /* Text-only mode is enforced here rather than at each display site, so a
    * new artwork consumer cannot forget to honour it -- and so the image is

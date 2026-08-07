@@ -575,6 +575,19 @@ spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position
   g_list_store_remove (self->store, position);
 }
 
+/* Release the artwork of every bound row. Touches only live bindings -- the
+ * same handful refresh_liked() walks. See album_grid's release_covers. */
+void
+spotifygtk_track_list_release_covers (SpotifyGtkTrackList *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  if (!self->bound_rows)
+    return;
+
+  for (guint i = 0; i < self->bound_rows->len; i++)
+    spotifygtk_track_row_release_cover (g_ptr_array_index (self->bound_rows, i));
+}
+
 SpotifyGtkTrackList *
 spotifygtk_track_list_new (void)
 {

@@ -1774,6 +1774,23 @@ on_content_paned_position (GObject *object, GParamSpec *pspec, gpointer user_dat
 }
 
 /* === Navigation === */
+/* Drop the artwork held by one page's lists and grids. */
+static void
+release_page_covers (SpotifyGtkNativeWindow *self, const gchar *page_name)
+{
+  if (g_strcmp0 (page_name, "liked") == 0)
+    spotifygtk_track_list_release_covers (
+      spotifygtk_liked_songs_page_get_list (self->liked_page));
+  else if (g_strcmp0 (page_name, "search") == 0)
+    spotifygtk_track_list_release_covers (
+      spotifygtk_search_page_get_list (self->search_page));
+  else if (g_strcmp0 (page_name, "context") == 0)
+    spotifygtk_track_list_release_covers (
+      spotifygtk_context_page_get_list (self->context_page));
+  else if (g_strcmp0 (page_name, "playlists") == 0 && self->playlists_grid)
+    spotifygtk_album_grid_release_covers (self->playlists_grid);
+}
+
 static void
 navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
 {
@@ -1781,6 +1798,23 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
     g_warning ("No page named '%s'", page_name);
     return;
   }
+
+  /*
+   * Hand back the artwork of the page being left.
+   *
+   * A GtkStack keeps its non-visible children realised and bound, so their
+   * rows and cards go on holding a reference to every cover they were showing
+   * -- and the cover cache cannot free what a widget still references. Sitting
+   * on one album page held the whole of Liked Songs' and Library's art behind
+   * it, indefinitely, because nothing new was arriving to push the cache down.
+   *
+   * Released here rather than on a timer: leaving a page is the moment its art
+   * stops being looked at, and the ids are kept so it returns when the page
+   * does.
+   */
+  const gchar *leaving = gtk_stack_get_visible_child_name (self->page_stack);
+  if (leaving && g_strcmp0 (leaving, page_name) != 0)
+    release_page_covers (self, leaving);
 
   gtk_stack_set_visible_child_name (self->page_stack, page_name);
 
