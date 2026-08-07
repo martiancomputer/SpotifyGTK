@@ -39,6 +39,22 @@
 /* The filter shape is rate-dependent; this is the rate Spotify decodes at. */
 #define DISPLAY_RATE  44100
 
+/*
+ * Pixels between curve samples.
+ *
+ * The curve used to be evaluated and drawn at one point per pixel -- around a
+ * thousand of them at this width. Every redraw then traced a thousand-segment
+ * path and stroked it twice, once wide for the glow and once narrow, both with
+ * round joins, and every drag motion re-evaluated all thousand points through
+ * fifteen biquads. That is the lag, and almost all of it was wasted: the
+ * response is smooth on a log axis, so consecutive pixels differ by far less
+ * than a pixel.
+ *
+ * At four pixels the drawn shape is indistinguishable and there is a quarter
+ * as much of everything.
+ */
+#define CURVE_STEP_PX 4
+
 struct _SpotifyGtkEqGraph {
   GtkDrawingArea parent_instance;
 
@@ -116,10 +132,29 @@ freq_label (gint hz)
 
 /* Rebuilt only when a gain changes or the width does; see the header comment
  * on why this is not done per frame. */
+/* Samples needed to span the plot at CURVE_STEP_PX, including the right edge. */
+static gint
+curve_points_for (gdouble w)
+{
+  gint span = (gint) (w - PAD_L - PAD_R);
+  if (span < 2)
+    return 0;
+  return span / CURVE_STEP_PX + 2;
+}
+
+/* Plot x of sample `i`, clamped to the right edge so the last one lands on it
+ * exactly rather than short of it. */
+static gdouble
+curve_x (gint i, gdouble w)
+{
+  gdouble x = PAD_L + (gdouble) i * CURVE_STEP_PX;
+  return MIN (x, w - PAD_R);
+}
+
 static void
 rebuild_curve (SpotifyGtkEqGraph *self, gdouble w)
 {
-  gint n = (gint) (w - PAD_L - PAD_R);
+  gint n = curve_points_for (w);
   if (n < 2)
     return;
 
@@ -133,7 +168,7 @@ rebuild_curve (SpotifyGtkEqGraph *self, gdouble w)
     g_free (self->freqs);
     self->freqs = g_new (gdouble, n);
     for (gint i = 0; i < n; i++)
-      self->freqs[i] = x_to_freq (PAD_L + i, w);
+      self->freqs[i] = x_to_freq (curve_x (i, w), w);
     self->freqs_len = n;
   }
 
@@ -166,7 +201,7 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   if (x1 - x0 < 4.0 || plot_bot - plot_top < 4.0)
     return;
 
-  if (self->curve_dirty || self->curve_len != (gint) (x1 - x0))
+  if (self->curve_dirty || self->curve_len != curve_points_for (w))
     rebuild_curve (self, w);
   if (!self->curve)
     return;
@@ -251,7 +286,7 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   /* Trace the response once; reuse the path for the fill and the stroke. */
   cairo_new_path (cr);
   for (gint i = 0; i < self->curve_len; i++) {
-    gdouble x = x0 + i;
+    gdouble x = curve_x (i, w);
     gdouble y = db_to_y (CLAMP (self->curve[i], EQ_MIN_DB, EQ_MAX_DB), h);
     if (i == 0) cairo_move_to (cr, x, y);
     else        cairo_line_to (cr, x, y);
@@ -310,7 +345,7 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   /* Handles sit on the curve at each band centre. */
   for (int b = 0; b < SPOTIFYGTK_EQ_BANDS; b++) {
     gdouble x = freq_to_x (spotifygtk_eq_frequencies[b], w);
-    gint    i = CLAMP ((gint) (x - x0), 0, self->curve_len - 1);
+    gint    i = CLAMP ((gint) ((x - x0) / CURVE_STEP_PX), 0, self->curve_len - 1);
     gdouble y = db_to_y (CLAMP (self->curve[i], EQ_MIN_DB, EQ_MAX_DB), h);
     gboolean hot = (b == self->active_band || b == self->hover_band);
     gdouble  r   = hot ? HANDLE_R + 1.5 : HANDLE_R;

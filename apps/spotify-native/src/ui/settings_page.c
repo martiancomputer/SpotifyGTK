@@ -8,6 +8,8 @@
  */
 
 #include "settings_page.h"
+
+#include <glib/gstdio.h>
 #include "settings.h"
 #include "../audio/dsp.h"
 #include "eq_graph.h"
@@ -42,6 +44,90 @@ on_log_out_clicked (GtkButton *button, gpointer user_data)
 {
   g_signal_emit (SPOTIFYGTK_SETTINGS_PAGE (user_data), signals[LOG_OUT], 0);
   (void) button;
+}
+
+/* === About === */
+
+#define REPO_URL "https://github.com/martiancomputer/SpotifyGTK"
+
+/*
+ * When this install was first run.
+ *
+ * Stamped on first launch rather than read from the binary's mtime: a rebuild
+ * rewrites the binary, so mtime answers "when was this last compiled", which
+ * is not the question. The stamp is written once and then only read, so it
+ * survives every later build.
+ *
+ * Returns a display string; the caller frees it.
+ */
+/*
+ * Fold `path` and anything directly inside it into the oldest mtime seen.
+ *
+ * Both the config and the cache directory are considered. The config one alone
+ * is misleading: the credentials file is rewritten on every token refresh, so
+ * its mtime is always recent. The cover cache is only ever added to, so its
+ * directory keeps the date it was created -- which is the first run.
+ */
+static void
+fold_oldest_mtime (const gchar *path, gint64 *oldest)
+{
+  GStatBuf st;
+  if (g_stat (path, &st) == 0 && st.st_mtime > 0 &&
+      (*oldest == 0 || (gint64) st.st_mtime < *oldest))
+    *oldest = (gint64) st.st_mtime;
+
+  g_autoptr(GDir) d = g_dir_open (path, 0, NULL);
+  const gchar *name;
+  while (d && (name = g_dir_read_name (d)) != NULL) {
+    g_autofree gchar *child = g_build_filename (path, name, NULL);
+    if (g_stat (child, &st) == 0 && st.st_mtime > 0 &&
+        (*oldest == 0 || (gint64) st.st_mtime < *oldest))
+      *oldest = (gint64) st.st_mtime;
+  }
+}
+
+static gchar *
+installed_on (void)
+{
+  g_autofree gchar *dir = g_build_filename (g_get_user_config_dir (),
+                                            "spotify-native", NULL);
+  g_autofree gchar *path = g_build_filename (dir, "installed", NULL);
+
+  g_autofree gchar *stamp = NULL;
+  if (!g_file_get_contents (path, &stamp, NULL, NULL)) {
+    /*
+     * No stamp yet. On a fresh install that is because this is the first run,
+     * and now is the right answer -- but on an install that predates this
+     * feature it would claim the client appeared the moment About was added.
+     *
+     * So seed from the oldest thing in the config directory instead. The
+     * credentials written at first sign-in are usually the earliest, which is
+     * as close to "installed" as anything on disk gets. Falls back to now when
+     * the directory is empty, which is the fresh-install case.
+     */
+    g_mkdir_with_parents (dir, 0700);
+
+    g_autofree gchar *cache = g_build_filename (g_get_user_cache_dir (),
+                                                "spotifygtk", NULL);
+    gint64 oldest = 0;
+    fold_oldest_mtime (dir, &oldest);
+    fold_oldest_mtime (cache, &oldest);
+
+    g_autoptr(GDateTime) seed = oldest > 0
+      ? g_date_time_new_from_unix_local (oldest)
+      : g_date_time_new_now_local ();
+    stamp = g_date_time_format_iso8601 (seed);
+    if (!g_file_set_contents (path, stamp, -1, NULL))
+      return g_strdup ("Unknown");
+  }
+
+  g_autoptr(GDateTime) when = g_date_time_new_from_iso8601 (g_strstrip (stamp), NULL);
+  if (!when)
+    return g_strdup ("Unknown");
+
+  /* Local time, spelled out -- this is read once out of curiosity, not
+   * scanned, so it is worth being unambiguous rather than compact. */
+  return g_date_time_format (when, "%e %B %Y at %H:%M");
 }
 
 /* === Building blocks === */
@@ -346,6 +432,37 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              logout));
 
   gtk_box_append (GTK_BOX (content), account_group);
+
+  /* --- About --- */
+  GtkWidget *about_group = build_group ("About");
+
+  /*
+   * A real link rather than a button: it can be middle-clicked, copied and
+   * read without being activated, which a button cannot.
+   */
+  GtkWidget *repo = gtk_link_button_new_with_label (REPO_URL, "Open on GitHub");
+  gtk_widget_add_css_class (repo, "pill-button");
+  gtk_widget_set_valign (repo, GTK_ALIGN_CENTER);
+  gtk_box_append (GTK_BOX (about_group),
+                  build_row ("Repository",
+                             "SpotifyGTK is a native Spotify client for Linux, "
+                             "written in C and licensed GPLv3. Source, issues "
+                             "and releases live here.",
+                             repo));
+
+  g_autofree gchar *since = installed_on ();
+  GtkWidget *since_label = gtk_label_new (since);
+  gtk_widget_add_css_class (since_label, "dim-text");
+  gtk_widget_set_valign (since_label, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_end (since_label, 16);
+  gtk_box_append (GTK_BOX (about_group),
+                  build_row ("Installed",
+                             "When this copy was first run. Version numbers "
+                             "will join it here once there is something to "
+                             "number.",
+                             since_label));
+
+  gtk_box_append (GTK_BOX (content), about_group);
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
   gtk_box_append (GTK_BOX (self), scroller);
