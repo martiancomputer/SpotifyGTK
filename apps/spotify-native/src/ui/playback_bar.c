@@ -506,6 +506,23 @@ spotifygtk_playback_bar_set_track (SpotifyGtkPlaybackBar *self,
 
   gtk_label_set_text (self->track_label, track_name ? track_name : "Nothing playing");
   gtk_label_set_text (self->artist_label, artist ? artist : "");
+
+  /*
+   * The full text on hover, since both labels are capped.
+   *
+   * The cap is not cosmetic: ellipsizing does not bound a label's natural
+   * width, so without max_width_chars a long title widens the whole bar and
+   * with it the window's minimum size. The text has to stay clipped, so the
+   * way to read it is a tooltip.
+   *
+   * Only when it is actually clipped -- a tooltip repeating a label you can
+   * already read in full is just noise under the pointer.
+   */
+  gint cap = gtk_label_get_max_width_chars (self->track_label);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->track_label),
+    (track_name && g_utf8_strlen (track_name, -1) > cap) ? track_name : NULL);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->artist_label),
+    (artist && g_utf8_strlen (artist, -1) > cap) ? artist : NULL);
 }
 
 void
