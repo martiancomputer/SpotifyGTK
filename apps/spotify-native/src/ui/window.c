@@ -1609,7 +1609,21 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     flush_pending_likes (self);
     spotifygtk_native_window_reload_liked (self);
     subscribe_collection_changes (self);
-    reload_playlists (self);
+
+    /*
+     * Playlists are deliberately not loaded here.
+     *
+     * The rootlist carries no names or covers, so each entry costs a head read
+     * of its own -- on a library of 59 playlists that is 59 round trips, and
+     * they went out at sign-in whether or not the page was ever opened. They
+     * share the AP connection with the collection load, so Liked Songs sat
+     * behind all of them: measured, its metadata pages finished at 13:08:52
+     * against a sign-in at 13:08:37, with the playlist reads filling the gap.
+     *
+     * navigate_raw() already loads them on first visit, guarded by
+     * playlists_loaded, so this call only ever duplicated that work earlier and
+     * at a worse moment.
+     */
 
     /* Development aid: open straight onto a page so its load can be watched
      * without driving the UI by hand. */
