@@ -51,7 +51,27 @@
  * (see dup_largest_cover_id), so this costs download bandwidth we were
  * spending anyway; what it does cost is texture memory, ~4x per cached cover.
  */
-#define CARD_DECODE_PX  352
+/*
+ * Decode size for a card, from the display it is actually on.
+ *
+ * 352 was 2x the card, chosen so a HiDPI panel had real pixels behind it. On a
+ * 1x display it is pure waste: four times the texture memory for pixels that
+ * are downscaled away before anyone sees them, and covers are the single
+ * largest thing this process keeps -- heaptrack put them at 60 MB of a 113 MB
+ * heap.
+ *
+ * Asking the widget instead gives 176 at 1x and 352 at 2x, which is exactly
+ * one texture pixel per physical pixel. That is also the sharpest option: the
+ * softness that motivated the old 2x came from decoding at 180 for a 150px
+ * card, a 1.2x downscale that lands on no pixel grid at all. Matching the
+ * scale factor does no resampling whatsoever.
+ */
+static gint
+card_decode_px (GtkWidget *widget)
+{
+  gint scale = widget ? gtk_widget_get_scale_factor (widget) : 1;
+  return CARD_ART_PX * MAX (1, scale);
+}
 #define CARD_WIDTH      (CARD_ART_PX + 24)
 
 /* Vertical space a shelf card needs beyond the art itself: 8+8 box margins,
@@ -164,7 +184,7 @@ card_retry_cover (GtkWidget *card)
 
   GCancellable *cancel = g_cancellable_new ();
   g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
-  spotifygtk_cover_load_deferrable (cover_id, CARD_DECODE_PX, cancel,
+  spotifygtk_cover_load_deferrable (cover_id, card_decode_px (card), cancel,
                                     on_card_cover_loaded, art);
 }
 
@@ -421,7 +441,7 @@ card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem
   if (item->cover_id && *item->cover_id) {
     GCancellable *cancel = g_cancellable_new ();
     g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
-    spotifygtk_cover_load_deferrable (item->cover_id, CARD_DECODE_PX, cancel,
+    spotifygtk_cover_load_deferrable (item->cover_id, card_decode_px (card), cancel,
                                       on_card_cover_loaded, art);
   }
   (void) self;
