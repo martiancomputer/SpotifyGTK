@@ -5,6 +5,8 @@
 
 #include "config.h"
 #include "spclient.h"
+
+#include <stdlib.h>
 #include "protobuf_min.h"
 
 #include <libsoup/soup.h>
@@ -336,7 +338,21 @@ spotifygtk_spclient_class_init (SpotifySpclientClass *klass)
 static void
 spotifygtk_spclient_init (SpotifySpclient *self)
 {
-  self->session = soup_session_new_with_options ("user-agent", "spotify-native/" APP_VERSION, NULL);
+  /*
+   * Connection concurrency, overridable so it can be measured rather than
+   * argued about -- the same knob cover_loader.c carries, for the same reason.
+   * Every context resolve goes to one host, so whatever libsoup defaults to is
+   * the ceiling on how many playlists can be described at once.
+   */
+  const gchar *conns_env = g_getenv ("SPOTIFY_SPCLIENT_CONNS");
+  guint conns = conns_env ? (guint) MAX (1, atoi (conns_env)) : 8;
+
+  self->session = soup_session_new_with_options (
+    "user-agent", "spotify-native/" APP_VERSION,
+    "max-conns-per-host", conns,
+    "max-conns", MAX (conns, 24),
+    NULL);
+  g_message ("spclient: session using %u connections per host", conns);
 }
 
 SpotifySpclient *
