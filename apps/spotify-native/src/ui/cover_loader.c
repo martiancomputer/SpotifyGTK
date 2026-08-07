@@ -367,8 +367,20 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   gint     rowstride = gdk_pixbuf_get_rowstride (pixbuf);
   gboolean has_alpha = gdk_pixbuf_get_has_alpha (pixbuf);
 
+  /*
+   * Hand the pixbuf's own buffer to the texture rather than copying it.
+   *
+   * g_bytes_new() duplicates, so every decode briefly held the pixels twice --
+   * once in the pixbuf and once in the copy the texture kept. With several
+   * decodes in flight that doubling is the peak, and the copy was pure
+   * overhead: the pixbuf is discarded immediately afterwards, so its buffer
+   * was already free for the taking. Keeping a reference to it instead lets
+   * the texture own the pixels outright.
+   */
   g_autoptr(GBytes) pixels =
-    g_bytes_new (gdk_pixbuf_get_pixels (pixbuf), (gsize) rowstride * h);
+    g_bytes_new_with_free_func (gdk_pixbuf_get_pixels (pixbuf),
+                                (gsize) rowstride * h,
+                                g_object_unref, g_object_ref (pixbuf));
   GdkTexture *texture = gdk_memory_texture_new (
     w, h, has_alpha ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8, pixels, rowstride);
 
