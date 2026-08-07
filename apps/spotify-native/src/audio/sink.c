@@ -238,8 +238,15 @@ sink_writer (gpointer user_data)
     t->queued -= frame->n_frames;
     g_cond_broadcast (&self->cond);          /* a producer may be waiting on space */
 
-    SpotifyNativeEngineControl *control = spotifygtk_native_engine_control_ref (t->control);
-    GCancellable *cancel = t->cancellable ? g_object_ref (t->cancellable) : NULL;
+    /*
+     * Borrowed, not referenced. The track holds a reference for as long as it
+     * exists, and only this thread ever frees a track, so these cannot go away
+     * underneath the unlocked section below. Taking a reference per frame was
+     * churn -- and while unref also resumed, it was the reason pause did not
+     * hold.
+     */
+    SpotifyNativeEngineControl *control = t->control;
+    GCancellable *cancel = t->cancellable;
     gint device_rate = self->device_rate;
     guint64 seq = t->seq;
 
@@ -249,8 +256,6 @@ sink_writer (gpointer user_data)
 
     if (n_frames == 0) {                     /* too short to yield a block yet */
       pcm_frame_free (frame);
-      spotifygtk_native_engine_control_free (control);
-      g_clear_object (&cancel);
       continue;
     }
 
@@ -278,8 +283,6 @@ sink_writer (gpointer user_data)
     }
 
     pcm_frame_free (frame);
-    spotifygtk_native_engine_control_free (control);
-    g_clear_object (&cancel);
 
     g_mutex_lock (&self->lock);
     if (go && wrote != n_frames) {
@@ -500,8 +503,18 @@ spotifygtk_audio_sink_shutdown (SpotifyAudioSink *self)
     return;
   }
   self->running = FALSE;
-  for (GList *l = self->tracks->head; l; l = l->next)
-    ((SinkTrack *) l->data)->cancelled = TRUE;
+  for (GList *l = self->tracks->head; l; l = l->next) {
+    SinkTrack *t = l->data;
+    t->cancelled = TRUE;
+    /*
+     * Unpark the writer if it is sitting on the pause gate.
+     *
+     * It waits on the control's condition, not the sink's, so broadcasting
+     * below does not reach it -- and paused means paused indefinitely. Without
+     * this the join never returns when the user quits while paused.
+     */
+    spotifygtk_native_engine_control_resume (t->control);
+  }
   g_cond_broadcast (&self->cond);
   g_mutex_unlock (&self->lock);
 
