@@ -162,13 +162,19 @@ spotifygtk_native_engine_control_free (SpotifyNativeEngineControl *control)
   if (!control)
     return;
 
-  /* Wake anything blocked on the pause gate before the count is tested: a
-   * paused worker holding the last reference would otherwise never reach the
-   * point where it drops it. */
-  spotifygtk_native_engine_control_resume (control);
-
   if (!g_atomic_ref_count_dec (&control->refs))
     return;
+
+  /*
+   * Wake anything still blocked on the pause gate, then tear down.
+   *
+   * This must happen only on the last reference. It used to run on every one,
+   * back when there was only ever a single owner -- but the sink takes and
+   * drops a reference around each frame it writes, so an unconditional resume
+   * here cleared the pause flag on the very next buffer after the user pressed
+   * pause. Playback simply carried on.
+   */
+  spotifygtk_native_engine_control_resume (control);
 
   spotifygtk_eq_free (control->eq);
   g_mutex_clear (&control->lock);
