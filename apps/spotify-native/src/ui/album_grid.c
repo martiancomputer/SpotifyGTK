@@ -52,25 +52,27 @@
  * spending anyway; what it does cost is texture memory, ~4x per cached cover.
  */
 /*
- * Decode size for a card, from the display it is actually on.
+ * Decode size for a card.
  *
- * 352 was 2x the card, chosen so a HiDPI panel had real pixels behind it. On a
- * 1x display it is pure waste: four times the texture memory for pixels that
- * are downscaled away before anyone sees them, and covers are the single
- * largest thing this process keeps -- heaptrack put them at 60 MB of a 113 MB
- * heap.
+ * Twice the nominal art size, and that headroom is not slack. gtk_image's
+ * pixel-size governs icons; a paintable is scaled to the widget's allocation
+ * instead, and cards stretch to fill their column, so the art is routinely
+ * drawn wider than CARD_ART_PX. Decoding at exactly that size left nothing to
+ * downscale from and the covers came out soft.
  *
- * Asking the widget instead gives 176 at 1x and 352 at 2x, which is exactly
- * one texture pixel per physical pixel. That is also the sharpest option: the
- * softness that motivated the old 2x came from decoding at 180 for a 150px
- * card, a 1.2x downscale that lands on no pixel grid at all. Matching the
- * scale factor does no resampling whatsoever.
+ * The scale factor is folded in on top, so a HiDPI panel gets real pixels
+ * rather than the 1x assumption the old fixed 352 made.
+ *
+ * This is the expensive choice -- texture memory goes as the square, and
+ * covers are the largest thing this process keeps. It is made deliberately:
+ * the way to spend less here is a disk cache, so evicting costs a decode
+ * rather than a download, not decoding art too small to look right.
  */
 static gint
 card_decode_px (GtkWidget *widget)
 {
   gint scale = widget ? gtk_widget_get_scale_factor (widget) : 1;
-  return CARD_ART_PX * MAX (1, scale);
+  return CARD_ART_PX * 2 * MAX (1, scale);
 }
 #define CARD_WIDTH      (CARD_ART_PX + 24)
 
