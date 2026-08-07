@@ -74,6 +74,15 @@
 #include <string.h>
 
 struct _SpotifyNativeEngineControl {
+  /*
+   * Refcounted because the audio sink outlives the engine run that created it.
+   * A track's run finishes once it has pushed its last PCM frame, but the sink
+   * may still be playing those frames -- and it needs this control to apply
+   * volume, run the equaliser and report position while it does. Freeing on
+   * the run's exit would pull it out from under the sink mid-track.
+   */
+  gatomicrefcount refs;
+
   GMutex  lock;
   GCond   cond;
   gboolean paused;
@@ -100,6 +109,7 @@ SpotifyNativeEngineControl *
 spotifygtk_native_engine_control_new (void)
 {
   SpotifyNativeEngineControl *control = g_new0 (SpotifyNativeEngineControl, 1);
+  g_atomic_ref_count_init (&control->refs);
   g_mutex_init (&control->lock);
   g_cond_init (&control->cond);
   control->volume = 1.0;
@@ -108,12 +118,33 @@ spotifygtk_native_engine_control_new (void)
   return control;
 }
 
+SpotifyNativeEngineControl *
+spotifygtk_native_engine_control_ref (SpotifyNativeEngineControl *control)
+{
+  if (control)
+    g_atomic_ref_count_inc (&control->refs);
+  return control;
+}
+
+/*
+ * Drops one reference. Named _free because that is what every existing caller
+ * means by it: the owner is done. The sink holds its own reference, so the
+ * teardown below runs only once the last of them has let go.
+ */
 void
 spotifygtk_native_engine_control_free (SpotifyNativeEngineControl *control)
 {
   if (!control)
     return;
+
+  /* Wake anything blocked on the pause gate before the count is tested: a
+   * paused worker holding the last reference would otherwise never reach the
+   * point where it drops it. */
   spotifygtk_native_engine_control_resume (control);
+
+  if (!g_atomic_ref_count_dec (&control->refs))
+    return;
+
   spotifygtk_eq_free (control->eq);
   g_mutex_clear (&control->lock);
   g_cond_clear (&control->cond);
@@ -192,8 +223,8 @@ spotifygtk_native_engine_control_set_output_rate (SpotifyNativeEngineControl *co
   g_mutex_unlock (&control->lock);
 }
 
-static gint
-engine_control_get_output_rate (SpotifyNativeEngineControl *control)
+gint
+spotifygtk_native_engine_control_get_output_rate (SpotifyNativeEngineControl *control)
 {
   if (!control) return 0;
   g_mutex_lock (&control->lock);
@@ -202,8 +233,8 @@ engine_control_get_output_rate (SpotifyNativeEngineControl *control)
   return r;
 }
 
-static void
-engine_control_apply_eq (SpotifyNativeEngineControl *control,
+void
+spotifygtk_native_engine_control_apply_eq (SpotifyNativeEngineControl *control,
                          gint16 *samples, gsize n_frames, gint channels, gint rate)
 {
   if (!control || !control->eq)
@@ -319,8 +350,8 @@ spotifygtk_native_engine_control_take_seek (SpotifyNativeEngineControl *control,
  * Samples are gint16, so the product is computed in gint32 and clamped:
  * gain is <= 1.0 here, but clamping keeps this correct if it ever isn't.
  */
-static void
-engine_control_apply_volume (SpotifyNativeEngineControl *control,
+void
+spotifygtk_native_engine_control_apply_volume (SpotifyNativeEngineControl *control,
                              gint16 *samples, gsize n_frames, gint channels)
 {
   if (!control || !samples || n_frames == 0)
@@ -348,8 +379,8 @@ engine_control_apply_volume (SpotifyNativeEngineControl *control,
   }
 }
 
-static gboolean
-engine_control_wait (SpotifyNativeEngineControl *control, GCancellable *cancellable)
+gboolean
+spotifygtk_native_engine_control_wait (SpotifyNativeEngineControl *control, GCancellable *cancellable)
 {
   gboolean cancelled = cancellable && g_cancellable_is_cancelled (cancellable);
   if (!control)
@@ -770,7 +801,7 @@ audio_output_thread (gpointer user_data)
     if (!output) {
       /* A target rate from the settings engages the resampler; 0 follows the
        * stream, which stays a straight copy to the device. */
-      gint target = engine_control_get_output_rate (state->control);
+      gint target = spotifygtk_native_engine_control_get_output_rate (state->control);
       device_rate = (target > 0) ? target : frame->sample_rate;
 
       if (device_rate != frame->sample_rate) {
@@ -796,16 +827,16 @@ audio_output_thread (gpointer user_data)
                        "Audio started; decoding incoming CDN ranges.");
     }
 
-    if (!engine_control_wait (state->control, state->cancellable)) {
+    if (!spotifygtk_native_engine_control_wait (state->control, state->cancellable)) {
       g_message ("[live-test] output worker stopping current PCM frame due to cancellation");
       mark_output_failed (state);
       pcm_frame_free (frame);
       continue;
     }
 
-    engine_control_apply_volume (state->control, frame->samples,
+    spotifygtk_native_engine_control_apply_volume (state->control, frame->samples,
                                  frame->n_frames, frame->channels);
-    engine_control_apply_eq (state->control, frame->samples,
+    spotifygtk_native_engine_control_apply_eq (state->control, frame->samples,
                              frame->n_frames, frame->channels, frame->sample_rate);
     /* Position is reported in device frames, so it must use the rate the
      * device is running at, not the stream's. */

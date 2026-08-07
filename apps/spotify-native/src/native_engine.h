@@ -18,6 +18,8 @@ typedef void (*SpotifyNativeEngineProgressFunc) (SpotifyNativeEngineStage stage,
 typedef struct _SpotifyNativeEngineControl SpotifyNativeEngineControl;
 
 SpotifyNativeEngineControl *spotifygtk_native_engine_control_new (void);
+/* The sink keeps a reference of its own; see the struct comment in main.c. */
+SpotifyNativeEngineControl *spotifygtk_native_engine_control_ref (SpotifyNativeEngineControl *control);
 void spotifygtk_native_engine_control_free (SpotifyNativeEngineControl *control);
 void spotifygtk_native_engine_control_pause (SpotifyNativeEngineControl *control);
 void spotifygtk_native_engine_control_resume (SpotifyNativeEngineControl *control);
@@ -39,6 +41,26 @@ void    spotifygtk_native_engine_control_set_output_rate (SpotifyNativeEngineCon
 
 void    spotifygtk_native_engine_control_set_eq (SpotifyNativeEngineControl *control,
                                                  const gdouble *gains_db, gboolean enabled);
+
+/*
+ * Shared with the audio sink, which applies these as it writes each frame.
+ *
+ * They were private to the engine while the engine also owned the device. The
+ * device now outlives any one track (see audio/sink.h), so whatever feeds it
+ * has to be able to reach the control of whichever track it is playing.
+ *
+ * wait() is the pause gate: it blocks while paused and returns FALSE if the
+ * track was cancelled.
+ */
+gboolean spotifygtk_native_engine_control_wait (SpotifyNativeEngineControl *control,
+                                                GCancellable *cancellable);
+void     spotifygtk_native_engine_control_apply_volume (SpotifyNativeEngineControl *control,
+                                                        gint16 *samples, gsize n_frames,
+                                                        gint channels);
+void     spotifygtk_native_engine_control_apply_eq (SpotifyNativeEngineControl *control,
+                                                    gint16 *samples, gsize n_frames,
+                                                    gint channels, gint rate);
+gint     spotifygtk_native_engine_control_get_output_rate (SpotifyNativeEngineControl *control);
 
 /* Playback position, reported by the audio worker and read by the UI.
  *
