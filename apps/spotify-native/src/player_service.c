@@ -1,5 +1,7 @@
 #include "player_service.h"
 
+#include "audio/sink.h"
+
 #include <string.h>
 #include "native_engine.h"
 #include "audio/dsp.h"
@@ -18,7 +20,33 @@ struct _SpotifyNativePlayerService {
   gboolean eq_enabled;
   guint position_timer_id;   /* polls the engine control for playback position */
   SpotifyNativePlayerState state;
+
+  /*
+   * Tracks handed to the sink and not yet finished sounding.
+   *
+   * There can be two: the one being heard, and the one already decoding behind
+   * it. A run finishes when it has pushed its last frame, several seconds
+   * before that audio is played, and that overlap is what removes the gap --
+   * so "the most recently started run" and "the track the user is hearing" are
+   * different things, and the UI has to follow the second.
+   */
+  GPtrArray *inflight;       /* InflightTrack* */
+  guint64    audible_seq;    /* sink slot currently sounding */
 };
+
+typedef struct {
+  gchar                      *uri;
+  SpotifyNativeEngineControl *control;   /* referenced */
+} InflightTrack;
+
+static void
+inflight_track_free (gpointer data)
+{
+  InflightTrack *t = data;
+  g_free (t->uri);
+  spotifygtk_native_engine_control_free (t->control);
+  g_free (t);
+}
 
 typedef struct {
   SpotifyNativePlayerService *service;
@@ -28,7 +56,7 @@ typedef struct {
 
 G_DEFINE_FINAL_TYPE (SpotifyNativePlayerService, spotifygtk_player_service, G_TYPE_OBJECT)
 
-enum { STATE_CHANGED, POSITION_CHANGED, N_SIGNALS };
+enum { STATE_CHANGED, POSITION_CHANGED, NOW_PLAYING_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 #define POSITION_POLL_MS 250
@@ -36,15 +64,69 @@ static guint signals[N_SIGNALS];
 /* Poll the engine control for the current position and announce it. Runs on
  * the service's main context while a track is active; stops when the control
  * goes away. */
+/*
+ * Reconcile what is sounding with what we are holding.
+ *
+ * Polled rather than pushed from the sink: this runs on the service's main
+ * context, where the signal can be emitted straight to the UI, and the sink's
+ * writer thread is the last place that should be reaching into widgets. At
+ * four times a second the handover is announced well inside a frame.
+ *
+ * Returns the control of the audible track, or NULL if nothing is.
+ */
+static SpotifyNativeEngineControl *
+sync_audible_track (SpotifyNativePlayerService *self)
+{
+  SpotifyAudioSink *sink = spotifygtk_audio_sink_get ();
+  guint64 seq = spotifygtk_audio_sink_current_seq (sink);
+
+  /* Drop anything the sink has finished with. */
+  for (guint i = self->inflight->len; i > 0; i--) {
+    InflightTrack *t = g_ptr_array_index (self->inflight, i - 1);
+    guint64 t_seq = spotifygtk_native_engine_control_get_sink_seq (t->control);
+    if (t_seq != 0 && spotifygtk_audio_sink_track_done (sink, t_seq))
+      g_ptr_array_remove_index (self->inflight, i - 1);
+  }
+
+  InflightTrack *audible = NULL;
+  for (guint i = 0; i < self->inflight->len; i++) {
+    InflightTrack *t = g_ptr_array_index (self->inflight, i);
+    if (spotifygtk_native_engine_control_get_sink_seq (t->control) == seq) {
+      audible = t;
+      break;
+    }
+  }
+
+  if (seq != self->audible_seq && audible) {
+    self->audible_seq = seq;
+    g_message ("player-service: now sounding %s (sink slot %" G_GUINT64_FORMAT ")",
+               audible->uri ? audible->uri : "(resume)", seq);
+    g_signal_emit (self, signals[NOW_PLAYING_CHANGED], 0, audible->uri);
+  }
+
+  return audible ? audible->control : NULL;
+}
+
 static gboolean
 poll_position (gpointer user_data)
 {
   SpotifyNativePlayerService *self = user_data;
-  if (!self->control) {
-    self->position_timer_id = 0;
-    return G_SOURCE_REMOVE;
+
+  SpotifyNativeEngineControl *audible = sync_audible_track (self);
+
+  /* Position comes from the track being heard, not the one being decoded --
+   * reading self->control would jump the progress bar to the next track the
+   * moment its decode started. */
+  SpotifyNativeEngineControl *from = audible ? audible : self->control;
+  if (!from) {
+    if (self->inflight->len == 0) {
+      self->position_timer_id = 0;
+      return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
   }
-  gint64 position_ms = spotifygtk_native_engine_control_get_position_ms (self->control);
+
+  gint64 position_ms = spotifygtk_native_engine_control_get_position_ms (from);
   g_signal_emit (self, signals[POSITION_CHANGED], 0, position_ms);
   return G_SOURCE_CONTINUE;
 }
@@ -154,8 +236,12 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
                start_err ? start_err->message : "unknown error");
   }
 
-  /* Playback truly ended (nothing pending): stop polling position. */
-  stop_position_timer (self);
+  /*
+   * Do not stop the position timer here. This run is finished producing, but
+   * the sink may still have several seconds of its audio to play, and the
+   * timer is what announces the handover and keeps position moving until it
+   * really is done. poll_position retires itself once nothing is in flight.
+   */
   emit_state (self, ok ? SPOTIFYGTK_PLAYER_IDLE : SPOTIFYGTK_PLAYER_ERROR,
               ok ? "Playback completed." : error->message);
   g_object_unref (self);
@@ -204,6 +290,11 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
     self->main_context = g_main_context_ref_thread_default ();
   if (!self->main_context)
     self->main_context = g_main_context_ref (g_main_context_default ());
+  InflightTrack *entry = g_new0 (InflightTrack, 1);
+  entry->uri     = g_strdup (track_uri);
+  entry->control = spotifygtk_native_engine_control_ref (self->control);
+  g_ptr_array_add (self->inflight, entry);
+
   self->task = g_task_new (self, self->cancellable, on_engine_finished, g_object_ref (self));
   /* Wait for the worker to finish before emitting completion. The current
    * engine APIs do not yet accept a cancellable at every network hop; an
@@ -298,6 +389,7 @@ spotifygtk_player_service_dispose (GObject *object)
   g_clear_object (&self->cancellable);
   g_clear_pointer (&self->track_uri, g_free);
   g_clear_pointer (&self->pending_uri, g_free);
+  g_clear_pointer (&self->inflight, g_ptr_array_unref);
   g_clear_pointer (&self->main_context, g_main_context_unref);
   G_OBJECT_CLASS (spotifygtk_player_service_parent_class)->dispose (object);
 }
@@ -313,10 +405,17 @@ spotifygtk_player_service_class_init (SpotifyNativePlayerServiceClass *klass)
   signals[POSITION_CHANGED] = g_signal_new ("position-changed", G_TYPE_FROM_CLASS (klass),
                                             G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
                                             G_TYPE_NONE, 1, G_TYPE_INT64);
+  /* The track actually being heard changed. Emitted at the handover, which is
+   * later than the moment its decode started -- see sync_audible_track(). */
+  signals[NOW_PLAYING_CHANGED] = g_signal_new ("now-playing-changed",
+                                               G_TYPE_FROM_CLASS (klass),
+                                               G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+                                               G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 
 static void spotifygtk_player_service_init (SpotifyNativePlayerService *self)
 {
+  self->inflight = g_ptr_array_new_with_free_func (inflight_track_free);
   self->state = SPOTIFYGTK_PLAYER_IDLE;
   self->volume_percent = 100;
 }

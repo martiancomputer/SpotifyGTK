@@ -80,10 +80,28 @@ void spotifygtk_audio_sink_end_track (SpotifyAudioSink *self, guint64 seq);
  */
 void spotifygtk_audio_sink_flush (SpotifyAudioSink *self, guint64 seq);
 
+/*
+ * Reset this track's position counter, in device frames.
+ *
+ * A seek does not restart the track, it moves it: the sink keeps playing the
+ * same slot, so the count it reports position from has to be moved with it.
+ */
+void spotifygtk_audio_sink_set_position (SpotifyAudioSink *self, guint64 seq,
+                                         guint64 device_frames);
+
 /* How many frames this track still has queued ahead of the device. The
  * prefetch decision reads this: it is the real measure of how much playing
  * time is left, which frames-decoded is not. */
 guint64 spotifygtk_audio_sink_queued_frames (SpotifyAudioSink *self, guint64 seq);
+
+/*
+ * The track the writer is currently sounding, or 0 for none.
+ *
+ * This is what "now playing" has to follow. A track's producer finishes
+ * several seconds before its audio does -- that overlap is the prefetch -- so
+ * the run that most recently started is not the one being heard.
+ */
+guint64 spotifygtk_audio_sink_current_seq (SpotifyAudioSink *self);
 
 /* TRUE once this track's frames are all written and the writer has moved on. */
 gboolean spotifygtk_audio_sink_track_done (SpotifyAudioSink *self, guint64 seq);

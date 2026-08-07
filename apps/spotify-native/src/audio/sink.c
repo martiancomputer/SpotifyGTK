@@ -395,6 +395,19 @@ spotifygtk_audio_sink_flush (SpotifyAudioSink *self, guint64 seq)
   g_mutex_unlock (&self->lock);
 }
 
+void
+spotifygtk_audio_sink_set_position (SpotifyAudioSink *self, guint64 seq,
+                                    guint64 device_frames)
+{
+  g_return_if_fail (self != NULL);
+
+  g_mutex_lock (&self->lock);
+  SinkTrack *t = find_track (self, seq);
+  if (t)
+    t->written = device_frames;
+  g_mutex_unlock (&self->lock);
+}
+
 guint64
 spotifygtk_audio_sink_queued_frames (SpotifyAudioSink *self, guint64 seq)
 {
@@ -405,6 +418,23 @@ spotifygtk_audio_sink_queued_frames (SpotifyAudioSink *self, guint64 seq)
   guint64 n = t ? t->queued : 0;
   g_mutex_unlock (&self->lock);
   return n;
+}
+
+guint64
+spotifygtk_audio_sink_current_seq (SpotifyAudioSink *self)
+{
+  g_return_val_if_fail (self != NULL, 0);
+
+  g_mutex_lock (&self->lock);
+  /* The head that has actually been heard. A slot claimed but not yet started
+   * is the next track buffering, not the one playing. */
+  guint64 seq = 0;
+  for (GList *l = self->tracks->head; l; l = l->next) {
+    SinkTrack *t = l->data;
+    if (t->started && !t->cancelled) { seq = t->seq; break; }
+  }
+  g_mutex_unlock (&self->lock);
+  return seq;
 }
 
 gboolean

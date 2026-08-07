@@ -65,6 +65,7 @@
 #include "spotify/playlist.h"
 #include "spotify/protobuf_min.h"
 #include "audio/decoder.h"
+#include "audio/sink.h"
 #include "audio/dsp.h"
 #include "audio/resampler.h"
 #include "audio/output.h"
@@ -100,6 +101,10 @@ struct _SpotifyNativeEngineControl {
   gboolean   eq_enabled;
   gboolean   eq_dirty;
 
+  /* Which sink slot this track was given, so the player service can tell
+   * which of the controls it is holding is the one being heard. */
+  guint64    sink_seq;
+
   /* Desired device rate; 0 means "follow whatever the stream decoded to",
    * which is passthrough and the highest-fidelity path. */
   gint       output_rate;
@@ -116,6 +121,26 @@ spotifygtk_native_engine_control_new (void)
   control->volume_dirty = TRUE;   /* apply once as soon as the output opens */
   control->eq = spotifygtk_eq_new ();
   return control;
+}
+
+void
+spotifygtk_native_engine_control_set_sink_seq (SpotifyNativeEngineControl *control,
+                                               guint64 seq)
+{
+  if (!control) return;
+  g_mutex_lock (&control->lock);
+  control->sink_seq = seq;
+  g_mutex_unlock (&control->lock);
+}
+
+guint64
+spotifygtk_native_engine_control_get_sink_seq (SpotifyNativeEngineControl *control)
+{
+  if (!control) return 0;
+  g_mutex_lock (&control->lock);
+  guint64 seq = control->sink_seq;
+  g_mutex_unlock (&control->lock);
+  return seq;
 }
 
 SpotifyNativeEngineControl *
@@ -555,13 +580,14 @@ typedef struct {
   SpotifyDecoder     *stream_decoder;
   guint64             stream_frames;
   guint64             output_frames;
-  GAsyncQueue        *pcm_queue;
-  GThread             *output_thread;
-  GMutex               queue_lock;
-  GCond                queue_cond;
-  guint64              queued_frames;
-  gboolean              output_failed;
-  gboolean              queue_initialized;
+  /*
+   * This track's slot in the sink. The device, the writer and the queued audio
+   * all live there now, above any one track -- see audio/sink.h. What stays
+   * here is only the handle used to push into it.
+   */
+  SpotifyAudioSink   *sink;
+  guint64             sink_seq;
+  gboolean            sink_started;   /* first frame accepted; watchdog disarmed */
   GSource            *timeout_source;
   GSource            *cancel_source;   /* quits the loop when the UI cancellable trips */
   GMainContext       *context;         /* borrowed: the engine's private context */
@@ -748,6 +774,7 @@ decode_and_play (GBytes *ogg_bytes, gboolean complete_source,
 }
 
 static void start_read_ahead (LiveTestState *state);
+static void disable_startup_watchdog (LiveTestState *state);
 
 static void
 disable_startup_watchdog (LiveTestState *state)
@@ -760,181 +787,77 @@ disable_startup_watchdog (LiveTestState *state)
   g_message ("[live-test] initial PCM output is active; network startup watchdog disabled");
 }
 
-static void
-mark_output_failed (LiveTestState *state)
-{
-  g_mutex_lock (&state->queue_lock);
-  state->output_failed = TRUE;
-  g_cond_broadcast (&state->queue_cond);
-  g_mutex_unlock (&state->queue_lock);
-}
-
-static gpointer
-audio_output_thread (gpointer user_data)
-{
-  LiveTestState *state = user_data;
-  SpotifyAudioOutput *output = NULL;
-  SpotifyResampler   *resampler = NULL;
-  gint                device_rate = 0;   /* rate the device was opened at */
-
-  for (;;) {
-    StreamQueueItem *item = g_async_queue_pop (state->pcm_queue);
-    if (item->end) {
-      g_free (item);
-      break;
-    }
-
-    PcmFrame *frame = item->frame;
-    g_free (item);
-
-    g_mutex_lock (&state->queue_lock);
-    state->queued_frames -= frame->n_frames;
-    gboolean failed = state->output_failed;
-    g_cond_broadcast (&state->queue_cond);
-    g_mutex_unlock (&state->queue_lock);
-
-    if (failed) {
-      pcm_frame_free (frame);
-      continue;
-    }
-
-    if (!output) {
-      /* A target rate from the settings engages the resampler; 0 follows the
-       * stream, which stays a straight copy to the device. */
-      gint target = spotifygtk_native_engine_control_get_output_rate (state->control);
-      device_rate = (target > 0) ? target : frame->sample_rate;
-
-      if (device_rate != frame->sample_rate) {
-        resampler = spotifygtk_resampler_new (frame->channels);
-        spotifygtk_resampler_set_rates (resampler, frame->sample_rate, device_rate);
-        g_message ("[live-test] resampling %d Hz -> %d Hz",
-                   frame->sample_rate, device_rate);
-      }
-
-      state->device_rate = device_rate;
-      output = spotifygtk_output_open (device_rate, frame->channels);
-      if (!output) {
-        g_warning ("[live-test] streaming decoder opened, but no PCM output backend is available");
-        mark_output_failed (state);
-        pcm_frame_free (frame);
-        continue;
-      }
-      g_message ("[live-test] streaming decoder opened Ogg/Vorbis: %d Hz, %d channel(s); output=%s",
-                 frame->sample_rate, frame->channels,
-                 spotifygtk_output_backend_name (output->kind));
-      disable_startup_watchdog (state);
-      report_progress (state, SPOTIFYGTK_ENGINE_PLAYING,
-                       "Audio started; decoding incoming CDN ranges.");
-    }
-
-    if (!spotifygtk_native_engine_control_wait (state->control, state->cancellable)) {
-      g_message ("[live-test] output worker stopping current PCM frame due to cancellation");
-      mark_output_failed (state);
-      pcm_frame_free (frame);
-      continue;
-    }
-
-    spotifygtk_native_engine_control_apply_volume (state->control, frame->samples,
-                                 frame->n_frames, frame->channels);
-    spotifygtk_native_engine_control_apply_eq (state->control, frame->samples,
-                             frame->n_frames, frame->channels, frame->sample_rate);
-    /* Position is reported in device frames, so it must use the rate the
-     * device is running at, not the stream's. */
-    gsize expected = frame->n_frames;
-    gint16 *pcm = frame->samples;
-    g_autofree gint16 *converted = NULL;
-
-    if (resampler && !spotifygtk_resampler_is_passthrough (resampler)) {
-      expected = spotifygtk_resampler_process (resampler, frame->samples,
-                                               frame->n_frames, &converted);
-      pcm = converted;
-      if (expected == 0) {          /* block too short to yield a frame yet */
-        pcm_frame_free (frame);
-        continue;
-      }
-    }
-
-    gsize written = spotifygtk_output_write (output, pcm, expected);
-    if (written != expected) {
-      g_warning ("[live-test] streaming audio output wrote %" G_GSIZE_FORMAT
-                 " of %" G_GSIZE_FORMAT " PCM frames",
-                 written, expected);
-      mark_output_failed (state);
-    } else {
-      state->output_frames += written;
-      /* Report position as it advances, so the UI progress bar can track it.
-       * output_frames counts only frames actually written to the device, so a
-       * paused or stalled stream holds its position rather than running on. */
-      spotifygtk_native_engine_control_report_position (state->control,
-                                                        state->output_frames,
-                                                        device_rate);
-    }
-    pcm_frame_free (frame);
-  }
-
-  if (output) {
-    spotifygtk_output_drain (output);
-    spotifygtk_output_close (output);
-  }
-  spotifygtk_resampler_free (resampler);
-  return NULL;
-}
 
 static void
 stream_playback_start (LiveTestState *state)
 {
-  state->pcm_queue = g_async_queue_new ();
-  g_mutex_init (&state->queue_lock);
-  g_cond_init (&state->queue_cond);
-  state->queue_initialized = TRUE;
-  state->output_thread = g_thread_new ("spotify-native-audio", audio_output_thread, state);
-  g_message ("[live-test] audio output worker started; PCM queue limit is %u frames",
-             STREAM_QUEUE_MAX_FRAMES);
+  /*
+   * Claim a slot in the sink rather than starting a worker of our own.
+   *
+   * Claimed before a single frame is decoded, and before the track already
+   * playing has finished: the sink plays its tracks in the order they were
+   * claimed, so this one queues up behind whatever is still sounding instead
+   * of waiting for the device to fall silent first.
+   */
+  state->sink = spotifygtk_audio_sink_get ();
+  state->sink_seq = spotifygtk_audio_sink_begin_track (state->sink, state->control,
+                                                       state->cancellable);
+  spotifygtk_native_engine_control_set_sink_seq (state->control, state->sink_seq);
 }
 
 static gboolean
 stream_queue_frame (LiveTestState *state, PcmFrame *frame)
 {
-  /* A pending seek breaks the wait promptly and rejects the frame, so the
-   * read-ahead chain returns to on_read_ahead_chunk and rebuilds at the new
-   * position instead of blocking here for the buffered audio to drain. */
-  g_mutex_lock (&state->queue_lock);
-  while (state->queued_frames >= STREAM_QUEUE_MAX_FRAMES &&
-         !state->output_failed &&
-         !spotifygtk_native_engine_control_seek_pending (state->control) &&
-         !(state->cancellable && g_cancellable_is_cancelled (state->cancellable))) {
-    g_cond_wait_until (&state->queue_cond, &state->queue_lock,
-                       g_get_monotonic_time () + 100 * G_TIME_SPAN_MILLISECOND);
-  }
-  gboolean rejected = state->output_failed ||
-                      spotifygtk_native_engine_control_seek_pending (state->control) ||
-                      (state->cancellable && g_cancellable_is_cancelled (state->cancellable));
-  if (!rejected)
-    state->queued_frames += frame->n_frames;
-  g_mutex_unlock (&state->queue_lock);
-
-  if (rejected) {
+  /*
+   * A pending seek rejects the frame before it is queued, so the read-ahead
+   * chain returns to on_read_ahead_chunk and rebuilds at the new position
+   * rather than blocking here for buffered audio to drain.
+   *
+   * The blocking wait for space lives in the sink: it is the one that knows
+   * how much of this track is still ahead of the device.
+   */
+  if (spotifygtk_native_engine_control_seek_pending (state->control) ||
+      (state->cancellable && g_cancellable_is_cancelled (state->cancellable))) {
     pcm_frame_free (frame);
     return FALSE;
   }
 
-  StreamQueueItem *item = g_new0 (StreamQueueItem, 1);
-  item->frame = frame;
-  g_async_queue_push (state->pcm_queue, item);
-  return TRUE;
+  gboolean queued = spotifygtk_audio_sink_push (state->sink, state->sink_seq, frame);
+
+  /*
+   * The startup watchdog used to be disarmed by the output worker, on the
+   * first frame it wrote. There is no per-track worker any more, so it is
+   * disarmed on the first frame the sink accepts instead -- a few tens of
+   * milliseconds earlier, and still proof that decoding got as far as
+   * producing audio, which is all the watchdog is guarding against.
+   *
+   * Getting this wrong is not cosmetic: a watchdog left armed fires mid-track
+   * and tears playback down under a track that is playing perfectly well.
+   */
+  if (queued && !state->sink_started) {
+    state->sink_started = TRUE;
+    disable_startup_watchdog (state);
+    report_progress (state, SPOTIFYGTK_ENGINE_PLAYING,
+                     "Audio started; decoding incoming CDN ranges.");
+  }
+  return queued;
 }
 
 static void
 stream_playback_stop (LiveTestState *state)
 {
-  if (!state->output_thread)
+  if (!state->sink || state->sink_seq == 0)
     return;
 
-  StreamQueueItem *item = g_new0 (StreamQueueItem, 1);
-  item->end = TRUE;
-  g_async_queue_push (state->pcm_queue, item);
-  g_thread_join (state->output_thread);
-  state->output_thread = NULL;
+  /*
+   * Says "no more frames", and returns. It deliberately does not wait for the
+   * audio to finish playing: the sink still holds up to ten seconds of it, and
+   * those seconds are the head start the next track gets to resolve, fetch its
+   * first CDN range and decode -- which is what closes the gap rather than
+   * merely shortening it.
+   */
+  spotifygtk_audio_sink_end_track (state->sink, state->sink_seq);
+  state->sink_seq = 0;
 }
 
 static gboolean
@@ -972,13 +895,17 @@ stream_decode_chunk (LiveTestState *state, GBytes *decrypted_chunk, gboolean fin
 
   if (final_chunk) {
     stream_playback_stop (state);
-    if (state->output_failed || state->output_frames == 0) {
+    if (spotifygtk_audio_sink_failed (state->sink) || state->stream_frames == 0) {
       g_warning ("[live-test] final streaming range produced no PCM output");
       return FALSE;
     }
+    /*
+     * Decoded, not written. The run is finished the moment the sink has
+     * accepted the last frame -- it is still playing several seconds of it,
+     * and waiting for that to finish is the gap this removes.
+     */
     g_message ("[live-test] streaming decode complete: %" G_GUINT64_FORMAT
-               " decoded, %" G_GUINT64_FORMAT " written PCM frames",
-               state->stream_frames, state->output_frames);
+               " frames handed to the sink", state->stream_frames);
   }
   return TRUE;
 }
@@ -1069,18 +996,6 @@ typedef struct {
 } SeekLanding;
 
 static void do_seek (LiveTestState *state);
-
-/* Re-arm the audio output worker after a seek teardown, reusing the existing
- * queue and lock (only the thread and the failed/counter state are reset). */
-static void
-stream_output_restart (LiveTestState *state)
-{
-  g_mutex_lock (&state->queue_lock);
-  state->output_failed = FALSE;
-  state->queued_frames = 0;
-  g_mutex_unlock (&state->queue_lock);
-  state->output_thread = g_thread_new ("spotify-native-audio", audio_output_thread, state);
-}
 
 /* The seek window arrived: find a page, replay headers into a fresh decoder,
  * feed from that page, and resume normal read-ahead from just past the window. */
@@ -1178,11 +1093,17 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
    * resampling is happening; with the resampler engaged (44.1k -> 48k here)
    * presetting a granule directly made every seek report a position short by
    * the rate ratio, which is 8.1% -- about 20 s at the four-minute mark. */
-  gint    dev_rate      = state->device_rate > 0 ? state->device_rate : rate;
+  gint    sink_rate     = spotifygtk_audio_sink_device_rate (state->sink);
+  gint    dev_rate      = sink_rate > 0 ? sink_rate : rate;
   guint64 stream_frames = landed_frames + (guint64) shortfall;
   state->output_frames  = (guint64) ((gdouble) stream_frames
                                      * (gdouble) dev_rate / (gdouble) rate);
 
+  /* The sink counts what it has written; a seek moves the track rather than
+   * restarting it, so its counter has to be moved too or position would resume
+   * from wherever the old one had got to. */
+  spotifygtk_audio_sink_set_position (state->sink, state->sink_seq,
+                                      state->output_frames);
   spotifygtk_native_engine_control_report_position (state->control,
                                                     state->output_frames, dev_rate);
 
@@ -1237,20 +1158,29 @@ do_seek (LiveTestState *state)
 
   g_message ("[seek] request: %" G_GINT64_FORMAT " ms", target_ms);
 
-  /* Preserve pause across the seek: resuming is only to unpark the output
-   * worker so it can observe the teardown (it waits on the pause condition,
-   * which mark_output_failed does not signal). Re-paused after the rebuild. */
+  /*
+   * Pause is preserved across the seek. Resuming here is only to unpark the
+   * sink's writer so it observes the flush; it waits on the pause condition.
+   * Re-paused after the rebuild.
+   */
   gboolean was_paused = spotifygtk_native_engine_control_is_paused (state->control);
 
   spotifygtk_native_engine_control_resume (state->control);
-  mark_output_failed (state);
-  stream_playback_stop (state);
+
+  /*
+   * Drop what is buffered and keep the same slot.
+   *
+   * This used to stop the output worker and start a new one, which meant the
+   * device was closed and reopened on every seek. The sink has no need of
+   * that: everything queued is audio from the old position, so throwing it
+   * away is the whole job, and the track carries on in place.
+   */
+  spotifygtk_audio_sink_flush (state->sink, state->sink_seq);
 
   g_clear_object (&state->stream_decoder);
   state->stream_decoder = spotifygtk_decoder_new ();
   state->stream_frames = 0;
 
-  stream_output_restart (state);
 
   if (was_paused)
     spotifygtk_native_engine_control_pause (state->control);
@@ -3106,8 +3036,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     .next_download_offset = 0,
     .header_prefix = NULL, .header_prefix_len = 0, .playback_generation = 0,
     .stream_decoder = NULL, .stream_frames = 0, .output_frames = 0,
-    .pcm_queue = NULL, .output_thread = NULL, .queued_frames = 0,
-    .output_failed = FALSE, .queue_initialized = FALSE,
+    .sink = NULL, .sink_seq = 0, .sink_started = FALSE,
     .timeout_source = NULL,
     .key_timeout_source = NULL,
     .context = context,
@@ -3311,13 +3240,12 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   g_free (state.cdn_url);
   g_clear_pointer (&state.initial_cdn_chunk, g_bytes_unref);
   g_clear_pointer (&state.header_prefix, g_free);
+  /*
+   * Ends this track's slot without waiting for it to finish sounding. The sink
+   * owns the queued audio and the device, both of which outlive this run by
+   * design -- that overlap is the gap being removed.
+   */
   stream_playback_stop (&state);
-  if (state.pcm_queue)
-    g_async_queue_unref (state.pcm_queue);
-  if (state.queue_initialized) {
-    g_mutex_clear (&state.queue_lock);
-    g_cond_clear (&state.queue_cond);
-  }
   g_clear_object (&state.stream_decoder);
 
   /*
