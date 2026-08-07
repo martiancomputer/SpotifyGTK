@@ -959,6 +959,24 @@ on_playlist_card_name (MercuryResponse *response, gpointer user_data)
                                          on_playlist_cover_tracks, c);
 }
 
+/*
+ * Set the playlists status line, hiding it when there is nothing to say.
+ *
+ * Blanking the text is not enough: an empty label still claims a line's
+ * height, and this one sits below the grid, so the grid gave up a strip of
+ * itself to a label showing nothing. The albums page already does this --
+ * see library_page.c -- which is why it never showed the same gap.
+ */
+static void
+set_playlists_status (SpotifyGtkNativeWindow *self, const gchar *message)
+{
+  if (!self->playlists_status)
+    return;
+  gboolean have = message && *message;
+  gtk_label_set_text (GTK_LABEL (self->playlists_status), have ? message : "");
+  gtk_widget_set_visible (self->playlists_status, have);
+}
+
 static void
 on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entries,
                           guint n_entries, gpointer user_data)
@@ -973,16 +991,15 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
   spotifygtk_album_grid_clear (self->playlists_grid);
 
   if (!ok) {
-    gtk_label_set_text (GTK_LABEL (self->playlists_status),
-                        "Couldn\u2019t load your playlists.");
+    set_playlists_status (self, "Couldn\u2019t load your playlists.");
     g_warning ("playlists: rootlist read failed (status %d)", status);
     return;
   }
   if (n_entries == 0) {
-    gtk_label_set_text (GTK_LABEL (self->playlists_status), "No playlists yet.");
+    set_playlists_status (self, "No playlists yet.");
     return;
   }
-  gtk_label_set_text (GTK_LABEL (self->playlists_status), "");
+  set_playlists_status (self, NULL);
   self->playlists_loaded = TRUE;
 
   SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
@@ -1018,7 +1035,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
   }
 
   if (added == 0)
-    gtk_label_set_text (GTK_LABEL (self->playlists_status), "No playlists yet.");
+    set_playlists_status (self, "No playlists yet.");
   (void) m;
 }
 
