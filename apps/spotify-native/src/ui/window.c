@@ -24,6 +24,7 @@
 #include "sidebar.h"
 #include "playback_bar.h"
 #include "now_playing_panel.h"
+#include "../audio/sink.h"
 #include "home_page.h"
 #include "search_page.h"
 #include "liked_songs_page.h"
@@ -105,6 +106,8 @@ struct _SpotifyGtkNativeWindow {
   guint collection_change_id;            /* coalesces change events */
   gboolean playlists_loaded;             /* the grid holds cards already */
   GtkWidget  *playlists_status;
+  /* Tracks we have started, so a handover can render one we no longer hold. */
+  GHashTable *display_tracks;
   guint64     collection_sub;   /* Mercury subscription for external changes */
 
   SpotifyGtkHomePage *home_page;
@@ -148,6 +151,7 @@ static void spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *se
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static void spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self);
 static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
+static void show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track);
 static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
                                  const gchar *title, const gchar *kind);
 static void spotifygtk_native_window_collapse_queue (SpotifyGtkNativeWindow *self);
@@ -281,26 +285,41 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
     return;
   }
 
-  g_free (self->current_track_uri);
-  self->current_track_uri = g_strdup (track->uri);
-  self->current_track_duration_ms = track->duration_ms;
+  /*
+   * Remember the track so the handover can render it later, then decide
+   * whether "later" is now.
+   *
+   * Starting from silence there is nothing to wait for, so the bar updates on
+   * the click as it always did. Starting while something is still sounding is
+   * a gapless handover: the previous track has seconds of audio left, and
+   * showing the new title over it would be a lie for those seconds. In that
+   * case the render waits for now-playing-changed, which the player service
+   * emits when the sink actually reaches it.
+   */
+  if (!self->display_tracks)
+    self->display_tracks = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+                                                  (GDestroyNotify) spotifygtk_native_track_free);
+  if (track->uri)
+    g_hash_table_insert (self->display_tracks, g_strdup (track->uri),
+                         spotifygtk_native_track_copy (track));
 
-  /* Reset the bar to 0 of the new track's length immediately; the engine's
-   * position reports then advance it. */
-  spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
-
-  const gchar *name    = track->name    ? track->name    : "Unknown track";
-  const gchar *artists = track->artists ? track->artists : "";
-  const gchar *album   = track->album   ? track->album   : "";
-
-  spotifygtk_playback_bar_set_track (self->playback_bar, name, artists);
-  /* The bar's heart follows whatever is playing. */
-  spotifygtk_playback_bar_set_liked (self->playback_bar,
-    track->uri && g_hash_table_contains (self->liked_uris, track->uri));
-  spotifygtk_now_playing_panel_set_track (self->now_playing_panel, name, artists, album);
-
-  spotifygtk_playback_bar_set_cover (self->playback_bar, track->cover_id);
-  spotifygtk_now_playing_panel_set_cover (self->now_playing_panel, track->cover_id);
+  if (spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ()) == 0) {
+    /*
+     * Silence: adopt the track now, exactly as before.
+     *
+     * current_track_uri and the progress reset move with the render rather
+     * than running ahead of it. They are not bookkeeping -- the URI is what
+     * every list highlights as the playing row, and the reset zeroes the
+     * progress bar. Doing either at the click would, during a handover, blank
+     * the progress of a track still being heard and move the equaliser to a
+     * row that is not sounding yet.
+     */
+    g_free (self->current_track_uri);
+    self->current_track_uri = g_strdup (track->uri);
+    self->current_track_duration_ms = track->duration_ms;
+    spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
+    show_now_playing (self, track);
+  }
 
   GError *error = NULL;
   if (!spotifygtk_player_service_start_uri (self->player, track->uri, &error)) {
@@ -1799,6 +1818,51 @@ navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name)
 }
 
 /* Open an album/artist context page and record it, so Back returns here. */
+/* Render one track into the bar and the panel. Called either on the click, or
+ * at the handover -- see the note in the activation path. */
+static void
+show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
+{
+  if (!track)
+    return;
+
+  const gchar *name    = track->name    ? track->name    : "Unknown track";
+  const gchar *artists = track->artists ? track->artists : "";
+  const gchar *album   = track->album   ? track->album   : "";
+
+  spotifygtk_playback_bar_set_track (self->playback_bar, name, artists);
+  /* The bar's heart follows whatever is playing. */
+  spotifygtk_playback_bar_set_liked (self->playback_bar,
+    track->uri && self->liked_uris &&
+    g_hash_table_contains (self->liked_uris, track->uri));
+  spotifygtk_now_playing_panel_set_track (self->now_playing_panel, name, artists, album);
+
+  spotifygtk_playback_bar_set_cover (self->playback_bar, track->cover_id);
+  spotifygtk_now_playing_panel_set_cover (self->now_playing_panel, track->cover_id);
+}
+
+/* The sink reached a different track. Only now is it true to say so. */
+static void
+on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
+                        gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) player;
+
+  if (!uri || !self->display_tracks)
+    return;
+
+  const SpotifyNativeTrack *track = g_hash_table_lookup (self->display_tracks, uri);
+  if (!track)
+    return;
+
+  g_free (self->current_track_uri);
+  self->current_track_uri = g_strdup (uri);
+  self->current_track_duration_ms = track->duration_ms;
+  spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
+  show_now_playing (self, track);
+}
+
 static void
 navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
                      const gchar *title, const gchar *kind)
@@ -2160,6 +2224,8 @@ spotifygtk_native_window_constructed (GObject *object)
 
   g_signal_connect (self->player, "state-changed",
                     G_CALLBACK (on_player_state_changed), self);
+  g_signal_connect (self->player, "now-playing-changed",
+                    G_CALLBACK (on_now_playing_changed), self);
   g_signal_connect (self->player, "position-changed",
                     G_CALLBACK (on_player_position_changed), self);
   g_signal_connect (self->session, "state-changed",
@@ -2412,6 +2478,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   g_clear_pointer (&self->nav_history, g_ptr_array_unref);
   g_clear_pointer (&self->pending_likes, g_ptr_array_unref);
+  g_clear_pointer (&self->display_tracks, g_hash_table_unref);
   g_clear_pointer (&self->liked_uris, g_hash_table_unref);
   g_clear_pointer (&self->liked_building, g_hash_table_unref);
   g_clear_object (&self->auth);

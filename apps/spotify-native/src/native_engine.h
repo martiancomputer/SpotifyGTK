@@ -62,6 +62,12 @@ void     spotifygtk_native_engine_control_apply_eq (SpotifyNativeEngineControl *
                                                     gint channels, gint rate);
 gint     spotifygtk_native_engine_control_get_output_rate (SpotifyNativeEngineControl *control);
 
+/* The sink slot this track occupies. Set by the engine, read by the player
+ * service to work out which of its controls is the audible one. */
+void    spotifygtk_native_engine_control_set_sink_seq (SpotifyNativeEngineControl *control,
+                                                       guint64 seq);
+guint64 spotifygtk_native_engine_control_get_sink_seq (SpotifyNativeEngineControl *control);
+
 /* Playback position, reported by the audio worker and read by the UI.
  *
  * The worker calls report_position() as it writes PCM to the device, passing
