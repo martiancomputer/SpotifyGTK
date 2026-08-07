@@ -41,6 +41,25 @@ void spotifygtk_album_grid_add_card (SpotifyGtkAlbumGrid *self, const gchar *uri
                                      const gchar *title, const gchar *subtitle,
                                      const gchar *cover_id);
 
+/*
+ * Lazy cards, for listings whose entries each cost a request to describe.
+ *
+ * add_pending_card() shows a card immediately from its URI alone; the grid
+ * emits "card-needs-resolve" the first time that card is scrolled into view,
+ * and the handler calls resolve_card() when the details arrive. On a large
+ * listing this turns one request per entry into one per card actually seen.
+ *
+ * resolve_card() updates the item in place rather than splicing the model --
+ * see its implementation for why patching cards any other way crashed.
+ */
+void spotifygtk_album_grid_add_pending_card (SpotifyGtkAlbumGrid *self,
+                                             const gchar *uri,
+                                             const gchar *placeholder_title,
+                                             const gchar *subtitle);
+void spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
+                                         const gchar *title, const gchar *subtitle,
+                                         const gchar *cover_id);
+
 void spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self);
 
 /* Inset the cards while leaving the scrollbar flush with the widget edge.
