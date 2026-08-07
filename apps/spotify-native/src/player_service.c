@@ -65,6 +65,34 @@ static guint signals[N_SIGNALS];
  * the service's main context while a track is active; stops when the control
  * goes away. */
 /*
+ * The control of the track being heard, or the one starting if none is.
+ *
+ * Every transport command has to go through this rather than self->control.
+ * A run finishes when it has pushed its last frame, seconds before that audio
+ * is played, at which point self->control is cleared and then replaced by the
+ * next track's -- so during a handover, pausing self->control either did
+ * nothing or paused the decode of a track nobody was listening to yet, while
+ * the audible one played on. That is "the play button stopped working".
+ *
+ * Looked up rather than cached, so a command that arrives between position
+ * polls still finds the right track.
+ */
+static SpotifyNativeEngineControl *
+active_control (SpotifyNativePlayerService *self)
+{
+  guint64 seq = spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ());
+  if (seq != 0) {
+    for (guint i = 0; i < self->inflight->len; i++) {
+      InflightTrack *t = g_ptr_array_index (self->inflight, i);
+      if (spotifygtk_native_engine_control_get_sink_seq (t->control) == seq)
+        return t->control;
+    }
+  }
+  /* Nothing sounding yet: the track just started is the one a command means. */
+  return self->control;
+}
+
+/*
  * Reconcile what is sounding with what we are holding.
  *
  * Polled rather than pushed from the sink: this runs on the service's main
@@ -114,12 +142,26 @@ poll_position (gpointer user_data)
 
   SpotifyNativeEngineControl *audible = sync_audible_track (self);
 
-  /* Position comes from the track being heard, not the one being decoded --
-   * reading self->control would jump the progress bar to the next track the
-   * moment its decode started. */
-  SpotifyNativeEngineControl *from = audible ? audible : self->control;
+  /*
+   * Position comes from the track being heard, and from nothing else.
+   *
+   * Falling back to self->control was wrong in the one case that matters: once
+   * the next track starts decoding, self->control is its control, sitting at
+   * zero, while the previous track is still playing. Reporting that snapped
+   * the progress bar to 0:00 mid-song. If the audible track cannot be
+   * identified, the honest answer is to say nothing and leave the last
+   * position on screen.
+   */
+  SpotifyNativeEngineControl *from = audible;
   if (!from) {
-    if (self->inflight->len == 0) {
+    /* Nothing sounding yet. Before the first frame reaches the device the
+     * starting track is the right source -- that is how the bar shows 0:00 of
+     * the new length while it buffers. */
+    if (spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ()) == 0)
+      from = self->control;
+  }
+  if (!from) {
+    if (self->inflight->len == 0 && !self->control) {
       self->position_timer_id = 0;
       return G_SOURCE_REMOVE;
     }
@@ -324,13 +366,14 @@ void
 spotifygtk_player_service_pause (SpotifyNativePlayerService *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
-  if (!self->task || !self->control)
+  SpotifyNativeEngineControl *c = active_control (self);
+  if (!c)
     return;
   /* Must report PAUSED, not PLAYING. Emitting PLAYING here left the
    * playback bar showing a pause icon while actually paused, so the next
    * click emitted "pause" again instead of "play" -- resume was
    * unreachable and the track appeared stuck. */
-  spotifygtk_native_engine_control_pause (self->control);
+  spotifygtk_native_engine_control_pause (c);
   emit_state (self, SPOTIFYGTK_PLAYER_PAUSED, "Playback paused; buffered audio is retained.");
 }
 
@@ -338,9 +381,10 @@ void
 spotifygtk_player_service_resume (SpotifyNativePlayerService *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
-  if (!self->task || !self->control)
+  SpotifyNativeEngineControl *c = active_control (self);
+  if (!c)
     return;
-  spotifygtk_native_engine_control_resume (self->control);
+  spotifygtk_native_engine_control_resume (c);
   emit_state (self, SPOTIFYGTK_PLAYER_PLAYING, "Playback resumed.");
 }
 
@@ -348,18 +392,20 @@ gboolean
 spotifygtk_player_service_is_paused (SpotifyNativePlayerService *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self), FALSE);
-  return self->control && spotifygtk_native_engine_control_is_paused (self->control);
+  SpotifyNativeEngineControl *c = active_control (self);
+  return c && spotifygtk_native_engine_control_is_paused (c);
 }
 
 void
 spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 position_ms)
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
-  if (!self->task || !self->control)
+  SpotifyNativeEngineControl *c = active_control (self);
+  if (!c)
     return;
   /* The engine consumes this at its next wait point and preserves pause state
    * across the seek (see do_seek in the engine). */
-  spotifygtk_native_engine_control_request_seek (self->control, position_ms);
+  spotifygtk_native_engine_control_request_seek (c, position_ms);
 }
 
 gboolean
@@ -429,6 +475,13 @@ spotifygtk_player_service_set_volume (SpotifyNativePlayerService *self, gint per
 
   /* Applies immediately when something is playing; otherwise it is picked
    * up by the next control created in start_uri(). */
+  /* Every track still in flight, not just the producing one: during a
+   * handover the audible track is a different control, and a volume change
+   * that skipped it would not be heard until the next song. */
+  for (guint i = 0; self->inflight && i < self->inflight->len; i++)
+    spotifygtk_native_engine_control_set_volume (
+      ((InflightTrack *) g_ptr_array_index (self->inflight, i))->control,
+      self->volume_percent / 100.0);
   if (self->control)
     spotifygtk_native_engine_control_set_volume (self->control,
                                                  self->volume_percent / 100.0);
@@ -444,6 +497,10 @@ spotifygtk_player_service_set_eq (SpotifyNativePlayerService *self,
     memcpy (self->eq_gains, gains_db, sizeof self->eq_gains);
   self->eq_enabled = enabled;
 
+  for (guint i = 0; self->inflight && i < self->inflight->len; i++)
+    spotifygtk_native_engine_control_set_eq (
+      ((InflightTrack *) g_ptr_array_index (self->inflight, i))->control,
+      self->eq_gains, enabled);
   if (self->control)
     spotifygtk_native_engine_control_set_eq (self->control, self->eq_gains, enabled);
 }

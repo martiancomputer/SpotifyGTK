@@ -94,6 +94,24 @@ head_track (SpotifyAudioSink *self)
   while (self->tracks->head) {
     SinkTrack *t = self->tracks->head->data;
 
+    /*
+     * A cancelled track is abandoned outright, buffered audio included.
+     *
+     * Cancellation was only checked when pushing, which stopped new frames but
+     * left everything already queued to play out -- so choosing another track
+     * kept the old one sounding for as long as the buffer lasted. The buffer
+     * is the whole point of the handover, so that is up to ten seconds of the
+     * wrong song.
+     */
+    if (!t->cancelled && t->cancellable && g_cancellable_is_cancelled (t->cancellable)) {
+      PcmFrame *f;
+      while ((f = g_queue_pop_head (t->frames)) != NULL)
+        pcm_frame_free (f);
+      t->queued = 0;
+      t->cancelled = TRUE;
+      g_cond_broadcast (&self->cond);
+    }
+
     gboolean spent = (t->cancelled || t->ended) && g_queue_is_empty (t->frames);
     if (!spent)
       return t;
