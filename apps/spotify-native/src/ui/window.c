@@ -100,6 +100,8 @@ struct _SpotifyGtkNativeWindow {
   GPtrArray *pending_likes;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
+  guint playlists_resolved;              /* cards that have asked for details */
+  gboolean playlists_loading;            /* rootlist read in flight */
   guint collection_change_id;            /* coalesces change events */
   gboolean playlists_loaded;             /* the grid holds cards already */
   GtkWidget  *playlists_status;
@@ -925,8 +927,8 @@ on_playlist_cover_tracks (GObject *source, GAsyncResult *result, gpointer user_d
     if (t) cover = t->cover_id;
   }
 
-  spotifygtk_album_grid_add_card (c->window->playlists_grid, c->uri,
-                                  c->name ? c->name : c->uri, "Playlist", cover);
+  spotifygtk_album_grid_resolve_card (c->window->playlists_grid, c->uri,
+                                      c->name ? c->name : c->uri, "Playlist", cover);
   playlist_card_free (c);
 }
 
@@ -962,6 +964,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
                           guint n_entries, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  self->playlists_loading = FALSE;
   if (!self->playlists_grid)
     return;
 
@@ -986,30 +989,85 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
   if (!m)
     return;
 
+  /*
+   * Cards go up straight away, knowing only their URIs; each fetches its own
+   * name and cover when it is scrolled into view.
+   *
+   * Resolving them all here cost two round trips per playlist -- a head read
+   * for the name, then a one-track context resolve for the cover -- issued for
+   * all 59 at once and serialised over the AP connection. That is what made
+   * this page take fifteen seconds to open, most of it for cards below the
+   * fold.
+   */
+  guint added = 0;
   for (guint i = 0; i < n_entries; i++) {
     if (!entries[i].uri)
       continue;
-    PlaylistCard *c = g_new0 (PlaylistCard, 1);
-    c->window     = self;
-    c->uri        = g_strdup (entries[i].uri);
-    c->generation = self->playlists_generation;
 
-    const gchar *id = strrchr (entries[i].uri, ':');
-    g_autofree gchar *head =
-      g_strdup_printf ("hm://playlist/v2/playlist/%s", id ? id + 1 : entries[i].uri);
-    spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", head, NULL,
-                                     on_playlist_card_name, c);
+    /* The rootlist interleaves folder markers with playlists. They are not
+     * playlists, have no head to read, and resolving them produced nothing but
+     * "could not find an upstream service" warnings. */
+    if (!g_str_has_prefix (entries[i].uri, "spotify:playlist:"))
+      continue;
+
+    spotifygtk_album_grid_add_pending_card (self->playlists_grid, entries[i].uri,
+                                            entries[i].name ? entries[i].name
+                                                            : "Playlist",
+                                            "Playlist");
+    added++;
   }
+
+  if (added == 0)
+    gtk_label_set_text (GTK_LABEL (self->playlists_status), "No playlists yet.");
+  (void) m;
+}
+
+/* One card has come into view and wants its name and cover. */
+static void
+on_playlist_card_needs_resolve (SpotifyGtkAlbumGrid *grid, const gchar *uri,
+                                gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) grid;
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  if (!m || !uri)
+    return;
+
+  self->playlists_resolved++;
+  SPOTIFYGTK_DEBUG ("playlists: resolving card %u (%s)", self->playlists_resolved, uri);
+
+  PlaylistCard *c = g_new0 (PlaylistCard, 1);
+  c->window     = self;
+  c->uri        = g_strdup (uri);
+  c->generation = self->playlists_generation;
+
+  const gchar *id = strrchr (uri, ':');
+  g_autofree gchar *head =
+    g_strdup_printf ("hm://playlist/v2/playlist/%s", id ? id + 1 : uri);
+  spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", head, NULL,
+                                   on_playlist_card_name, c);
 }
 
 static void
 reload_playlists (SpotifyGtkNativeWindow *self)
 {
+  /*
+   * playlists_loaded is only set once the rootlist has come back, so it does
+   * not stop a second call made while the first is still out -- and startup
+   * makes exactly that pair, navigating to the visible page twice. Each one
+   * cleared the grid and re-added every card, so every card resolved twice.
+   */
+  if (self->playlists_loading)
+    return;
+
   SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
   g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (self->session)
                              : NULL;
   if (!m || !user)
     return;
+
+  self->playlists_loading = TRUE;
   spotifygtk_playlist_list (m, user, on_page_playlists_listed, self);
 }
 
@@ -2205,6 +2263,8 @@ spotifygtk_native_window_constructed (GObject *object)
     spotifygtk_album_grid_set_content_margins (self->playlists_grid, 0, 0);
     g_signal_connect (self->playlists_grid, "album-activated",
                       G_CALLBACK (on_playlist_card_activated), self);
+    g_signal_connect (self->playlists_grid, "card-needs-resolve",
+                      G_CALLBACK (on_playlist_card_needs_resolve), self);
     gtk_box_append (GTK_BOX (pl), GTK_WIDGET (self->playlists_grid));
 
     self->playlists_status = gtk_label_new ("Not signed in yet.");

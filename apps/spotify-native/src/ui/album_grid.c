@@ -74,6 +74,11 @@ struct _SpotifyGtkAlbumItem {
   gchar   *name;
   gchar   *artist;
   gchar   *cover_id;
+
+  /* A card added URI-only, still waiting for its name and cover. See
+   * spotifygtk_album_grid_add_pending_card(). */
+  gboolean pending;
+  gboolean resolving;   /* a request is out; do not ask again on every rebind */
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkAlbumItem, spotifygtk_album_item, G_TYPE_OBJECT)
@@ -137,7 +142,8 @@ struct _SpotifyGtkAlbumGrid {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkAlbumGrid, spotifygtk_album_grid, GTK_TYPE_BOX)
 
-enum { ALBUM_ACTIVATED, ALBUM_ADD_TO_LIKED, ALBUM_ADD_TO_QUEUE, N_SIGNALS };
+enum { ALBUM_ACTIVATED, ALBUM_ADD_TO_LIKED, ALBUM_ADD_TO_QUEUE,
+       CARD_NEEDS_RESOLVE, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 #define GRID_SETTLE_MS 180
@@ -353,6 +359,9 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   (void) factory;
 }
 
+static void card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card,
+                             SpotifyGtkAlbumItem *item);
+
 static void
 factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
@@ -362,9 +371,36 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   if (!card || !item)
     return;
 
+  card_apply_item (self, card, item);
+
+  if (!g_ptr_array_find (self->bound_cards, card, NULL))
+    g_ptr_array_add (self->bound_cards, card);
+
+  /*
+   * Ask for the details the moment the card is actually on screen.
+   *
+   * Resolving every entry up front cost one round trip each, serialised, for
+   * cards the user may never scroll to. Only a dozen or so are visible at a
+   * time, so this turns a fan-out over the whole listing into a handful.
+   */
+  if (item->pending && !item->resolving) {
+    item->resolving = TRUE;
+    g_signal_emit (self, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
+  }
+  (void) factory;
+}
+
+/* Paint one item onto one card. Shared by bind and by resolve, so a card that
+ * is already on screen when its details arrive updates the same way it would
+ * have on a fresh bind. */
+static void
+card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem *item)
+{
   GtkWidget *art   = g_object_get_data (G_OBJECT (card), "art");
   GtkWidget *title = g_object_get_data (G_OBJECT (card), "title");
   GtkWidget *sub   = g_object_get_data (G_OBJECT (card), "sub");
+  if (!art || !title || !sub)
+    return;
 
   gtk_label_set_text (GTK_LABEL (title), item->name ? item->name : "Unknown album");
   gtk_label_set_text (GTK_LABEL (sub), item->artist ? item->artist : "");
@@ -382,16 +418,13 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   g_object_set_data_full (G_OBJECT (card), "cover-id",
                           g_strdup (item->cover_id), g_free);
 
-  if (!g_ptr_array_find (self->bound_cards, card, NULL))
-    g_ptr_array_add (self->bound_cards, card);
-
   if (item->cover_id && *item->cover_id) {
     GCancellable *cancel = g_cancellable_new ();
     g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
     spotifygtk_cover_load_deferrable (item->cover_id, CARD_DECODE_PX, cancel,
                                       on_card_cover_loaded, art);
   }
-  (void) factory; (void) user_data;
+  (void) self;
 }
 
 static void
@@ -416,6 +449,67 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
     gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
   }
   (void) factory; (void) user_data;
+}
+
+/*
+ * A card that knows only its URI. Its name and cover are fetched when it first
+ * scrolls into view -- see the CARD_NEEDS_RESOLVE emission in factory_bind().
+ */
+void
+spotifygtk_album_grid_add_pending_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
+                                        const gchar *placeholder_title,
+                                        const gchar *subtitle)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (uri != NULL);
+
+  g_autoptr(SpotifyGtkAlbumItem) item =
+    album_item_new (uri, placeholder_title, subtitle, NULL);
+  item->pending = TRUE;
+  g_list_store_append (self->store, item);
+}
+
+/*
+ * Fill in a pending card's details.
+ *
+ * Sets the fields on the item and repaints whichever card is currently showing
+ * it, if any. Deliberately not a splice: replacing the item would destroy the
+ * one a card is bound to and force a rebind with cover loads still in flight
+ * against that card, which is what crashed when cards were patched before.
+ * Updating in place touches no model structure at all.
+ *
+ * A card scrolled out of view has nothing to repaint, and does not need one --
+ * the item holds the data, so it is correct on the next bind.
+ */
+void
+spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
+                                    const gchar *title, const gchar *subtitle,
+                                    const gchar *cover_id)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (uri != NULL);
+
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  for (guint i = 0; i < n; i++) {
+    g_autoptr(SpotifyGtkAlbumItem) item =
+      g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    if (!item || g_strcmp0 (item->uri, uri) != 0)
+      continue;
+
+    g_free (item->name);     item->name     = g_strdup (title);
+    g_free (item->artist);   item->artist   = g_strdup (subtitle);
+    g_free (item->cover_id); item->cover_id = g_strdup (cover_id);
+    item->pending   = FALSE;
+    item->resolving = FALSE;
+
+    for (guint c = 0; c < self->bound_cards->len; c++) {
+      GtkWidget *card = g_ptr_array_index (self->bound_cards, c);
+      const gchar *shown = g_object_get_data (G_OBJECT (card), "album-uri");
+      if (g_strcmp0 (shown, uri) == 0)
+        card_apply_item (self, card, item);
+    }
+    return;
+  }
 }
 
 void
@@ -532,6 +626,12 @@ spotifygtk_album_grid_class_init (SpotifyGtkAlbumGridClass *klass)
    * can be exercised before either lands. */
   signals[ALBUM_ADD_TO_LIKED] = g_signal_new (
     "album-add-to-liked", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+    NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  /* Emitted the first time a pending card is bound, i.e. scrolled into view.
+   * The handler is expected to fetch its details and call resolve_card(). */
+  signals[CARD_NEEDS_RESOLVE] = g_signal_new (
+    "card-needs-resolve", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST, 0,
     NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 
   signals[ALBUM_ADD_TO_QUEUE] = g_signal_new (
