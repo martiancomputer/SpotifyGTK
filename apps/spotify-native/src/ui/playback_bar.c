@@ -63,6 +63,9 @@ struct _SpotifyGtkPlaybackBar {
   guint    seek_release_id;
 };
 
+/* Natural width of the now-playing title and artist, in characters. */
+#define BAR_TEXT_MAX_CHARS 40
+
 G_DEFINE_FINAL_TYPE (SpotifyGtkPlaybackBar, spotifygtk_playback_bar, GTK_TYPE_BOX)
 
 enum {
@@ -307,17 +310,27 @@ build_left_column (SpotifyGtkPlaybackBar *self)
   gtk_widget_set_valign (info, GTK_ALIGN_CENTER);
   gtk_widget_set_hexpand (info, FALSE);
 
+  /*
+   * Room to breathe, with ellipsizing as the fallback rather than the norm.
+   *
+   * 18 characters truncated almost every real title -- the bar sits in a
+   * GtkCenterBox, whose start widget gets its natural width, and this cap is
+   * what that natural width was. Raising it does not force the window wider:
+   * an ellipsizing label's *minimum* width stays small, so the text still
+   * compresses when the window is genuinely short of space, which is the only
+   * time it should.
+   */
   self->track_label = GTK_LABEL (gtk_label_new ("Nothing playing"));
   gtk_label_set_xalign (self->track_label, 0.0);
   gtk_label_set_ellipsize (self->track_label, PANGO_ELLIPSIZE_END);
-  gtk_label_set_max_width_chars (self->track_label, 18);
+  gtk_label_set_max_width_chars (self->track_label, BAR_TEXT_MAX_CHARS);
   gtk_widget_add_css_class (GTK_WIDGET (self->track_label), "bar-title");
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->track_label));
 
   self->artist_label = GTK_LABEL (gtk_label_new (""));
   gtk_label_set_xalign (self->artist_label, 0.0);
   gtk_label_set_ellipsize (self->artist_label, PANGO_ELLIPSIZE_END);
-  gtk_label_set_max_width_chars (self->artist_label, 18);
+  gtk_label_set_max_width_chars (self->artist_label, BAR_TEXT_MAX_CHARS);
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "bar-subtitle");
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->artist_label));
 
