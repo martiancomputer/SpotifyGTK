@@ -64,6 +64,13 @@ void                 spotifygtk_settings_set_sample_rate (SpotifyGtkSettings *se
 #define SPOTIFYGTK_SETTINGS_EQ_BANDS 15
 
 const gdouble *spotifygtk_settings_get_eq_gains   (SpotifyGtkSettings *self);
+/* Shuffle, and repeat as SpotifyGtkRepeatMode. Persisted like the rest: the
+ * modes are a standing preference, not per-session state. */
+gboolean spotifygtk_settings_get_shuffle (SpotifyGtkSettings *self);
+void     spotifygtk_settings_set_shuffle (SpotifyGtkSettings *self, gboolean on);
+guint    spotifygtk_settings_get_repeat  (SpotifyGtkSettings *self);
+void     spotifygtk_settings_set_repeat  (SpotifyGtkSettings *self, guint mode);
+
 gboolean       spotifygtk_settings_get_eq_enabled (SpotifyGtkSettings *self);
 void           spotifygtk_settings_set_eq_band    (SpotifyGtkSettings *self,
                                                    guint band, gdouble gain_db);

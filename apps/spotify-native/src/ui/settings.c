@@ -17,6 +17,8 @@ struct _SpotifyGtkSettings {
   SpotifyGtkSampleRate sample_rate;
 
   gboolean eq_enabled;
+  gboolean shuffle;
+  guint    repeat;
   gdouble  eq_gains[SPOTIFYGTK_SETTINGS_EQ_BANDS];  /* dB per band */
 
   gchar *path;
@@ -53,6 +55,8 @@ load (SpotifyGtkSettings *self)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "sample-rate", NULL);
 
   self->eq_enabled = g_key_file_get_boolean (kf, SETTINGS_GROUP, "eq-enabled", NULL);
+  self->shuffle    = g_key_file_get_boolean (kf, SETTINGS_GROUP, "shuffle", NULL);
+  self->repeat     = (guint) g_key_file_get_integer (kf, SETTINGS_GROUP, "repeat", NULL);
   gsize n = 0;
   g_autofree gdouble *g = g_key_file_get_double_list (kf, SETTINGS_GROUP,
                                                       "eq-gains", &n, NULL);
@@ -78,6 +82,8 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_integer (kf, SETTINGS_GROUP, "media-mode", self->media_mode);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "sample-rate", self->sample_rate);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "eq-enabled", self->eq_enabled);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "shuffle", self->shuffle);
+  g_key_file_set_integer (kf, SETTINGS_GROUP, "repeat", (gint) self->repeat);
   g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains,
                               SPOTIFYGTK_SETTINGS_EQ_BANDS);
 
@@ -142,6 +148,38 @@ spotifygtk_settings_get_eq_gains (SpotifyGtkSettings *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), NULL);
   return self->eq_gains;
+}
+
+gboolean
+spotifygtk_settings_get_shuffle (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  return self->shuffle;
+}
+
+void
+spotifygtk_settings_set_shuffle (SpotifyGtkSettings *self, gboolean on)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (self->shuffle == on) return;
+  self->shuffle = on;
+  save (self);
+}
+
+guint
+spotifygtk_settings_get_repeat (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), 0);
+  return self->repeat;
+}
+
+void
+spotifygtk_settings_set_repeat (SpotifyGtkSettings *self, guint mode)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (self->repeat == mode) return;
+  self->repeat = mode;
+  save (self);
 }
 
 gboolean

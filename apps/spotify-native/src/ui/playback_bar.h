@@ -14,11 +14,27 @@
 
 G_BEGIN_DECLS
 
+/*
+ * Repeat cycles rather than toggles: off, then the whole context, then the one
+ * track. Two states cannot express "keep playing this track", which is the
+ * half of repeat people reach for deliberately.
+ */
+typedef enum {
+  SPOTIFYGTK_REPEAT_OFF = 0,
+  SPOTIFYGTK_REPEAT_ALL,
+  SPOTIFYGTK_REPEAT_ONE,
+} SpotifyGtkRepeatMode;
+
 #define SPOTIFYGTK_TYPE_PLAYBACK_BAR (spotifygtk_playback_bar_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifyGtkPlaybackBar, spotifygtk_playback_bar,
                       SPOTIFYGTK, PLAYBACK_BAR, GtkBox)
 
 SpotifyGtkPlaybackBar *spotifygtk_playback_bar_new (void);
+
+/* Set both toggles without emitting, for restoring persisted state. */
+void spotifygtk_playback_bar_set_modes (SpotifyGtkPlaybackBar *self,
+                                        gboolean shuffle,
+                                        SpotifyGtkRepeatMode repeat);
 
 /* Update displayed information */
 void spotifygtk_playback_bar_set_track (SpotifyGtkPlaybackBar *self,
@@ -54,7 +70,7 @@ void spotifygtk_playback_bar_set_skip_sensitive (SpotifyGtkPlaybackBar *self,
  * - volume-changed (gint percent)
  * - like-toggled    (gboolean liked)
  * - shuffle-toggled (gboolean enabled)
- * - repeat-toggled  (gboolean enabled)
+ * - repeat-changed  (SpotifyGtkRepeatMode mode)
  * - queue-clicked
  */
 

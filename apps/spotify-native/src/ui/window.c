@@ -149,6 +149,20 @@ struct _SpotifyGtkNativeWindow {
   GPtrArray *play_context;      /* SpotifyNativeTrack*, free func set; may be NULL */
   gint       context_index;     /* -1 when there is no context */
   GQueue    *user_queue;        /* SpotifyNativeTrack*, freed manually */
+
+  /*
+   * The order the context is played in, as positions into play_context.
+   *
+   * Shuffle is a permutation held here rather than a reordering of
+   * play_context itself: the list on screen must not rearrange under the user,
+   * and turning shuffle off has to restore the real order, which is only
+   * possible if it was never lost. context_index stays the position of the
+   * current track in play_context, so everything that reads it is unaffected.
+   */
+  GArray    *order;             /* guint, indices into play_context */
+  gint       order_pos;         /* cursor into order; -1 when none */
+  gboolean   shuffle;
+  SpotifyGtkRepeatMode repeat;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, GTK_TYPE_APPLICATION_WINDOW)
@@ -159,6 +173,8 @@ static void spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *se
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static void spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self);
 static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
+static gint order_pos_of (SpotifyGtkNativeWindow *self, gint ctx_index);
+static void rebuild_order (SpotifyGtkNativeWindow *self, gint keep);
 static void show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track);
 static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
                                  const gchar *title, const gchar *kind);
@@ -256,10 +272,14 @@ on_nav_fwd_clicked (GtkButton *b, gpointer user_data)
 static void
 refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
 {
-  gboolean can_prev = self->play_context && self->context_index > 0;
+  gint opos = self->order_pos >= 0 ? self->order_pos
+                                   : order_pos_of (self, self->context_index);
+  gboolean can_prev = self->order && (opos > 0 ||
+                      (self->repeat == SPOTIFYGTK_REPEAT_ALL && self->order->len > 0));
   gboolean can_next = !g_queue_is_empty (self->user_queue) ||
-                      (self->play_context && self->context_index >= 0 &&
-                       self->context_index + 1 < (gint) self->play_context->len);
+                      (self->order && opos >= 0 &&
+                       (opos + 1 < (gint) self->order->len ||
+                        self->repeat != SPOTIFYGTK_REPEAT_OFF));
   spotifygtk_playback_bar_set_skip_sensitive (self->playback_bar, can_prev, can_next);
 
   /* Up next = user-queued tracks first, then the tail of the context, capped
@@ -272,10 +292,14 @@ refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
   GPtrArray *up_next = g_ptr_array_new ();   /* borrowed pointers, no free func */
   for (GList *l = self->user_queue->head; l && up_next->len < UP_NEXT_MAX; l = l->next)
     g_ptr_array_add (up_next, l->data);
-  if (self->play_context && self->context_index >= 0) {
-    for (guint i = self->context_index + 1;
-         i < self->play_context->len && up_next->len < UP_NEXT_MAX; i++)
-      g_ptr_array_add (up_next, g_ptr_array_index (self->play_context, i));
+  if (self->play_context && self->order && opos >= 0) {
+    /* Walks the play order, so Up Next shows what shuffle will actually
+     * play rather than whatever happens to sit below in the listing. */
+    for (guint i = (guint) opos + 1;
+         i < self->order->len && up_next->len < UP_NEXT_MAX; i++)
+      g_ptr_array_add (up_next,
+        g_ptr_array_index (self->play_context,
+                           g_array_index (self->order, guint, i)));
   }
   spotifygtk_now_playing_panel_set_native_queue (self->now_playing_panel, up_next);
   g_ptr_array_free (up_next, TRUE);
@@ -345,6 +369,7 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
      * disagreement, the audible track is the one to believe. */
     if (handover) {
       g_clear_pointer (&self->awaiting_uri, g_free);
+  g_clear_pointer (&self->order, g_array_unref);
     } else {
       g_free (self->awaiting_uri);
       self->awaiting_uri = g_strdup (track->uri);
@@ -360,6 +385,62 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
   refresh_transport_and_queue (self);
 }
 
+/* Where `ctx_index` sits in the current play order, or -1. */
+static gint
+order_pos_of (SpotifyGtkNativeWindow *self, gint ctx_index)
+{
+  if (!self->order || ctx_index < 0)
+    return -1;
+  for (guint i = 0; i < self->order->len; i++)
+    if ((gint) g_array_index (self->order, guint, i) == ctx_index)
+      return (gint) i;
+  return -1;
+}
+
+/*
+ * Rebuild the play order for the current context.
+ *
+ * `keep` is the context position to treat as current; it is moved to the front
+ * so that turning shuffle on does not change what is playing, only what comes
+ * after it.
+ */
+static void
+rebuild_order (SpotifyGtkNativeWindow *self, gint keep)
+{
+  g_clear_pointer (&self->order, g_array_unref);
+  self->order_pos = -1;
+
+  if (!self->play_context || self->play_context->len == 0)
+    return;
+
+  guint n = self->play_context->len;
+  self->order = g_array_sized_new (FALSE, FALSE, sizeof (guint), n);
+  for (guint i = 0; i < n; i++)
+    g_array_append_val (self->order, i);
+
+  if (self->shuffle) {
+    /* Fisher-Yates, so every permutation is equally likely. Picking a random
+     * track each time instead would repeat and strand tracks, which is what
+     * people mean when they say a shuffle "isn't random". */
+    for (guint i = n; i > 1; i--) {
+      guint j = (guint) g_random_int_range (0, (gint32) i);
+      guint tmp = g_array_index (self->order, guint, i - 1);
+      g_array_index (self->order, guint, i - 1) = g_array_index (self->order, guint, j);
+      g_array_index (self->order, guint, j) = tmp;
+    }
+  }
+
+  if (keep >= 0) {
+    gint at = order_pos_of (self, keep);
+    if (at > 0) {
+      guint tmp = g_array_index (self->order, guint, 0);
+      g_array_index (self->order, guint, 0) = g_array_index (self->order, guint, at);
+      g_array_index (self->order, guint, at) = tmp;
+    }
+    self->order_pos = 0;
+  }
+}
+
 /* Play the context entry at `index`, making it the current track. */
 static void
 play_context_at (SpotifyGtkNativeWindow *self, gint index, gboolean handover)
@@ -367,6 +448,7 @@ play_context_at (SpotifyGtkNativeWindow *self, gint index, gboolean handover)
   if (!self->play_context || index < 0 || index >= (gint) self->play_context->len)
     return;
   self->context_index = index;
+  self->order_pos = order_pos_of (self, index);
   play_native_track (self, g_ptr_array_index (self->play_context, index), handover);
 }
 
@@ -389,10 +471,38 @@ advance_next (SpotifyGtkNativeWindow *self, gboolean handover)
     return TRUE;
   }
 
-  if (self->play_context && self->context_index >= 0 &&
-      self->context_index + 1 < (gint) self->play_context->len) {
-    play_context_at (self, self->context_index + 1, handover);
+  if (!self->play_context || self->play_context->len == 0)
+    return FALSE;
+
+  /* Repeat-one replays the same entry, and only when the track ended on its
+   * own -- pressing Next while it is on should still move on, or the button
+   * would appear broken. */
+  if (self->repeat == SPOTIFYGTK_REPEAT_ONE && handover && self->context_index >= 0) {
+    play_context_at (self, self->context_index, handover);
     return TRUE;
+  }
+
+  if (!self->order)
+    rebuild_order (self, self->context_index);
+  if (!self->order || self->order->len == 0)
+    return FALSE;
+
+  gint pos = self->order_pos >= 0 ? self->order_pos
+                                  : order_pos_of (self, self->context_index);
+
+  if (pos + 1 < (gint) self->order->len) {
+    play_context_at (self, (gint) g_array_index (self->order, guint, pos + 1), handover);
+    return TRUE;
+  }
+
+  /* End of the order. Repeat-all starts again -- reshuffled, so a repeated
+   * context is not the same sequence twice. */
+  if (self->repeat == SPOTIFYGTK_REPEAT_ALL) {
+    rebuild_order (self, -1);
+    if (self->order && self->order->len > 0) {
+      play_context_at (self, (gint) g_array_index (self->order, guint, 0), handover);
+      return TRUE;
+    }
   }
 
   return FALSE;
@@ -401,10 +511,20 @@ advance_next (SpotifyGtkNativeWindow *self, gboolean handover)
 static gboolean
 advance_prev (SpotifyGtkNativeWindow *self)
 {
-  if (self->play_context && self->context_index > 0) {
+  if (!self->play_context || !self->order)
+    return FALSE;
+
+  gint pos = self->order_pos >= 0 ? self->order_pos
+                                  : order_pos_of (self, self->context_index);
+  if (pos > 0) {
     /* Previous is a button press, not a handover: the current track stops at
      * once, so its title should go with it. */
-    play_context_at (self, self->context_index - 1, FALSE);
+    play_context_at (self, (gint) g_array_index (self->order, guint, pos - 1), FALSE);
+    return TRUE;
+  }
+  if (self->repeat == SPOTIFYGTK_REPEAT_ALL && self->order->len > 0) {
+    play_context_at (self, (gint) g_array_index (self->order, guint,
+                                                 self->order->len - 1), FALSE);
     return TRUE;
   }
   return FALSE;
@@ -423,6 +543,7 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
 
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   self->play_context = spotifygtk_track_list_snapshot (list);
+  rebuild_order (self, -1);
   self->context_index = -1;
 
   for (guint i = 0; i < self->play_context->len; i++) {
@@ -890,6 +1011,31 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
  * Shares list_set_liked()'s path so the bar, the rows and the context menus
  * cannot disagree: one write, one set, one fan-out.
  */
+/* Shuffle keeps what is playing and reorders what follows, so toggling it
+ * mid-track is not a jump cut. */
+static void
+on_shuffle_toggled (SpotifyGtkPlaybackBar *bar, gboolean enabled, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) bar;
+
+  self->shuffle = enabled;
+  spotifygtk_settings_set_shuffle (spotifygtk_settings_get_default (), enabled);
+  rebuild_order (self, self->context_index);
+  refresh_transport_and_queue (self);
+}
+
+static void
+on_repeat_changed (SpotifyGtkPlaybackBar *bar, guint mode, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) bar;
+
+  self->repeat = (SpotifyGtkRepeatMode) mode;
+  spotifygtk_settings_set_repeat (spotifygtk_settings_get_default (), mode);
+  refresh_transport_and_queue (self);   /* repeat-all makes Next reachable at the end */
+}
+
 static void
 on_playback_like_toggled (SpotifyGtkPlaybackBar *bar, gboolean liked, gpointer user_data)
 {
@@ -2560,6 +2706,18 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_add_css_class (GTK_WIDGET (self->playback_bar), "playback-bar");
   g_signal_connect (self->playback_bar, "like-toggled",
                     G_CALLBACK (on_playback_like_toggled), self);
+  /* Restore the persisted modes before anything can play, and without
+   * emitting -- these setters are the source of the values, not a reaction. */
+  {
+    SpotifyGtkSettings *st = spotifygtk_settings_get_default ();
+    self->shuffle = spotifygtk_settings_get_shuffle (st);
+    self->repeat  = (SpotifyGtkRepeatMode) spotifygtk_settings_get_repeat (st);
+    spotifygtk_playback_bar_set_modes (self->playback_bar, self->shuffle, self->repeat);
+  }
+  g_signal_connect (self->playback_bar, "shuffle-toggled",
+                    G_CALLBACK (on_shuffle_toggled), self);
+  g_signal_connect (self->playback_bar, "repeat-changed",
+                    G_CALLBACK (on_repeat_changed), self);
   g_signal_connect (self->playback_bar, "play-clicked",
                     G_CALLBACK (on_play_clicked), self);
   g_signal_connect (self->playback_bar, "pause-clicked",
