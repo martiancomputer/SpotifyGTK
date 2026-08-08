@@ -70,6 +70,9 @@ struct _SpotifyGtkEqGraph {
    */
   cairo_surface_t *bg;
   gint             bg_w, bg_h;
+  /* Text colour the cached background was drawn with. Everything in it is
+   * derived from that, so a palette change has to invalidate it. */
+  GdkRGBA          bg_fg;
 
   /* Frequency per pixel column. Depends only on width, so it is not rebuilt
    * with the curve. */
@@ -86,6 +89,22 @@ struct _SpotifyGtkEqGraph {
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkEqGraph, spotifygtk_eq_graph, GTK_TYPE_DRAWING_AREA)
+
+/*
+ * Redraw when the palette changes.
+ *
+ * Invalidating the cached background is only half of it -- something has to
+ * ask for a frame, and a drawing area whose own geometry has not changed does
+ * not necessarily get one from a stylesheet reload. Without this the new
+ * colours appeared at the next unrelated redraw, or at the next start, which
+ * is what "it needs a full restart" was.
+ */
+static void
+eq_graph_css_changed (GtkWidget *widget, GtkCssStyleChange *change)
+{
+  GTK_WIDGET_CLASS (spotifygtk_eq_graph_parent_class)->css_changed (widget, change);
+  gtk_widget_queue_draw (widget);
+}
 
 enum { BAND_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -231,10 +250,20 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   const gdouble ar = 0.114, ag = 0.725, ab = 0.329;   /* @accent #1db954 */
 
   /* Static layer: panel, grid and labels. Redrawn only when the size changes. */
-  if (!self->bg || self->bg_w != width || self->bg_h != height) {
+  /*
+   * Rebuild on a palette change as well as a resize.
+   *
+   * The well, the grid and the labels are all drawn from the text colour and
+   * then cached, so switching theme left the previous theme's background in
+   * place -- correct only after a restart, when the cache was built fresh.
+   * Size was the only thing invalidating it.
+   */
+  if (!self->bg || self->bg_w != width || self->bg_h != height ||
+      !gdk_rgba_equal (&self->bg_fg, &fg)) {
     g_clear_pointer (&self->bg, cairo_surface_destroy);
     self->bg = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, width, height);
     self->bg_w = width; self->bg_h = height;
+    self->bg_fg = fg;
 
     cairo_t *bc = cairo_create (self->bg);
     cairo_select_font_face (bc, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
@@ -516,6 +545,7 @@ static void
 spotifygtk_eq_graph_class_init (SpotifyGtkEqGraphClass *klass)
 {
   G_OBJECT_CLASS (klass)->finalize = spotifygtk_eq_graph_finalize;
+  GTK_WIDGET_CLASS (klass)->css_changed = eq_graph_css_changed;
 
   signals[BAND_CHANGED] = g_signal_new (
     "band-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
