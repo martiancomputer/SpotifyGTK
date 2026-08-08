@@ -67,7 +67,8 @@ typedef struct {
    * Hex rather than raw bytes because that is the form the image CDN takes
    * (https://i.scdn.co/image/<hex>), so every consumer would otherwise
    * convert it identically. */
-  gchar   *cover_id;
+  gchar   *cover_id;        /* widest variant, for panel and card art */
+  gchar   *cover_id_small;  /* narrowest variant, for row thumbnails */
 
   /* Release year from Track.album.date, or 0 when absent or implausible.
    * Only the year is kept: it is what an album header shows, and month/day

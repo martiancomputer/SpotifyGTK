@@ -93,8 +93,13 @@ on_scroll_settled (gpointer user_data)
         g_autoptr(SpotifyGtkTrackItem) item =
           g_list_model_get_item (G_LIST_MODEL (self->store), i);
         const SpotifyNativeTrack *t = item ? spotifygtk_track_item_get_track (item) : NULL;
-        if (t && t->cover_id)
-          spotifygtk_cover_prefetch (t->cover_id, 96);
+        /* The same variant a row will ask for. Prefetching the full-size art
+         * instead both downloaded the 640px original for a 96px thumbnail and
+         * cached it under a key no row would ever look up, so the read-ahead
+         * cost the most and bought nothing. */
+        const gchar *pre = t->cover_id_small ? t->cover_id_small : t->cover_id;
+        if (t && pre)
+          spotifygtk_cover_prefetch (pre, 96);
       }
     }
   }

@@ -59,7 +59,10 @@ typedef struct {
   gchar   *album;
   gint64   duration_ms;
   gboolean is_explicit;
-  gchar   *cover_id;     /* hex Image.file_id; NULL if the album has no art */
+  gchar   *cover_id;       /* hex Image.file_id, widest variant; NULL if no art */
+  /* Narrowest variant of the same art. A row thumbnail is 96px; fetching the
+   * 640px original for it cost 112 KB a row. */
+  gchar   *cover_id_small;
   gchar   *album_uri;    /* spotify:album:<id>;  NULL if unknown */
   gchar   *artist_uri;   /* spotify:artist:<id> (primary); NULL if unknown */
   gint     release_year; /* from the album; 0 when unknown */
