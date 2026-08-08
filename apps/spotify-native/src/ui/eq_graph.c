@@ -211,26 +211,22 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   gtk_widget_get_color (GTK_WIDGET (area), &fg);
 
   /*
-   * Which way round the theme is, from the widget's own text colour: light
-   * text means a dark page.
+   * Every neutral here is expressed relative to the text colour, and nothing
+   * branches on which theme is in use.
    *
-   * Measured rather than assumed -- gtk_widget_get_color() on this drawing
-   * area reports (0.00 0.00 0.02) under the light theme, so it does follow the
-   * palette. An earlier revision asked AdwStyleManager instead, on the theory
-   * that the inherited colour was unreliable; it disagreed with the widget and
-   * inverted the dark theme, which is worse than the problem it was aimed at.
+   * Branching is what kept breaking: fixing the light theme meant literal
+   * blacks became greys the dark theme could not show, fixing the dark theme
+   * put them back and the light one turned muddy, and a wrong guess about
+   * which theme was active flipped both at once.
    *
-   * SPOTIFY_COVER_STATS logs both, should this need settling again.
+   * The text colour is reliably the opposite of the page behind it, whichever
+   * theme that is -- so `fg` at a low alpha is a subtle tint against the page
+   * in either, and its inverse is near enough the page colour itself for
+   * anything that needs to sit on top of the drawing. Same contrast both ways
+   * round, one code path, nothing to detect.
    */
-  gdouble  lum        = 0.2126 * fg.red + 0.7152 * fg.green + 0.0722 * fg.blue;
-  gboolean dark_theme = lum > 0.5;
+  GdkRGBA bg = { 1.0 - fg.red, 1.0 - fg.green, 1.0 - fg.blue, 1.0 };
 
-  if (g_getenv ("SPOTIFY_COVER_STATS")) {
-    static gint shown = 0;
-    if (shown < 3) { shown++;
-      g_message ("eq: fg=(%.2f %.2f %.2f) lum=%.2f -> dark=%d",
-                 fg.red, fg.green, fg.blue, lum, dark_theme); }
-  }
 
   const gdouble ar = 0.114, ag = 0.725, ab = 0.329;   /* @accent #1db954 */
 
@@ -247,7 +243,7 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
 
     /* A recessed plot area, the way a mixing EQ reads: the curve sits inside a
      * darker well rather than floating on the page. */
-    cairo_set_source_rgba (bc, 0, 0, 0, dark_theme ? 0.22 : 0.055);
+    cairo_set_source_rgba (bc, fg.red, fg.green, fg.blue, 0.06);
     rounded_rect (bc, x0, plot_top, x1 - x0, plot_bot - plot_top, 6.0);
     cairo_fill (bc);
 
@@ -369,12 +365,9 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
     cairo_arc (cr, x, y, r, 0, 2 * G_PI);
     cairo_fill (cr);
 
-    /* The ring separates the handle from the curve running under it, so it
-     * wants to be the page behind, not always white. */
-    if (dark_theme)
-      cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, hot ? 0.95 : 0.7);
-    else
-      cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, hot ? 1.0 : 0.9);
+    /* The ring separates the handle from the curve running under it, so it is
+     * the page behind -- which is white only on a light theme. */
+    cairo_set_source_rgba (cr, bg.red, bg.green, bg.blue, hot ? 0.95 : 0.75);
     cairo_set_line_width (cr, 1.5);
     cairo_arc (cr, x, y, r, 0, 2 * G_PI);
     cairo_stroke (cr);
@@ -392,12 +385,10 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
     cairo_text_extents (cr, txt, &ext);
 
     gdouble bx = x1 - ext.width - 12.0, by = plot_top + 8.0;
-    /* The chip only has to lift the text off the grid behind it. On a light
-     * page that is a pale wash, not a black box. */
-    if (dark_theme)
-      cairo_set_source_rgba (cr, 0, 0, 0, 0.45);
-    else
-      cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 0.82);
+    /* The chip only has to lift the text off the grid behind it, so it is the
+     * page colour at most of full opacity -- dark on a dark theme, light on a
+     * light one, without being told which. */
+    cairo_set_source_rgba (cr, bg.red, bg.green, bg.blue, 0.78);
     rounded_rect (cr, bx - 7.0, by - 2.0, ext.width + 14.0, ext.height + 10.0, 4.0);
     cairo_fill (cr);
 
