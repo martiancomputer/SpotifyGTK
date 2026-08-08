@@ -47,7 +47,7 @@ struct _SpotifyGtkPlaybackBar {
   GtkButton *repeat_btn;
   GtkButton *like_btn;
   gboolean   shuffle_on;
-  gboolean   repeat_on;
+  SpotifyGtkRepeatMode repeat_mode;
   gboolean   liked;
 
   gboolean is_playing;
@@ -77,7 +77,7 @@ enum {
   VOLUME_CHANGED,
   LIKE_TOGGLED,
   SHUFFLE_TOGGLED,
-  REPEAT_TOGGLED,
+  REPEAT_CHANGED,
   QUEUE_CLICKED,
   N_SIGNALS
 };
@@ -140,13 +140,28 @@ on_shuffle_clicked (GtkButton *button, gpointer user_data)
 }
 
 static void
+apply_repeat_visual (SpotifyGtkPlaybackBar *self)
+{
+  /* A distinct icon for "one", because an active highlight alone cannot say
+   * which of the two active modes is in force. */
+  gtk_button_set_icon_name (self->repeat_btn,
+    self->repeat_mode == SPOTIFYGTK_REPEAT_ONE ? "media-playlist-repeat-song-symbolic"
+                                               : "media-playlist-repeat-symbolic");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->repeat_btn),
+    self->repeat_mode == SPOTIFYGTK_REPEAT_ONE ? "Repeat one" :
+    self->repeat_mode == SPOTIFYGTK_REPEAT_ALL ? "Repeat all" : "Repeat");
+  set_toggle_state (self->repeat_btn, self->repeat_mode != SPOTIFYGTK_REPEAT_OFF);
+}
+
+static void
 on_repeat_clicked (GtkButton *button, gpointer user_data)
 {
   SpotifyGtkPlaybackBar *self = user_data;
-  self->repeat_on = !self->repeat_on;
-  set_toggle_state (self->repeat_btn, self->repeat_on);
-  g_signal_emit (self, signals[REPEAT_TOGGLED], 0, self->repeat_on);
   (void) button;
+
+  self->repeat_mode = (self->repeat_mode + 1) % 3;
+  apply_repeat_visual (self);
+  g_signal_emit (self, signals[REPEAT_CHANGED], 0, (guint) self->repeat_mode);
 }
 
 static void
@@ -268,9 +283,9 @@ spotifygtk_playback_bar_class_init (SpotifyGtkPlaybackBarClass *klass)
   signals[SHUFFLE_TOGGLED] = g_signal_new ("shuffle-toggled",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
-  signals[REPEAT_TOGGLED] = g_signal_new ("repeat-toggled",
+  signals[REPEAT_CHANGED] = g_signal_new ("repeat-changed",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
+    G_TYPE_NONE, 1, G_TYPE_UINT);
 }
 
 static GtkWidget *
@@ -500,6 +515,20 @@ spotifygtk_playback_bar_init (SpotifyGtkPlaybackBar *self)
   gtk_center_box_set_center_widget (GTK_CENTER_BOX (center_box), build_centre_column (self));
   gtk_center_box_set_end_widget (GTK_CENTER_BOX (center_box), build_right_column (self));
   gtk_box_append (GTK_BOX (self), center_box);
+}
+
+/* Restore the modes from settings at startup, without emitting -- the window
+ * is the one that read them. */
+void
+spotifygtk_playback_bar_set_modes (SpotifyGtkPlaybackBar *self,
+                                   gboolean shuffle, SpotifyGtkRepeatMode repeat)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+
+  self->shuffle_on  = shuffle;
+  self->repeat_mode = repeat;
+  set_toggle_state (self->shuffle_btn, shuffle);
+  apply_repeat_visual (self);
 }
 
 SpotifyGtkPlaybackBar *
