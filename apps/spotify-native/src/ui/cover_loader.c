@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <glib/gstdio.h>
 
 #include <libsoup/soup.h>
 
@@ -38,7 +39,21 @@
  * A budget adapts on its own: ~1300 small covers or ~100 large ones, and
  * changing a decode size can no longer move the ceiling.
  */
-#define COVER_CACHE_MAX_BYTES (48 * 1024 * 1024)
+/*
+ * Lowered from 48 MB now that there is a disk cache behind it.
+ *
+ * The old figure was set by what eviction cost: with nothing underneath, a
+ * dropped cover meant another round trip, so the cache had to be large enough
+ * that scrolling rarely missed. Evicting now costs a file read and a decode,
+ * so the budget can be sized for what is actually on screen.
+ *
+ * Not smaller than that, though. Sizing it below the visible set backfires: an
+ * evicted cover is still referenced by the widget drawing it, so re-reading it
+ * decodes a *second* texture for the same image and the pair costs more than
+ * keeping the first. Measured at 16 MB, RSS went up rather than down. 24 MB is
+ * several screens of either size.
+ */
+#define COVER_CACHE_MAX_BYTES (24 * 1024 * 1024)
 
 /* Bytes currently held. GdkTexture does not report its footprint, so this is
  * computed from the dimensions at insert -- exact for the RGBA memory textures
@@ -79,6 +94,110 @@ mapped_pixels_free (gpointer data)
   mapped_live_bytes -= MIN (m->len, mapped_live_bytes);
   munmap (m->addr, m->len);
   g_free (m);
+}
+
+/*
+ * On-disk cache of the compressed images.
+ *
+ * A cover costs a network round trip the first time and a file read every time
+ * after, across restarts. Worth having on its own -- fetch averaged 94ms
+ * against roughly 20ms to read and decode -- but the reason it matters here is
+ * queue pressure: an id served from disk never enters the fetch queue at all,
+ * and a queue that fills is what made artwork stop loading part way through a
+ * session.
+ *
+ * Keyed by cover id, not by decode size. The file is the image as the CDN sent
+ * it, and every target size decodes from the same one. Variants already have
+ * distinct ids (see dup_cover_id), so an album's 300px and 640px versions are
+ * separate files, correctly.
+ */
+#define COVER_DISK_BUDGET (256 * 1024 * 1024)
+
+typedef struct { gchar *path; gint64 mtime; gsize size; } DiskEntry;
+
+static gchar *
+disk_cache_path (const gchar *cover_id)
+{
+  /* Ids are hex from the catalogue; anything else is not ours and must not be
+   * turned into a path. */
+  if (!cover_id || !*cover_id)
+    return NULL;
+  for (const gchar *p = cover_id; *p; p++)
+    if (!g_ascii_isxdigit (*p))
+      return NULL;
+
+  return g_build_filename (g_get_user_cache_dir (), "spotifygtk", "images",
+                           cover_id, NULL);
+}
+
+static void
+disk_cache_write (const gchar *cover_id, GBytes *bytes)
+{
+  g_autofree gchar *path = disk_cache_path (cover_id);
+  if (!path || !bytes)
+    return;
+
+  gsize len = 0;
+  const gchar *data = g_bytes_get_data (bytes, &len);
+  if (len == 0)
+    return;
+
+  g_autofree gchar *dir = g_path_get_dirname (path);
+  g_mkdir_with_parents (dir, 0700);
+
+  /* Failure needs no handling: an unwritten cover is fetched again next time,
+   * which is exactly the old behaviour. */
+  g_file_set_contents (path, data, (gssize) len, NULL);
+}
+
+static gint
+disk_entry_older (gconstpointer a, gconstpointer b)
+{
+  const DiskEntry *x = a, *y = b;
+  return (x->mtime > y->mtime) - (x->mtime < y->mtime);
+}
+
+/* Trim the oldest files until the directory fits the budget. Runs once, on a
+ * worker, because it stats every entry. */
+static void
+disk_cache_prune (GTask *task, gpointer src, gpointer data, GCancellable *c)
+{
+  (void) task; (void) src; (void) data; (void) c;
+
+  g_autofree gchar *dir = g_build_filename (g_get_user_cache_dir (), "spotifygtk",
+                                            "images", NULL);
+  g_autoptr(GDir) d = g_dir_open (dir, 0, NULL);
+  if (!d)
+    return;
+
+  g_autoptr(GArray) files = g_array_new (FALSE, FALSE, sizeof (DiskEntry));
+  gsize total = 0;
+  const gchar *name;
+
+  while ((name = g_dir_read_name (d)) != NULL) {
+    DiskEntry e = { g_build_filename (dir, name, NULL), 0, 0 };
+    GStatBuf st;
+    if (g_stat (e.path, &st) == 0) {
+      e.mtime = (gint64) st.st_mtime;
+      e.size  = (gsize) st.st_size;
+      total  += e.size;
+      g_array_append_val (files, e);
+    } else {
+      g_free (e.path);
+    }
+  }
+
+  if (total > COVER_DISK_BUDGET) {
+    g_array_sort (files, disk_entry_older);
+    for (guint i = 0; i < files->len && total > COVER_DISK_BUDGET; i++) {
+      DiskEntry *e = &g_array_index (files, DiskEntry, i);
+      if (g_unlink (e->path) == 0)
+        total -= MIN (e->size, total);
+    }
+  }
+
+  for (guint i = 0; i < files->len; i++)
+    g_free (g_array_index (files, DiskEntry, i).path);
 }
 
 /*
@@ -127,7 +246,8 @@ static GHashTable *in_flight = NULL;
 static SoupSession *cover_session = NULL;
 
 static struct {
-  guint  hits;          /* served from cache */
+  guint  hits;          /* served from the memory cache */
+  guint  disk_hits;     /* served from disk, no request made */
   guint  misses;        /* required a fetch */
   guint  joined;        /* deduplicated onto an in-flight fetch */
   guint  deferred;      /* dropped because a scroll was in progress */
@@ -276,6 +396,8 @@ spotifygtk_cover_log_stats (const gchar *context)
              cover_stats.hits, 100.0 * cover_stats.hits / asked,
              cover_stats.misses, cover_stats.joined, cover_stats.deferred,
              cover_stats.failures);
+  g_message ("cover stats (%s): %u served from disk without a request",
+             context ? context : "", cover_stats.disk_hits);
   g_message ("cover stats (%s): %u dropped before issue, %u queued now, "
              "peak queue %u, %u in flight (cap %d)",
              context ? context : "", cover_stats.dropped,
@@ -372,6 +494,14 @@ ensure_initialised (void)
   const gchar *conns_env = g_getenv ("SPOTIFY_COVER_CONNS");
   guint conns = conns_env ? (guint) MAX (1, atoi (conns_env)) : 6;
 
+  /* Bring the on-disk cache back under budget once per run, off the main
+   * thread -- it stats every file. */
+  {
+    GTask *prune = g_task_new (NULL, NULL, NULL, NULL);
+    g_task_run_in_thread (prune, disk_cache_prune);
+    g_object_unref (prune);
+  }
+
   cover_session = soup_session_new_with_options (
     "max-conns-per-host", conns,
     "max-conns", MAX (conns, 24),
@@ -428,6 +558,23 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   GBytes *bytes = task_data;
   gint target_px = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (task), "target-px"));
   g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) from_disk = NULL;
+
+  /* Served from the disk cache: read it here rather than on the main thread,
+   * since this is already the thread that pays for the decode. */
+  if (!bytes) {
+    const gchar *path = g_object_get_data (G_OBJECT (task), "disk-path");
+    gchar *data = NULL;
+    gsize  len  = 0;
+    if (!path || !g_file_get_contents (path, &data, &len, NULL) || len == 0) {
+      g_free (data);
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                               "cover not readable from the disk cache");
+      return;
+    }
+    from_disk = g_bytes_new_take (data, len);
+    bytes = from_disk;
+  }
 
   g_autoptr(GInputStream) stream = g_memory_input_stream_new_from_bytes (bytes);
   g_autoptr(GdkPixbuf) pixbuf =
@@ -522,6 +669,27 @@ issue_fetch (const gchar *cache_key, gint target_px)
   if (at)
     *at = '\0';
 
+  /*
+   * Disk first. A hit skips the request entirely, which is the point: it is
+   * both faster than the CDN and one less entry in a queue whose filling is
+   * what stalls artwork later in a session.
+   */
+  g_autofree gchar *disk = disk_cache_path (cover_id);
+  if (disk && g_file_test (disk, G_FILE_TEST_EXISTS)) {
+    cover_stats.disk_hits++;
+    GTask *task = g_task_new (NULL, NULL, on_cover_decoded, g_strdup (cache_key));
+    g_object_set_data (G_OBJECT (task), "decode-start",
+                       GINT_TO_POINTER ((gint) (g_get_monotonic_time () / 1000)));
+    g_object_set_data (G_OBJECT (task), "target-px", GINT_TO_POINTER (target_px));
+    g_object_set_data_full (G_OBJECT (task), "disk-path", g_steal_pointer (&disk), g_free);
+    g_task_run_in_thread (task, decode_in_thread);
+    g_object_unref (task);
+
+    cover_active--;
+    cover_pump ();
+    return;
+  }
+
   g_autofree gchar *url = spotifygtk_cover_build_url (cover_id);
   if (!url) {
     cover_active--;
@@ -601,6 +769,14 @@ on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
     cover_active--;
     cover_pump ();
     return;
+  }
+
+  /* Keep it, so this id costs a file read next time and never the queue. */
+  {
+    g_autofree gchar *id = g_strdup (cache_key);
+    gchar *at = strrchr (id, '@');
+    if (at) *at = '\0';
+    disk_cache_write (id, bytes);
   }
 
   /* Decode off the main thread. The bytes and target size ride along; the
