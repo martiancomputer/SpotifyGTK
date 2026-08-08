@@ -23,6 +23,8 @@
 #include "eq_graph.h"
 #include "../audio/dsp.h"
 
+#include <adwaita.h>
+
 #include <math.h>
 
 #define EQ_MIN_DB     (-12.0)
@@ -210,13 +212,27 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   gtk_widget_get_color (GTK_WIDGET (area), &fg);
 
   /*
-   * Which way round the theme is, from the text colour: light text means a
-   * dark background. The neutrals below used to be literal black, which is
-   * right on a dark page and wrong on a light one -- the recessed well became
-   * a muddy grey slab and the readout chip a heavy black box.
+   * Which way round the theme is.
+   *
+   * Asked of the style manager, not inferred from the widget's colour. The app
+   * forces the scheme there, and a plain GtkDrawingArea inherits whatever
+   * colour happens to reach it -- which on the light theme was still a light
+   * one, so the inference said "dark", drew the well as a 22% black slab on a
+   * white card and painted the labels light-on-light.
+   */
+  gboolean dark_theme = adw_style_manager_get_dark (adw_style_manager_get_default ());
+
+  /*
+   * And if that inherited colour disagrees with the theme, it is not the text
+   * colour of the page this is drawn on; the grid lines and the frequency
+   * labels are drawn from it, so taking it on trust is what made them
+   * illegible. Fall back to the theme's own.
    */
   gdouble lum = 0.2126 * fg.red + 0.7152 * fg.green + 0.0722 * fg.blue;
-  gboolean dark_theme = lum > 0.5;
+  if (dark_theme != (lum > 0.5)) {
+    fg.red = fg.green = fg.blue = dark_theme ? 1.0 : 0.0;
+    fg.alpha = 1.0;
+  }
   const gdouble ar = 0.114, ag = 0.725, ab = 0.329;   /* @accent #1db954 */
 
   /* Static layer: panel, grid and labels. Redrawn only when the size changes. */
