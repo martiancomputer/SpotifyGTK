@@ -311,7 +311,7 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   self->results = spotifygtk_track_list_new ();
   gtk_widget_set_margin_start (GTK_WIDGET (self->results), 35);
   gtk_widget_set_margin_end (GTK_WIDGET (self->results), 12);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self->results), 24);
+  /* No bottom margin; see the note in liked_songs_page.c. */
   gtk_widget_set_vexpand (GTK_WIDGET (self->results), TRUE);
   spotifygtk_track_list_set_top_inset (self->results, SEARCH_HEADER_INSET);
   g_signal_connect (self->results, "track-activated", G_CALLBACK (on_track_activated), self);

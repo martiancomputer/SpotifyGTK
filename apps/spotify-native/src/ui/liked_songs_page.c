@@ -430,7 +430,12 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
   gtk_widget_set_margin_end (GTK_WIDGET (self), 12);
   gtk_widget_set_margin_top (GTK_WIDGET (self), 24);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self), 24);
+  /*
+   * No bottom margin. It reads as a band of dead page above the playback bar
+   * -- and worse, it shrinks the scroller's viewport, so the last row is cut
+   * wherever that new edge falls and there is nothing further to scroll to.
+   * The Library page sets none, which is why albums never showed either.
+   */
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
 

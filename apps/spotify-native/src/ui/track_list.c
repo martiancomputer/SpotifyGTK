@@ -56,9 +56,6 @@ struct _SpotifyGtkTrackList {
  * stopping. The animation itself runs ~150ms, so anything below that would
  * fire mid-scroll and defeat the purpose.
  */
-/* Scrollable space under the final row, so it can clear the bottom edge. */
-#define ROW_BOTTOM_HEADROOM 16
-
 #define SETTLE_MS 180
 
 /* Rows warmed either side of the visible range once the scroll settles, in the
@@ -464,17 +461,6 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
   self->list = GTK_LIST_VIEW (gtk_list_view_new (GTK_SELECTION_MODEL (model), factory));
   gtk_list_view_set_single_click_activate (self->list, TRUE);
 
-  /*
-   * Room to scroll the last row clear of the bottom edge.
-   *
-   * Inside the scroller, so it is scrollable content rather than a gap under
-   * the widget. The page's own margin_bottom does not help: it shrinks the
-   * viewport, and the final row is still cut wherever the viewport happens to
-   * end -- so the bottom entry sat permanently half-drawn with nothing further
-   * to scroll to. The album grid never showed this because it sets content
-   * margins on its own scroller instead.
-   */
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self->list), ROW_BOTTOM_HEADROOM);
   gtk_widget_add_css_class (GTK_WIDGET (self->list), "track-listview");
   gtk_widget_set_margin_end (GTK_WIDGET (self->list), 2);
   g_signal_connect (self->list, "activate", G_CALLBACK (on_list_activate), self);
