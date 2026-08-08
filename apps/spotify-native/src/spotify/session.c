@@ -102,6 +102,7 @@ spotifygtk_native_track_free (SpotifyNativeTrack *track)
   g_free (track->artists);
   g_free (track->album);
   g_free (track->cover_id);
+  g_free (track->cover_id_small);
   g_free (track->album_uri);
   g_free (track->artist_uri);
   g_free (track);
@@ -121,6 +122,7 @@ spotifygtk_native_track_copy (const SpotifyNativeTrack *track)
   copy->duration_ms = track->duration_ms;
   copy->is_explicit = track->is_explicit;
   copy->cover_id    = g_strdup (track->cover_id);
+  copy->cover_id_small = g_strdup (track->cover_id_small);
   copy->release_year = track->release_year;
   copy->album_uri   = g_strdup (track->album_uri);
   copy->artist_uri  = g_strdup (track->artist_uri);
@@ -725,6 +727,7 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     track->duration_ms = info->meta.duration_ms;
     track->is_explicit = info->meta.is_explicit;
     track->cover_id    = g_strdup (info->meta.cover_id);
+    track->cover_id_small = g_strdup (info->meta.cover_id_small);
     track->album_uri   = g_strdup (info->meta.album_uri);
     track->artist_uri  = g_strdup (info->meta.artist_uri);
     track->release_year = info->meta.release_year;

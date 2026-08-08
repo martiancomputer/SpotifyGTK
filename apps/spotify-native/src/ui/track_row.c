@@ -571,7 +571,14 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
   g_autofree gchar *dur = g_strdup_printf ("%d:%02d", total_secs / 60, total_secs % 60);
   gtk_label_set_text (self->duration_label, dur);
 
-  row_request_cover (self, track->cover_id);
+  /*
+   * The small variant, not the album's full-size art. A row draws 96px; the
+   * widest variant averaged 112.5 KB, which is a 640px original downloaded and
+   * thrown away once per row. Falls back to the large one when the album offers
+   * only a single size.
+   */
+  row_request_cover (self, track->cover_id_small ? track->cover_id_small
+                                                 : track->cover_id);
 }
 
 /*

@@ -88,8 +88,24 @@ album_release_year (const guint8 *album_data, gsize album_len)
   return (gint) year;
 }
 
+/*
+ * Pick a cover from the album's image group.
+ *
+ * Every album offers three widths -- 64, 300 and 640, confirmed live -- and
+ * only the widest was ever kept, so a 96px row thumbnail downloaded the 640px
+ * original: 112.5 KB of payload, measured, to produce 36 KB of pixels, once
+ * per row of a five-thousand-track library.
+ *
+ * `min_width` is the narrowest acceptable variant: the smallest one at least
+ * that wide wins, falling back to the widest available when nothing qualifies.
+ * Not simply "the smallest", which would hand a row the 64px image for a 96px
+ * box and upscale it.
+ *
+ * 0 means "the widest", not "anything goes" -- with no floor every variant
+ * qualifies and the narrowest rule would hand the panel the 64px thumbnail.
+ */
 static gchar *
-dup_largest_cover_id (const guint8 *album_data, gsize album_len)
+dup_cover_id (const guint8 *album_data, gsize album_len, gint64 min_width)
 {
   const guint8 *group_data = NULL;
   gsize         group_len  = 0;
@@ -105,8 +121,10 @@ dup_largest_cover_id (const guint8 *album_data, gsize album_len)
   gsize         field_len;
   guint64       field_varint;
 
-  gchar  *best_id    = NULL;
-  gint64  best_width = -1;
+  gchar  *best_id     = NULL;   /* narrowest that qualifies */
+  gint64  best_width  = -1;
+  gchar  *widest_id   = NULL;   /* fallback when nothing does */
+  gint64  widest      = -1;
 
   while (pb_read_field (group_data, group_len, &pos, &field_num, &wire_type,
                         &field_data, &field_len, &field_varint)) {
@@ -124,14 +142,31 @@ dup_largest_cover_id (const guint8 *album_data, gsize album_len)
     if (pb_find_varint_field (field_data, field_len, IMAGE_FIELD_WIDTH, &raw_width))
       width = (gint64) ((raw_width >> 1) ^ (~(raw_width & 1) + 1));
 
-    if (width > best_width || best_id == NULL) {
+    g_autofree gchar *id = bytes_to_hex (id_data, id_len);
+
+    if (width > widest || widest_id == NULL) {
+      g_free (widest_id);
+      widest_id = g_strdup (id);
+      widest    = width;
+    }
+
+    if (width >= min_width && (best_id == NULL || width < best_width)) {
       g_free (best_id);
-      best_id = bytes_to_hex (id_data, id_len);
+      best_id    = g_strdup (id);
       best_width = width;
     }
   }
 
-  return best_id;
+  if (min_width <= 0) {
+    g_free (best_id);
+    return widest_id;
+  }
+
+  if (best_id) {
+    g_free (widest_id);
+    return best_id;
+  }
+  return widest_id;
 }
 
 static gchar *
@@ -240,7 +275,11 @@ spotifygtk_track_meta_parse (const guint8     *track_data,
       if (wire_type == PB_WIRE_LENGTH_DELIMITED && !out->album_name)
         out->album_name = dup_name_from_submessage (field_data, field_len);
       if (wire_type == PB_WIRE_LENGTH_DELIMITED && !out->cover_id)
-        out->cover_id = dup_largest_cover_id (field_data, field_len);
+        out->cover_id = dup_cover_id (field_data, field_len, 0);
+      if (wire_type == PB_WIRE_LENGTH_DELIMITED && !out->cover_id_small)
+        /* Rows draw at 96px, cards at 176; 128 lands on the 300px variant,
+         * which covers both without reaching for the 640. */
+        out->cover_id_small = dup_cover_id (field_data, field_len, 128);
       if (wire_type == PB_WIRE_LENGTH_DELIMITED && !out->album_uri)
         out->album_uri = dup_uri_from_submessage (field_data, field_len, "album");
       if (wire_type == PB_WIRE_LENGTH_DELIMITED && out->release_year == 0)
