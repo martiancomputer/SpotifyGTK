@@ -555,8 +555,18 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
   row_request_cover (self, track->cover_id);
 }
 
-/* Drop this row's artwork and cancel any fetch for it. The pending id stays,
- * so binding or scrolling back requests it again. */
+/*
+ * Drop this row's artwork, leaving it in a state that can ask for it again.
+ *
+ * The pending id is kept deliberately, and so is the rest of the bookkeeping:
+ * retry_cover() refuses to act while cover_shown is set, so clearing the image
+ * without clearing that flag released the art and then declined to reload it,
+ * for good. A returning page never rebinds its rows -- a GtkStack keeps
+ * non-visible children realised -- so a rebind cannot be relied on to repair
+ * it either.
+ *
+ * A fresh cancellable goes with it, so the reload is still cancellable.
+ */
 void
 spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self)
 {
@@ -566,7 +576,12 @@ spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self)
     g_cancellable_cancel (self->cover_cancellable);
     g_clear_object (&self->cover_cancellable);
   }
+  if (!self->pending_cover_id)
+    return;
+
   gtk_image_clear (self->album_art);
+  self->cover_shown = FALSE;
+  self->cover_cancellable = g_cancellable_new ();
 }
 
 void

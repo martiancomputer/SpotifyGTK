@@ -588,6 +588,20 @@ spotifygtk_track_list_release_covers (SpotifyGtkTrackList *self)
     spotifygtk_track_row_release_cover (g_ptr_array_index (self->bound_rows, i));
 }
 
+/* Ask every bound row for its artwork again. The counterpart to
+ * release_covers: a page returning to view does not rebind its rows, so
+ * something has to say "you may load again". */
+void
+spotifygtk_track_list_reload_covers (SpotifyGtkTrackList *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  if (!self->bound_rows)
+    return;
+
+  for (guint i = 0; i < self->bound_rows->len; i++)
+    spotifygtk_track_row_retry_cover (g_ptr_array_index (self->bound_rows, i));
+}
+
 SpotifyGtkTrackList *
 spotifygtk_track_list_new (void)
 {

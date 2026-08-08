@@ -48,6 +48,9 @@ void spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint pos
  * visible. Ids are kept, so the art returns when the page does. */
 void spotifygtk_track_list_release_covers (SpotifyGtkTrackList *self);
 
+/* Re-request artwork for every bound row, after release_covers. */
+void spotifygtk_track_list_reload_covers (SpotifyGtkTrackList *self);
+
 SpotifyGtkTrackList *spotifygtk_track_list_new (void);
 
 
