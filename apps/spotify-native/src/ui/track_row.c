@@ -56,6 +56,7 @@ struct _SpotifyGtkTrackRow {
   /* The cover this row wants, kept so a load skipped during a scroll can be
    * reissued once the list settles. */
   gchar        *pending_cover_id;
+  gint          row_number;      /* 0 in an unnumbered list */
   gboolean      cover_shown;
 
   gboolean show_album;
@@ -266,7 +267,12 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
   self->cover_cancellable = g_cancellable_new ();
   g_free (self->pending_cover_id);
   self->pending_cover_id = g_strdup (cover_id);
+
+  /* A recycled row still shows the previous track's cover; this is the one
+   * place that knows the artwork has just gone stale. */
   self->cover_shown = FALSE;
+  gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
+  gtk_widget_set_visible (GTK_WIDGET (self->track_num), self->row_number > 0);
   spotifygtk_cover_load_deferrable (cover_id, 96, self->cover_cancellable,
                                     on_row_cover_loaded, self);
 }
@@ -459,11 +465,24 @@ spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self, JsonObject *track_data
   gtk_label_set_text (self->title_label, name);
 
   /* Track number */
+  self->row_number = track_number;
+
   if (track_number > 0) {
     g_autofree gchar *num_text = g_strdup_printf ("%d", track_number);
     gtk_label_set_text (self->track_num, num_text);
-    gtk_widget_set_visible (GTK_WIDGET (self->track_num), TRUE);
-    gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
+    /*
+     * The number shows only while there is no cover to show instead, and this
+     * says nothing about the artwork either way.
+     *
+     * It used to hide album_art outright, which was harmless while a number
+     * was set once per bind and became a bug the moment numbering started
+     * following notify::position: every shift of a row re-hid art that had
+     * already loaded. On a 5,000-row list positions shift constantly, so
+     * covers were fetched, decoded, shown and hidden again -- indistinguishable
+     * from never loading. Short lists barely move, which is why albums and
+     * playlists never showed it.
+     */
+    gtk_widget_set_visible (GTK_WIDGET (self->track_num), !self->cover_shown);
   } else {
     /* No number: hide the column entirely rather than leaving a blank
      * 24px indent, which made unnumbered lists sit further right than
@@ -580,6 +599,8 @@ spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self)
     return;
 
   gtk_image_clear (self->album_art);
+  gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
+  gtk_widget_set_visible (GTK_WIDGET (self->track_num), self->row_number > 0);
   self->cover_shown = FALSE;
   self->cover_cancellable = g_cancellable_new ();
 }
