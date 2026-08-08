@@ -681,6 +681,22 @@ spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *t
   g_ptr_array_unref (items);
 
   spotifygtk_track_list_set_status (self, shown == 0 ? "Nothing playable here." : NULL);
+
+  /*
+   * Give this list's own rows a retry shortly after they bind.
+   *
+   * Cover deferral is global but the retry that lifts it is not: on_scroll_settled
+   * clears the flag and then re-asks only for the rows of the list whose timer
+   * fired. So a list populated while some other list was scrolling had every
+   * cover request dropped, and nothing ever came back for them -- an album
+   * opened for the first time showed no artwork at all, while opening it again
+   * (no scroll in flight, deferral off) loaded everything.
+   *
+   * Arming the same timer here means new content always gets one retry of its
+   * own, whoever happened to be scrolling when it arrived.
+   */
+  if (shown > 0 && self->settle_id == 0)
+    self->settle_id = g_timeout_add (SETTLE_MS, on_scroll_settled, self);
 }
 
 GPtrArray *
