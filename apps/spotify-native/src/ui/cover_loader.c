@@ -6,9 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#ifdef __GLIBC__
-# include <malloc.h>   /* malloc_trim, after the idle sweep */
-#endif
 
 #include <libsoup/soup.h>
 
@@ -85,68 +82,26 @@ mapped_pixels_free (gpointer data)
 }
 
 /*
- * Idle trim.
+ * There is deliberately no idle sweep of this cache.
  *
- * The cache only ever evicted on insert, so it shrank when it was being used
- * and never otherwise. Sitting on one album page for five minutes held every
- * cover from wherever the user had been, at the high-water mark, with nothing
- * arriving to push it down. The budget was the wrong question: reaching 48 MB
- * while scrolling a library is fine, still holding it once the scrolling
- * stopped is not.
+ * One was tried. It worked exactly as designed -- 48 MB down to 8 MB, on
+ * schedule -- and was the wrong lever twice over.
  *
- * Evicting a cover that is still on screen is harmless -- the widget holds its
- * own reference, so only the cache entry goes and a later request refetches
- * it. Pages that are no longer visible drop their references separately, via
- * the release_covers() calls in window.c; without that this frees the entry
- * and the widget keeps the pixels alive regardless.
+ * It barely freed anything: with the cache at 7.8 MB there were still 95.7 MB
+ * of decoded pixels mapped, so nearly all cover memory is held by the widgets
+ * showing it and not by this table. Evicting an entry a widget still
+ * references drops a reference and no pixels.
+ *
+ * And it made returning to a page slow, because every row then had to fetch
+ * its art over the network again. The cache is what makes a page reappear
+ * instantly; emptying it while the widgets kept the memory gave up the speed
+ * and kept the cost.
+ *
+ * What actually frees the pixels is the widgets letting go, which happens in
+ * release_covers() when a page is navigated away from -- and that works with a
+ * full cache, so the art comes straight back from memory when the page
+ * returns.
  */
-#define COVER_IDLE_TRIM_MS  (30 * 1000)
-#define COVER_IDLE_BUDGET   (8 * 1024 * 1024)
-
-static guint cover_idle_id = 0;
-static void  cover_evict_to (gsize budget);
-
-static gboolean
-cover_idle_trim (gpointer data)
-{
-  (void) data;
-  cover_idle_id = 0;
-
-  gsize before = cover_cache_bytes;
-  cover_evict_to (COVER_IDLE_BUDGET);
-  if (before == cover_cache_bytes)
-    return G_SOURCE_REMOVE;
-
-  /*
-   * Give the pages back to the kernel, not just to the allocator.
-   *
-   * A decoded thumbnail is around 36 KB, under glibc's mmap threshold, so it
-   * comes from the heap and freeing it only returns it to a free list -- RSS
-   * does not move. Releasing 40 MB of covers changed the process size by
-   * nothing at all until this was added.
-   *
-   * Only worth doing here. Trimming after every free would fight the allocator
-   * for pages it is about to reuse; after an idle sweep there is by definition
-   * nothing about to reuse them.
-   */
-  g_message ("cover: idle trim %.1f MB -> %.1f MB cached; %.1f MB of pixels "
-             "still mapped (held by widgets, not the cache)",
-             before / 1048576.0, cover_cache_bytes / 1048576.0,
-             mapped_live_bytes / 1048576.0);
-#ifdef __GLIBC__
-  malloc_trim (0);
-#endif
-  return G_SOURCE_REMOVE;
-}
-
-/* Restart the idle countdown. Called on every request, so the trim only fires
- * once nothing has asked for a cover for a while. */
-static void
-cover_defer_idle_trim (void)
-{
-  g_clear_handle_id (&cover_idle_id, g_source_remove);
-  cover_idle_id = g_timeout_add (COVER_IDLE_TRIM_MS, cover_idle_trim, NULL);
-}
 
 static void
 cover_evict_to (gsize budget)
@@ -668,9 +623,6 @@ cover_load_internal (const gchar          *cover_id,
                      gboolean              deferrable)
 {
   g_return_if_fail (callback != NULL);
-
-  /* Any request means browsing is still happening, so push the idle trim out. */
-  cover_defer_idle_trim ();
 
   /* Text-only mode is enforced here rather than at each display site, so a
    * new artwork consumer cannot forget to honour it -- and so the image is
