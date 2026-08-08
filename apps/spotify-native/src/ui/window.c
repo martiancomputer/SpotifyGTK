@@ -108,6 +108,14 @@ struct _SpotifyGtkNativeWindow {
   GtkWidget  *playlists_status;
   /* Tracks we have started, so a handover can render one we no longer hold. */
   GHashTable *display_tracks;
+  /*
+   * Set when the user picks a track, cleared when the sink reaches it.
+   *
+   * Between those two the outgoing track is still the audible one, so the
+   * player service goes on reporting its position and can still announce it as
+   * now-playing. Both would overwrite what the click already put on screen.
+   */
+  gchar      *awaiting_uri;
   guint64     collection_sub;   /* Mercury subscription for external changes */
 
   SpotifyGtkHomePage *home_page;
@@ -331,6 +339,16 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
     self->current_track_duration_ms = track->duration_ms;
     spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
     show_now_playing (self, track);
+
+    /* Hold everything the outgoing track still has to say until the sink has
+     * actually moved on. Only for a deliberate pick: a handover has no such
+     * disagreement, the audible track is the one to believe. */
+    if (handover) {
+      g_clear_pointer (&self->awaiting_uri, g_free);
+    } else {
+      g_free (self->awaiting_uri);
+      self->awaiting_uri = g_strdup (track->uri);
+    }
   }
 
   GError *error = NULL;
@@ -1563,6 +1581,11 @@ on_player_state_changed (SpotifyNativePlayerService *player,
       return;
   }
 
+  /* Nothing is going to arrive to release the latch now, and leaving it set
+   * would freeze the progress bar for the rest of the session. */
+  if (state == SPOTIFYGTK_PLAYER_IDLE || state == SPOTIFYGTK_PLAYER_ERROR)
+    g_clear_pointer (&self->awaiting_uri, g_free);
+
   gboolean is_playing = (state == SPOTIFYGTK_PLAYER_PLAYING);
   gboolean has_track   = (state == SPOTIFYGTK_PLAYER_PLAYING ||
                           state == SPOTIFYGTK_PLAYER_PAUSED ||
@@ -1590,6 +1613,12 @@ on_player_position_changed (SpotifyNativePlayerService *player,
                             gint64 position_ms, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+
+  /* The position still belongs to the outgoing track; painting it against the
+   * new track's duration is what made the old song appear to start playing. */
+  if (self->awaiting_uri)
+    return;
+
   spotifygtk_native_window_set_progress (self, position_ms,
                                          self->current_track_duration_ms);
   (void) player;
@@ -1960,6 +1989,14 @@ on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
 
   if (!uri || !self->display_tracks)
     return;
+
+  /* Still catching up to a track the user picked: anything else the sink is
+   * sounding on the way there is stale by definition. */
+  if (self->awaiting_uri) {
+    if (g_strcmp0 (uri, self->awaiting_uri) != 0)
+      return;
+    g_clear_pointer (&self->awaiting_uri, g_free);
+  }
 
   const SpotifyNativeTrack *track = g_hash_table_lookup (self->display_tracks, uri);
   if (!track)
@@ -2588,6 +2625,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->nav_history, g_ptr_array_unref);
   g_clear_pointer (&self->pending_likes, g_ptr_array_unref);
   g_clear_pointer (&self->display_tracks, g_hash_table_unref);
+  g_clear_pointer (&self->awaiting_uri, g_free);
   g_clear_pointer (&self->liked_uris, g_hash_table_unref);
   g_clear_pointer (&self->liked_building, g_hash_table_unref);
   g_clear_object (&self->auth);
