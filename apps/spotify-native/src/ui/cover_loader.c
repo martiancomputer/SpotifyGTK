@@ -661,11 +661,23 @@ cover_load_internal (const gchar          *cover_id,
   /* Deferred: a miss costs nothing rather than queueing a fetch for a row the
    * scroll is already past. Only for callers that re-request on settle -- see
    * spotifygtk_cover_load_deferrable(). */
-  if (deferrable && cover_deferred) {
-    cover_stats.deferred++;
-    callback (NULL, user_data);
-    return;
-  }
+  /*
+   * A real request is never dropped for being made during a scroll.
+   *
+   * It used to be: deferrable requests made while any list was scrolling were
+   * answered with NULL and forgotten. That is where three separate "artwork
+   * never loads" bugs came from, because the flag is global while the retry
+   * that lifts it is per-list -- whichever list settled first cleared it and
+   * re-asked only for its own rows, so anything else that had been dropped
+   * meanwhile was simply lost.
+   *
+   * Nothing is needed in its place. A row that scrolls out of view cancels its
+   * request, and cover_pump() drops a queued fetch whose waiters have all gone
+   * before issuing it, which is the same "do not fetch art nobody is looking
+   * at" outcome arrived at without discarding requests that someone is.
+   *
+   * Speculative read-ahead still respects the flag; see spotifygtk_cover_prefetch.
+   */
 
   PendingRequest *req = g_new0 (PendingRequest, 1);
   req->callback    = callback;

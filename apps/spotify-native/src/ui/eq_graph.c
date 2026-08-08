@@ -23,7 +23,6 @@
 #include "eq_graph.h"
 #include "../audio/dsp.h"
 
-#include <adwaita.h>
 
 #include <math.h>
 
@@ -212,27 +211,27 @@ draw_func (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer da
   gtk_widget_get_color (GTK_WIDGET (area), &fg);
 
   /*
-   * Which way round the theme is.
+   * Which way round the theme is, from the widget's own text colour: light
+   * text means a dark page.
    *
-   * Asked of the style manager, not inferred from the widget's colour. The app
-   * forces the scheme there, and a plain GtkDrawingArea inherits whatever
-   * colour happens to reach it -- which on the light theme was still a light
-   * one, so the inference said "dark", drew the well as a 22% black slab on a
-   * white card and painted the labels light-on-light.
+   * Measured rather than assumed -- gtk_widget_get_color() on this drawing
+   * area reports (0.00 0.00 0.02) under the light theme, so it does follow the
+   * palette. An earlier revision asked AdwStyleManager instead, on the theory
+   * that the inherited colour was unreliable; it disagreed with the widget and
+   * inverted the dark theme, which is worse than the problem it was aimed at.
+   *
+   * SPOTIFY_COVER_STATS logs both, should this need settling again.
    */
-  gboolean dark_theme = adw_style_manager_get_dark (adw_style_manager_get_default ());
+  gdouble  lum        = 0.2126 * fg.red + 0.7152 * fg.green + 0.0722 * fg.blue;
+  gboolean dark_theme = lum > 0.5;
 
-  /*
-   * And if that inherited colour disagrees with the theme, it is not the text
-   * colour of the page this is drawn on; the grid lines and the frequency
-   * labels are drawn from it, so taking it on trust is what made them
-   * illegible. Fall back to the theme's own.
-   */
-  gdouble lum = 0.2126 * fg.red + 0.7152 * fg.green + 0.0722 * fg.blue;
-  if (dark_theme != (lum > 0.5)) {
-    fg.red = fg.green = fg.blue = dark_theme ? 1.0 : 0.0;
-    fg.alpha = 1.0;
+  if (g_getenv ("SPOTIFY_COVER_STATS")) {
+    static gint shown = 0;
+    if (shown < 3) { shown++;
+      g_message ("eq: fg=(%.2f %.2f %.2f) lum=%.2f -> dark=%d",
+                 fg.red, fg.green, fg.blue, lum, dark_theme); }
   }
+
   const gdouble ar = 0.114, ag = 0.725, ab = 0.329;   /* @accent #1db954 */
 
   /* Static layer: panel, grid and labels. Redrawn only when the size changes. */
