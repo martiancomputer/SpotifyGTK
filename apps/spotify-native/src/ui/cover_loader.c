@@ -164,6 +164,10 @@ static struct {
  */
 #define COVER_MAX_INFLIGHT 8
 
+/* Ceiling on queued-but-not-issued fetches. Read-ahead is the only thing that
+ * can outrun the drain, and a backlog older than this is for rows long gone. */
+#define COVER_QUEUE_MAX 192
+
 typedef struct {
   gchar *cache_key;
   gint   target_px;
@@ -182,6 +186,36 @@ queued_fetch_free (QueuedFetch *q)
     return;
   g_free (q->cache_key);
   g_free (q);
+}
+
+/*
+ * Move a queued fetch to the front of the line.
+ *
+ * The queue is drained from the tail and read-ahead is pushed to the head, so
+ * a speculative entry waits behind everything real -- which is right until
+ * somebody actually wants it. A row that catches up to a prefetched id joins
+ * its in-flight entry and returns, and from then on it is waiting on a fetch
+ * the pump has no reason to reach: read-ahead adds two dozen entries per
+ * settle against a screenful of real ones, so the head grows faster than it
+ * drains and those ids never load at all.
+ *
+ * Wanting something is what promotes it. Without this the failure looks like
+ * artwork loading fine for a few minutes and then stopping, because it takes
+ * that long for the ids on screen to be ones a prefetch got to first.
+ */
+static void
+promote_queued (const gchar *cache_key)
+{
+  for (GList *l = cover_queue.head; l; l = l->next) {
+    QueuedFetch *q = l->data;
+    if (g_strcmp0 (q->cache_key, cache_key) != 0)
+      continue;
+    if (l == cover_queue.tail)
+      return;                       /* already next to be taken */
+    g_queue_unlink (&cover_queue, l);
+    g_queue_push_tail_link (&cover_queue, l);
+    return;
+  }
 }
 
 /* Start as many queued fetches as the cap allows, newest first. */
@@ -698,6 +732,9 @@ cover_load_internal (const gchar          *cover_id,
     cover_stats.joined++;
     waiters = g_list_prepend (waiters, req);
     g_hash_table_insert (in_flight, g_strdup (cache_key), waiters);
+    /* Somebody is looking at it now, so it stops being read-ahead. */
+    if (!speculative)
+      promote_queued (cache_key);
     return;
   }
 
@@ -729,10 +766,30 @@ cover_load_internal (const gchar          *cover_id,
    * Prefetches go to the other end, so they are picked up only once nothing
    * anyone is looking at is waiting.
    */
-  if (speculative)
+  if (speculative) {
     g_queue_push_head (&cover_queue, q);
-  else
+
+    /*
+     * Bound the speculative backlog.
+     *
+     * Read-ahead is pushed here and drained from the other end, so during a
+     * long scroll it accumulates faster than it is taken -- entries for rows
+     * the user went past minutes ago, which nothing will ever ask for again.
+     * The oldest go first, and they are completed with NULL rather than just
+     * dropped, so their in-flight entry is retired instead of leaving an id
+     * that every later request would join and wait on forever.
+     */
+    while (g_queue_get_length (&cover_queue) > COVER_QUEUE_MAX) {
+      QueuedFetch *old = g_queue_pop_head (&cover_queue);
+      if (!old)
+        break;
+      cover_stats.dropped++;
+      complete_waiters (old->cache_key, NULL);
+      queued_fetch_free (old);
+    }
+  } else {
     g_queue_push_tail (&cover_queue, q);
+  }
   if (g_queue_get_length (&cover_queue) > cover_stats.peak_queue)
     cover_stats.peak_queue = g_queue_get_length (&cover_queue);
   cover_pump ();
