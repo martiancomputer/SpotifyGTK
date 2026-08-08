@@ -275,7 +275,8 @@ static gboolean cover_deferred = FALSE;
 static void cover_load_internal (const gchar *cover_id, gint target_px,
                                  GCancellable *cancellable,
                                  SpotifyCoverCallback callback,
-                                 gpointer user_data, gboolean deferrable);
+                                 gpointer user_data, gboolean deferrable,
+                                 gboolean speculative);
 
 static void
 prefetch_discard (GdkTexture *texture, gpointer user_data)
@@ -288,7 +289,7 @@ spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px)
 {
   if (!cover_id || !*cover_id || cover_deferred)
     return;
-  cover_load_internal (cover_id, target_px, NULL, prefetch_discard, NULL, TRUE);
+  cover_load_internal (cover_id, target_px, NULL, prefetch_discard, NULL, TRUE, TRUE);
 }
 
 void
@@ -601,7 +602,7 @@ spotifygtk_cover_load (const gchar          *cover_id,
                        SpotifyCoverCallback  callback,
                        gpointer              user_data)
 {
-  cover_load_internal (cover_id, target_px, cancellable, callback, user_data, FALSE);
+  cover_load_internal (cover_id, target_px, cancellable, callback, user_data, FALSE, FALSE);
 }
 
 void
@@ -611,7 +612,7 @@ spotifygtk_cover_load_deferrable (const gchar          *cover_id,
                                   SpotifyCoverCallback  callback,
                                   gpointer              user_data)
 {
-  cover_load_internal (cover_id, target_px, cancellable, callback, user_data, TRUE);
+  cover_load_internal (cover_id, target_px, cancellable, callback, user_data, TRUE, FALSE);
 }
 
 static void
@@ -620,7 +621,8 @@ cover_load_internal (const gchar          *cover_id,
                      GCancellable         *cancellable,
                      SpotifyCoverCallback  callback,
                      gpointer              user_data,
-                     gboolean              deferrable)
+                     gboolean              deferrable,
+                     gboolean              speculative)
 {
   g_return_if_fail (callback != NULL);
 
@@ -701,7 +703,24 @@ cover_load_internal (const gchar          *cover_id,
   QueuedFetch *q = g_new0 (QueuedFetch, 1);
   q->cache_key = g_strdup (cache_key);
   q->target_px = target_px;
-  g_queue_push_tail (&cover_queue, q);
+
+  /*
+   * The queue is drained from the tail, newest first -- right for a scroll,
+   * where the most recently asked-for row is the one now on screen.
+   *
+   * Which means a speculative read-ahead issued *after* the visible rows was
+   * served *before* them. track_list.c intends the opposite and says so:
+   * "what is on screen must not queue behind speculative work". It did, for
+   * the whole prefetch window, and only in track lists -- grids do not read
+   * ahead, which is why albums and playlists never showed this.
+   *
+   * Prefetches go to the other end, so they are picked up only once nothing
+   * anyone is looking at is waiting.
+   */
+  if (speculative)
+    g_queue_push_head (&cover_queue, q);
+  else
+    g_queue_push_tail (&cover_queue, q);
   if (g_queue_get_length (&cover_queue) > cover_stats.peak_queue)
     cover_stats.peak_queue = g_queue_get_length (&cover_queue);
   cover_pump ();
