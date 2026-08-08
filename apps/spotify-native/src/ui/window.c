@@ -278,7 +278,8 @@ refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
  * drift from what's on screen. It does not touch the queue or context —
  * callers own that decision. */
 static void
-play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
+play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track,
+                   gboolean handover)
 {
   if (!track || !track->uri) {
     g_warning ("Track has no URI; nothing to play");
@@ -303,7 +304,18 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
     g_hash_table_insert (self->display_tracks, g_strdup (track->uri),
                          spotifygtk_native_track_copy (track));
 
-  if (spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ()) == 0) {
+  /*
+   * Render now unless this is a handover.
+   *
+   * Deferring exists for one case: a track ending into the next while several
+   * seconds of its audio are still queued, where showing the new title early
+   * would be a lie. Picking a track by hand is the opposite -- the one playing
+   * is cancelled at once, so waiting for the sink to reach the new one left
+   * the old song's cover, title and duration on screen through the gap, which
+   * read as the previous track trying to play again.
+   */
+  if (!handover ||
+      spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ()) == 0) {
     /*
      * Silence: adopt the track now, exactly as before.
      *
@@ -332,30 +344,36 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
 
 /* Play the context entry at `index`, making it the current track. */
 static void
-play_context_at (SpotifyGtkNativeWindow *self, gint index)
+play_context_at (SpotifyGtkNativeWindow *self, gint index, gboolean handover)
 {
   if (!self->play_context || index < 0 || index >= (gint) self->play_context->len)
     return;
   self->context_index = index;
-  play_native_track (self, g_ptr_array_index (self->play_context, index));
+  play_native_track (self, g_ptr_array_index (self->play_context, index), handover);
 }
 
 /* Resolve and play the next track: a user-queued track first, otherwise the
  * next context entry. Returns TRUE if something started. A queued track plays
  * without disturbing the context cursor, so the context resumes after it. */
+/*
+ * `handover` distinguishes a track ending into the next from a button press.
+ * Only the first should hold the old title on screen while its remaining audio
+ * plays out; a press stops the current track immediately, so the display must
+ * follow immediately too.
+ */
 static gboolean
-advance_next (SpotifyGtkNativeWindow *self)
+advance_next (SpotifyGtkNativeWindow *self, gboolean handover)
 {
   if (!g_queue_is_empty (self->user_queue)) {
     SpotifyNativeTrack *track = g_queue_pop_head (self->user_queue);
-    play_native_track (self, track);
+    play_native_track (self, track, handover);
     spotifygtk_native_track_free (track);
     return TRUE;
   }
 
   if (self->play_context && self->context_index >= 0 &&
       self->context_index + 1 < (gint) self->play_context->len) {
-    play_context_at (self, self->context_index + 1);
+    play_context_at (self, self->context_index + 1, handover);
     return TRUE;
   }
 
@@ -366,7 +384,9 @@ static gboolean
 advance_prev (SpotifyGtkNativeWindow *self)
 {
   if (self->play_context && self->context_index > 0) {
-    play_context_at (self, self->context_index - 1);
+    /* Previous is a button press, not a handover: the current track stops at
+     * once, so its title should go with it. */
+    play_context_at (self, self->context_index - 1, FALSE);
     return TRUE;
   }
   return FALSE;
@@ -396,9 +416,9 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   }
 
   if (self->context_index >= 0)
-    play_context_at (self, self->context_index);
+    play_context_at (self, self->context_index, FALSE);
   else
-    play_native_track (self, track);   /* not found in snapshot; play it alone */
+    play_native_track (self, track, FALSE);  /* not in the snapshot; play it alone */
 }
 
 
@@ -1513,7 +1533,7 @@ static void
 on_next_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
-  advance_next (self);
+  advance_next (self, FALSE);
   (void) bar;
 }
 
@@ -1539,7 +1559,7 @@ on_player_state_changed (SpotifyNativePlayerService *player,
    * engine without emitting IDLE). So IDLE with a track loaded means "play
    * whatever is next". If nothing is next, fall through and clear the UI. */
   if (state == SPOTIFYGTK_PLAYER_IDLE && self->current_track_uri) {
-    if (advance_next (self))
+    if (advance_next (self, TRUE))   /* the track ended on its own */
       return;
   }
 
