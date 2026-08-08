@@ -863,6 +863,26 @@ on_playback_like_toggled (SpotifyGtkPlaybackBar *bar, gboolean liked, gpointer u
     return;
   }
 
+  /*
+   * The real track, not a URI in a bare struct.
+   *
+   * This used to hand list_set_liked a SpotifyNativeTrack with nothing but a
+   * uri set, which is enough to write the collection but not to draw a row --
+   * so liking from the bar inserted "Unknown track" into Liked Songs while the
+   * context menu, which passes the row's own track, inserted it properly.
+   *
+   * display_tracks holds what was started, keyed by uri, for exactly this kind
+   * of after-the-fact lookup.
+   */
+  const SpotifyNativeTrack *known =
+    self->display_tracks ? g_hash_table_lookup (self->display_tracks,
+                                                self->current_track_uri)
+                         : NULL;
+  if (known) {
+    list_set_liked (self, (gpointer) known, liked);
+    return;
+  }
+
   SpotifyNativeTrack t = { 0 };
   t.uri = self->current_track_uri;
   list_set_liked (self, &t, liked);

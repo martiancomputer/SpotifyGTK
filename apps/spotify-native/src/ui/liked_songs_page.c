@@ -664,6 +664,12 @@ spotifygtk_liked_songs_page_add_track (SpotifyGtkLikedSongsPage *self,
   if (find_track_index (self, track->uri) >= 0)
     return;
 
+  /* Nothing to draw. A caller that has only a uri can still write the
+   * collection, but inserting the row here would put "Unknown track" on the
+   * page; the next refetch brings it in with its metadata. */
+  if (!track->name || !*track->name)
+    return;
+
   /* Position 0 is newest: the collection arrives newest-first and SORT_ADDED
    * is that arrival order. See the sort-key enum. */
   SpotifyNativeTrack *copy = spotifygtk_native_track_copy (track);
