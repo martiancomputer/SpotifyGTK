@@ -247,6 +247,15 @@ spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
   if (self->cover_shown || !self->pending_cover_id)
     return;
 
+  /*
+   * Never ask without one. The cancellable is how this row withdraws its
+   * request when it is recycled or destroyed; issuing with NULL means the
+   * completion has no way to know the row is gone and will write into it
+   * regardless.
+   */
+  if (!self->cover_cancellable)
+    self->cover_cancellable = g_cancellable_new ();
+
   spotifygtk_cover_load_deferrable (self->pending_cover_id, 96, self->cover_cancellable,
                                     on_row_cover_loaded, self);
 }
@@ -261,8 +270,24 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
     g_clear_object (&self->cover_cancellable);
   }
 
-  if (!cover_id || !*cover_id)
+  if (!cover_id || !*cover_id) {
+    /*
+     * No art for this track, and nothing left claiming there is.
+     *
+     * The pending id used to survive this return, still naming the *previous*
+     * track's cover, while the cancellable above had just been cleared. A
+     * later retry_cover() then issued that stale id with a NULL cancellable --
+     * and complete_waiters() only skips a request whose cancellable is
+     * cancelled, so a NULL one always fires. Once the row had been recycled
+     * or destroyed, that callback ran on freed memory: SIGSEGV inside
+     * gtk_image_set_from_paintable.
+     */
+    g_clear_pointer (&self->pending_cover_id, g_free);
+    self->cover_shown = FALSE;
+    gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
+    gtk_widget_set_visible (GTK_WIDGET (self->track_num), self->row_number > 0);
     return;
+  }
 
   self->cover_cancellable = g_cancellable_new ();
   g_free (self->pending_cover_id);
