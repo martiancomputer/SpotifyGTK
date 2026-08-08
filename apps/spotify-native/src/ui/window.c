@@ -1785,6 +1785,23 @@ static void
 set_page_covers_loaded (SpotifyGtkNativeWindow *self, const gchar *page_name,
                         gboolean loaded)
 {
+  /*
+   * Clear scroll deferral before asking for anything back.
+   *
+   * A deferrable request made while deferral is on is not queued, it is
+   * dropped -- the callback fires with NULL and that is the end of it. The
+   * flag is global and set by any list that is scrolling, including the one
+   * being navigated away from, so the reload landed in exactly the window
+   * where its requests would be discarded. Nothing then retried, because the
+   * only retry is a scroll settle on that list, and a page nobody scrolls
+   * never settles. That is the fifteen seconds of blank rows.
+   *
+   * A page being opened is the definition of art worth loading, so deferral
+   * has no business applying to it.
+   */
+  if (loaded)
+    spotifygtk_cover_set_deferred (FALSE);
+
   SpotifyGtkTrackList *list = NULL;
 
   if (g_strcmp0 (page_name, "liked") == 0)
