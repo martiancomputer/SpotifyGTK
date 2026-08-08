@@ -1774,21 +1774,36 @@ on_content_paned_position (GObject *object, GParamSpec *pspec, gpointer user_dat
 }
 
 /* === Navigation === */
-/* Drop the artwork held by one page's lists and grids. */
+/*
+ * Release or reload the artwork held by one page's lists and grids.
+ *
+ * Always used as a pair. Releasing without a reload is what made covers
+ * disappear for good: a page returning to view does not rebind its rows, so
+ * nothing else was ever going to ask for them again.
+ */
 static void
-release_page_covers (SpotifyGtkNativeWindow *self, const gchar *page_name)
+set_page_covers_loaded (SpotifyGtkNativeWindow *self, const gchar *page_name,
+                        gboolean loaded)
 {
+  SpotifyGtkTrackList *list = NULL;
+
   if (g_strcmp0 (page_name, "liked") == 0)
-    spotifygtk_track_list_release_covers (
-      spotifygtk_liked_songs_page_get_list (self->liked_page));
+    list = spotifygtk_liked_songs_page_get_list (self->liked_page);
   else if (g_strcmp0 (page_name, "search") == 0)
-    spotifygtk_track_list_release_covers (
-      spotifygtk_search_page_get_list (self->search_page));
+    list = spotifygtk_search_page_get_list (self->search_page);
   else if (g_strcmp0 (page_name, "context") == 0)
-    spotifygtk_track_list_release_covers (
-      spotifygtk_context_page_get_list (self->context_page));
-  else if (g_strcmp0 (page_name, "playlists") == 0 && self->playlists_grid)
-    spotifygtk_album_grid_release_covers (self->playlists_grid);
+    list = spotifygtk_context_page_get_list (self->context_page);
+
+  if (list) {
+    if (loaded) spotifygtk_track_list_reload_covers (list);
+    else        spotifygtk_track_list_release_covers (list);
+    return;
+  }
+
+  if (g_strcmp0 (page_name, "playlists") == 0 && self->playlists_grid) {
+    if (loaded) spotifygtk_album_grid_reload_covers (self->playlists_grid);
+    else        spotifygtk_album_grid_release_covers (self->playlists_grid);
+  }
 }
 
 static void
@@ -1814,9 +1829,12 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
    */
   const gchar *leaving = gtk_stack_get_visible_child_name (self->page_stack);
   if (leaving && g_strcmp0 (leaving, page_name) != 0)
-    release_page_covers (self, leaving);
+    set_page_covers_loaded (self, leaving, FALSE);
 
   gtk_stack_set_visible_child_name (self->page_stack, page_name);
+
+  /* And ask the arriving page for its artwork back. */
+  set_page_covers_loaded (self, page_name, TRUE);
 
   /* Load on first visit rather than at startup; the page no-ops the
    * refresh once it holds data. Home and Library are static for now. */

@@ -564,6 +564,18 @@ spotifygtk_album_grid_release_covers (SpotifyGtkAlbumGrid *self)
   }
 }
 
+/* Ask every bound card for its artwork again; see the track list's version. */
+void
+spotifygtk_album_grid_reload_covers (SpotifyGtkAlbumGrid *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  if (!self->bound_cards)
+    return;
+
+  for (guint i = 0; i < self->bound_cards->len; i++)
+    card_retry_cover (g_ptr_array_index (self->bound_cards, i));
+}
+
 void
 spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self)
 {
