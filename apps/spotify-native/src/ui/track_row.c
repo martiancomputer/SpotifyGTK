@@ -265,6 +265,27 @@ spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
 static void
 row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
 {
+  /*
+   * Already asking for exactly this: leave it alone.
+   *
+   * A GtkListView rebinds a row far more often than its contents change -- a
+   * splice, a resort, a scroll -- and every rebind used to cancel the request
+   * in flight and issue an identical one. The cancelled fetch still completed,
+   * still decoded, and was then dropped on the floor because its waiter was
+   * gone: measured at 1021 of 2896 requests thrown away that way, which is a
+   * third of the work and the reason artwork trickles in instead of arriving.
+   */
+  if (cover_id && g_strcmp0 (self->pending_cover_id, cover_id) == 0) {
+    /* Already showing it: nothing to do, and re-requesting would blank the
+     * row back to its number for as long as the round trip takes. */
+    if (self->cover_shown)
+      return;
+    /* Already asking for it. */
+    if (self->cover_cancellable &&
+        !g_cancellable_is_cancelled (self->cover_cancellable))
+      return;
+  }
+
   if (self->cover_cancellable) {
     g_cancellable_cancel (self->cover_cancellable);
     g_clear_object (&self->cover_cancellable);
@@ -618,6 +639,14 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
  *
  * A fresh cancellable goes with it, so the reload is still cancellable.
  */
+/* Whether this row is currently showing artwork. Diagnostic. */
+gboolean
+spotifygtk_track_row_has_cover (SpotifyGtkTrackRow *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self), FALSE);
+  return self->cover_shown;
+}
+
 void
 spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self)
 {

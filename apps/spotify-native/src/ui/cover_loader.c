@@ -248,6 +248,9 @@ static SoupSession *cover_session = NULL;
 static struct {
   guint  hits;          /* served from the memory cache */
   guint  disk_hits;     /* served from disk, no request made */
+  guint  delivered;     /* callbacks actually invoked with a texture */
+  guint  skipped;       /* waiters skipped because they were cancelled */
+  guint  null_deliver;  /* callbacks invoked with NULL */
   guint  misses;        /* required a fetch */
   guint  joined;        /* deduplicated onto an in-flight fetch */
   guint  deferred;      /* dropped because a scroll was in progress */
@@ -396,6 +399,9 @@ spotifygtk_cover_log_stats (const gchar *context)
              cover_stats.hits, 100.0 * cover_stats.hits / asked,
              cover_stats.misses, cover_stats.joined, cover_stats.deferred,
              cover_stats.failures);
+  g_message ("cover stats (%s): %u delivered, %u skipped as cancelled, %u delivered NULL",
+             context ? context : "", cover_stats.delivered, cover_stats.skipped,
+             cover_stats.null_deliver);
   g_message ("cover stats (%s): %u served from disk without a request",
              context ? context : "", cover_stats.disk_hits);
   g_message ("cover stats (%s): %u dropped before issue, %u queued now, "
@@ -528,8 +534,12 @@ complete_waiters (const gchar *cover_id, GdkTexture *texture)
 
     /* A cancelled caller is usually a recycled list row. Delivering anyway
      * would paint the wrong album onto it. */
-    if (!req->cancellable || !g_cancellable_is_cancelled (req->cancellable))
+    if (!req->cancellable || !g_cancellable_is_cancelled (req->cancellable)) {
+      if (texture) cover_stats.delivered++; else cover_stats.null_deliver++;
       req->callback (texture, req->user_data);
+    } else {
+      cover_stats.skipped++;
+    }
 
     pending_request_free (req);
   }

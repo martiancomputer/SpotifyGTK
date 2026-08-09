@@ -40,6 +40,8 @@ void spotifygtk_track_row_set_number (SpotifyGtkTrackRow *self, gint track_numbe
 void spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
                                             const SpotifyNativeTrack *track,
                                             gint                      track_number);
+gboolean spotifygtk_track_row_has_cover (SpotifyGtkTrackRow *self);
+
 /* Release the row's artwork; see album_grid's release_covers for why. */
 void spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self);
 
