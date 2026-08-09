@@ -33,19 +33,22 @@
  * nothing in the metadata says which it is: Album.type exists in Spotify's
  * schema but context-resolve returns tracks, not album objects, so it never
  * reaches us. The thresholds are the usual industry shape -- one or two tracks
- * is a single, up to six an EP -- and being a heuristic is why the filter is
- * presented as a view of one list rather than as three separate things.
+ * is a single, up to six an EP.
+ *
+ * These sort, they do not filter. The heading says "Albums, EPs and Singles",
+ * so all three are always on the page and the buttons decide which comes
+ * first -- exactly what the sort on Liked Songs does, and the reason there is
+ * no "All" button here: nothing is ever being hidden for it to restore.
  */
 typedef enum {
-  RELEASE_ALL = 0,
-  RELEASE_ALBUM,
+  RELEASE_ALBUM = 0,
   RELEASE_EP,
   RELEASE_SINGLE,
   N_RELEASE_KINDS
 } ReleaseKind;
 
 static const gchar *const KIND_LABELS[N_RELEASE_KINDS] = {
-  "All", "Albums", "EPs", "Singles"
+  "Album", "EP", "Singles"
 };
 
 #define EP_MAX_TRACKS      6
@@ -85,7 +88,8 @@ struct _SpotifyGtkArtistPage {
   SpotifyGtkAlbumGrid *releases;
   GtkLabel            *releases_status;
   GtkWidget           *kind_buttons[N_RELEASE_KINDS];
-  ReleaseKind          kind;
+  ReleaseKind          sort_kind;
+  gboolean             sort_desc[N_RELEASE_KINDS];
 
   GPtrArray           *all_releases;   /* Release*, in first-seen order */
 
@@ -140,31 +144,66 @@ release_kind_of (const Release *r)
   return RELEASE_ALBUM;
 }
 
-/* Rebuild the cards for the current filter. */
+/* Chosen kind first; everything else keeps the order the resolve gave it. */
+static gint
+compare_releases (gconstpointer a, gconstpointer b, gpointer user_data)
+{
+  SpotifyGtkArtistPage *self = user_data;
+  const Release *x = *(const Release **) a;
+  const Release *y = *(const Release **) b;
+
+  gboolean xf = (release_kind_of (x) == self->sort_kind);
+  gboolean yf = (release_kind_of (y) == self->sort_kind);
+  if (xf != yf)
+    return self->sort_desc[self->sort_kind] ? (xf - yf) : (yf - xf);
+
+  /* Stable within a group: the resolve's own order, which is Spotify's. */
+  return (x->first_seen > y->first_seen) - (x->first_seen < y->first_seen);
+}
+
+/* Rebuild the cards in the current order. Every release is shown every time --
+ * see the note on ReleaseKind. */
 static void
-apply_release_filter (SpotifyGtkArtistPage *self)
+apply_release_sort (SpotifyGtkArtistPage *self)
 {
   spotifygtk_album_grid_clear (self->releases);
+  if (!self->all_releases)
+    return;
 
-  guint shown = 0;
-  for (guint i = 0; self->all_releases && i < self->all_releases->len; i++) {
-    const Release *r = g_ptr_array_index (self->all_releases, i);
-    if (self->kind != RELEASE_ALL && release_kind_of (r) != self->kind)
-      continue;
+  g_autoptr(GPtrArray) ordered = g_ptr_array_sized_new (self->all_releases->len);
+  for (guint i = 0; i < self->all_releases->len; i++)
+    g_ptr_array_add (ordered, g_ptr_array_index (self->all_releases, i));
+  g_ptr_array_sort_with_data (ordered, compare_releases, self);
 
+  for (guint i = 0; i < ordered->len; i++) {
+    const Release *r = g_ptr_array_index (ordered, i);
     g_autofree gchar *subtitle = r->year > 0
       ? g_strdup_printf ("%s · %d", KIND_LABELS[release_kind_of (r)], r->year)
       : g_strdup (KIND_LABELS[release_kind_of (r)]);
-
     spotifygtk_album_grid_add_card (self->releases, r->uri, r->name,
                                     subtitle, r->cover_id);
-    shown++;
   }
 
-  gboolean empty = (shown == 0);
-  gtk_label_set_text (self->releases_status,
-                      empty ? "Nothing of this kind here." : "");
+  gboolean empty = (ordered->len == 0);
+  gtk_label_set_text (self->releases_status, empty ? "No releases here." : "");
   gtk_widget_set_visible (GTK_WIDGET (self->releases_status), empty);
+}
+
+/* Show the direction on the active button only, as Liked Songs does. */
+static void
+refresh_kind_labels (SpotifyGtkArtistPage *self)
+{
+  for (guint i = 0; i < N_RELEASE_KINDS; i++) {
+    if (i == self->sort_kind) {
+      g_autofree gchar *text = g_strdup_printf ("%s %s", KIND_LABELS[i],
+                                                self->sort_desc[i] ? "\u2193" : "\u2191");
+      gtk_button_set_label (GTK_BUTTON (self->kind_buttons[i]), text);
+    } else {
+      gtk_button_set_label (GTK_BUTTON (self->kind_buttons[i]), KIND_LABELS[i]);
+    }
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->kind_buttons[i]),
+                                  i == self->sort_kind);
+  }
 }
 
 static void
@@ -174,11 +213,13 @@ on_kind_clicked (GtkButton *button, gpointer user_data)
   ReleaseKind kind = (ReleaseKind) GPOINTER_TO_UINT (
     g_object_get_data (G_OBJECT (button), "release-kind"));
 
-  self->kind = kind;
-  for (guint i = 0; i < N_RELEASE_KINDS; i++)
-    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->kind_buttons[i]),
-                                  i == kind);
-  apply_release_filter (self);
+  /* Clicking the active key reverses it, as on Liked Songs. */
+  if (kind == self->sort_kind)
+    self->sort_desc[kind] = !self->sort_desc[kind];
+  self->sort_kind = kind;
+
+  refresh_kind_labels (self);
+  apply_release_sort (self);
 }
 
 /* Gather the distinct releases present in the resolved tracks, in the order
@@ -278,7 +319,7 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   spotifygtk_track_list_set_native_tracks (self->list, top);
 
   build_releases (self, tracks);
-  apply_release_filter (self);
+  apply_release_sort (self);
 }
 
 void
@@ -439,38 +480,43 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
   gtk_widget_set_margin_end (content, 12);
 
-  /* Hero: the artist's current release, as a banner. */
-  GtkWidget *hero = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 16);
+  /*
+   * The hero: one curved panel the full width of the page, carrying the
+   * artist's current media.
+   *
+   * Not a small portrait with text beside it. That arrangement is the shape of
+   * the page this replaces, where the header is chrome and the content starts
+   * underneath -- here the media is the first thing on the page and is given
+   * the room to be it.
+   */
+  GtkWidget *hero = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_add_css_class (hero, "artist-hero");
   gtk_widget_set_size_request (hero, -1, HERO_HEIGHT);
+  gtk_widget_set_hexpand (hero, TRUE);
 
   self->hero_art = GTK_IMAGE (gtk_image_new_from_icon_name ("avatar-default-symbolic"));
   gtk_image_set_pixel_size (self->hero_art, HERO_ART_PX);
-  gtk_widget_add_css_class (GTK_WIDGET (self->hero_art), "art-large");
-  gtk_widget_set_margin_start (GTK_WIDGET (self->hero_art), 20);
+  gtk_widget_set_halign (GTK_WIDGET (self->hero_art), GTK_ALIGN_CENTER);
   gtk_widget_set_valign (GTK_WIDGET (self->hero_art), GTK_ALIGN_CENTER);
+  gtk_widget_set_vexpand (GTK_WIDGET (self->hero_art), TRUE);
   gtk_box_append (GTK_BOX (hero), GTK_WIDGET (self->hero_art));
 
-  GtkWidget *hero_text = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
-  gtk_widget_set_valign (hero_text, GTK_ALIGN_CENTER);
-
-  GtkWidget *hero_kind = gtk_label_new ("Latest release");
-  gtk_widget_add_css_class (hero_kind, "dim-text");
-  gtk_label_set_xalign (GTK_LABEL (hero_kind), 0.0);
-  gtk_box_append (GTK_BOX (hero_text), hero_kind);
-
+  /* What the panel is showing, since it is a release standing in for imagery
+   * the protocol does not carry. Sits inside the panel, under the art. */
   self->hero_caption = GTK_LABEL (gtk_label_new (""));
-  gtk_widget_add_css_class (GTK_WIDGET (self->hero_caption), "section-heading");
-  gtk_label_set_xalign (self->hero_caption, 0.0);
+  gtk_widget_add_css_class (GTK_WIDGET (self->hero_caption), "dim-text");
+  gtk_widget_set_halign (GTK_WIDGET (self->hero_caption), GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (self->hero_caption), 12);
   gtk_label_set_ellipsize (self->hero_caption, PANGO_ELLIPSIZE_END);
-  gtk_label_set_max_width_chars (self->hero_caption, 40);
-  gtk_box_append (GTK_BOX (hero_text), GTK_WIDGET (self->hero_caption));
+  gtk_label_set_max_width_chars (self->hero_caption, 48);
+  gtk_box_append (GTK_BOX (hero), GTK_WIDGET (self->hero_caption));
 
-  gtk_box_append (GTK_BOX (hero), hero_text);
   gtk_box_append (GTK_BOX (content), hero);
 
   /* Most played. */
-  gtk_box_append (GTK_BOX (content), section_heading ("Popular"));
+  /* Not "Popular" -- that is the other client's word for this, and the whole
+   * point of the page is not to be a copy of it. */
+  gtk_box_append (GTK_BOX (content), section_heading ("Top tracks"));
 
   self->list = spotifygtk_track_list_new ();
   spotifygtk_track_list_set_inline (self->list, TRUE);
@@ -492,7 +538,7 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   gtk_widget_set_hexpand (spacer, TRUE);
   gtk_box_append (GTK_BOX (releases_row), spacer);
 
-  GtkWidget *caption = gtk_label_new ("Show");
+  GtkWidget *caption = gtk_label_new ("Sort by");
   gtk_widget_add_css_class (caption, "dim-text");
   gtk_widget_set_valign (caption, GTK_ALIGN_CENTER);
   gtk_box_append (GTK_BOX (releases_row), caption);
@@ -506,10 +552,10 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
     gtk_widget_add_css_class (b, "flat");
     g_object_set_data (G_OBJECT (b), "release-kind", GUINT_TO_POINTER (i));
     g_signal_connect (b, "clicked", G_CALLBACK (on_kind_clicked), self);
-    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (b), i == RELEASE_ALL);
     gtk_box_append (GTK_BOX (kind_group), b);
     self->kind_buttons[i] = b;
   }
+  refresh_kind_labels (self);
   gtk_box_append (GTK_BOX (releases_row), kind_group);
   gtk_box_append (GTK_BOX (content), releases_row);
 

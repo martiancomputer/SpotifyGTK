@@ -2310,6 +2310,11 @@ static const gchar *theme_body =
   "  color: @art_glyph; }"
   ".art-large { background-color: @art_bg; border-radius: 12px;"
   "  color: @art_glyph; }"
+  /* The artist page's banner. A larger radius than the art tiles because it
+   * spans the page rather than sitting in a row of equals, and the same
+   * palette entry so it reads as the same family of surface. */
+  ".artist-hero { background-color: @art_bg; border-radius: 16px;"
+  "  color: @art_glyph; }"
   ".pill-button { background-color: @bg_selected; border-radius: 999px;"
   "  color: @fg; font-size: 12px; font-weight: 600;"
   "  padding: 4px 14px; min-height: 0; }"
