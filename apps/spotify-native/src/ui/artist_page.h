@@ -9,7 +9,12 @@
  *   their most-played tracks
  *   Albums, EPs and Singles -- sortable, as inline cards
  *
- * All of it comes from a single /context-resolve of the artist URI. The native
+ * The tracks and releases come from a single /context-resolve of the artist
+ * URI. The banner does not, and cannot: it is fetched over Spotify's GraphQL
+ * API, because no part of the native protocol carries it. See
+ * spotifygtk_spclient_get_artist_header().
+ *
+ * All of the rest comes from that one resolve. The native
  * stack has no discography endpoint, so the releases are the distinct albums
  * present in that track list, grouped here -- the same approach Home, Search
  * and Library take, and the same reason: real data grouped from what a resolve

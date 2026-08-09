@@ -23,9 +23,19 @@
 /* Height of the hero panel. Tall enough to read as a banner rather than an
  * oversized row, short enough that the tracks are still on screen with it. */
 #define HERO_HEIGHT         220
-/* Decode width for the banner. A header is a wide image drawn across the page,
- * so it is fetched at a width rather than at the panel's height. */
-#define HERO_IMAGE_PX       640
+/*
+ * Decode size for the banner.
+ *
+ * The loader fits an image inside target x target preserving aspect, so for a
+ * header -- wide, typically around 21:9 -- the target sets the *width*. 640
+ * was the album-cover figure and far too small: the panel is as wide as the
+ * page, so a 640px decode was being scaled up about twice and looked it.
+ *
+ * 1280 covers a maximised window on a 1080p display, and the scale factor is
+ * folded in for HiDPI, exactly as the album cards do it. Only ever one of
+ * these is held at a time, so the cost is one image rather than a gridful.
+ */
+#define HERO_IMAGE_PX       1280
 
 /*
  * Release kinds.
@@ -143,9 +153,10 @@ on_artist_image (const gchar *cover_id, gpointer user_data)
   }
 
   gtk_label_set_text (self->hero_caption, "");
-  /* Asked for at the banner's width, not its height: a header is wide and
-   * would come back needlessly small if sized by the short edge. */
-  spotifygtk_cover_load (cover_id, HERO_IMAGE_PX, NULL,
+  /* Asked for at the banner's width, not its height: the loader fits within a
+   * square, so for a wide image the target is what the width becomes. */
+  gint scale = gtk_widget_get_scale_factor (GTK_WIDGET (self));
+  spotifygtk_cover_load (cover_id, HERO_IMAGE_PX * MAX (1, scale), NULL,
                          on_hero_cover_loaded, self->hero_art);
 }
 
