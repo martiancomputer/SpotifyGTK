@@ -21,23 +21,18 @@
 #define ARTIST_TOP_TRACKS   12
 
 /*
- * Height of the banner.
+ * Height of the banner, and it is enforced rather than requested.
  *
- * A Spotify header is roughly 2.3:1 and the panel is as wide as the page, so
- * this number decides how much of the image survives. At 220 the panel was
- * about 6:1: covering it filled the width and sliced a thin band out of the
- * middle, which is how subjects lost their heads.
+ * set_size_request only sets a minimum. A GtkPicture reports the texture's
+ * own size as its natural size, so a box holding one grows to the image:
+ * asking for 320 and measuring 511 is what that looked like. Inside a
+ * scrolled window, which hands out natural height, nothing pushed back.
  *
- * 320 brings it to roughly 4:1 on a maximised window -- still a banner rather
- * than a picture taking over the page, but close enough to the source that
- * covering trims the top and bottom instead of cutting through the centre.
- *
- * Some crop is unavoidable: the panel is wider than the image is, at any
- * height that leaves room for the tracks. Covering and losing the edges is
- * the better trade than fitting and leaving bars down both sides, which is
- * what the small centred avatar looked like.
+ * Hence the overlay below -- an overlay child that is not a measure-overlay
+ * contributes nothing to measurement and is allocated the overlay's size, so
+ * the sizer decides the height and the picture fills whatever it is given.
  */
-#define HERO_HEIGHT         320
+#define HERO_HEIGHT         260
 /*
  * Decode size for the banner.
  *
@@ -50,7 +45,7 @@
  * folded in for HiDPI, exactly as the album cards do it. Only ever one of
  * these is held at a time, so the cost is one image rather than a gridful.
  */
-#define HERO_IMAGE_PX       1280
+#define HERO_IMAGE_PX       1024
 
 /*
  * Release kinds.
@@ -169,7 +164,10 @@ on_artist_image (const gchar *cover_id, gpointer user_data)
 
   gtk_label_set_text (self->hero_caption, "");
   /* Asked for at the banner's width, not its height: the loader fits within a
-   * square, so for a wide image the target is what the width becomes. */
+   * square, so for a wide image the target is what the width becomes. The
+   * measured header is 660x496, so this upscales -- the loader has no way to
+   * say "no larger than the source", and a decode box much past this one is
+   * megabytes of interpolated pixels for no visible gain. */
   gint scale = gtk_widget_get_scale_factor (GTK_WIDGET (self));
   spotifygtk_cover_load (cover_id, HERO_IMAGE_PX * MAX (1, scale), NULL,
                          on_hero_cover_loaded, self->hero_art);
@@ -588,10 +586,17 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
    * underneath -- here the media is the first thing on the page and is given
    * the room to be it.
    */
-  GtkWidget *hero = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *hero = gtk_overlay_new ();
   gtk_widget_add_css_class (hero, "artist-hero");
-  gtk_widget_set_size_request (hero, -1, HERO_HEIGHT);
   gtk_widget_set_hexpand (hero, TRUE);
+  /* Covering overflows the allocation by design; clip it, and to the rounded
+   * corners rather than a square. */
+  gtk_widget_set_overflow (hero, GTK_OVERFLOW_HIDDEN);
+
+  /* The only thing that gets measured. */
+  GtkWidget *sizer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_size_request (sizer, -1, HERO_HEIGHT);
+  gtk_overlay_set_child (GTK_OVERLAY (hero), sizer);
 
   /*
    * A GtkPicture, not a GtkImage. An image draws at an icon size and centres
@@ -606,7 +611,7 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   gtk_widget_set_hexpand (GTK_WIDGET (self->hero_art), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self->hero_art), TRUE);
   gtk_widget_add_css_class (GTK_WIDGET (self->hero_art), "artist-hero-art");
-  gtk_box_append (GTK_BOX (hero), GTK_WIDGET (self->hero_art));
+  gtk_overlay_add_overlay (GTK_OVERLAY (hero), GTK_WIDGET (self->hero_art));
 
   /* What the panel is showing, since it is a release standing in for imagery
    * the protocol does not carry. Sits inside the panel, under the art. */
@@ -616,7 +621,9 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   gtk_widget_set_margin_bottom (GTK_WIDGET (self->hero_caption), 12);
   gtk_label_set_ellipsize (self->hero_caption, PANGO_ELLIPSIZE_END);
   gtk_label_set_max_width_chars (self->hero_caption, 48);
-  gtk_box_append (GTK_BOX (hero), GTK_WIDGET (self->hero_caption));
+  /* Added after the art so it sits above it. */
+  gtk_widget_set_valign (GTK_WIDGET (self->hero_caption), GTK_ALIGN_END);
+  gtk_overlay_add_overlay (GTK_OVERLAY (hero), GTK_WIDGET (self->hero_caption));
 
   gtk_box_append (GTK_BOX (content), hero);
 

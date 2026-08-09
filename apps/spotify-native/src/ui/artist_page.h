@@ -10,9 +10,10 @@
  *   Albums, EPs and Singles -- sortable, as inline cards
  *
  * The tracks and releases come from a single /context-resolve of the artist
- * URI. The banner does not, and cannot: it is fetched over Spotify's GraphQL
- * API, because no part of the native protocol carries it. See
- * spotifygtk_spclient_get_artist_header().
+ * URI. The banner does not: it comes from hm://artistview/v1/artist/<id>,
+ * over the same AP connection. See research/artist-images.md -- in particular
+ * for why the round avatar is not the banner, and how showing it instead went
+ * unnoticed.
  *
  * All of the rest comes from that one resolve. The native
  * stack has no discography endpoint, so the releases are the distinct albums

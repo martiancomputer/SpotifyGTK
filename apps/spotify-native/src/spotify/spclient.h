@@ -199,32 +199,6 @@ typedef void (*SpclientArtistCallback) (const gchar *cover_id /* NULL if none */
                                         GError      *error    /* NULL on success */,
                                         gpointer     user_data);
 
-/*
- * The artist's header image -- the banner they upload, as distinct from the
- * avatar get_artist_portrait() returns.
- *
- * This one is not on the native stack at all. The Artist message carries
- * portrait and portrait_group and nothing resembling a header; the banner
- * lives on artistUnion.visuals.headerImage, which is the pathfinder GraphQL
- * service. Confirmed by reading the shipped client: it selects
- * `headerImage.data` and reads `sources` off an ImageV2.
- *
- * Worth being explicit that this is a second catalog transport beside
- * spclient. It is not, however, the api.spotify.com path this project moved
- * off: that failed because it used Spotify's shared keymaster client_id and
- * drew on a globally contended quota. Pathfinder is what the desktop client
- * itself calls, with this session's own login5 bearer and client-token.
- *
- * `cover_id` is the last path segment of the returned URL, which is an
- * i.scdn.co image id and so goes straight to the cover loader. NULL when the
- * artist has published no header.
- */
-void spotifygtk_spclient_get_artist_header (SpotifySpclient        *self,
-                                            const gchar            *artist_uri,
-                                            const gchar            *bearer_token,
-                                            const gchar            *client_token,
-                                            SpclientArtistCallback  callback,
-                                            gpointer                user_data);
 
 void spotifygtk_spclient_get_artist_portrait (SpotifySpclient        *self,
                                               const gchar            *artist_uri,

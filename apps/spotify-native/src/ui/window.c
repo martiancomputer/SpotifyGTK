@@ -1956,7 +1956,9 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     /* Development aid: open straight onto a page so its load can be watched
      * without driving the UI by hand. */
     const gchar *start = g_getenv ("SPOTIFY_DEV_START_PAGE");
-    if (start && *start)
+    if (start && g_str_has_prefix (start, "spotify:"))
+      navigate_to_context (self, start, "Dev", "artist");
+    else if (start && *start)
       navigate_raw (self, start);
     spotifygtk_library_page_set_session (self->library_page, session);
 

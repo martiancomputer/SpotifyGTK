@@ -16,6 +16,8 @@
 #include "native_auth.h"
 #include "spclient.h"
 
+#include <json-glib/json-glib.h>
+
 #include <string.h>
 
 struct _SpotifyNativeSession {
@@ -1022,25 +1024,71 @@ on_artist_portrait (const gchar *cover_id, GError *error, gpointer user_data)
 }
 
 /*
- * The header first. It is the image the artist actually uploads as their
- * banner; the portrait is a square avatar and looks wrong stretched across
- * one. Plenty of artists have published no header, which is not an error --
- * hence the fall back rather than a failure.
+ * The banner, out of the artist view.
+ *
+ * `hm://artistview/v1/artist/<id>` is the native protocol's artist page: the
+ * same payload the official client's artist screen is built from, over the AP
+ * connection we already hold. Somewhere in it is one image whose id begins
+ * ab6761_70_ -- the header the artist uploaded, as opposed to ab6761_61_,
+ * which is the round avatar. That prefix is the only thing that reliably
+ * distinguishes them, so it is what this looks for rather than a fixed path:
+ * the background hangs off whichever section happens to carry it (on the
+ * account probed, the pinned "Artist pick" row), and that is not stable.
+ *
+ * This replaces a GraphQL call to api-partner that never once succeeded. It
+ * answered 403 "Client/request not allowed" for every artist -- pathfinder
+ * will not take our client token -- and because a missing header is not an
+ * error, the code quietly fell through to the avatar every single time and
+ * looked like it was working. See research/artist-images.md.
  */
+#define ARTIST_HEADER_ID_PREFIX "ab676170"
+
+static gchar *
+artistview_find_header (const gchar *json, gsize len)
+{
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  if (!json_parser_load_from_data (parser, json, (gssize) len, NULL))
+    return NULL;
+
+  /* The id is wanted, not the URL: the cover loader builds its own CDN URL
+   * and keys its caches on the id. */
+  const gchar *p = json;
+  const gchar *end = json + len;
+  while ((p = g_strstr_len (p, end - p, ARTIST_HEADER_ID_PREFIX))) {
+    const gchar *q = p;
+    while (q < end && g_ascii_isxdigit (*q))
+      q++;
+    if (q - p == 40)
+      return g_strndup (p, 40);
+    p += strlen (ARTIST_HEADER_ID_PREFIX);
+  }
+  return NULL;
+}
+
 static void
-on_artist_header (const gchar *cover_id, GError *error, gpointer user_data)
+on_artistview (MercuryResponse *response, gpointer user_data)
 {
   ArtistImageOp *op = user_data;
+  SpotifyNativeSession *self = op->session;
+  g_autofree gchar *cover = NULL;
 
-  if (cover_id && *cover_id) {
-    artist_image_done (op, cover_id);
+  if (response && response->parts && response->parts->len > 0) {
+    gsize len = 0;
+    const gchar *data = g_bytes_get_data (response->parts->pdata[0], &len);
+    if (data && len)
+      cover = artistview_find_header (data, len);
+  }
+
+  if (cover) {
+    artist_image_done (op, cover);
     return;
   }
-  if (error)
-    g_message ("session: no artist header for %s (%s); trying the portrait",
-               op->uri, error->message);
 
-  SpotifyNativeSession *self = op->session;
+  /* Plenty of artists have published no header. That is not an error, but it
+   * is worth saying -- the silence here is exactly what hid the 403. */
+  g_message ("session: no artist header for %s; falling back to the avatar",
+             op->uri);
+
   g_mutex_lock (&self->lock);
   g_autofree gchar *bearer = g_strdup (self->bearer_token);
   g_autofree gchar *ctoken = g_strdup (self->client_token);
@@ -1056,20 +1104,20 @@ start_artist_image (gpointer user_data)
   ArtistImageOp *op = user_data;
   SpotifyNativeSession *self = op->session;
 
-  g_mutex_lock (&self->lock);
-  g_autofree gchar *bearer = g_strdup (self->bearer_token);
-  g_autofree gchar *ctoken = g_strdup (self->client_token);
-  g_mutex_unlock (&self->lock);
+  SpotifyMercury *mercury = spotifygtk_native_session_get_mercury (self);
+  const gchar *id = strrchr (op->uri, ':');
 
-  if (!self->spclient) {
+  if (!self->spclient || !mercury || !id || !*(id + 1)) {
     if (op->callback) op->callback (NULL, op->user_data);
     g_free (op->uri);
     g_free (op);
     return G_SOURCE_REMOVE;
   }
 
-  spotifygtk_spclient_get_artist_header (self->spclient, op->uri, bearer, ctoken,
-                                         on_artist_header, op);
+  g_autofree gchar *view = g_strdup_printf (
+    "hm://artistview/v1/artist/%s?format=json", id + 1);
+  spotifygtk_mercury_request (mercury, MERCURY_METHOD_GET, view, NULL,
+                              on_artistview, op);
   return G_SOURCE_REMOVE;
 }
 
