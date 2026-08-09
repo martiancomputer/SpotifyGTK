@@ -347,7 +347,7 @@ badly shows up first.
 | Sign-in to a loaded collection | ~3.8s. Playlists are no longer resolved at sign-in; they cost one head read and one cover resolve each, and doing all of them up front put the collection load behind 59 serialised round trips. |
 | Opening Playlists | cards appear in ~0.3s and fill in as each resolves. |
 | Concurrency | `spclient` sets its own connections-per-host (8). libsoup's default is what made per-entry lookups serialise; Mercury was never the bottleneck, since it carries many requests at once keyed by sequence number. |
-| Memory | ~380 MB RSS with the library loaded. Note that ~163 MB of that is Mesa's `libLLVM`/`libgallium` mapped read-only — an empty GTK4 window on the same machine is already 189 MB RSS — so RSS overstates it; the process's own share is ~190 MB private. Cover textures dominate the heap and are held at the size they are drawn, which is a deliberate trade: decoding smaller made covers visibly soft, and an on-disk cache was tried and *raised* memory, because disk hits complete fast enough that more covers finish decoding and stay resident. |
+| Memory | ~265 MB RSS with the library loaded, down from ~380 MB before covers were cached on disk. Note that ~163 MB of that is Mesa's `libLLVM`/`libgallium` mapped read-only — an empty GTK4 window on the same machine is already 189 MB RSS — so RSS overstates the app's own share considerably. Cover textures dominate the heap and are held at the size they are drawn: decoding smaller made them visibly soft, which is a trade not worth making. What did work was caching the compressed images on disk, which let the in-memory budget drop from 48 MB to 24 MB, since evicting now costs a file read rather than a round trip. |
 
 ### Audio backend tracks
 
