@@ -1618,6 +1618,13 @@ wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
   g_signal_connect (list, "add-to-playlist",   G_CALLBACK (on_list_add_to_playlist),   self);
 }
 
+/* Argument order adapter for the artist page's per-release lists. */
+static void
+wire_track_list_for (SpotifyGtkTrackList *list, gpointer user_data)
+{
+  wire_track_list (user_data, list);
+}
+
 /* === Sidebar callbacks === */
 static void
 on_sidebar_page_activated (SpotifyGtkSidebar *sidebar,
@@ -2691,10 +2698,9 @@ spotifygtk_native_window_constructed (GObject *object)
   wire_track_list (self, spotifygtk_context_page_get_list (self->context_page));
   wire_track_list (self, spotifygtk_artist_page_get_list (self->artist_page));
 
-  /* A release card opens the album it names, through the same path an album
-   * card anywhere else takes. */
-  g_signal_connect (self->artist_page, "album-activated",
-                    G_CALLBACK (on_album_activated), self);
+  /* The artist page builds a list per release after this point, so it needs
+   * the same wiring applied to each as it is created. */
+  spotifygtk_artist_page_set_list_wire (self->artist_page, wire_track_list_for, self);
 
   wire_album_grid (self, spotifygtk_search_page_get_album_grid (self->search_page));
   wire_album_grid (self, spotifygtk_home_page_get_album_grid (self->home_page));

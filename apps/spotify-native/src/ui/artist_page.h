@@ -35,6 +35,21 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkArtistPage, spotifygtk_artist_page,
 
 SpotifyGtkArtistPage *spotifygtk_artist_page_new (void);
 
+/*
+ * Called for every track list this page creates.
+ *
+ * The releases are expanded in place, so the page builds a list per release
+ * after the window has finished wiring the ones it owns. Without this those
+ * rows would play but have no context menu, no like, and no play-context --
+ * the same rows behaving differently depending which section they are in.
+ */
+typedef void (*SpotifyGtkArtistListWireFunc) (SpotifyGtkTrackList *list,
+                                              gpointer user_data);
+
+void spotifygtk_artist_page_set_list_wire (SpotifyGtkArtistPage *self,
+                                           SpotifyGtkArtistListWireFunc fn,
+                                           gpointer user_data);
+
 void spotifygtk_artist_page_set_session (SpotifyGtkArtistPage *self,
                                          SpotifyNativeSession *session);
 
@@ -54,7 +69,6 @@ void spotifygtk_artist_page_set_playing_uri (SpotifyGtkArtistPage *self,
 
 /* Signals:
  * - track-activated  (SpotifyNativeTrack *track)
- * - album-activated  (const gchar *uri, const gchar *name)
  */
 
 G_END_DECLS
