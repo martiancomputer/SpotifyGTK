@@ -1,103 +1,104 @@
 # Artist images
 
-Two different images, and the client was showing the wrong one for as long as
-the artist page has existed.
+Five image classes hang off an artist, and four of them are not the banner.
+Telling them apart by id prefix is the only reliable method — nothing in any
+payload labels them.
 
-| id prefix | what it is | measured |
+| id prefix | what it is | shape |
 |---|---|---|
-| `ab676161…` | round avatar | 269×496 → 269×320, 0.84:1 |
-| `ab676170…` | backdrop of the pinned "Artist pick" card — a promo photo | 660×496, 1.33:1 |
-| `ab67616d…` | album cover | — |
+| `ab676186…` | **the banner** — `artistUnion.headerImage` | 2660×1140, 2.33:1 |
+| `ab676161…` | round avatar / profile picture | square, e.g. 640×640 |
+| `ab676167…` | gallery — promo photos, used by "About the artist" | square |
+| `ab676170…` | backdrop of the pinned "Artist pick" card | 660×496 |
+| `ab67616d…` | album cover | square |
 
-The prefix is the only reliable way to tell them apart. Both are plain
-`i.scdn.co/image/<40 hex>` ids and nothing else in the payload marks which is
-which.
+The banner's URLs point at `image-cdn-ak.spotifycdn.com` and `i2o.scdn.co`, but
+`i.scdn.co` serves the same ids, so the id alone is enough and the cover loader
+needs no new host.
 
-## The GraphQL route does not work
+## Getting the banner: two things had to be right
 
-`api-partner.spotify.com/pathfinder/v1/query`, operation `queryArtistOverview`,
-persisted-query hash `1ac33dda…737c72` — all read correctly out of the shipped
-client's bundle — answers:
+It comes from pathfinder, Spotify's GraphQL endpoint — persisted query
+`queryArtistOverview`, hash `1ac33dda…737c72`, both read out of the shipped
+bundle (`322.js`). Nothing in the native protocol carries it: the `Artist`
+descriptor has no header field (see below), the full `ExtensionKind` enum has no
+visuals kind, and the binary holds no `hm://` artist route or spclient image
+path.
 
-```json
-{ "error": { "status": 403, "message": "Client/request not allowed" } }
-```
+### 1. The User-Agent
 
-for every artist. Pathfinder does not accept our client token; that endpoint
-belongs to the web player, whose token is minted against a different client id.
-Sending `Authorization`, `Accept` and `Client-Token` is not enough.
+`api-partner` answers `403 "Client/request not allowed"` to anything that does
+not look like a browser. **That is the entire difference.** Ruled out against a
+live server, every one still 403:
 
-**This failed silently for months.** A missing header is legitimately not an
-error — plenty of artists have not uploaded one — so the code fell back to the
-avatar, an image appeared, and the page looked like it worked. The fallback
-only logged when it had a `GError`, and a 403 body parsed fine into "no image
-found", so there was never a `GError` to log. Everything downstream was then
-debugged as a *sizing* problem, because a 0.84:1 avatar stretched across a
-landscape panel does look like one.
+- the client id — the shipped client uses **keymaster**, `65b708…87bd`, the same
+  one we do. Confirmed in its own `login.spa`. This kills the obvious theory.
+- the client token, and `client_version` inside it: `1.2.52.442` (librespot's),
+  `1.2.92.147`, `1.2.156.10197`
+- `spotify-app-version`, both `1.2.92.147` and the numeric `896000000` the
+  bundle actually sends
+- `app-platform`: `Linux`, `WebPlayer`, `Win32`
+- `origin`/`referer` for `xpui.app.spotify.com` and `open.spotify.com`
+- GET and POST
 
-The lesson is the logging, not the endpoint: a fallback that fires on the
-normal path and the broken path alike, and says nothing on either, cannot be
-told apart from success.
+Send a Chrome UA and the request succeeds with the credentials we already had.
 
-## The real header is out of reach
+**libsoup detail that cost a debugging round:** `SoupSession:user-agent` is
+applied to every message the session queues, *overwriting* whatever the message
+already set. Putting the browser UA on the `SoupMessage` was silently undone.
+Pathfinder therefore gets its own `SoupSession` whose UA is the browser one.
 
-**The banner the desktop client draws is not obtainable.** Confirmed, not assumed:
+### 2. The field is not under `visuals`
 
-- **pathfinder is the only source.** `artistUnion.visuals.headerImage`. The
-  operation name and hash in `322.js` match what we send exactly.
-- **It refuses us.** 403 for bearer alone, bearer + client-token, and with
-  `app-platform` and `spotify-app-version` added. Both tokens are present and
-  valid (438 and 388 bytes). Our client id is keymaster,
-  `65b708073fc0480ea92a077233ca87bd`, which is not entitled to that endpoint.
-- **The native protocol does not carry it.** The full `ExtensionKind` enum —
-  `UNKNOWN_EXTENSION, CANVAZ, STORYLINES, PODCAST_TOPICS, PODCAST_SEGMENTS,
-  AUDIO_FILES, TRACK_DESCRIPTOR, PODCAST_COUNTER, ARTIST_V4=8, ALBUM_V4=9,
-  TRACK_V4=10, …` — has no visuals kind. The binary contains no `hm://` artist
-  endpoint and no spclient path matching image/visual/gallery/header.
-- **The public web page has nothing to scrape.** `open.spotify.com/artist/<id>`
-  and its `/embed/` variant are client-rendered shells: zero `i.scdn.co` ids,
-  zero `headerImage`. `get_access_token` is blocked outright.
+It is **`artistUnion.headerImage`**, top level, an `ImageV2` whose
+`data.sources[]` carry `maxWidth`/`maxHeight`.
 
-So the choice is between a promo photo, the avatar, or no image — not between
-those and the real banner.
+`visuals` contains `avatarImage` and `gallery` — the round profile picture and
+promo photos. Neither is the banner. Reading `visuals.headerImage`, which does
+not exist, is why this returned nothing even in the responses that did work.
 
-## What is reachable: `hm://artistview/v1/artist/<id>?format=json`
+Ad-hoc GraphQL is refused (`"Missing extensions in the request"`), so the query
+cannot be narrowed to the one field wanted; the whole overview comes back.
 
-Straight over the AP connection we already hold. 64 KB of JSON, the same
-payload the official artist screen is built from:
+## How this stayed broken so long
 
-```
-{ id, title, header, body[], custom }
-```
+The original code had **both** faults at once, and either alone would have hidden
+the other. Worse, a missing banner is legitimately not an error — plenty of
+artists have published none — so the code fell back to the avatar, an image
+appeared, and the page looked like it worked. The fallback only logged when it
+held a `GError`, and a 403 body parses cleanly into "no image found", so there
+was never a `GError` to log.
 
-This is the **mobile** artist page (`ubi:specification_id: mobile-artist-page`),
-which is why there is no banner in it — that design uses a circular avatar, and
-`header.images.main` says so outright with `"custom": {"style": "circular"}`.
+Everything downstream was then debugged as a *sizing* problem, because a 0.84:1
+avatar stretched across a landscape panel genuinely does look like one. Two
+commits went into geometry before anyone checked what the texture was.
 
-The one landscape image hangs off whichever body section carries it:
+Two lessons, both cheap next time:
 
-```
-body[7]  id=pinned_item_row  component=artist:pinnedItemV2
-         images.background.uri → https://i.scdn.co/image/ab6761700000c52c…
-```
+- **A fallback that fires identically on the working and broken paths, and is
+  silent on both, is indistinguishable from success.** It now logs
+  unconditionally.
+- **Verify an image by looking at it.** `ab676170…` was accepted as "the header"
+  on the strength of its 1.33:1 aspect ratio. Opening the file shows a man in a
+  chair — the Artist-pick backdrop. One `Read` would have caught it.
 
-That is the **backdrop of the "Artist pick" card** — verified by looking at the
-image, not by inferring from its aspect ratio, which is the mistake that put an
-avatar on the page in the first place. It is a promo photo of the artist: real,
-landscape, and *not* the header. Artists with no pinned pick have none at all,
-and then the page falls back to the avatar.
+## The native protocol, for the record
 
-Placement is not dependable, so the scan looks for a 40-hex id starting
-`ab676170` anywhere in the payload rather than walking a fixed path.
+`hm://artistview/v1/artist/<id>?format=json` works and returns 64 KB — but it is
+the **mobile** artist page (`ubi:specification_id: mobile-artist-page`), whose
+design has no banner. Its `header.images.main` is the avatar and says so:
+`"custom": {"style": "circular"}`. `hm://artist/v1/<id>/desktop?format=json` is
+gone, returning empty.
 
-`hm://artist/v1/<id>/desktop?format=json` — the librespot-era endpoint — comes
-back empty and is gone.
+The `Artist` message descriptor, read out of the binary, in full: `gid, name,
+popularity, top_track, album_group, single_group, compilation_group,
+appears_on_group, external_id, portrait, biography, activity_period,
+restriction, related, is_portrait_album_cover, portrait_group, sale_period,
+availability`. No header, no banner, no visuals.
 
-### Only one size exists
-
-`c52c` is the only variant that resolves. `e5eb`, `b273`, `1e02`, `5174`,
-`10ca`, `ecd8`, `f178`, `bd5e` all 404. So 660×496 is the whole of it, and the
-banner necessarily upscales.
+`ExtensionKind`: `UNKNOWN_EXTENSION=0, CANVAZ, STORYLINES, PODCAST_TOPICS,
+PODCAST_SEGMENTS, AUDIO_FILES, TRACK_DESCRIPTOR, PODCAST_COUNTER, ARTIST_V4=8,
+ALBUM_V4=9, TRACK_V4=10, SHOW_V4, EPISODE_V4, …` — nothing for artist visuals.
 
 ## Sizing
 
@@ -108,8 +109,8 @@ natural height, nothing pushes back.
 
 The hero is therefore a `GtkOverlay`: an overlay child that is not a
 measure-overlay contributes nothing to measurement and is allocated the
-overlay's size. An empty sizer box carries the height, the picture fills what
-it is given, and `GTK_OVERFLOW_HIDDEN` clips the cover overflow to the rounded
+overlay's size. An empty sizer box carries the height, the picture fills what it
+is given, and `GTK_OVERFLOW_HIDDEN` clips the cover overflow to the rounded
 corners.
 
-Verified at 1169 px wide: texture 1024×770, allocation 1169×260.
+Verified at 1125 px wide: texture 1280×549, allocation 1125×300.

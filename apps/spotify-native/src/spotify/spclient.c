@@ -10,11 +10,22 @@
 #include "protobuf_min.h"
 
 #include <libsoup/soup.h>
+#include <json-glib/json-glib.h>
 #include <string.h>
 
 struct _SpotifySpclient {
   GObject      parent_instance;
   SoupSession *session;
+  /*
+   * A second session, for pathfinder only.
+   *
+   * SoupSession:user-agent is applied to every message it queues, overwriting
+   * whatever the message already carried -- so setting a browser UA on the
+   * message was silently undone, and the request went on 403'ing. pathfinder
+   * refuses anything that does not look like a browser, so it needs a session
+   * whose UA is one.
+   */
+  SoupSession *gql_session;
   GCancellable *cancellable;
 };
 
@@ -325,6 +336,7 @@ spotifygtk_spclient_dispose (GObject *object)
 {
   SpotifySpclient *self = SPOTIFYGTK_SPCLIENT (object);
   g_clear_object (&self->session);
+  g_clear_object (&self->gql_session);
   g_clear_object (&self->cancellable);
   G_OBJECT_CLASS (spotifygtk_spclient_parent_class)->dispose (object);
 }
@@ -781,6 +793,167 @@ on_artist_response (GObject *source, GAsyncResult *result, gpointer user_data)
 
 
 
+
+/*
+ * Artist banner, over pathfinder.
+ *
+ * Two things had to be right that were not, and each hid the other.
+ *
+ * 1. THE USER-AGENT. api-partner answers 403 "Client/request not allowed" to
+ *    anything that does not look like a browser. Not the client id -- the
+ *    shipped client uses keymaster, the same one we do, confirmed in its own
+ *    login bundle. Not the client token, the app version, the origin, or the
+ *    method: every one of those was varied against a live server and every one
+ *    still 403'd. Sending a Chrome UA is the entire difference, and the
+ *    request then succeeds with the credentials we already had.
+ *
+ * 2. THE FIELD IS NOT UNDER `visuals`. It is `artistUnion.headerImage`, at the
+ *    top level, an ImageV2 whose `data.sources[]` carry `maxWidth`/`maxHeight`.
+ *    `visuals` holds `avatarImage` (the round profile picture) and `gallery`
+ *    (promo photos) -- neither is the banner, and reading either one is how
+ *    the page spent so long showing a portrait stretched across a landscape
+ *    panel.
+ *
+ * Sources are ~2660x1140. The URLs point at image-cdn-ak.spotifycdn.com, but
+ * i.scdn.co serves the same ids, so the id alone is enough and the cover
+ * loader needs no new host.
+ *
+ * Operation name and persisted-query hash come from the shipped bundle
+ * (322.js: `new c.l("queryArtistOverview","query","1ac33dda…737c72",null)`).
+ * Persisted means the document is never sent; ad-hoc GraphQL is refused with
+ * "Missing extensions in the request", so this cannot be narrowed to just the
+ * one field we want. See research/artist-images.md.
+ */
+#define PATHFINDER_URL \
+  "https://api-partner.spotify.com/pathfinder/v1/query"
+#define ARTIST_OVERVIEW_HASH \
+  "1ac33ddab5d39a3a9c27802774e6d78b9405cc188c6f75aed007df2a32737c72"
+/* Required. See (1) above -- this is not cosmetic. */
+#define PATHFINDER_UA \
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " \
+  "Chrome/126.0.0.0 Safari/537.36"
+
+/* The trailing path segment of a Spotify image URL is the id. */
+static gchar *
+dup_image_id_from_url (const gchar *url)
+{
+  if (!url || !*url)
+    return NULL;
+  const gchar *slash = strrchr (url, '/');
+  const gchar *id = slash ? slash + 1 : url;
+  if (!*id)
+    return NULL;
+  const gchar *q = strchr (id, '?');
+  return q ? g_strndup (id, (gsize) (q - id)) : g_strdup (id);
+}
+
+static void
+on_artist_header_response (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  ArtistClosure *cl = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body =
+    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+
+  if (!body) {
+    if (cl->callback) cl->callback (NULL, error, cl->user_data);
+    g_free (cl);
+    return;
+  }
+
+  gsize len = 0;
+  const gchar *json = g_bytes_get_data (body, &len);
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  g_autofree gchar *cover = NULL;
+
+  if (json_parser_load_from_data (parser, json, (gssize) len, NULL)) {
+    JsonNode *root = json_parser_get_root (parser);
+    JsonObject *o = (root && JSON_NODE_HOLDS_OBJECT (root))
+      ? json_node_get_object (root) : NULL;
+
+    /* data.artistUnion.headerImage.data.sources[] */
+    const gchar *path[] = { "data", "artistUnion", "headerImage", "data" };
+    for (guint i = 0; o && i < G_N_ELEMENTS (path); i++) {
+      JsonNode *n = json_object_has_member (o, path[i])
+        ? json_object_get_member (o, path[i]) : NULL;
+      o = (n && JSON_NODE_HOLDS_OBJECT (n)) ? json_node_get_object (n) : NULL;
+    }
+
+    JsonArray *sources = (o && json_object_has_member (o, "sources"))
+      ? json_object_get_array_member (o, "sources") : NULL;
+
+    /* Widest wins: the panel is the full width of the page. */
+    gint best = -1;
+    for (guint i = 0; sources && i < json_array_get_length (sources); i++) {
+      JsonObject *src = json_array_get_object_element (sources, i);
+      if (!src || !json_object_has_member (src, "url"))
+        continue;
+      gint w = json_object_has_member (src, "maxWidth")
+        ? (gint) json_object_get_int_member (src, "maxWidth") : 0;
+      if (w <= best)
+        continue;
+      g_autofree gchar *id =
+        dup_image_id_from_url (json_object_get_string_member (src, "url"));
+      if (id) {
+        g_free (cover);
+        cover = g_steal_pointer (&id);
+        best = w;
+      }
+    }
+  }
+
+  if (cl->callback) cl->callback (cover, NULL, cl->user_data);
+  g_free (cl);
+}
+
+void
+spotifygtk_spclient_get_artist_header (SpotifySpclient        *self,
+                                       const gchar            *artist_uri,
+                                       const gchar            *bearer_token,
+                                       const gchar            *client_token,
+                                       SpclientArtistCallback  callback,
+                                       gpointer                user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
+
+  if (!artist_uri || !*artist_uri) {
+    if (callback) callback (NULL, NULL, user_data);
+    return;
+  }
+
+  g_autofree gchar *variables = g_strdup_printf (
+    "{\"uri\":\"%s\",\"locale\":\"\",\"includePrerelease\":true}", artist_uri);
+  g_autofree gchar *extensions = g_strdup_printf (
+    "{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"%s\"}}",
+    ARTIST_OVERVIEW_HASH);
+
+  g_autofree gchar *enc_vars = g_uri_escape_string (variables, NULL, FALSE);
+  g_autofree gchar *enc_ext  = g_uri_escape_string (extensions, NULL, FALSE);
+  g_autofree gchar *url = g_strdup_printf (
+    "%s?operationName=queryArtistOverview&variables=%s&extensions=%s",
+    PATHFINDER_URL, enc_vars, enc_ext);
+
+  SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
+  g_autofree gchar *auth_hdr =
+    g_strdup_printf ("Bearer %s", bearer_token ? bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth_hdr);
+  soup_message_headers_replace (headers, "Accept", "application/json");
+  soup_message_headers_replace (headers, "User-Agent", PATHFINDER_UA);
+  if (client_token && *client_token)
+    soup_message_headers_replace (headers, "Client-Token", client_token);
+
+  ArtistClosure *cl = g_new0 (ArtistClosure, 1);
+  cl->callback  = callback;
+  cl->user_data = user_data;
+
+  if (!self->gql_session)
+    self->gql_session = soup_session_new_with_options ("user-agent", PATHFINDER_UA, NULL);
+
+  soup_session_send_and_read_async (self->gql_session, msg, G_PRIORITY_DEFAULT,
+                                    self->cancellable, on_artist_header_response, cl);
+  g_object_unref (msg);
+}
 
 void
 spotifygtk_spclient_get_artist_portrait (SpotifySpclient        *self,

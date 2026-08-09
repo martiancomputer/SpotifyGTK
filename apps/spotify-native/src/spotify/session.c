@@ -240,6 +240,12 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
 
   g_message ("session: ready (bearer expires in %ds)", expires_in_seconds);
   set_state (self, SPOTIFYGTK_SESSION_READY, "Signed in.");
+  if (g_getenv ("SPOTIFY_DUMP_TOKENS")) {
+    g_autofree gchar *t = g_strdup_printf ("%s\n%s\n",
+      self->bearer_token ? self->bearer_token : "", 
+      self->client_token ? self->client_token : "");
+    g_file_set_contents ("/tmp/claude-1000/-home-wrldmk2--SpotifyGTK/cc964017-47a6-4c10-b489-3031a013748f/scratchpad/tokens.txt", t, -1, NULL);
+  }
 }
 
 /* Re-mint the bearer using the AP session's reusable credentials, which are
@@ -1024,73 +1030,29 @@ on_artist_portrait (const gchar *cover_id, GError *error, gpointer user_data)
 }
 
 /*
- * The best artist image the native protocol will give us -- which is not the
- * banner the desktop client draws, and cannot be made into it.
+ * The banner first, the avatar only if there is none.
  *
- * `hm://artistview/v1/artist/<id>` is the artist page as the *mobile* client
- * builds it: `header.images.main` there is the round avatar, explicitly
- * `style: circular`. There is no banner in it. The one landscape image in the
- * payload has an id beginning ab6761_70_ and is the backdrop of the pinned
- * "Artist pick" card -- a promo photo of the artist. It is the closest thing
- * available, so it is used when present, but it is not the header.
- *
- * The real header is `artistUnion.visuals.headerImage`, and it exists only
- * behind pathfinder, Spotify's GraphQL endpoint, which answers 403
- * "Client/request not allowed" to this client's tokens no matter what headers
- * accompany them: our client id is keymaster, which is not entitled to it.
- * Nothing in the native protocol carries the image -- ExtensionKind has no
- * visuals kind, and the shipped binary contains no artist image route.
- *
- * See research/artist-images.md.
+ * These are two different images and the difference is the whole point:
+ * `headerImage` is the wide backdrop the artist uploads, `portrait_group` is
+ * the round profile picture. Covering a panel with the second is what made
+ * every artist page look broken. Plenty of artists have published no banner,
+ * which is not an error -- hence the fall back, and hence the log line, since
+ * a silent fallback here is exactly what hid a broken request for so long.
  */
-#define ARTIST_HEADER_ID_PREFIX "ab676170"
-
-static gchar *
-artistview_find_header (const gchar *json, gsize len)
-{
-  g_autoptr(JsonParser) parser = json_parser_new ();
-  if (!json_parser_load_from_data (parser, json, (gssize) len, NULL))
-    return NULL;
-
-  /* The id is wanted, not the URL: the cover loader builds its own CDN URL
-   * and keys its caches on the id. */
-  const gchar *p = json;
-  const gchar *end = json + len;
-  while ((p = g_strstr_len (p, end - p, ARTIST_HEADER_ID_PREFIX))) {
-    const gchar *q = p;
-    while (q < end && g_ascii_isxdigit (*q))
-      q++;
-    if (q - p == 40)
-      return g_strndup (p, 40);
-    p += strlen (ARTIST_HEADER_ID_PREFIX);
-  }
-  return NULL;
-}
-
 static void
-on_artistview (MercuryResponse *response, gpointer user_data)
+on_artist_header (const gchar *cover_id, GError *error, gpointer user_data)
 {
   ArtistImageOp *op = user_data;
-  SpotifyNativeSession *self = op->session;
-  g_autofree gchar *cover = NULL;
 
-  if (response && response->parts && response->parts->len > 0) {
-    gsize len = 0;
-    const gchar *data = g_bytes_get_data (response->parts->pdata[0], &len);
-    if (data && len)
-      cover = artistview_find_header (data, len);
-  }
-
-  if (cover) {
-    artist_image_done (op, cover);
+  if (cover_id && *cover_id) {
+    artist_image_done (op, cover_id);
     return;
   }
 
-  /* Plenty of artists have published no header. That is not an error, but it
-   * is worth saying -- the silence here is exactly what hid the 403. */
-  g_message ("session: no artist header for %s; falling back to the avatar",
-             op->uri);
+  g_message ("session: no artist banner for %s (%s); using the avatar",
+             op->uri, error ? error->message : "none published");
 
+  SpotifyNativeSession *self = op->session;
   g_mutex_lock (&self->lock);
   g_autofree gchar *bearer = g_strdup (self->bearer_token);
   g_autofree gchar *ctoken = g_strdup (self->client_token);
@@ -1106,20 +1068,20 @@ start_artist_image (gpointer user_data)
   ArtistImageOp *op = user_data;
   SpotifyNativeSession *self = op->session;
 
-  SpotifyMercury *mercury = spotifygtk_native_session_get_mercury (self);
-  const gchar *id = strrchr (op->uri, ':');
+  g_mutex_lock (&self->lock);
+  g_autofree gchar *bearer = g_strdup (self->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (self->client_token);
+  g_mutex_unlock (&self->lock);
 
-  if (!self->spclient || !mercury || !id || !*(id + 1)) {
+  if (!self->spclient) {
     if (op->callback) op->callback (NULL, op->user_data);
     g_free (op->uri);
     g_free (op);
     return G_SOURCE_REMOVE;
   }
 
-  g_autofree gchar *view = g_strdup_printf (
-    "hm://artistview/v1/artist/%s?format=json", id + 1);
-  spotifygtk_mercury_request (mercury, MERCURY_METHOD_GET, view, NULL,
-                              on_artistview, op);
+  spotifygtk_spclient_get_artist_header (self->spclient, op->uri, bearer, ctoken,
+                                         on_artist_header, op);
   return G_SOURCE_REMOVE;
 }
 

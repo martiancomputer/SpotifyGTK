@@ -200,6 +200,15 @@ typedef void (*SpclientArtistCallback) (const gchar *cover_id /* NULL if none */
                                         gpointer     user_data);
 
 
+/* The artist's banner, via pathfinder. `cover_id` is NULL when the artist has
+ * published none -- common, and not an error. */
+void spotifygtk_spclient_get_artist_header (SpotifySpclient        *self,
+                                            const gchar            *artist_uri,
+                                            const gchar            *bearer_token,
+                                            const gchar            *client_token,
+                                            SpclientArtistCallback  callback,
+                                            gpointer                user_data);
+
 void spotifygtk_spclient_get_artist_portrait (SpotifySpclient        *self,
                                               const gchar            *artist_uri,
                                               const gchar            *bearer_token,

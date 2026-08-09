@@ -32,7 +32,7 @@
  * contributes nothing to measurement and is allocated the overlay's size, so
  * the sizer decides the height and the picture fills whatever it is given.
  */
-#define HERO_HEIGHT         260
+#define HERO_HEIGHT         300
 /*
  * Decode size for the banner.
  *
@@ -45,7 +45,7 @@
  * folded in for HiDPI, exactly as the album cards do it. Only ever one of
  * these is held at a time, so the cost is one image rather than a gridful.
  */
-#define HERO_IMAGE_PX       1024
+#define HERO_IMAGE_PX       1280
 
 /*
  * Release kinds.
@@ -179,9 +179,9 @@ on_artist_image (const gchar *cover_id, gpointer user_data)
   gtk_label_set_text (self->hero_caption, "");
   /* Asked for at the banner's width, not its height: the loader fits within a
    * square, so for a wide image the target is what the width becomes. The
-   * measured header is 660x496, so this upscales -- the loader has no way to
-   * say "no larger than the source", and a decode box much past this one is
-   * megabytes of interpolated pixels for no visible gain. */
+   * banner is ~2660x1140, so this decodes to about 1280x549 -- enough to draw
+   * a full-width panel without upscaling, and a decode box much past it is
+   * megabytes of pixels for no visible gain. */
   gint scale = gtk_widget_get_scale_factor (GTK_WIDGET (self));
   spotifygtk_cover_load (cover_id, HERO_IMAGE_PX * MAX (1, scale), NULL,
                          on_hero_cover_loaded, self->hero_art);
