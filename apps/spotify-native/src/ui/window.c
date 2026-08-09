@@ -2222,7 +2222,29 @@ navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
 /* The shared rule body. Every colour is an @-name resolved by the palette
  * prepended at load time. */
 static const gchar *theme_body =
-  "window { background-color: @bg_chrome; color: @fg; }"
+  /*
+   * The interface face.
+   *
+   * The system default here is Noto Sans, which is a text face -- narrow
+   * apertures and a modest x-height. At the 11-13px the subtitles, durations
+   * and captions run at, that reads as slightly-wrong rather than small, which
+   * is the "uncanny" people were reporting.
+   *
+   * Adwaita Sans is GNOME's interface font and is derived from Inter, drawn for
+   * exactly this size range. Rendered side by side at 9.75pt it has the taller
+   * x-height and more open shapes the small sizes need.
+   *
+   * Applied to the whole window rather than only the small classes on purpose.
+   * Swapping just the subtitles put two faces in one row, and because Adwaita
+   * Sans is the wider of the two, the subtitle then read looser than the title
+   * above it -- the mismatch was more noticeable than the problem being fixed.
+   *
+   * A stack, not a single name: on a system without Adwaita Sans this has to
+   * land somewhere sensible rather than on whatever fontconfig picks. Inter is
+   * the same design, Cantarell is what GNOME shipped before it.
+   */
+  "window { background-color: @bg_chrome; color: @fg;"
+  "  font-family: \"Adwaita Sans\", Inter, Cantarell, sans-serif; }"
 
   /* ── Structure ─────────────────────────────────────────────── */
   "headerbar { background-color: @bg_chrome; box-shadow: none;"
