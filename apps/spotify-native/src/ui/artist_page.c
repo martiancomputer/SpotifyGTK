@@ -20,9 +20,24 @@
 #define ARTIST_PAGE_LIMIT   200
 #define ARTIST_TOP_TRACKS   12
 
-/* Height of the hero panel. Tall enough to read as a banner rather than an
- * oversized row, short enough that the tracks are still on screen with it. */
-#define HERO_HEIGHT         220
+/*
+ * Height of the banner.
+ *
+ * A Spotify header is roughly 2.3:1 and the panel is as wide as the page, so
+ * this number decides how much of the image survives. At 220 the panel was
+ * about 6:1: covering it filled the width and sliced a thin band out of the
+ * middle, which is how subjects lost their heads.
+ *
+ * 320 brings it to roughly 4:1 on a maximised window -- still a banner rather
+ * than a picture taking over the page, but close enough to the source that
+ * covering trims the top and bottom instead of cutting through the centre.
+ *
+ * Some crop is unavoidable: the panel is wider than the image is, at any
+ * height that leaves room for the tracks. Covering and losing the edges is
+ * the better trade than fitting and leaving bars down both sides, which is
+ * what the small centred avatar looked like.
+ */
+#define HERO_HEIGHT         320
 /*
  * Decode size for the banner.
  *
