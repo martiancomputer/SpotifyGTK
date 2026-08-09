@@ -1003,15 +1003,51 @@ typedef struct {
 } ArtistImageOp;
 
 static void
-on_artist_image (const gchar *cover_id, GError *error, gpointer user_data)
+artist_image_done (ArtistImageOp *op, const gchar *cover_id)
 {
-  ArtistImageOp *op = user_data;
-  if (error)
-    g_message ("session: no artist portrait for %s (%s)", op->uri, error->message);
   if (op->callback)
     op->callback (cover_id, op->user_data);
   g_free (op->uri);
   g_free (op);
+}
+
+/* The avatar, asked for only when there is no header to show. */
+static void
+on_artist_portrait (const gchar *cover_id, GError *error, gpointer user_data)
+{
+  ArtistImageOp *op = user_data;
+  if (error)
+    g_message ("session: no artist portrait for %s (%s)", op->uri, error->message);
+  artist_image_done (op, cover_id);
+}
+
+/*
+ * The header first. It is the image the artist actually uploads as their
+ * banner; the portrait is a square avatar and looks wrong stretched across
+ * one. Plenty of artists have published no header, which is not an error --
+ * hence the fall back rather than a failure.
+ */
+static void
+on_artist_header (const gchar *cover_id, GError *error, gpointer user_data)
+{
+  ArtistImageOp *op = user_data;
+
+  if (cover_id && *cover_id) {
+    artist_image_done (op, cover_id);
+    return;
+  }
+  if (error)
+    g_message ("session: no artist header for %s (%s); trying the portrait",
+               op->uri, error->message);
+
+  SpotifyNativeSession *self = op->session;
+  g_mutex_lock (&self->lock);
+  g_autofree gchar *bearer = g_strdup (self->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (self->client_token);
+  g_mutex_unlock (&self->lock);
+
+  spotifygtk_spclient_get_artist_portrait (self->spclient, op->uri, bearer, ctoken,
+                                           on_artist_portrait, op);
 }
 
 static gboolean
@@ -1032,8 +1068,8 @@ start_artist_image (gpointer user_data)
     return G_SOURCE_REMOVE;
   }
 
-  spotifygtk_spclient_get_artist_portrait (self->spclient, op->uri, bearer, ctoken,
-                                           on_artist_image, op);
+  spotifygtk_spclient_get_artist_header (self->spclient, op->uri, bearer, ctoken,
+                                         on_artist_header, op);
   return G_SOURCE_REMOVE;
 }
 

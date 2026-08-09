@@ -23,7 +23,9 @@
 /* Height of the hero panel. Tall enough to read as a banner rather than an
  * oversized row, short enough that the tracks are still on screen with it. */
 #define HERO_HEIGHT         220
-#define HERO_ART_PX         180
+/* Decode width for the banner. A header is a wide image drawn across the page,
+ * so it is fetched at a width rather than at the panel's height. */
+#define HERO_IMAGE_PX       640
 
 /*
  * Release kinds.
@@ -81,7 +83,7 @@ struct _SpotifyGtkArtistPage {
   GtkLabel            *title_label;
   GtkLabel            *year_label;
 
-  GtkImage            *hero_art;
+  GtkPicture          *hero_art;   /* a banner, not an icon -- see init */
   GtkLabel            *hero_caption;
 
   SpotifyGtkTrackList *list;
@@ -116,10 +118,10 @@ static guint signals[N_SIGNALS];
 static void
 on_hero_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
-  GtkImage *image = user_data;
-  if (!texture || !GTK_IS_IMAGE (image))
+  GtkPicture *pic = user_data;
+  if (!texture || !GTK_IS_PICTURE (pic))
     return;
-  gtk_image_set_from_paintable (image, GDK_PAINTABLE (texture));
+  gtk_picture_set_paintable (pic, GDK_PAINTABLE (texture));
 }
 
 /* The portrait, once the extended-metadata request answers. */
@@ -134,14 +136,16 @@ on_artist_image (const gchar *cover_id, gpointer user_data)
     return;
 
   if (!cover_id || !*cover_id) {
-    /* Some artists have no portrait at all. The placeholder stays, and the
-     * caption says so rather than leaving an unexplained empty panel. */
+    /* Neither a header nor a portrait. The placeholder stays, and the caption
+     * says so rather than leaving an unexplained empty panel. */
     gtk_label_set_text (self->hero_caption, "No artist image");
     return;
   }
 
   gtk_label_set_text (self->hero_caption, "");
-  spotifygtk_cover_load (cover_id, HERO_ART_PX, NULL,
+  /* Asked for at the banner's width, not its height: a header is wide and
+   * would come back needlessly small if sized by the short edge. */
+  spotifygtk_cover_load (cover_id, HERO_IMAGE_PX, NULL,
                          on_hero_cover_loaded, self->hero_art);
 }
 
@@ -393,8 +397,7 @@ spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
   gtk_label_set_text (self->title_label, name ? name : "");
   gtk_label_set_text (self->year_label, "");
   gtk_label_set_text (self->hero_caption, "");
-  gtk_image_set_from_icon_name (self->hero_art, "avatar-default-symbolic");
-  gtk_image_set_pixel_size (self->hero_art, HERO_ART_PX);
+  gtk_picture_set_paintable (self->hero_art, NULL);
 
   spotifygtk_track_list_clear (self->list);
   g_clear_pointer (&self->all_releases, g_ptr_array_unref);
@@ -564,11 +567,19 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   gtk_widget_set_size_request (hero, -1, HERO_HEIGHT);
   gtk_widget_set_hexpand (hero, TRUE);
 
-  self->hero_art = GTK_IMAGE (gtk_image_new_from_icon_name ("avatar-default-symbolic"));
-  gtk_image_set_pixel_size (self->hero_art, HERO_ART_PX);
-  gtk_widget_set_halign (GTK_WIDGET (self->hero_art), GTK_ALIGN_CENTER);
-  gtk_widget_set_valign (GTK_WIDGET (self->hero_art), GTK_ALIGN_CENTER);
+  /*
+   * A GtkPicture, not a GtkImage. An image draws at an icon size and centres
+   * what it is given, which is how the avatar ended up as a small square in
+   * the middle of the banner. A picture can be told to cover its allocation,
+   * which is what a header image is for -- CONTAIN would letterbox it back
+   * into that same centred square.
+   */
+  self->hero_art = GTK_PICTURE (gtk_picture_new ());
+  gtk_picture_set_content_fit (self->hero_art, GTK_CONTENT_FIT_COVER);
+  gtk_picture_set_can_shrink (self->hero_art, TRUE);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->hero_art), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self->hero_art), TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->hero_art), "artist-hero-art");
   gtk_box_append (GTK_BOX (hero), GTK_WIDGET (self->hero_art));
 
   /* What the panel is showing, since it is a release standing in for imagery

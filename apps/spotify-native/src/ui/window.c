@@ -2322,6 +2322,9 @@ static const gchar *theme_body =
    * palette entry so it reads as the same family of surface. */
   ".artist-hero { background-color: @art_bg; border-radius: 16px;"
   "  color: @art_glyph; }"
+  /* The banner image is clipped to the panel it fills, or a covering image
+   * would paint over the rounded corners and square them off. */
+  ".artist-hero-art { border-radius: 16px; }"
   ".pill-button { background-color: @bg_selected; border-radius: 999px;"
   "  color: @fg; font-size: 12px; font-weight: 600;"
   "  padding: 4px 14px; min-height: 0; }"
