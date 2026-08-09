@@ -184,6 +184,28 @@ void spotifygtk_spclient_get_tracks_metadata (SpotifySpclient      *self,
  *
  * bearer_token: login5 access_token. client_token: from clienttoken.h.
  */
+/*
+ * The artist's portrait image id, from the extended-metadata service.
+ *
+ * A resolved track carries its album's cover and nothing else, so an artist
+ * page has no image of the artist unless it asks for one. The same batch
+ * endpoint answers for any entity -- it takes an entity URI and an extension
+ * kind -- so this is that endpoint with ARTIST_V4 instead of TRACK_V4.
+ *
+ * `cover_id` is a hex Image.file_id ready for the cover loader, or NULL when
+ * the artist has no portrait. Owned by the callee.
+ */
+typedef void (*SpclientArtistCallback) (const gchar *cover_id /* NULL if none */,
+                                        GError      *error    /* NULL on success */,
+                                        gpointer     user_data);
+
+void spotifygtk_spclient_get_artist_portrait (SpotifySpclient        *self,
+                                              const gchar            *artist_uri,
+                                              const gchar            *bearer_token,
+                                              const gchar            *client_token,
+                                              SpclientArtistCallback  callback,
+                                              gpointer                user_data);
+
 void spotifygtk_spclient_get_context (SpotifySpclient        *self,
                                        const gchar            *context_uri,
                                        const gchar            *bearer_token,

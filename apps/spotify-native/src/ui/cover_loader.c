@@ -162,13 +162,17 @@ disk_entry_older (gconstpointer a, gconstpointer b)
 static void
 disk_cache_prune (GTask *task, gpointer src, gpointer data, GCancellable *c)
 {
-  (void) task; (void) src; (void) data; (void) c;
+  (void) src; (void) data; (void) c;
 
   g_autofree gchar *dir = g_build_filename (g_get_user_cache_dir (), "spotifygtk",
                                             "images", NULL);
   g_autoptr(GDir) d = g_dir_open (dir, 0, NULL);
-  if (!d)
+  if (!d) {
+    /* A thread func must complete its task on every path; GTask asserts when
+     * one returns without doing so. */
+    g_task_return_boolean (task, TRUE);
     return;
+  }
 
   g_autoptr(GArray) files = g_array_new (FALSE, FALSE, sizeof (DiskEntry));
   gsize total = 0;
@@ -198,6 +202,8 @@ disk_cache_prune (GTask *task, gpointer src, gpointer data, GCancellable *c)
 
   for (guint i = 0; i < files->len; i++)
     g_free (g_array_index (files, DiskEntry, i).path);
+
+  g_task_return_boolean (task, TRUE);
 }
 
 /*

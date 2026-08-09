@@ -642,6 +642,195 @@ on_context_response (GObject *source, GAsyncResult *result, gpointer user_data)
   g_free (cl);
 }
 
+
+/*
+ * Artist portrait, over the same batch endpoint the track metadata uses.
+ *
+ * Field numbers all recovered from the shipped client's own descriptors rather
+ * than assumed: ExtensionKind.ARTIST_V4 = 8 (the enum there also gives
+ * TRACK_V4 = 10, which is the constant this file already used, so the reading
+ * is self-checking), and Artist.portrait_group = 17 -- the same number Album
+ * gives cover_group, which is why the image parsing below is identical to the
+ * album path.
+ */
+#define EXTENSION_KIND_ARTIST_V4   8
+#define ARTIST_FIELD_PORTRAIT_GROUP 17
+#define ARTIST_FIELD_PORTRAIT       11   /* repeated Image, older shape */
+
+typedef struct {
+  SpclientArtistCallback callback;
+  gpointer               user_data;
+} ArtistClosure;
+
+/* Widest image in an ImageGroup, as hex. The hero is drawn large, so unlike a
+ * row thumbnail it genuinely wants the biggest variant. */
+static gchar *
+dup_widest_image (const guint8 *group, gsize len)
+{
+  gsize         pos = 0;
+  guint32       fnum;
+  PbWireType    wtype;
+  const guint8 *fdata;
+  gsize         flen;
+  guint64       fvarint;
+
+  gchar  *best   = NULL;
+  gint64  best_w = -1;
+
+  while (pb_read_field (group, len, &pos, &fnum, &wtype, &fdata, &flen, &fvarint)) {
+    if (fnum != 1 || wtype != PB_WIRE_LENGTH_DELIMITED)   /* ImageGroup.image */
+      continue;
+
+    const guint8 *id = NULL;
+    gsize         id_len = 0;
+    if (!pb_find_bytes_field (fdata, flen, 1, &id, &id_len))   /* Image.file_id */
+      continue;
+
+    guint64 raw = 0;
+    gint64  w   = 0;
+    if (pb_find_varint_field (fdata, flen, 3, &raw))           /* Image.width */
+      w = (gint64) ((raw >> 1) ^ (~(raw & 1) + 1));
+
+    if (w > best_w || best == NULL) {
+      g_free (best);
+      GString *hex = g_string_sized_new (id_len * 2);
+      for (gsize i = 0; i < id_len; i++)
+        g_string_append_printf (hex, "%02x", id[i]);
+      best = g_string_free (hex, FALSE);
+      best_w = w;
+    }
+  }
+  return best;
+}
+
+static void
+on_artist_response (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  ArtistClosure *cl = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body =
+    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+
+  if (!body) {
+    if (cl->callback) cl->callback (NULL, error, cl->user_data);
+    g_free (cl);
+    return;
+  }
+
+  gsize len = 0;
+  const guint8 *data = g_bytes_get_data (body, &len);
+
+  gsize         pos = 0;
+  guint32       fnum;
+  PbWireType    wtype;
+  const guint8 *fdata;
+  gsize         flen;
+  guint64       fvarint;
+  g_autofree gchar *cover = NULL;
+
+  /* Same envelope as the track batch: extended_metadata -> extension_data ->
+   * Any.value, with an Artist inside instead of a Track. */
+  while (!cover && pb_read_field (data, len, &pos, &fnum, &wtype, &fdata, &flen, &fvarint)) {
+    if (fnum != BER_EXTENDED_METADATA || wtype != PB_WIRE_LENGTH_DELIMITED)
+      continue;
+
+    gsize         ipos = 0;
+    guint32       ifnum;
+    PbWireType    iwtype;
+    const guint8 *idata;
+    gsize         ilen;
+    guint64       ivarint;
+
+    while (!cover && pb_read_field (fdata, flen, &ipos, &ifnum, &iwtype,
+                                    &idata, &ilen, &ivarint)) {
+      if (ifnum != EEDA_EXTENSION_DATA || iwtype != PB_WIRE_LENGTH_DELIMITED)
+        continue;
+
+      const guint8 *any = NULL; gsize any_len = 0;
+      if (!pb_find_bytes_field (idata, ilen, EED_EXTENSION_DATA, &any, &any_len))
+        continue;
+      const guint8 *artist = NULL; gsize artist_len = 0;
+      if (!pb_find_bytes_field (any, any_len, ANY_VALUE, &artist, &artist_len))
+        continue;
+
+      const guint8 *grp = NULL; gsize grp_len = 0;
+      if (pb_find_bytes_field (artist, artist_len, ARTIST_FIELD_PORTRAIT_GROUP,
+                               &grp, &grp_len))
+        cover = dup_widest_image (grp, grp_len);
+
+      /* Some artists carry the older repeated Image instead of the group. */
+      if (!cover && pb_find_bytes_field (artist, artist_len, ARTIST_FIELD_PORTRAIT,
+                                         &grp, &grp_len)) {
+        const guint8 *id = NULL; gsize id_len = 0;
+        if (pb_find_bytes_field (grp, grp_len, 1, &id, &id_len)) {
+          GString *hex = g_string_sized_new (id_len * 2);
+          for (gsize i = 0; i < id_len; i++)
+            g_string_append_printf (hex, "%02x", id[i]);
+          cover = g_string_free (hex, FALSE);
+        }
+      }
+    }
+  }
+
+  if (cl->callback)
+    cl->callback (cover, NULL, cl->user_data);
+  g_free (cl);
+}
+
+void
+spotifygtk_spclient_get_artist_portrait (SpotifySpclient        *self,
+                                         const gchar            *artist_uri,
+                                         const gchar            *bearer_token,
+                                         const gchar            *client_token,
+                                         SpclientArtistCallback  callback,
+                                         gpointer                user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
+
+  if (!artist_uri || !*artist_uri) {
+    if (callback) callback (NULL, NULL, user_data);
+    return;
+  }
+
+  g_autofree gchar *url = g_strdup_printf (
+    "https://%s/extended-metadata/v0/extended-metadata", SPCLIENT_FALLBACK_HOST);
+
+  GByteArray *req_buf = g_byte_array_new ();
+
+  GByteArray *query_buf = g_byte_array_new ();
+  pb_write_varint_field (query_buf, 1, EXTENSION_KIND_ARTIST_V4);
+
+  GByteArray *entity_req_buf = g_byte_array_new ();
+  pb_write_bytes_field (entity_req_buf, 1,
+                        (const guint8 *) artist_uri, strlen (artist_uri));
+  pb_write_message_field (entity_req_buf, 2, query_buf->data, query_buf->len);
+  pb_write_message_field (req_buf, 2, entity_req_buf->data, entity_req_buf->len);
+
+  g_byte_array_free (query_buf, TRUE);
+  g_byte_array_free (entity_req_buf, TRUE);
+
+  SoupMessage *msg = soup_message_new (SOUP_METHOD_POST, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
+  g_autofree gchar *auth_hdr = g_strdup_printf ("Bearer %s", bearer_token ? bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth_hdr);
+  soup_message_headers_replace (headers, "Content-Type", "application/x-protobuf");
+  soup_message_headers_replace (headers, "Accept", "application/x-protobuf");
+  if (client_token && *client_token)
+    soup_message_headers_replace (headers, "Client-Token", client_token);
+
+  GBytes *body_bytes = g_byte_array_free_to_bytes (req_buf);
+  soup_message_set_request_body_from_bytes (msg, "application/x-protobuf", body_bytes);
+  g_bytes_unref (body_bytes);
+
+  ArtistClosure *cl = g_new0 (ArtistClosure, 1);
+  cl->callback  = callback;
+  cl->user_data = user_data;
+
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
+                                    self->cancellable, on_artist_response, cl);
+  g_object_unref (msg);
+}
+
 void
 spotifygtk_spclient_get_context (SpotifySpclient        *self,
                                  const gchar            *context_uri,

@@ -122,6 +122,29 @@ on_hero_cover_loaded (GdkTexture *texture, gpointer user_data)
   gtk_image_set_from_paintable (image, GDK_PAINTABLE (texture));
 }
 
+/* The portrait, once the extended-metadata request answers. */
+static void
+on_artist_image (const gchar *cover_id, gpointer user_data)
+{
+  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (user_data);
+  g_weak_ref_clear (user_data);
+  g_free (user_data);
+
+  if (!self)
+    return;
+
+  if (!cover_id || !*cover_id) {
+    /* Some artists have no portrait at all. The placeholder stays, and the
+     * caption says so rather than leaving an unexplained empty panel. */
+    gtk_label_set_text (self->hero_caption, "No artist image");
+    return;
+  }
+
+  gtk_label_set_text (self->hero_caption, "");
+  spotifygtk_cover_load (cover_id, HERO_ART_PX, NULL,
+                         on_hero_cover_loaded, self->hero_art);
+}
+
 static void
 on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_data)
 {
@@ -336,18 +359,12 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     gtk_label_set_text (self->year_label, year);
   }
 
-  /* The hero borrows the first track's art. Spotify has artist imagery but it
-   * is not on this path -- context-resolve returns tracks, and a track carries
-   * its album's cover and nothing else -- so this is the artist's most current
-   * release standing in for a portrait, which is what it is captioned as. */
-  const SpotifyNativeTrack *first = tracks->len > 0
-    ? g_ptr_array_index (tracks, 0) : NULL;
-  if (first && first->cover_id)
-    spotifygtk_cover_load (first->cover_id, HERO_ART_PX, NULL,
-                           on_hero_cover_loaded, self->hero_art);
-  if (first)
-    gtk_label_set_text (self->hero_caption,
-                        first->album ? first->album : "");
+  /*
+   * The hero waits for the artist's own portrait, asked for separately in
+   * show(). A track carries its album's cover and nothing else, so the
+   * resolve cannot supply one -- standing a release in for it was wrong, and
+   * showed the newest single where the artist should be.
+   */
 
   /* Top tracks: the head of the resolve, which is Spotify's own ordering for
    * an artist context and so already "most played" rather than arbitrary. */
@@ -395,6 +412,14 @@ spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
   self->in_flight = g_cancellable_new ();
 
   spotifygtk_track_list_set_status (self->list, "Loading…");
+
+  /* The portrait is its own request -- a different entity kind on the same
+   * batch endpoint -- so it is asked for in parallel with the resolve rather
+   * than after it. */
+  GWeakRef *img_ref = g_new0 (GWeakRef, 1);
+  g_weak_ref_init (img_ref, self);
+  spotifygtk_native_session_get_artist_image (self->session, artist_uri,
+                                              on_artist_image, img_ref);
 
   GWeakRef *ref = g_new0 (GWeakRef, 1);
   g_weak_ref_init (ref, self);

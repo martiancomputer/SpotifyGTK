@@ -994,6 +994,72 @@ spotifygtk_native_session_load_tracks (SpotifyNativeSession *self,
   g_main_context_invoke (self->context, start_load_tracks, op);
 }
 
+
+typedef struct {
+  SpotifyNativeSession        *session;
+  gchar                       *uri;
+  SpotifyNativeArtistImageFunc callback;
+  gpointer                     user_data;
+} ArtistImageOp;
+
+static void
+on_artist_image (const gchar *cover_id, GError *error, gpointer user_data)
+{
+  ArtistImageOp *op = user_data;
+  if (error)
+    g_message ("session: no artist portrait for %s (%s)", op->uri, error->message);
+  if (op->callback)
+    op->callback (cover_id, op->user_data);
+  g_free (op->uri);
+  g_free (op);
+}
+
+static gboolean
+start_artist_image (gpointer user_data)
+{
+  ArtistImageOp *op = user_data;
+  SpotifyNativeSession *self = op->session;
+
+  g_mutex_lock (&self->lock);
+  g_autofree gchar *bearer = g_strdup (self->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (self->client_token);
+  g_mutex_unlock (&self->lock);
+
+  if (!self->spclient) {
+    if (op->callback) op->callback (NULL, op->user_data);
+    g_free (op->uri);
+    g_free (op);
+    return G_SOURCE_REMOVE;
+  }
+
+  spotifygtk_spclient_get_artist_portrait (self->spclient, op->uri, bearer, ctoken,
+                                           on_artist_image, op);
+  return G_SOURCE_REMOVE;
+}
+
+void
+spotifygtk_native_session_get_artist_image (SpotifyNativeSession *self,
+                                            const gchar          *artist_uri,
+                                            SpotifyNativeArtistImageFunc callback,
+                                            gpointer              user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+
+  if (!artist_uri || !self->context) {
+    if (callback) callback (NULL, user_data);
+    return;
+  }
+
+  ArtistImageOp *op = g_new0 (ArtistImageOp, 1);
+  op->session   = self;
+  op->uri       = g_strdup (artist_uri);
+  op->callback  = callback;
+  op->user_data = user_data;
+
+  /* Onto the worker: every spclient call must run on the session's context. */
+  g_main_context_invoke (self->context, start_artist_image, op);
+}
+
 void
 spotifygtk_native_session_invalidate_context (SpotifyNativeSession *self,
                                               const gchar          *context_uri)
