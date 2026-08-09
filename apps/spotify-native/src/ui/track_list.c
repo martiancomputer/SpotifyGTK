@@ -46,6 +46,7 @@ struct _SpotifyGtkTrackList {
   /* Scroll settle detection. Cover loading is suppressed while the adjustment
    * is moving and resumed once it has been still for SETTLE_MS. */
   GtkAdjustment *vadj;         /* borrowed */
+  GtkWidget     *scroller;     /* borrowed; NULL-safe */
   guint          settle_id;
   GPtrArray     *bound_rows;   /* borrowed SpotifyGtkTrackRow*, live bindings */
 };
@@ -442,6 +443,7 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->status));
 
   GtkWidget *scroller = gtk_scrolled_window_new ();
+  self->scroller = scroller;
   gtk_widget_set_vexpand (scroller, TRUE);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
@@ -639,6 +641,33 @@ spotifygtk_track_list_set_status (SpotifyGtkTrackList *self, const gchar *messag
   } else {
     gtk_widget_set_visible (GTK_WIDGET (self->status), FALSE);
   }
+}
+
+/*
+ * Render at full height inside somebody else's scroller.
+ *
+ * The list normally owns a scroller and expands to fill its page. On a page
+ * that scrolls as a whole -- an artist, where the tracks are one section among
+ * several -- that produces a scroller inside a scroller, which traps the wheel
+ * and gives the inner list a scrollbar of its own halfway down the page.
+ *
+ * Policy NEVER plus propagate-natural-height makes it ask for exactly the
+ * height of its rows and let the page do the scrolling.
+ */
+void
+spotifygtk_track_list_set_inline (SpotifyGtkTrackList *self, gboolean inlined)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  if (!self->scroller)
+    return;
+
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (self->scroller),
+                                  GTK_POLICY_NEVER,
+                                  inlined ? GTK_POLICY_NEVER : GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_propagate_natural_height (
+    GTK_SCROLLED_WINDOW (self->scroller), inlined);
+  gtk_widget_set_vexpand (self->scroller, !inlined);
+  gtk_widget_set_vexpand (GTK_WIDGET (self), !inlined);
 }
 
 void

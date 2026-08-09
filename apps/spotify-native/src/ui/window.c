@@ -33,6 +33,7 @@
 #include "spotify/native_auth.h"
 #include "settings.h"
 #include "context_page.h"
+#include "artist_page.h"
 #include "track_list.h"
 
 #include "../player_service.h"
@@ -123,7 +124,8 @@ struct _SpotifyGtkNativeWindow {
   SpotifyGtkLikedSongsPage *liked_page;
   SpotifyGtkLibraryPage *library_page;
   SpotifyGtkSettingsPage *settings_page;
-  SpotifyGtkContextPage *context_page;   /* album / artist target */
+  SpotifyGtkContextPage *context_page;   /* album / playlist target */
+  SpotifyGtkArtistPage  *artist_page;    /* artists get their own layout */
 
   /* Now Playing panel (right side) */
   SpotifyGtkNowPlayingPanel *now_playing_panel;
@@ -241,10 +243,16 @@ nav_go (SpotifyGtkNativeWindow *self, gint dir)
 
   self->nav_pos = target;
   NavEntry *e = g_ptr_array_index (self->nav_history, target);
-  if (e->uri)
-    spotifygtk_context_page_load (self->context_page, e->uri,
-                                  e->title ? e->title : "Album",
-                                  e->kind ? e->kind : "Album");
+  if (e->uri) {
+    /* Restoring a history entry has to pick the same page the entry was
+     * recorded from, or Back would land an artist in the album view. */
+    if (g_str_has_prefix (e->uri, "spotify:artist:"))
+      spotifygtk_artist_page_show (self->artist_page, e->uri, e->title);
+    else
+      spotifygtk_context_page_load (self->context_page, e->uri,
+                                    e->title ? e->title : "Album",
+                                    e->kind ? e->kind : "Album");
+  }
   navigate_raw (self, e->page);
   nav_update_buttons (self);
 }
@@ -1745,7 +1753,10 @@ on_player_state_changed (SpotifyNativePlayerService *player,
   const gchar *uri = has_track ? self->current_track_uri : NULL;
   spotifygtk_search_page_set_playing_uri (self->search_page, uri, is_playing);
   spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, uri, is_playing);
+  spotifygtk_artist_page_set_playing_uri (self->artist_page,
+                                          self->current_track_uri, is_playing);
   spotifygtk_context_page_set_playing_uri (self->context_page, uri, is_playing);
+  spotifygtk_artist_page_set_playing_uri (self->artist_page, uri, is_playing);
 
   if (state == SPOTIFYGTK_PLAYER_ERROR) {
     g_warning ("Player error: %s", message);
@@ -1911,6 +1922,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     spotifygtk_search_page_set_session (self->search_page, session);
     spotifygtk_liked_songs_page_set_session (self->liked_page, session);
     spotifygtk_context_page_set_session (self->context_page, session);
+    spotifygtk_artist_page_set_session (self->artist_page, session);
     spotifygtk_home_page_set_session (self->home_page, session);
 
     /* Liked state for every list and every context menu. Paged, so the size of
@@ -2025,6 +2037,8 @@ set_page_covers_loaded (SpotifyGtkNativeWindow *self, const gchar *page_name,
     list = spotifygtk_search_page_get_list (self->search_page);
   else if (g_strcmp0 (page_name, "context") == 0)
     list = spotifygtk_context_page_get_list (self->context_page);
+  else if (g_strcmp0 (page_name, "artist") == 0)
+    list = spotifygtk_artist_page_get_list (self->artist_page);
 
   if (list) {
     if (loaded) spotifygtk_track_list_reload_covers (list);
@@ -2159,6 +2173,15 @@ static void
 navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
                      const gchar *title, const gchar *kind)
 {
+  /* Artists have their own page -- a hero, their popular tracks and their
+   * releases as cards -- rather than the bare track list an album gets. */
+  if (uri && g_str_has_prefix (uri, "spotify:artist:")) {
+    spotifygtk_artist_page_show (self->artist_page, uri, title);
+    navigate_raw (self, "artist");
+    nav_record (self, "artist", uri, title, kind);
+    return;
+  }
+
   spotifygtk_context_page_load (self->context_page, uri, title, kind);
   navigate_raw (self, "context");
   nav_record (self, "context", uri, title, kind);
@@ -2599,6 +2622,7 @@ spotifygtk_native_window_constructed (GObject *object)
   g_signal_connect_swapped (self->settings_page, "log-out",
                             G_CALLBACK (spotifygtk_native_window_log_out), self);
   self->context_page = spotifygtk_context_page_new ();
+  self->artist_page  = spotifygtk_artist_page_new ();
 
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->home_page), "home");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->search_page), "search");
@@ -2652,6 +2676,7 @@ spotifygtk_native_window_constructed (GObject *object)
 
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->settings_page), "settings");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->context_page), "context");
+  gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->artist_page), "artist");
 
   /* Every track list — search results, liked songs, and an opened album or
    * artist — routes activation, queueing and album/artist navigation through
@@ -2659,6 +2684,12 @@ spotifygtk_native_window_constructed (GObject *object)
   wire_track_list (self, spotifygtk_search_page_get_list (self->search_page));
   wire_track_list (self, spotifygtk_liked_songs_page_get_list (self->liked_page));
   wire_track_list (self, spotifygtk_context_page_get_list (self->context_page));
+  wire_track_list (self, spotifygtk_artist_page_get_list (self->artist_page));
+
+  /* A release card opens the album it names, through the same path an album
+   * card anywhere else takes. */
+  g_signal_connect (self->artist_page, "album-activated",
+                    G_CALLBACK (on_album_activated), self);
 
   wire_album_grid (self, spotifygtk_search_page_get_album_grid (self->search_page));
   wire_album_grid (self, spotifygtk_home_page_get_album_grid (self->home_page));

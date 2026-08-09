@@ -1,384 +1,537 @@
 /*
- * artist_page.c — Artist detail view implementation.
+ * artist_page.c — see artist_page.h.
  */
 
 #include "artist_page.h"
-#include "smooth_scroll.h"
+
+#include "album_grid.h"
+#include "cover_loader.h"
+
+#include <string.h>
+
+/*
+ * How much of the artist's context to resolve, and how much of it to show as
+ * "most played".
+ *
+ * The resolve is the only request this page makes, and everything on it comes
+ * out of that one list -- the tracks at the top and the releases below -- so
+ * the limit is set by wanting enough albums to be worth grouping rather than
+ * by the dozen rows on show.
+ */
+#define ARTIST_PAGE_LIMIT   200
+#define ARTIST_TOP_TRACKS   12
+
+/* Height of the hero panel. Tall enough to read as a banner rather than an
+ * oversized row, short enough that the tracks are still on screen with it. */
+#define HERO_HEIGHT         220
+#define HERO_ART_PX         180
+
+/*
+ * Release kinds.
+ *
+ * Inferred from how many of the artist's tracks a release contributes, because
+ * nothing in the metadata says which it is: Album.type exists in Spotify's
+ * schema but context-resolve returns tracks, not album objects, so it never
+ * reaches us. The thresholds are the usual industry shape -- one or two tracks
+ * is a single, up to six an EP -- and being a heuristic is why the filter is
+ * presented as a view of one list rather than as three separate things.
+ */
+typedef enum {
+  RELEASE_ALL = 0,
+  RELEASE_ALBUM,
+  RELEASE_EP,
+  RELEASE_SINGLE,
+  N_RELEASE_KINDS
+} ReleaseKind;
+
+static const gchar *const KIND_LABELS[N_RELEASE_KINDS] = {
+  "All", "Albums", "EPs", "Singles"
+};
+
+#define EP_MAX_TRACKS      6
+#define SINGLE_MAX_TRACKS  2
+
+/* One release gathered from the artist's tracks. */
+typedef struct {
+  gchar *uri;
+  gchar *name;
+  gchar *cover_id;
+  guint  track_count;
+  gint   year;
+  guint  first_seen;   /* keeps the resolve's own ordering as the tiebreak */
+} Release;
+
+static void
+release_free (gpointer data)
+{
+  Release *r = data;
+  g_free (r->uri);
+  g_free (r->name);
+  g_free (r->cover_id);
+  g_free (r);
+}
 
 struct _SpotifyGtkArtistPage {
-  AdwBin parent_instance;
+  GtkBox parent_instance;
 
-  GtkBox *root_box;
-  GtkImage *artist_image;
-  GtkLabel *name_label;
-  GtkButton *follow_btn;
-  GtkListBox *top_tracks_list;
-  GtkListBox *albums_list;
-  GtkListBox *related_list;
+  GtkLabel            *kind_label;
+  GtkLabel            *title_label;
+  GtkLabel            *year_label;
 
-  gchar *artist_id;
-  gboolean is_following;
+  GtkImage            *hero_art;
+  GtkLabel            *hero_caption;
+
+  SpotifyGtkTrackList *list;
+  SpotifyGtkAlbumGrid *releases;
+  GtkLabel            *releases_status;
+  GtkWidget           *kind_buttons[N_RELEASE_KINDS];
+  ReleaseKind          kind;
+
+  GPtrArray           *all_releases;   /* Release*, in first-seen order */
+
+  SpotifyNativeSession *session;
+  GCancellable         *in_flight;
+  gchar                *current_uri;
 };
 
-G_DEFINE_FINAL_TYPE (SpotifyGtkArtistPage, spotifygtk_artist_page, ADW_TYPE_BIN)
+G_DEFINE_FINAL_TYPE (SpotifyGtkArtistPage, spotifygtk_artist_page, GTK_TYPE_BOX)
 
-enum {
-  PLAY_TRACK,
-  PLAY_ARTIST_TOP,
-  TOGGLE_FOLLOW,
-  ALBUM_ACTIVATED,
-  RELATED_ARTIST_ACTIVATED,
-  N_SIGNALS
-};
-
+enum { TRACK_ACTIVATED, ALBUM_ACTIVATED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
-static gchar *
-duration_str (gint ms)
+/*
+ * Written out rather than casting gtk_image_set_from_paintable to the callback
+ * type: it takes (image, paintable) and the callback delivers (texture,
+ * user_data), so the cast passes the texture as the image and GTK rejects it.
+ */
+static void
+on_hero_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
-  gint total_secs = ms / 1000;
-  return g_strdup_printf ("%d:%02d", total_secs / 60, total_secs % 60);
+  GtkImage *image = user_data;
+  if (!texture || !GTK_IS_IMAGE (image))
+    return;
+  gtk_image_set_from_paintable (image, GDK_PAINTABLE (texture));
 }
 
 static void
-on_track_activated (GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
+on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_data)
 {
   SpotifyGtkArtistPage *self = user_data;
-  const gchar *uri = g_object_get_data (G_OBJECT (row), "track-uri");
-  if (uri)
-    g_signal_emit (self, signals[PLAY_TRACK], 0, uri);
-  (void) box;
+  (void) list;
+  g_signal_emit (self, signals[TRACK_ACTIVATED], 0, track);
 }
 
 static void
-on_album_activated (GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
+on_release_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
+                      const gchar *name, gpointer user_data)
 {
   SpotifyGtkArtistPage *self = user_data;
-  const gchar *id = g_object_get_data (G_OBJECT (row), "album-id");
-  if (id)
-    g_signal_emit (self, signals[ALBUM_ACTIVATED], 0, id);
-  (void) box;
+  (void) grid;
+  g_signal_emit (self, signals[ALBUM_ACTIVATED], 0, uri, name);
+}
+
+static ReleaseKind
+release_kind_of (const Release *r)
+{
+  if (r->track_count <= SINGLE_MAX_TRACKS)
+    return RELEASE_SINGLE;
+  if (r->track_count <= EP_MAX_TRACKS)
+    return RELEASE_EP;
+  return RELEASE_ALBUM;
+}
+
+/* Rebuild the cards for the current filter. */
+static void
+apply_release_filter (SpotifyGtkArtistPage *self)
+{
+  spotifygtk_album_grid_clear (self->releases);
+
+  guint shown = 0;
+  for (guint i = 0; self->all_releases && i < self->all_releases->len; i++) {
+    const Release *r = g_ptr_array_index (self->all_releases, i);
+    if (self->kind != RELEASE_ALL && release_kind_of (r) != self->kind)
+      continue;
+
+    g_autofree gchar *subtitle = r->year > 0
+      ? g_strdup_printf ("%s · %d", KIND_LABELS[release_kind_of (r)], r->year)
+      : g_strdup (KIND_LABELS[release_kind_of (r)]);
+
+    spotifygtk_album_grid_add_card (self->releases, r->uri, r->name,
+                                    subtitle, r->cover_id);
+    shown++;
+  }
+
+  gboolean empty = (shown == 0);
+  gtk_label_set_text (self->releases_status,
+                      empty ? "Nothing of this kind here." : "");
+  gtk_widget_set_visible (GTK_WIDGET (self->releases_status), empty);
 }
 
 static void
-on_related_activated (GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
+on_kind_clicked (GtkButton *button, gpointer user_data)
 {
   SpotifyGtkArtistPage *self = user_data;
-  const gchar *id = g_object_get_data (G_OBJECT (row), "artist-id");
-  if (id)
-    g_signal_emit (self, signals[RELATED_ARTIST_ACTIVATED], 0, id);
-  (void) box;
+  ReleaseKind kind = (ReleaseKind) GPOINTER_TO_UINT (
+    g_object_get_data (G_OBJECT (button), "release-kind"));
+
+  self->kind = kind;
+  for (guint i = 0; i < N_RELEASE_KINDS; i++)
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->kind_buttons[i]),
+                                  i == kind);
+  apply_release_filter (self);
+}
+
+/* Gather the distinct releases present in the resolved tracks, in the order
+ * the resolve returned them. */
+static void
+build_releases (SpotifyGtkArtistPage *self, GPtrArray *tracks)
+{
+  g_clear_pointer (&self->all_releases, g_ptr_array_unref);
+  self->all_releases = g_ptr_array_new_with_free_func (release_free);
+
+  g_autoptr(GHashTable) by_uri = g_hash_table_new (g_str_hash, g_str_equal);
+
+  for (guint i = 0; i < tracks->len; i++) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
+    if (!t || !t->album_uri || !*t->album_uri)
+      continue;
+
+    Release *r = g_hash_table_lookup (by_uri, t->album_uri);
+    if (!r) {
+      r = g_new0 (Release, 1);
+      r->uri        = g_strdup (t->album_uri);
+      r->name       = g_strdup (t->album ? t->album : "Unknown release");
+      r->cover_id   = g_strdup (t->cover_id);
+      r->year       = t->release_year;
+      r->first_seen = i;
+      g_ptr_array_add (self->all_releases, r);
+      g_hash_table_insert (by_uri, r->uri, r);
+    }
+    r->track_count++;
+    if (r->year == 0 && t->release_year > 0)
+      r->year = t->release_year;
+  }
 }
 
 static void
-on_follow_clicked (GtkButton *button, gpointer user_data)
+on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
-  SpotifyGtkArtistPage *self = user_data;
-  self->is_following = !self->is_following;
-  gtk_button_set_label (self->follow_btn,
-                        self->is_following ? "Following" : "Follow");
-  if (self->artist_id)
-    g_signal_emit (self, signals[TOGGLE_FOLLOW], 0, self->artist_id, self->is_following);
-  (void) button;
+  SpotifyNativeSession *session = SPOTIFYGTK_NATIVE_SESSION (source);
+  GWeakRef             *ref     = user_data;
+  g_autoptr(GError)     err     = NULL;
+
+  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (ref);
+  g_weak_ref_clear (ref);
+  g_free (ref);
+
+  g_autoptr(GPtrArray) tracks =
+    spotifygtk_native_session_load_tracks_finish (session, result, &err);
+
+  if (!self)
+    return;
+
+  g_clear_object (&self->in_flight);
+
+  if (!tracks) {
+    if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+      return;
+    g_autofree gchar *msg = g_strdup_printf ("Couldn't load: %s", err->message);
+    spotifygtk_track_list_clear (self->list);
+    spotifygtk_track_list_set_status (self->list, msg);
+    /* A failed load must not be remembered as the current URI, or a retry via
+     * re-navigation would be swallowed by the same-URI no-op. */
+    g_clear_pointer (&self->current_uri, g_free);
+    return;
+  }
+
+  /* The year the artist's earliest visible release carries, which is the
+   * closest thing to a "since" the tracks can supply. */
+  gint earliest = 0;
+  for (guint i = 0; i < tracks->len; i++) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
+    if (t->release_year > 0 && (earliest == 0 || t->release_year < earliest))
+      earliest = t->release_year;
+  }
+  if (earliest > 0) {
+    g_autofree gchar *year = g_strdup_printf ("%d", earliest);
+    gtk_label_set_text (self->year_label, year);
+  }
+
+  /* The hero borrows the first track's art. Spotify has artist imagery but it
+   * is not on this path -- context-resolve returns tracks, and a track carries
+   * its album's cover and nothing else -- so this is the artist's most current
+   * release standing in for a portrait, which is what it is captioned as. */
+  const SpotifyNativeTrack *first = tracks->len > 0
+    ? g_ptr_array_index (tracks, 0) : NULL;
+  if (first && first->cover_id)
+    spotifygtk_cover_load (first->cover_id, HERO_ART_PX, NULL,
+                           on_hero_cover_loaded, self->hero_art);
+  if (first)
+    gtk_label_set_text (self->hero_caption,
+                        first->album ? first->album : "");
+
+  /* Top tracks: the head of the resolve, which is Spotify's own ordering for
+   * an artist context and so already "most played" rather than arbitrary. */
+  g_autoptr(GPtrArray) top = g_ptr_array_new ();
+  for (guint i = 0; i < tracks->len && top->len < ARTIST_TOP_TRACKS; i++)
+    g_ptr_array_add (top, g_ptr_array_index (tracks, i));
+  spotifygtk_track_list_set_native_tracks (self->list, top);
+
+  build_releases (self, tracks);
+  apply_release_filter (self);
+}
+
+void
+spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
+                             const gchar *artist_uri, const gchar *name)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
+  g_return_if_fail (artist_uri != NULL);
+
+  if (g_strcmp0 (self->current_uri, artist_uri) == 0)
+    return;
+
+  g_free (self->current_uri);
+  self->current_uri = g_strdup (artist_uri);
+
+  gtk_label_set_text (self->title_label, name ? name : "");
+  gtk_label_set_text (self->year_label, "");
+  gtk_label_set_text (self->hero_caption, "");
+  gtk_image_set_from_icon_name (self->hero_art, "avatar-default-symbolic");
+  gtk_image_set_pixel_size (self->hero_art, HERO_ART_PX);
+
+  spotifygtk_track_list_clear (self->list);
+  spotifygtk_album_grid_clear (self->releases);
+  g_clear_pointer (&self->all_releases, g_ptr_array_unref);
+
+  if (!self->session ||
+      spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
+    spotifygtk_track_list_set_status (self->list, "Not signed in yet.");
+    return;
+  }
+
+  if (self->in_flight)
+    g_cancellable_cancel (self->in_flight);
+  g_clear_object (&self->in_flight);
+  self->in_flight = g_cancellable_new ();
+
+  spotifygtk_track_list_set_status (self->list, "Loading…");
+
+  GWeakRef *ref = g_new0 (GWeakRef, 1);
+  g_weak_ref_init (ref, self);
+  spotifygtk_native_session_load_tracks (self->session, artist_uri,
+                                         ARTIST_PAGE_LIMIT, self->in_flight,
+                                         on_tracks_loaded, ref);
+}
+
+void
+spotifygtk_artist_page_set_session (SpotifyGtkArtistPage *self,
+                                    SpotifyNativeSession *session)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
+  g_set_object (&self->session, session);
+}
+
+SpotifyGtkTrackList *
+spotifygtk_artist_page_get_list (SpotifyGtkArtistPage *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self), NULL);
+  return self->list;
+}
+
+void
+spotifygtk_artist_page_set_playing_uri (SpotifyGtkArtistPage *self,
+                                        const gchar *uri, gboolean playing)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
+  spotifygtk_track_list_set_playing_uri (self->list, uri, playing);
 }
 
 static void
 spotifygtk_artist_page_dispose (GObject *object)
 {
   SpotifyGtkArtistPage *self = SPOTIFYGTK_ARTIST_PAGE (object);
-  g_clear_pointer (&self->artist_id, g_free);
+
+  if (self->in_flight)
+    g_cancellable_cancel (self->in_flight);
+  g_clear_object (&self->in_flight);
+  g_clear_object (&self->session);
+  g_clear_pointer (&self->current_uri, g_free);
+  g_clear_pointer (&self->all_releases, g_ptr_array_unref);
+
   G_OBJECT_CLASS (spotifygtk_artist_page_parent_class)->dispose (object);
 }
 
 static void
 spotifygtk_artist_page_class_init (SpotifyGtkArtistPageClass *klass)
 {
-  GObjectClass *object_class = G_OBJECT_CLASS (klass);
-  object_class->dispose = spotifygtk_artist_page_dispose;
+  G_OBJECT_CLASS (klass)->dispose = spotifygtk_artist_page_dispose;
 
-  signals[PLAY_TRACK] = g_signal_new ("play-track",
-    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-    G_TYPE_NONE, 1, G_TYPE_STRING);
-
-  signals[PLAY_ARTIST_TOP] = g_signal_new ("play-artist-top",
-    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-    G_TYPE_NONE, 1, G_TYPE_STRING);
-
-  signals[TOGGLE_FOLLOW] = g_signal_new ("toggle-follow",
-    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-    G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_BOOLEAN);
-
-  signals[ALBUM_ACTIVATED] = g_signal_new ("album-activated",
-    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-    G_TYPE_NONE, 1, G_TYPE_STRING);
-
-  signals[RELATED_ARTIST_ACTIVATED] = g_signal_new ("related-artist-activated",
-    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-    G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[TRACK_ACTIVATED] = g_signal_new (
+    "track-activated", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+    NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_POINTER);
+  signals[ALBUM_ACTIVATED] = g_signal_new (
+    "album-activated", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+    NULL, NULL, NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_STRING);
 }
 
-static void
-clear_list (GtkListBox *list)
+/* A section heading, matching the weight the other pages give theirs. */
+static GtkWidget *
+section_heading (const gchar *text)
 {
-  GtkWidget *child;
-  while ((child = gtk_widget_get_first_child (GTK_WIDGET (list))))
-    gtk_list_box_remove (list, child);
+  GtkWidget *label = gtk_label_new (text);
+  gtk_widget_add_css_class (label, "section-heading");
+  gtk_label_set_xalign (GTK_LABEL (label), 0.0);
+  return label;
 }
 
 static void
 spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
 {
-  GtkWidget *scroll = gtk_scrolled_window_new ();
-  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroll),
+  gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
+  gtk_box_set_spacing (GTK_BOX (self), 4);
+  gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
+  gtk_widget_set_margin_end (GTK_WIDGET (self), 12);
+  gtk_widget_set_margin_top (GTK_WIDGET (self), 24);
+  gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
+  gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
+
+  self->kind_label = GTK_LABEL (gtk_label_new ("Artist"));
+  gtk_widget_add_css_class (GTK_WIDGET (self->kind_label), "dim-text");
+  gtk_label_set_xalign (self->kind_label, 0.0);
+  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->kind_label));
+
+  /* Title and year share a row, the year sitting just past the end of the
+   * title rather than out at the right margin -- the same arrangement, and the
+   * same reasoning, as the album page. */
+  GtkWidget *title_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_margin_bottom (title_row, 8);
+
+  self->title_label = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->title_label), "title-text");
+  gtk_label_set_xalign (self->title_label, 0.0);
+  gtk_label_set_ellipsize (self->title_label, PANGO_ELLIPSIZE_END);
+  gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->title_label));
+
+  self->year_label = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->year_label), "dim-text");
+  gtk_label_set_xalign (self->year_label, 0.0);
+  gtk_widget_set_valign (GTK_WIDGET (self->year_label), GTK_ALIGN_END);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (self->year_label), 6);
+  gtk_box_append (GTK_BOX (title_row), GTK_WIDGET (self->year_label));
+
+  GtkWidget *title_slack = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand (title_slack, TRUE);
+  gtk_box_append (GTK_BOX (title_row), title_slack);
+  gtk_box_append (GTK_BOX (self), title_row);
+
+  /*
+   * Everything below the title scrolls as one. The sections inside are the
+   * shared list and grid in inline mode, so neither scrolls on its own -- see
+   * the note on set_inline().
+   */
+  GtkWidget *scroller = gtk_scrolled_window_new ();
+  gtk_widget_set_vexpand (scroller, TRUE);
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-  spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroll),
-                                   GTK_ORIENTATION_VERTICAL);
+  gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
 
-  self->root_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 24));
-  gtk_widget_set_margin_start (GTK_WIDGET (self->root_box), 32);
-  gtk_widget_set_margin_end (GTK_WIDGET (self->root_box), 32);
-  gtk_widget_set_margin_top (GTK_WIDGET (self->root_box), 24);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self->root_box), 24);
+  GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_set_margin_end (content, 12);
 
-  /* Header */
-  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 24);
+  /* Hero: the artist's current release, as a banner. */
+  GtkWidget *hero = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 16);
+  gtk_widget_add_css_class (hero, "artist-hero");
+  gtk_widget_set_size_request (hero, -1, HERO_HEIGHT);
 
-  self->artist_image = GTK_IMAGE (gtk_image_new_from_icon_name ("avatar-default-symbolic"));
-  gtk_image_set_pixel_size (self->artist_image, 200);
-  gtk_widget_add_css_class (GTK_WIDGET (self->artist_image), "circular");
-  gtk_widget_add_css_class (GTK_WIDGET (self->artist_image), "card");
-  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->artist_image));
+  self->hero_art = GTK_IMAGE (gtk_image_new_from_icon_name ("avatar-default-symbolic"));
+  gtk_image_set_pixel_size (self->hero_art, HERO_ART_PX);
+  gtk_widget_add_css_class (GTK_WIDGET (self->hero_art), "art-large");
+  gtk_widget_set_margin_start (GTK_WIDGET (self->hero_art), 20);
+  gtk_widget_set_valign (GTK_WIDGET (self->hero_art), GTK_ALIGN_CENTER);
+  gtk_box_append (GTK_BOX (hero), GTK_WIDGET (self->hero_art));
 
-  GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
-  gtk_widget_set_valign (info, GTK_ALIGN_CENTER);
+  GtkWidget *hero_text = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_set_valign (hero_text, GTK_ALIGN_CENTER);
 
-  GtkWidget *type_label = gtk_label_new ("ARTIST");
-  gtk_label_set_xalign (GTK_LABEL (type_label), 0.0);
-  gtk_widget_add_css_class (type_label, "caption");
-  gtk_widget_add_css_class (type_label, "dim-label");
-  gtk_box_append (GTK_BOX (info), type_label);
+  GtkWidget *hero_kind = gtk_label_new ("Latest release");
+  gtk_widget_add_css_class (hero_kind, "dim-text");
+  gtk_label_set_xalign (GTK_LABEL (hero_kind), 0.0);
+  gtk_box_append (GTK_BOX (hero_text), hero_kind);
 
-  self->name_label = GTK_LABEL (gtk_label_new ("Artist"));
-  gtk_label_set_xalign (self->name_label, 0.0);
-  gtk_label_set_ellipsize (self->name_label, PANGO_ELLIPSIZE_END);
-  gtk_widget_add_css_class (GTK_WIDGET (self->name_label), "title-1");
-  gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->name_label));
+  self->hero_caption = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->hero_caption), "section-heading");
+  gtk_label_set_xalign (self->hero_caption, 0.0);
+  gtk_label_set_ellipsize (self->hero_caption, PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars (self->hero_caption, 40);
+  gtk_box_append (GTK_BOX (hero_text), GTK_WIDGET (self->hero_caption));
 
-  self->follow_btn = GTK_BUTTON (gtk_button_new_with_label ("Follow"));
-  gtk_widget_add_css_class (GTK_WIDGET (self->follow_btn), "pill");
-  g_signal_connect (self->follow_btn, "clicked", G_CALLBACK (on_follow_clicked), self);
-  gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->follow_btn));
+  gtk_box_append (GTK_BOX (hero), hero_text);
+  gtk_box_append (GTK_BOX (content), hero);
 
-  gtk_box_append (GTK_BOX (header), info);
-  gtk_box_append (GTK_BOX (self->root_box), header);
+  /* Most played. */
+  gtk_box_append (GTK_BOX (content), section_heading ("Popular"));
 
-  /* Top tracks */
-  GtkWidget *top_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
-  GtkWidget *top_title = gtk_label_new ("Popular");
-  gtk_label_set_xalign (GTK_LABEL (top_title), 0.0);
-  gtk_widget_add_css_class (top_title, "title-3");
-  gtk_box_append (GTK_BOX (top_section), top_title);
-
-  self->top_tracks_list = GTK_LIST_BOX (gtk_list_box_new ());
-  gtk_list_box_set_selection_mode (self->top_tracks_list, GTK_SELECTION_SINGLE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->top_tracks_list), "boxed-list");
-  g_signal_connect (self->top_tracks_list, "row-activated",
+  self->list = spotifygtk_track_list_new ();
+  spotifygtk_track_list_set_inline (self->list, TRUE);
+  spotifygtk_track_list_set_numbered (self->list, TRUE);
+  g_signal_connect (self->list, "track-activated",
                     G_CALLBACK (on_track_activated), self);
-  gtk_box_append (GTK_BOX (top_section), GTK_WIDGET (self->top_tracks_list));
-  gtk_box_append (GTK_BOX (self->root_box), top_section);
+  gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->list));
 
-  /* Albums */
-  GtkWidget *albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
-  GtkWidget *albums_title = gtk_label_new ("Discography");
-  gtk_label_set_xalign (GTK_LABEL (albums_title), 0.0);
-  gtk_widget_add_css_class (albums_title, "title-3");
-  gtk_box_append (GTK_BOX (albums_section), albums_title);
+  /*
+   * Releases, with the filter presented the way Liked Songs presents its sort:
+   * a caption and a linked group of toggles pushed to the right of the
+   * heading, so the two pages read as the same control.
+   */
+  GtkWidget *releases_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  gtk_widget_set_margin_top (releases_row, 8);
+  gtk_box_append (GTK_BOX (releases_row), section_heading ("Albums, EPs and Singles"));
 
-  self->albums_list = GTK_LIST_BOX (gtk_list_box_new ());
-  gtk_list_box_set_selection_mode (self->albums_list, GTK_SELECTION_SINGLE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->albums_list), "boxed-list");
-  g_signal_connect (self->albums_list, "row-activated",
-                    G_CALLBACK (on_album_activated), self);
-  gtk_box_append (GTK_BOX (albums_section), GTK_WIDGET (self->albums_list));
-  gtk_box_append (GTK_BOX (self->root_box), albums_section);
+  GtkWidget *spacer = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand (spacer, TRUE);
+  gtk_box_append (GTK_BOX (releases_row), spacer);
 
-  /* Related artists */
-  GtkWidget *related_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
-  GtkWidget *related_title = gtk_label_new ("Fans Also Like");
-  gtk_label_set_xalign (GTK_LABEL (related_title), 0.0);
-  gtk_widget_add_css_class (related_title, "title-3");
-  gtk_box_append (GTK_BOX (related_section), related_title);
+  GtkWidget *caption = gtk_label_new ("Show");
+  gtk_widget_add_css_class (caption, "dim-text");
+  gtk_widget_set_valign (caption, GTK_ALIGN_CENTER);
+  gtk_box_append (GTK_BOX (releases_row), caption);
 
-  self->related_list = GTK_LIST_BOX (gtk_list_box_new ());
-  gtk_list_box_set_selection_mode (self->related_list, GTK_SELECTION_SINGLE);
-  gtk_widget_add_css_class (GTK_WIDGET (self->related_list), "boxed-list");
-  g_signal_connect (self->related_list, "row-activated",
-                    G_CALLBACK (on_related_activated), self);
-  gtk_box_append (GTK_BOX (related_section), GTK_WIDGET (self->related_list));
-  gtk_box_append (GTK_BOX (self->root_box), related_section);
+  GtkWidget *kind_group = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class (kind_group, "linked");
+  gtk_widget_set_valign (kind_group, GTK_ALIGN_CENTER);
 
-  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroll), GTK_WIDGET (self->root_box));
-  adw_bin_set_child (ADW_BIN (self), scroll);
+  for (guint i = 0; i < N_RELEASE_KINDS; i++) {
+    GtkWidget *b = gtk_toggle_button_new_with_label (KIND_LABELS[i]);
+    gtk_widget_add_css_class (b, "flat");
+    g_object_set_data (G_OBJECT (b), "release-kind", GUINT_TO_POINTER (i));
+    g_signal_connect (b, "clicked", G_CALLBACK (on_kind_clicked), self);
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (b), i == RELEASE_ALL);
+    gtk_box_append (GTK_BOX (kind_group), b);
+    self->kind_buttons[i] = b;
+  }
+  gtk_box_append (GTK_BOX (releases_row), kind_group);
+  gtk_box_append (GTK_BOX (content), releases_row);
+
+  self->releases = spotifygtk_album_grid_new_grid ();
+  spotifygtk_album_grid_set_inline (self->releases, TRUE);
+  spotifygtk_album_grid_set_content_margins (self->releases, 0, 0);
+  g_signal_connect (self->releases, "album-activated",
+                    G_CALLBACK (on_release_activated), self);
+  gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->releases));
+
+  self->releases_status = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->releases_status), "dim-text");
+  gtk_label_set_xalign (self->releases_status, 0.0);
+  gtk_widget_set_visible (GTK_WIDGET (self->releases_status), FALSE);
+  gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->releases_status));
+
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
+  gtk_box_append (GTK_BOX (self), scroller);
 }
 
 SpotifyGtkArtistPage *
 spotifygtk_artist_page_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_ARTIST_PAGE, NULL);
-}
-
-void
-spotifygtk_artist_page_set_artist (SpotifyGtkArtistPage *self, JsonObject *artist_data)
-{
-  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
-  if (!artist_data) return;
-
-  const gchar *name = json_object_get_string_member_with_default (artist_data, "name", "Artist");
-  const gchar *id = json_object_get_string_member_with_default (artist_data, "id", "");
-
-  g_free (self->artist_id);
-  self->artist_id = g_strdup (id);
-
-  gtk_label_set_text (self->name_label, name);
-}
-
-void
-spotifygtk_artist_page_set_top_tracks (SpotifyGtkArtistPage *self, JsonArray *tracks)
-{
-  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
-
-  clear_list (self->top_tracks_list);
-  if (!tracks) return;
-
-  for (guint i = 0; i < json_array_get_length (tracks) && i < 10; i++) {
-    JsonObject *track = json_array_get_object_element (tracks, i);
-    const gchar *name = json_object_get_string_member_with_default (track, "name", "");
-    const gchar *uri = json_object_get_string_member_with_default (track, "uri", "");
-    gint64 duration_ms = json_object_has_member (track, "duration_ms") ?
-      json_object_get_int_member (track, "duration_ms") : 0;
-
-    g_autofree gchar *dur = duration_str ((gint) duration_ms);
-
-    GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_set_margin_start (box, 8);
-    gtk_widget_set_margin_end (box, 8);
-    gtk_widget_set_margin_top (box, 6);
-    gtk_widget_set_margin_bottom (box, 6);
-
-    GtkWidget *num = gtk_label_new (g_strdup_printf ("%u", i + 1));
-    gtk_widget_add_css_class (num, "dim-label");
-    gtk_widget_set_size_request (num, 20, -1);
-    gtk_box_append (GTK_BOX (box), num);
-
-    GtkWidget *title = gtk_label_new (name);
-    gtk_label_set_xalign (GTK_LABEL (title), 0.0);
-    gtk_label_set_ellipsize (GTK_LABEL (title), PANGO_ELLIPSIZE_END);
-    gtk_widget_set_hexpand (title, TRUE);
-    gtk_box_append (GTK_BOX (box), title);
-
-    GtkWidget *dur_label = gtk_label_new (dur);
-    gtk_widget_add_css_class (dur_label, "dim-label");
-    gtk_box_append (GTK_BOX (box), dur_label);
-
-    GtkWidget *row = gtk_list_box_row_new ();
-    gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), box);
-    g_object_set_data_full (G_OBJECT (row), "track-uri", g_strdup (uri), g_free);
-    gtk_list_box_append (self->top_tracks_list, row);
-  }
-}
-
-void
-spotifygtk_artist_page_set_albums (SpotifyGtkArtistPage *self, JsonArray *albums)
-{
-  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
-
-  clear_list (self->albums_list);
-  if (!albums) return;
-
-  for (guint i = 0; i < json_array_get_length (albums); i++) {
-    JsonObject *album = json_array_get_object_element (albums, i);
-    const gchar *name = json_object_get_string_member_with_default (album, "name", "");
-    const gchar *id = json_object_get_string_member_with_default (album, "id", "");
-    const gchar *year = json_object_get_string_member_with_default (album, "release_date", "");
-
-    GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_set_margin_start (box, 8);
-    gtk_widget_set_margin_end (box, 8);
-    gtk_widget_set_margin_top (box, 6);
-    gtk_widget_set_margin_bottom (box, 6);
-
-    GtkWidget *icon = gtk_image_new_from_icon_name ("media-optical-symbolic");
-    gtk_image_set_pixel_size (GTK_IMAGE (icon), 40);
-    gtk_box_append (GTK_BOX (box), icon);
-
-    GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
-    GtkWidget *title = gtk_label_new (name);
-    gtk_label_set_xalign (GTK_LABEL (title), 0.0);
-    gtk_label_set_ellipsize (GTK_LABEL (title), PANGO_ELLIPSIZE_END);
-    gtk_widget_set_hexpand (title, TRUE);
-    gtk_box_append (GTK_BOX (info), title);
-
-    GtkWidget *year_label = gtk_label_new (year);
-    gtk_widget_add_css_class (year_label, "dim-label");
-    gtk_widget_add_css_class (year_label, "caption");
-    gtk_box_append (GTK_BOX (info), year_label);
-
-    gtk_box_append (GTK_BOX (box), info);
-
-    GtkWidget *row = gtk_list_box_row_new ();
-    gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), box);
-    g_object_set_data_full (G_OBJECT (row), "album-id", g_strdup (id), g_free);
-    gtk_list_box_append (self->albums_list, row);
-  }
-}
-
-void
-spotifygtk_artist_page_set_related_artists (SpotifyGtkArtistPage *self, JsonArray *artists)
-{
-  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
-
-  clear_list (self->related_list);
-  if (!artists) return;
-
-  for (guint i = 0; i < json_array_get_length (artists); i++) {
-    JsonObject *artist = json_array_get_object_element (artists, i);
-    const gchar *name = json_object_get_string_member_with_default (artist, "name", "");
-    const gchar *id = json_object_get_string_member_with_default (artist, "id", "");
-
-    GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_set_margin_start (box, 8);
-    gtk_widget_set_margin_end (box, 8);
-    gtk_widget_set_margin_top (box, 6);
-    gtk_widget_set_margin_bottom (box, 6);
-
-    GtkWidget *icon = gtk_image_new_from_icon_name ("avatar-default-symbolic");
-    gtk_image_set_pixel_size (GTK_IMAGE (icon), 40);
-    gtk_box_append (GTK_BOX (box), icon);
-
-    GtkWidget *title = gtk_label_new (name);
-    gtk_label_set_xalign (GTK_LABEL (title), 0.0);
-    gtk_widget_set_hexpand (title, TRUE);
-    gtk_box_append (GTK_BOX (box), title);
-
-    GtkWidget *row = gtk_list_box_row_new ();
-    gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), box);
-    g_object_set_data_full (G_OBJECT (row), "artist-id", g_strdup (id), g_free);
-    gtk_list_box_append (self->related_list, row);
-  }
-}
-
-void
-spotifygtk_artist_page_set_following (SpotifyGtkArtistPage *self, gboolean is_following)
-{
-  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
-  self->is_following = is_following;
-  gtk_button_set_label (self->follow_btn, is_following ? "Following" : "Follow");
-}
-
-void
-spotifygtk_artist_page_set_loading (SpotifyGtkArtistPage *self, gboolean loading)
-{
-  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
-  /* TODO */
-  (void) loading;
 }

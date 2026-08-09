@@ -565,6 +565,27 @@ spotifygtk_album_grid_release_covers (SpotifyGtkAlbumGrid *self)
 }
 
 /* Ask every bound card for its artwork again; see the track list's version. */
+/*
+ * Render at full height inside somebody else's scroller. See the track list's
+ * version -- same problem, same reason: a grid that is one section of a page
+ * must not scroll independently of it.
+ */
+void
+spotifygtk_album_grid_set_inline (SpotifyGtkAlbumGrid *self, gboolean inlined)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  if (!self->scroller)
+    return;
+
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (self->scroller),
+                                  GTK_POLICY_NEVER,
+                                  inlined ? GTK_POLICY_NEVER : GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_propagate_natural_height (
+    GTK_SCROLLED_WINDOW (self->scroller), inlined);
+  gtk_widget_set_vexpand (self->scroller, !inlined);
+  gtk_widget_set_vexpand (GTK_WIDGET (self), !inlined);
+}
+
 void
 spotifygtk_album_grid_reload_covers (SpotifyGtkAlbumGrid *self)
 {

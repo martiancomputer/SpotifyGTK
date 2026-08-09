@@ -72,6 +72,10 @@ void spotifygtk_track_list_set_status (SpotifyGtkTrackList *self, const gchar *m
 void spotifygtk_track_list_clear (SpotifyGtkTrackList *self);
 
 /* Number rows 1..n rather than showing per-row art. */
+/* Size to content and let an outer scroller do the scrolling, for a list that
+ * is one section of a longer page rather than the page itself. */
+void spotifygtk_track_list_set_inline (SpotifyGtkTrackList *self, gboolean inlined);
+
 void spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered);
 
 /*

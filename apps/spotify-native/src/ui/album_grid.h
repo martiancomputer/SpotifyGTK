@@ -65,6 +65,10 @@ void spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar 
  * reloads when it is looked at again. */
 void spotifygtk_album_grid_release_covers (SpotifyGtkAlbumGrid *self);
 
+/* Size to content and let an outer scroller do the scrolling, for a grid that
+ * is one section of a longer page rather than the page itself. */
+void spotifygtk_album_grid_set_inline (SpotifyGtkAlbumGrid *self, gboolean inlined);
+
 /* Re-request artwork for every bound card, after release_covers. */
 void spotifygtk_album_grid_reload_covers (SpotifyGtkAlbumGrid *self);
 
