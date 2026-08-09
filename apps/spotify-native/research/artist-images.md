@@ -6,7 +6,8 @@ the artist page has existed.
 | id prefix | what it is | measured |
 |---|---|---|
 | `ab676161…` | round avatar | 269×496 → 269×320, 0.84:1 |
-| `ab676170…` | the header the artist uploads | 660×496, 1.33:1 |
+| `ab676170…` | backdrop of the pinned "Artist pick" card — a promo photo | 660×496, 1.33:1 |
+| `ab67616d…` | album cover | — |
 
 The prefix is the only reliable way to tell them apart. Both are plain
 `i.scdn.co/image/<40 hex>` ids and nothing else in the payload marks which is
@@ -38,7 +39,29 @@ The lesson is the logging, not the endpoint: a fallback that fires on the
 normal path and the broken path alike, and says nothing on either, cannot be
 told apart from success.
 
-## What works: `hm://artistview/v1/artist/<id>?format=json`
+## The real header is out of reach
+
+**The banner the desktop client draws is not obtainable.** Confirmed, not assumed:
+
+- **pathfinder is the only source.** `artistUnion.visuals.headerImage`. The
+  operation name and hash in `322.js` match what we send exactly.
+- **It refuses us.** 403 for bearer alone, bearer + client-token, and with
+  `app-platform` and `spotify-app-version` added. Both tokens are present and
+  valid (438 and 388 bytes). Our client id is keymaster,
+  `65b708073fc0480ea92a077233ca87bd`, which is not entitled to that endpoint.
+- **The native protocol does not carry it.** The full `ExtensionKind` enum —
+  `UNKNOWN_EXTENSION, CANVAZ, STORYLINES, PODCAST_TOPICS, PODCAST_SEGMENTS,
+  AUDIO_FILES, TRACK_DESCRIPTOR, PODCAST_COUNTER, ARTIST_V4=8, ALBUM_V4=9,
+  TRACK_V4=10, …` — has no visuals kind. The binary contains no `hm://` artist
+  endpoint and no spclient path matching image/visual/gallery/header.
+- **The public web page has nothing to scrape.** `open.spotify.com/artist/<id>`
+  and its `/embed/` variant are client-rendered shells: zero `i.scdn.co` ids,
+  zero `headerImage`. `get_access_token` is blocked outright.
+
+So the choice is between a promo photo, the avatar, or no image — not between
+those and the real banner.
+
+## What is reachable: `hm://artistview/v1/artist/<id>?format=json`
 
 Straight over the AP connection we already hold. 64 KB of JSON, the same
 payload the official artist screen is built from:
@@ -47,17 +70,25 @@ payload the official artist screen is built from:
 { id, title, header, body[], custom }
 ```
 
-`header.images.main` is the **avatar** — this is the trap. The header image is
-further down, hanging off whichever body section carries it:
+This is the **mobile** artist page (`ubi:specification_id: mobile-artist-page`),
+which is why there is no banner in it — that design uses a circular avatar, and
+`header.images.main` says so outright with `"custom": {"style": "circular"}`.
+
+The one landscape image hangs off whichever body section carries it:
 
 ```
 body[7]  id=pinned_item_row  component=artist:pinnedItemV2
          images.background.uri → https://i.scdn.co/image/ab6761700000c52c…
 ```
 
-On the account probed that was the pinned "Artist pick" row. That placement is
-not something to depend on, so `artistview_find_header()` scans the whole
-payload for a 40-hex id starting `ab676170` rather than walking a fixed path.
+That is the **backdrop of the "Artist pick" card** — verified by looking at the
+image, not by inferring from its aspect ratio, which is the mistake that put an
+avatar on the page in the first place. It is a promo photo of the artist: real,
+landscape, and *not* the header. Artists with no pinned pick have none at all,
+and then the page falls back to the avatar.
+
+Placement is not dependable, so the scan looks for a 40-hex id starting
+`ab676170` anywhere in the payload rather than walking a fixed path.
 
 `hm://artist/v1/<id>/desktop?format=json` — the librespot-era endpoint — comes
 back empty and is gone.

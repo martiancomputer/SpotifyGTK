@@ -141,6 +141,20 @@ on_hero_cover_loaded (GdkTexture *texture, gpointer user_data)
   GtkPicture *pic = user_data;
   if (!texture || !GTK_IS_PICTURE (pic))
     return;
+
+  /*
+   * Only a landscape image gets covered into the banner. What arrives is not
+   * always one: the true header is unreachable (see session.c), so this is
+   * sometimes a promo photo and sometimes the square-ish avatar, and covering
+   * a 0.84:1 avatar across a 4.5:1 strip magnifies a face until it is a crop
+   * of a cheek. Fitting it instead leaves the panel colour either side, which
+   * reads as a portrait on a backdrop rather than as a mistake.
+   */
+  gint w = gdk_texture_get_width (texture);
+  gint h = gdk_texture_get_height (texture);
+  gtk_picture_set_content_fit (pic, (h > 0 && (gdouble) w / h >= 1.2)
+                                      ? GTK_CONTENT_FIT_COVER
+                                      : GTK_CONTENT_FIT_CONTAIN);
   gtk_picture_set_paintable (pic, GDK_PAINTABLE (texture));
 }
 

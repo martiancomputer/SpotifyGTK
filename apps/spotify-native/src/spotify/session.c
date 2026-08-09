@@ -1024,22 +1024,24 @@ on_artist_portrait (const gchar *cover_id, GError *error, gpointer user_data)
 }
 
 /*
- * The banner, out of the artist view.
+ * The best artist image the native protocol will give us -- which is not the
+ * banner the desktop client draws, and cannot be made into it.
  *
- * `hm://artistview/v1/artist/<id>` is the native protocol's artist page: the
- * same payload the official client's artist screen is built from, over the AP
- * connection we already hold. Somewhere in it is one image whose id begins
- * ab6761_70_ -- the header the artist uploaded, as opposed to ab6761_61_,
- * which is the round avatar. That prefix is the only thing that reliably
- * distinguishes them, so it is what this looks for rather than a fixed path:
- * the background hangs off whichever section happens to carry it (on the
- * account probed, the pinned "Artist pick" row), and that is not stable.
+ * `hm://artistview/v1/artist/<id>` is the artist page as the *mobile* client
+ * builds it: `header.images.main` there is the round avatar, explicitly
+ * `style: circular`. There is no banner in it. The one landscape image in the
+ * payload has an id beginning ab6761_70_ and is the backdrop of the pinned
+ * "Artist pick" card -- a promo photo of the artist. It is the closest thing
+ * available, so it is used when present, but it is not the header.
  *
- * This replaces a GraphQL call to api-partner that never once succeeded. It
- * answered 403 "Client/request not allowed" for every artist -- pathfinder
- * will not take our client token -- and because a missing header is not an
- * error, the code quietly fell through to the avatar every single time and
- * looked like it was working. See research/artist-images.md.
+ * The real header is `artistUnion.visuals.headerImage`, and it exists only
+ * behind pathfinder, Spotify's GraphQL endpoint, which answers 403
+ * "Client/request not allowed" to this client's tokens no matter what headers
+ * accompany them: our client id is keymaster, which is not entitled to it.
+ * Nothing in the native protocol carries the image -- ExtensionKind has no
+ * visuals kind, and the shipped binary contains no artist image route.
+ *
+ * See research/artist-images.md.
  */
 #define ARTIST_HEADER_ID_PREFIX "ab676170"
 
