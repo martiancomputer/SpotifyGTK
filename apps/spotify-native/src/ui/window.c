@@ -1595,6 +1595,27 @@ wire_album_grid (SpotifyGtkNativeWindow *self, SpotifyGtkAlbumGrid *grid)
 /* Connect the window to one page's inner list: activation drives play +
  * context, and the row context menu drives queue and album/artist nav. Every
  * page that shows tracks routes through the same handlers. */
+/*
+ * Drop a list from the registry when the list itself goes.
+ *
+ * track_lists holds borrowed pointers and every like repaints all of them, so
+ * an entry that outlives its widget is a use-after-free waiting for the next
+ * heart to be clicked. The artist page destroys and rebuilds a list per
+ * release on every re-sort, so those pointers go stale routinely -- two
+ * SIGSEGVs in SPOTIFYGTK_IS_TRACK_LIST, reached once from the now-playing
+ * like button and once from the liked-page refresh.
+ *
+ * A weak ref rather than a strong one: the registry is a notice board, not an
+ * owner, and holding refs here would keep destroyed pages' widgets alive.
+ */
+static void
+on_wired_list_gone (gpointer data, GObject *where_the_list_was)
+{
+  SpotifyGtkNativeWindow *self = data;
+  if (self->track_lists)
+    g_ptr_array_remove_fast (self->track_lists, where_the_list_was);
+}
+
 static void
 wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
 {
@@ -1602,8 +1623,10 @@ wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
     return;
   if (!self->track_lists)
     self->track_lists = g_ptr_array_new ();
-  if (!g_ptr_array_find (self->track_lists, list, NULL))
+  if (!g_ptr_array_find (self->track_lists, list, NULL)) {
     g_ptr_array_add (self->track_lists, list);
+    g_object_weak_ref (G_OBJECT (list), on_wired_list_gone, self);
+  }
 
   /* Borrowed, not copied: a list consults it on every bind, so a page built
    * before or after the read finishes is equally correct. */
@@ -2855,6 +2878,14 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->awaiting_uri, g_free);
   g_clear_pointer (&self->liked_uris, g_hash_table_unref);
   g_clear_pointer (&self->liked_building, g_hash_table_unref);
+  /* Unhook first: a weak-ref callback firing after this point would write
+   * into a window that is already going away. */
+  if (self->track_lists) {
+    for (guint i = 0; i < self->track_lists->len; i++)
+      g_object_weak_unref (G_OBJECT (g_ptr_array_index (self->track_lists, i)),
+                           on_wired_list_gone, self);
+    g_clear_pointer (&self->track_lists, g_ptr_array_unref);
+  }
   g_clear_object (&self->auth);
   if (self->user_queue) {
     g_queue_free_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
