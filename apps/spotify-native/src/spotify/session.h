@@ -39,6 +39,7 @@
 #include <gio/gio.h>
 #include <glib-object.h>
 #include "mercury.h"
+#include "spclient.h"
 
 G_BEGIN_DECLS
 
@@ -141,6 +142,46 @@ void spotifygtk_native_session_load_tracks (SpotifyNativeSession *self,
 GPtrArray *spotifygtk_native_session_load_tracks_finish (SpotifyNativeSession *self,
                                                          GAsyncResult         *result,
                                                          GError              **error);
+
+/* One release, with its tracks. Free with spotifygtk_native_release_free(). */
+typedef struct {
+  gchar               *uri;
+  gchar               *name;
+  gint                 year;
+  SpotifyAlbumType     type;    /* exact -- from Album.type, not guessed */
+  SpotifyReleaseGroup  group;
+  gchar               *cover_id;
+  GPtrArray           *tracks;  /* SpotifyNativeTrack*, in running order */
+} SpotifyNativeRelease;
+
+void spotifygtk_native_release_free (SpotifyNativeRelease *release);
+
+/*
+ * The artist's whole discography, with every track of every release.
+ *
+ * Three requests, whatever the size of the catalogue: ARTIST_V4 for the
+ * release URIs and their groups, ALBUM_V4 for names, years, types, covers and
+ * track URIs, then the ordinary track batch for names and durations. Each of
+ * the last two is chunked; the artist call is a single entity.
+ *
+ * This replaces deriving releases from a resolve of the artist context. That
+ * resolve returns the artist's most-played tracks, so the releases it implied
+ * were only the ones those tracks happened to sit on, and each showed only the
+ * tracks that appeared -- one or two of a ten-track album. Nothing about that
+ * was fixable by asking for more tracks; it is the wrong question to the wrong
+ * endpoint.
+ *
+ * Finish returns a GPtrArray of SpotifyNativeRelease* with a free func set.
+ */
+void spotifygtk_native_session_load_discography (SpotifyNativeSession *self,
+                                                 const gchar          *artist_uri,
+                                                 GCancellable         *cancellable,
+                                                 GAsyncReadyCallback   callback,
+                                                 gpointer              user_data);
+
+GPtrArray *spotifygtk_native_session_load_discography_finish (SpotifyNativeSession *self,
+                                                              GAsyncResult         *result,
+                                                              GError              **error);
 
 /*
  * The artist's portrait image id, for the artist page's banner.

@@ -98,4 +98,15 @@ void spotifygtk_track_meta_clear (SpotifyTrackMeta *meta);
  * Returns NULL unless `len` is 16. Free with g_free(). */
 gchar *spotifygtk_gid_to_base62 (const guint8 *gid, gsize len);
 
+/*
+ * Release year out of an Album.date submessage, or 0 when absent or absurd.
+ *
+ * Shared rather than reimplemented: Date.year is sint32 and therefore
+ * zigzag-encoded, so reading it as a plain varint doubles it -- 2023 comes out
+ * as 4046. That is the same trap that once doubled every track duration, and
+ * it caught the discography loader too, which is why this is now one function
+ * instead of two.
+ */
+gint spotifygtk_album_release_year (const guint8 *album_data, gsize album_len);
+
 G_END_DECLS

@@ -1003,6 +1003,297 @@ spotifygtk_native_session_load_tracks (SpotifyNativeSession *self,
 }
 
 
+/* ── Discography ─────────────────────────────────────────────────────────── */
+
+#define DISCO_ALBUM_BATCH 300   /* well under the batch ceiling probed for tracks */
+
+void
+spotifygtk_native_release_free (SpotifyNativeRelease *release)
+{
+  if (!release)
+    return;
+  g_free (release->uri);
+  g_free (release->name);
+  g_free (release->cover_id);
+  g_clear_pointer (&release->tracks, g_ptr_array_unref);
+  g_free (release);
+}
+
+typedef struct {
+  SpotifyNativeSession *session;
+  GTask                *task;
+  gchar                *artist_uri;
+
+  GPtrArray            *releases;    /* SpotifyNativeRelease*, the result */
+  GHashTable           *by_uri;      /* album uri -> SpotifyNativeRelease* (borrowed) */
+
+  GPtrArray            *album_uris;  /* gchar* */
+  guint                 next_album;
+
+  GPtrArray            *track_uris;  /* gchar* */
+  GHashTable           *track_owner; /* track uri -> SpotifyNativeRelease* (borrowed) */
+  guint                 next_track;
+} DiscoOp;
+
+static void disco_request_albums (DiscoOp *op);
+static void disco_request_tracks (DiscoOp *op);
+
+static void
+disco_op_free (DiscoOp *op)
+{
+  if (!op)
+    return;
+  g_free (op->artist_uri);
+  g_clear_pointer (&op->releases, g_ptr_array_unref);
+  g_clear_pointer (&op->by_uri, g_hash_table_unref);
+  g_clear_pointer (&op->album_uris, g_ptr_array_unref);
+  g_clear_pointer (&op->track_uris, g_ptr_array_unref);
+  g_clear_pointer (&op->track_owner, g_hash_table_unref);
+  g_free (op);
+}
+
+static void
+disco_fail (DiscoOp *op, const gchar *what, GError *error)
+{
+  g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "could not load the discography (%s): %s", what,
+                           error ? error->message : "no data returned");
+  g_object_unref (op->task);
+  disco_op_free (op);
+}
+
+static void
+disco_finish (DiscoOp *op)
+{
+  g_task_return_pointer (op->task, g_steal_pointer (&op->releases),
+                         (GDestroyNotify) g_ptr_array_unref);
+  g_object_unref (op->task);
+  disco_op_free (op);
+}
+
+/* Third leg: names and durations for the track URIs the albums listed. */
+static void
+on_disco_tracks (const SpclientTrackInfo *tracks, guint n_tracks,
+                 GError *error, gpointer user_data)
+{
+  DiscoOp *op = user_data;
+
+  if (error) {
+    disco_fail (op, "track metadata", error);
+    return;
+  }
+
+  g_autoptr(GHashTable) by_uri = g_hash_table_new (g_str_hash, g_str_equal);
+  for (guint i = 0; i < n_tracks; i++) {
+    if (tracks[i].entity_uri)
+      g_hash_table_insert (by_uri, tracks[i].entity_uri, (gpointer) &tracks[i]);
+  }
+
+  /* Walk the slice that was *requested*, so each release keeps its running
+   * order -- the same reason the context loader does it this way. */
+  guint page = MIN (op->track_uris->len - op->next_track, SPOTIFYGTK_SESSION_MAX_BATCH);
+  for (guint i = 0; i < page; i++) {
+    const gchar *want = g_ptr_array_index (op->track_uris, op->next_track + i);
+    const SpclientTrackInfo *info = g_hash_table_lookup (by_uri, want);
+    SpotifyNativeRelease *owner = g_hash_table_lookup (op->track_owner, want);
+    if (!info || !owner)
+      continue;
+
+    SpotifyNativeTrack *t = g_new0 (SpotifyNativeTrack, 1);
+    t->uri            = g_strdup (info->entity_uri);
+    t->name           = g_strdup (info->meta.name);
+    t->artists        = g_strdup (info->meta.artist_names);
+    t->album          = g_strdup (info->meta.album_name ? info->meta.album_name : owner->name);
+    t->duration_ms    = info->meta.duration_ms;
+    t->is_explicit    = info->meta.is_explicit;
+    t->cover_id       = g_strdup (info->meta.cover_id ? info->meta.cover_id : owner->cover_id);
+    t->cover_id_small = g_strdup (info->meta.cover_id_small);
+    t->album_uri      = g_strdup (info->meta.album_uri ? info->meta.album_uri : owner->uri);
+    t->artist_uri     = g_strdup (info->meta.artist_uri);
+    t->release_year   = info->meta.release_year ? info->meta.release_year : owner->year;
+
+    g_ptr_array_add (owner->tracks, t);
+  }
+
+  op->next_track += page;
+  disco_request_tracks (op);
+}
+
+static void
+disco_request_tracks (DiscoOp *op)
+{
+  if (!op->track_uris || op->next_track >= op->track_uris->len) {
+    disco_finish (op);
+    return;
+  }
+
+  guint n = MIN (op->track_uris->len - op->next_track, SPOTIFYGTK_SESSION_MAX_BATCH);
+
+  g_mutex_lock (&op->session->lock);
+  g_autofree gchar *bearer = g_strdup (op->session->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (op->session->client_token);
+  g_mutex_unlock (&op->session->lock);
+
+  spotifygtk_spclient_get_tracks_metadata (op->session->spclient,
+                                           (const gchar *const *) &op->track_uris->pdata[op->next_track],
+                                           n, bearer, ctoken, on_disco_tracks, op);
+}
+
+/* Second leg: name, year, type, cover and track URIs per release. */
+static void
+on_disco_albums (GPtrArray *albums, GError *error, gpointer user_data)
+{
+  DiscoOp *op = user_data;
+
+  if (error) {
+    disco_fail (op, "album metadata", error);
+    return;
+  }
+
+  for (guint i = 0; albums && i < albums->len; i++) {
+    const SpotifyRelease *a = g_ptr_array_index (albums, i);
+    SpotifyNativeRelease *r = a->uri ? g_hash_table_lookup (op->by_uri, a->uri) : NULL;
+    if (!r)
+      continue;
+
+    if (!r->name && a->name)
+      r->name = g_strdup (a->name);
+    if (a->year)
+      r->year = a->year;
+    if (a->type)
+      r->type = a->type;
+    if (!r->cover_id && a->cover_id)
+      r->cover_id = g_strdup (a->cover_id);
+
+    for (guint j = 0; a->track_uris && j < a->track_uris->len; j++) {
+      const gchar *turi = g_ptr_array_index (a->track_uris, j);
+      if (!turi || g_hash_table_contains (op->track_owner, turi))
+        continue;   /* the same recording can appear on more than one release */
+      gchar *owned = g_strdup (turi);
+      g_ptr_array_add (op->track_uris, owned);
+      g_hash_table_insert (op->track_owner, owned, r);
+    }
+  }
+
+  op->next_album += MIN (op->album_uris->len - op->next_album, DISCO_ALBUM_BATCH);
+  disco_request_albums (op);
+}
+
+static void
+disco_request_albums (DiscoOp *op)
+{
+  if (!op->album_uris || op->next_album >= op->album_uris->len) {
+    disco_request_tracks (op);
+    return;
+  }
+
+  guint n = MIN (op->album_uris->len - op->next_album, DISCO_ALBUM_BATCH);
+
+  g_mutex_lock (&op->session->lock);
+  g_autofree gchar *bearer = g_strdup (op->session->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (op->session->client_token);
+  g_mutex_unlock (&op->session->lock);
+
+  spotifygtk_spclient_get_albums_metadata (op->session->spclient,
+                                           (const gchar *const *) &op->album_uris->pdata[op->next_album],
+                                           n, bearer, ctoken, on_disco_albums, op);
+}
+
+/* First leg: every release URI the artist has, and which group it sits in. */
+static void
+on_disco_releases (GPtrArray *releases, GError *error, gpointer user_data)
+{
+  DiscoOp *op = user_data;
+
+  if (error || !releases) {
+    disco_fail (op, "release list", error);
+    return;
+  }
+
+  for (guint i = 0; i < releases->len; i++) {
+    const SpotifyRelease *src = g_ptr_array_index (releases, i);
+    if (!src->uri || g_hash_table_contains (op->by_uri, src->uri))
+      continue;
+
+    SpotifyNativeRelease *r = g_new0 (SpotifyNativeRelease, 1);
+    r->uri    = g_strdup (src->uri);
+    r->group  = src->group;
+    r->tracks = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_track_free);
+
+    g_ptr_array_add (op->releases, r);
+    g_hash_table_insert (op->by_uri, r->uri, r);
+    g_ptr_array_add (op->album_uris, r->uri);   /* borrowed; the release owns it */
+  }
+
+  g_message ("session: %u releases for %s", op->releases->len, op->artist_uri);
+  disco_request_albums (op);
+}
+
+static gboolean
+start_discography (gpointer user_data)
+{
+  DiscoOp *op = user_data;
+
+  if (!op->session->spclient) {
+    disco_fail (op, "session", NULL);
+    return G_SOURCE_REMOVE;
+  }
+
+  g_mutex_lock (&op->session->lock);
+  g_autofree gchar *bearer = g_strdup (op->session->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (op->session->client_token);
+  g_mutex_unlock (&op->session->lock);
+
+  spotifygtk_spclient_get_artist_releases (op->session->spclient, op->artist_uri,
+                                           bearer, ctoken, on_disco_releases, op);
+  return G_SOURCE_REMOVE;
+}
+
+void
+spotifygtk_native_session_load_discography (SpotifyNativeSession *self,
+                                            const gchar          *artist_uri,
+                                            GCancellable         *cancellable,
+                                            GAsyncReadyCallback   callback,
+                                            gpointer              user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+  g_return_if_fail (artist_uri != NULL);
+
+  GTask *task = g_task_new (self, cancellable, callback, user_data);
+  g_task_set_source_tag (task, spotifygtk_native_session_load_discography);
+
+  if (!self->context) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
+                             "session has not been started");
+    g_object_unref (task);
+    return;
+  }
+
+  DiscoOp *op = g_new0 (DiscoOp, 1);
+  op->session     = self;
+  op->task        = task;
+  op->artist_uri  = g_strdup (artist_uri);
+  op->releases    = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_release_free);
+  op->by_uri      = g_hash_table_new (g_str_hash, g_str_equal);
+  op->album_uris  = g_ptr_array_new ();               /* borrowed strings */
+  op->track_uris  = g_ptr_array_new_with_free_func (g_free);
+  op->track_owner = g_hash_table_new (g_str_hash, g_str_equal);
+
+  g_main_context_invoke (self->context, start_discography, op);
+}
+
+GPtrArray *
+spotifygtk_native_session_load_discography_finish (SpotifyNativeSession *self,
+                                                   GAsyncResult         *result,
+                                                   GError              **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+  return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+
 typedef struct {
   SpotifyNativeSession        *session;
   gchar                       *uri;

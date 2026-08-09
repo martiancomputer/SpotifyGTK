@@ -184,6 +184,84 @@ void spotifygtk_spclient_get_tracks_metadata (SpotifySpclient      *self,
  *
  * bearer_token: login5 access_token. client_token: from clienttoken.h.
  */
+/* ── Discography ─────────────────────────────────────────────────────────── */
+
+/*
+ * Which of the artist's groups a release came from.
+ *
+ * These are the real groups the catalogue keeps, not a guess: Artist carries
+ * album_group, single_group and compilation_group as separate repeated fields.
+ * The page used to infer "EP" from a track count because nothing better
+ * reached it; Album.type does, and is exact.
+ */
+typedef enum {
+  SPOTIFY_RELEASE_ALBUM = 0,
+  SPOTIFY_RELEASE_SINGLE,
+  SPOTIFY_RELEASE_COMPILATION,
+} SpotifyReleaseGroup;
+
+/* Album.type (field 4). EP is a distinct value here and nowhere else. */
+typedef enum {
+  SPOTIFY_ALBUM_TYPE_UNKNOWN     = 0,
+  SPOTIFY_ALBUM_TYPE_ALBUM       = 1,
+  SPOTIFY_ALBUM_TYPE_SINGLE      = 2,
+  SPOTIFY_ALBUM_TYPE_COMPILATION = 3,
+  SPOTIFY_ALBUM_TYPE_EP          = 4,
+} SpotifyAlbumType;
+
+typedef struct {
+  gchar               *uri;         /* spotify:album:<id> */
+  gchar               *name;        /* NULL until the album batch fills it */
+  gint                 year;
+  SpotifyAlbumType     type;
+  gchar               *cover_id;    /* hex file_id, widest variant */
+  SpotifyReleaseGroup  group;
+  GPtrArray           *track_uris;  /* gchar*, in disc then track order */
+} SpotifyRelease;
+
+void spotifygtk_release_free (SpotifyRelease *release);
+
+typedef void (*SpclientReleasesCallback) (GPtrArray *releases /* SpotifyRelease*, NULL on failure */,
+                                          GError   *error,
+                                          gpointer  user_data);
+
+/*
+ * Every release the artist has, as URIs and their group.
+ *
+ * ARTIST_V4 again, reading album_group (5), single_group (6) and
+ * compilation_group (7) instead of the portrait. This is the whole
+ * discography -- counts here match what the catalogue reports exactly, where
+ * resolving the artist context returns only their most-played tracks and
+ * therefore only the handful of releases those happen to sit on.
+ *
+ * Names, years, covers and track lists are not in this message; they come
+ * from spotifygtk_spclient_get_albums_metadata() on the URIs returned here.
+ */
+void spotifygtk_spclient_get_artist_releases (SpotifySpclient         *self,
+                                              const gchar             *artist_uri,
+                                              const gchar             *bearer_token,
+                                              const gchar             *client_token,
+                                              SpclientReleasesCallback callback,
+                                              gpointer                 user_data);
+
+/*
+ * Name, year, type, cover and track list for many albums in one request.
+ *
+ * ALBUM_V4, the same batch endpoint with a different extension kind. The
+ * track list comes from disc (11) -> track (3) -> gid (1) and is URIs only:
+ * the album message carries no track names or durations, so those still need
+ * spotifygtk_spclient_get_tracks_metadata() over the URIs this returns.
+ *
+ * Same batch ceiling as the track batch -- chunk to a few hundred.
+ */
+void spotifygtk_spclient_get_albums_metadata (SpotifySpclient         *self,
+                                              const gchar *const      *album_uris,
+                                              guint                    n_uris,
+                                              const gchar             *bearer_token,
+                                              const gchar             *client_token,
+                                              SpclientReleasesCallback callback,
+                                              gpointer                 user_data);
+
 /*
  * The artist's portrait image id, from the extended-metadata service.
  *

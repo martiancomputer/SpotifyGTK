@@ -50,11 +50,11 @@
 /*
  * Release kinds.
  *
- * Inferred from how many of the artist's tracks a release contributes, because
- * nothing in the metadata says which it is: Album.type exists in Spotify's
- * schema but context-resolve returns tracks, not album objects, so it never
- * reaches us. The thresholds are the usual industry shape -- one or two tracks
- * is a single, up to six an EP.
+ * Exact, not inferred. These come from Album.type in the catalogue, which the
+ * discography load reads directly -- an earlier version guessed from how many
+ * of the artist's tracks a release contributed, because a context resolve
+ * returns tracks rather than album objects and the type never reached the
+ * page. It reaches it now, so a two-track EP is an EP.
  *
  * These sort, they do not filter. The heading says "Albums, EPs and Singles",
  * so all three are always on the page and the buttons decide which comes
@@ -72,17 +72,15 @@ static const gchar *const KIND_LABELS[N_RELEASE_KINDS] = {
   "Album", "EP", "Singles"
 };
 
-#define EP_MAX_TRACKS      6
-#define SINGLE_MAX_TRACKS  2
-
-/* One release gathered from the artist's tracks. */
+/* One release out of the artist's discography. */
 typedef struct {
-  gchar     *uri;
-  gchar     *name;
-  gchar     *cover_id;
-  GPtrArray *tracks;    /* SpotifyNativeTrack*, owned copies */
-  gint       year;
-  guint      first_seen; /* keeps the resolve's own ordering as the tiebreak */
+  gchar           *uri;
+  gchar           *name;
+  gchar           *cover_id;
+  GPtrArray       *tracks;    /* SpotifyNativeTrack*, owned copies */
+  gint             year;
+  SpotifyAlbumType type;      /* from the catalogue */
+  guint            first_seen; /* keeps the catalogue's own order as the tiebreak */
 } Release;
 
 static void
@@ -199,12 +197,15 @@ on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_dat
 static ReleaseKind
 release_kind_of (const Release *r)
 {
-  guint n = r->tracks ? r->tracks->len : 0;
-  if (n <= SINGLE_MAX_TRACKS)
-    return RELEASE_SINGLE;
-  if (n <= EP_MAX_TRACKS)
-    return RELEASE_EP;
-  return RELEASE_ALBUM;
+  switch (r->type) {
+    case SPOTIFY_ALBUM_TYPE_SINGLE:      return RELEASE_SINGLE;
+    case SPOTIFY_ALBUM_TYPE_EP:          return RELEASE_EP;
+    case SPOTIFY_ALBUM_TYPE_ALBUM:
+    case SPOTIFY_ALBUM_TYPE_COMPILATION: return RELEASE_ALBUM;
+    default: break;
+  }
+  /* Only for a release the catalogue gave no type at all. */
+  return (r->tracks && r->tracks->len <= 2) ? RELEASE_SINGLE : RELEASE_ALBUM;
 }
 
 /* Chosen kind first; everything else keeps the order the resolve gave it. */
@@ -323,38 +324,69 @@ on_kind_clicked (GtkButton *button, gpointer user_data)
   apply_release_sort (self);
 }
 
-/* Gather the distinct releases present in the resolved tracks, in the order
- * the resolve returned them. */
+
+/*
+ * The discography, which is a separate load from the tracks above.
+ *
+ * The resolve that fills Top tracks returns the artist's most-played tracks,
+ * so the releases it implies are only the ones those tracks happen to sit on,
+ * each showing only the tracks that appeared. That is why an album with ten
+ * tracks used to show two, and why most of a catalogue was missing: it was
+ * never a limit that could be raised, it was the wrong question. This asks the
+ * catalogue for the discography instead.
+ */
 static void
-build_releases (SpotifyGtkArtistPage *self, GPtrArray *tracks)
+on_discography_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
+  SpotifyNativeSession *session = SPOTIFYGTK_NATIVE_SESSION (source);
+  GWeakRef             *ref     = user_data;
+  g_autoptr(GError)     err     = NULL;
+
+  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (ref);
+  g_weak_ref_clear (ref);
+  g_free (ref);
+
+  g_autoptr(GPtrArray) releases =
+    spotifygtk_native_session_load_discography_finish (session, result, &err);
+
+  if (!self)
+    return;
+
+  if (!releases) {
+    if (!g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+      gtk_label_set_text (self->releases_status, "Couldn't load the releases.");
+    return;
+  }
+
   g_clear_pointer (&self->all_releases, g_ptr_array_unref);
   self->all_releases = g_ptr_array_new_with_free_func (release_free);
 
-  g_autoptr(GHashTable) by_uri = g_hash_table_new (g_str_hash, g_str_equal);
+  for (guint i = 0; i < releases->len; i++) {
+    const SpotifyNativeRelease *src = g_ptr_array_index (releases, i);
 
-  for (guint i = 0; i < tracks->len; i++) {
-    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
-    if (!t || !t->album_uri || !*t->album_uri)
+    /* A release whose tracks all failed to resolve would render as a heading
+     * over nothing. */
+    if (!src->tracks || src->tracks->len == 0)
       continue;
 
-    Release *r = g_hash_table_lookup (by_uri, t->album_uri);
-    if (!r) {
-      r = g_new0 (Release, 1);
-      r->uri        = g_strdup (t->album_uri);
-      r->name       = g_strdup (t->album ? t->album : "Unknown release");
-      r->cover_id   = g_strdup (t->cover_id);
-      r->year       = t->release_year;
-      r->first_seen = i;
-      r->tracks     = g_ptr_array_new_with_free_func (
-        (GDestroyNotify) spotifygtk_native_track_free);
-      g_ptr_array_add (self->all_releases, r);
-      g_hash_table_insert (by_uri, r->uri, r);
-    }
-    g_ptr_array_add (r->tracks, spotifygtk_native_track_copy (t));
-    if (r->year == 0 && t->release_year > 0)
-      r->year = t->release_year;
+    Release *r = g_new0 (Release, 1);
+    r->uri        = g_strdup (src->uri);
+    r->name       = g_strdup (src->name ? src->name : "Unknown release");
+    r->cover_id   = g_strdup (src->cover_id);
+    r->year       = src->year;
+    r->type       = src->type;
+    r->first_seen = i;
+    r->tracks     = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_track_free);
+
+    for (guint j = 0; j < src->tracks->len; j++)
+      g_ptr_array_add (r->tracks, spotifygtk_native_track_copy (
+        g_ptr_array_index (src->tracks, j)));
+
+    g_ptr_array_add (self->all_releases, r);
   }
+
+  apply_release_sort (self);
 }
 
 static void
@@ -415,8 +447,6 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     g_ptr_array_add (top, g_ptr_array_index (tracks, i));
   spotifygtk_track_list_set_native_tracks (self->list, top);
 
-  build_releases (self, tracks);
-  apply_release_sort (self);
 }
 
 void
@@ -467,6 +497,14 @@ spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
   spotifygtk_native_session_load_tracks (self->session, artist_uri,
                                          ARTIST_PAGE_LIMIT, self->in_flight,
                                          on_tracks_loaded, ref);
+
+  /* Also in parallel: three requests of its own, and much the larger job. */
+  gtk_label_set_text (self->releases_status, "Loading releases…");
+  GWeakRef *disco_ref = g_new0 (GWeakRef, 1);
+  g_weak_ref_init (disco_ref, self);
+  spotifygtk_native_session_load_discography (self->session, artist_uri,
+                                              self->in_flight,
+                                              on_discography_loaded, disco_ref);
 }
 
 void

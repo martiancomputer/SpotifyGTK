@@ -8,6 +8,7 @@
 
 #include <stdlib.h>
 #include "protobuf_min.h"
+#include "track_meta.h"
 
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
@@ -792,6 +793,322 @@ on_artist_response (GObject *source, GAsyncResult *result, gpointer user_data)
 
 
 
+
+
+/* ── Discography ─────────────────────────────────────────────────────────── */
+/*
+ * Field numbers, all read out of the shipped client's descriptors:
+ *
+ *   Artist.album_group = 5, single_group = 6, compilation_group = 7
+ *   AlbumGroup.album   = 1,  Album.gid = 1
+ *   Album.name = 2, type = 4, date = 6, disc = 11, cover_group = 17
+ *   Date.year  = 1,  Disc.track = 3,  Track.gid = 1
+ *
+ * Corroborated against the catalogue rather than trusted: for one artist the
+ * groups hold 4 / 73 / 2 entries, and the same artist's discography reports
+ * 4 albums, 73 singles and 2 compilations. cover_group = 17 is the number the
+ * album path in this file already used, so that much is self-checking.
+ */
+#define EXTENSION_KIND_ALBUM_V4      9
+#define ARTIST_FIELD_ALBUM_GROUP     5
+#define ARTIST_FIELD_SINGLE_GROUP    6
+#define ARTIST_FIELD_COMPIL_GROUP    7
+#define ALBUM_GROUP_ALBUM            1
+#define ALBUM_FIELD_GID              1
+#define ALBUM_FIELD_NAME             2
+#define ALBUM_FIELD_TYPE             4
+#define ALBUM_FIELD_DATE             6
+#define ALBUM_FIELD_DISC            11
+#define ALBUM_FIELD_COVER_GROUP     17
+#define DISC_FIELD_TRACK             3
+#define TRACK_FIELD_GID              1
+
+/* Walk the batch envelope and hand each entity payload to one of these. */
+typedef void (*EntityFunc) (const guint8 *entity, gsize len, gpointer user_data);
+
+typedef struct {
+  SpclientReleasesCallback callback;
+  gpointer                 user_data;
+  EntityFunc               entity_fn;
+} ReleasesClosure;
+
+void
+spotifygtk_release_free (SpotifyRelease *release)
+{
+  if (!release)
+    return;
+  g_free (release->uri);
+  g_free (release->name);
+  g_free (release->cover_id);
+  g_clear_pointer (&release->track_uris, g_ptr_array_unref);
+  g_free (release);
+}
+
+/* A 16-byte gid at `field` of `msg`, as spotify:<kind>:<base62>. */
+static gchar *
+dup_uri_from_gid (const guint8 *msg, gsize len, guint32 field, const gchar *kind)
+{
+  const guint8 *gid = NULL;
+  gsize         gid_len = 0;
+  if (!pb_find_bytes_field (msg, len, field, &gid, &gid_len) || gid_len != 16)
+    return NULL;
+  g_autofree gchar *b62 = spotifygtk_gid_to_base62 (gid, gid_len);
+  return b62 ? g_strconcat ("spotify:", kind, ":", b62, NULL) : NULL;
+}
+
+static void
+for_each_entity (const guint8 *data, gsize len, EntityFunc fn, gpointer user_data)
+{
+  gsize         pos = 0;
+  guint32       fnum;
+  PbWireType    wtype;
+  const guint8 *fdata;
+  gsize         flen;
+  guint64       fvarint;
+
+  while (pb_read_field (data, len, &pos, &fnum, &wtype, &fdata, &flen, &fvarint)) {
+    if (fnum != BER_EXTENDED_METADATA || wtype != PB_WIRE_LENGTH_DELIMITED)
+      continue;
+
+    gsize         ipos = 0;
+    guint32       ifnum;
+    PbWireType    iwtype;
+    const guint8 *idata;
+    gsize         ilen;
+    guint64       ivarint;
+
+    while (pb_read_field (fdata, flen, &ipos, &ifnum, &iwtype, &idata, &ilen, &ivarint)) {
+      if (ifnum != EEDA_EXTENSION_DATA || iwtype != PB_WIRE_LENGTH_DELIMITED)
+        continue;
+      const guint8 *any = NULL; gsize any_len = 0;
+      if (!pb_find_bytes_field (idata, ilen, EED_EXTENSION_DATA, &any, &any_len))
+        continue;
+      const guint8 *entity = NULL; gsize entity_len = 0;
+      if (!pb_find_bytes_field (any, any_len, ANY_VALUE, &entity, &entity_len))
+        continue;
+      fn (entity, entity_len, user_data);
+    }
+  }
+}
+
+static void
+collect_group (const guint8 *artist, gsize len, guint32 field,
+               SpotifyReleaseGroup group, GPtrArray *out)
+{
+  gsize         pos = 0;
+  guint32       fnum;
+  PbWireType    wtype;
+  const guint8 *fdata;
+  gsize         flen;
+  guint64       fvarint;
+
+  while (pb_read_field (artist, len, &pos, &fnum, &wtype, &fdata, &flen, &fvarint)) {
+    if (fnum != field || wtype != PB_WIRE_LENGTH_DELIMITED)
+      continue;
+
+    /* An AlbumGroup is the same release in several editions; the first is the
+     * one to show, or a page lists the same record three times. */
+    const guint8 *album = NULL; gsize album_len = 0;
+    if (!pb_find_bytes_field (fdata, flen, ALBUM_GROUP_ALBUM, &album, &album_len))
+      continue;
+
+    gchar *uri = dup_uri_from_gid (album, album_len, ALBUM_FIELD_GID, "album");
+    if (!uri)
+      continue;
+
+    SpotifyRelease *r = g_new0 (SpotifyRelease, 1);
+    r->uri   = uri;
+    r->group = group;
+    g_ptr_array_add (out, r);
+  }
+}
+
+static void
+on_artist_releases_entity (const guint8 *artist, gsize len, gpointer user_data)
+{
+  GPtrArray *out = user_data;
+  collect_group (artist, len, ARTIST_FIELD_ALBUM_GROUP,  SPOTIFY_RELEASE_ALBUM,       out);
+  collect_group (artist, len, ARTIST_FIELD_SINGLE_GROUP, SPOTIFY_RELEASE_SINGLE,      out);
+  collect_group (artist, len, ARTIST_FIELD_COMPIL_GROUP, SPOTIFY_RELEASE_COMPILATION, out);
+}
+
+static void
+on_album_entity (const guint8 *album, gsize len, gpointer user_data)
+{
+  GPtrArray *out = user_data;
+
+  gchar *uri = dup_uri_from_gid (album, len, ALBUM_FIELD_GID, "album");
+  if (!uri)
+    return;
+
+  SpotifyRelease *r = g_new0 (SpotifyRelease, 1);
+  r->uri = uri;
+
+  const guint8 *fdata = NULL; gsize flen = 0;
+  if (pb_find_bytes_field (album, len, ALBUM_FIELD_NAME, &fdata, &flen))
+    r->name = g_strndup ((const gchar *) fdata, flen);
+
+  guint64 v = 0;
+  if (pb_find_varint_field (album, len, ALBUM_FIELD_TYPE, &v))
+    r->type = (SpotifyAlbumType) v;
+
+  /* Takes the Album, not the date submessage, and zigzag-decodes it -- see
+   * the header. Reading Date.year as a plain varint returns 4046 for 2023. */
+  r->year = spotifygtk_album_release_year (album, len);
+
+  if (pb_find_bytes_field (album, len, ALBUM_FIELD_COVER_GROUP, &fdata, &flen))
+    r->cover_id = dup_widest_image (fdata, flen);
+
+  /* disc is repeated, and so is track within it; both orders matter, so this
+   * walks rather than taking the first of each. */
+  r->track_uris = g_ptr_array_new_with_free_func (g_free);
+
+  gsize         pos = 0;
+  guint32       fnum;
+  PbWireType    wtype;
+  const guint8 *ddata;
+  gsize         dlen;
+  guint64       dvarint;
+
+  while (pb_read_field (album, len, &pos, &fnum, &wtype, &ddata, &dlen, &dvarint)) {
+    if (fnum != ALBUM_FIELD_DISC || wtype != PB_WIRE_LENGTH_DELIMITED)
+      continue;
+
+    gsize         tpos = 0;
+    guint32       tfnum;
+    PbWireType    twtype;
+    const guint8 *tdata;
+    gsize         tlen;
+    guint64       tvarint;
+
+    while (pb_read_field (ddata, dlen, &tpos, &tfnum, &twtype, &tdata, &tlen, &tvarint)) {
+      if (tfnum != DISC_FIELD_TRACK || twtype != PB_WIRE_LENGTH_DELIMITED)
+        continue;
+      gchar *turi = dup_uri_from_gid (tdata, tlen, TRACK_FIELD_GID, "track");
+      if (turi)
+        g_ptr_array_add (r->track_uris, turi);
+    }
+  }
+
+  g_ptr_array_add (out, r);
+}
+
+static void
+on_releases_response (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  ReleasesClosure *cl = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body =
+    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+
+  if (!body) {
+    if (cl->callback) cl->callback (NULL, error, cl->user_data);
+    g_free (cl);
+    return;
+  }
+
+  gsize len = 0;
+  const guint8 *data = g_bytes_get_data (body, &len);
+
+  g_autoptr(GPtrArray) out =
+    g_ptr_array_new_with_free_func ((GDestroyNotify) spotifygtk_release_free);
+  for_each_entity (data, len, cl->entity_fn, out);
+
+  if (cl->callback) cl->callback (out, NULL, cl->user_data);
+  g_free (cl);
+}
+
+/* Both discography calls are the same request with a different kind and a
+ * different reader, so they share one sender. */
+static void
+send_entity_batch (SpotifySpclient *self, const gchar *const *uris, guint n_uris,
+                   guint kind, EntityFunc entity_fn,
+                   const gchar *bearer_token, const gchar *client_token,
+                   SpclientReleasesCallback callback, gpointer user_data)
+{
+  GByteArray *req_buf = g_byte_array_new ();
+
+  for (guint i = 0; i < n_uris; i++) {
+    if (!uris[i] || !*uris[i])
+      continue;
+    GByteArray *query_buf = g_byte_array_new ();
+    pb_write_varint_field (query_buf, 1, kind);
+
+    GByteArray *entity_req_buf = g_byte_array_new ();
+    pb_write_bytes_field (entity_req_buf, 1, (const guint8 *) uris[i], strlen (uris[i]));
+    pb_write_message_field (entity_req_buf, 2, query_buf->data, query_buf->len);
+    pb_write_message_field (req_buf, 2, entity_req_buf->data, entity_req_buf->len);
+
+    g_byte_array_free (query_buf, TRUE);
+    g_byte_array_free (entity_req_buf, TRUE);
+  }
+
+  g_autofree gchar *url = g_strdup_printf (
+    "https://%s/extended-metadata/v0/extended-metadata", SPCLIENT_FALLBACK_HOST);
+
+  SoupMessage *msg = soup_message_new (SOUP_METHOD_POST, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
+  g_autofree gchar *auth_hdr = g_strdup_printf ("Bearer %s", bearer_token ? bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth_hdr);
+  soup_message_headers_replace (headers, "Content-Type", "application/x-protobuf");
+  soup_message_headers_replace (headers, "Accept", "application/x-protobuf");
+  if (client_token && *client_token)
+    soup_message_headers_replace (headers, "Client-Token", client_token);
+
+  GBytes *body_bytes = g_byte_array_free_to_bytes (req_buf);
+  soup_message_set_request_body_from_bytes (msg, "application/x-protobuf", body_bytes);
+  g_bytes_unref (body_bytes);
+
+  ReleasesClosure *cl = g_new0 (ReleasesClosure, 1);
+  cl->callback  = callback;
+  cl->user_data = user_data;
+  cl->entity_fn = entity_fn;
+
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
+                                    self->cancellable, on_releases_response, cl);
+  g_object_unref (msg);
+}
+
+void
+spotifygtk_spclient_get_artist_releases (SpotifySpclient         *self,
+                                         const gchar             *artist_uri,
+                                         const gchar             *bearer_token,
+                                         const gchar             *client_token,
+                                         SpclientReleasesCallback callback,
+                                         gpointer                 user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
+
+  if (!artist_uri || !*artist_uri) {
+    if (callback) callback (NULL, NULL, user_data);
+    return;
+  }
+
+  send_entity_batch (self, &artist_uri, 1, EXTENSION_KIND_ARTIST_V4,
+                     on_artist_releases_entity, bearer_token, client_token,
+                     callback, user_data);
+}
+
+void
+spotifygtk_spclient_get_albums_metadata (SpotifySpclient         *self,
+                                         const gchar *const      *album_uris,
+                                         guint                    n_uris,
+                                         const gchar             *bearer_token,
+                                         const gchar             *client_token,
+                                         SpclientReleasesCallback callback,
+                                         gpointer                 user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
+
+  if (!album_uris || n_uris == 0) {
+    if (callback) callback (NULL, NULL, user_data);
+    return;
+  }
+
+  send_entity_batch (self, album_uris, n_uris, EXTENSION_KIND_ALBUM_V4,
+                     on_album_entity, bearer_token, client_token,
+                     callback, user_data);
+}
 
 
 /*

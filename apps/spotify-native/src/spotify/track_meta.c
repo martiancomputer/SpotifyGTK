@@ -65,8 +65,8 @@ bytes_to_hex (const guint8 *data, gsize len)
  * worse than no year at all. Anything outside living memory of recorded music
  * is treated as absent.
  */
-static gint
-album_release_year (const guint8 *album_data, gsize album_len)
+gint
+spotifygtk_album_release_year (const guint8 *album_data, gsize album_len)
 {
   const guint8 *date_data = NULL;
   gsize         date_len  = 0;
@@ -283,7 +283,7 @@ spotifygtk_track_meta_parse (const guint8     *track_data,
       if (wire_type == PB_WIRE_LENGTH_DELIMITED && !out->album_uri)
         out->album_uri = dup_uri_from_submessage (field_data, field_len, "album");
       if (wire_type == PB_WIRE_LENGTH_DELIMITED && out->release_year == 0)
-        out->release_year = album_release_year (field_data, field_len);
+        out->release_year = spotifygtk_album_release_year (field_data, field_len);
       break;
 
     case TRACK_FIELD_ARTIST:

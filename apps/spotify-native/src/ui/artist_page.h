@@ -7,7 +7,7 @@
  *   Artist / name / year
  *   a hero panel carrying the artist's art
  *   their most-played tracks
- *   Albums, EPs and Singles -- sortable, as inline cards
+ *   Albums, EPs and Singles -- the full discography, sortable, expanded
  *
  * The tracks and releases come from a single /context-resolve of the artist
  * URI. The banner does not: it comes from hm://artistview/v1/artist/<id>,
@@ -15,11 +15,13 @@
  * for why the round avatar is not the banner, and how showing it instead went
  * unnoticed.
  *
- * All of the rest comes from that one resolve. The native
- * stack has no discography endpoint, so the releases are the distinct albums
- * present in that track list, grouped here -- the same approach Home, Search
- * and Library take, and the same reason: real data grouped from what a resolve
- * already returns, rather than invented.
+ * The releases are a separate load and the whole discography, not a grouping
+ * of whatever the resolve happened to return. See
+ * spotifygtk_native_session_load_discography(): the catalogue is asked for the
+ * artist's release list, then for each release's tracks, so an album shows all
+ * of its tracks rather than the two that reached the top-tracks resolve, and
+ * the page lists every single rather than the handful with a popular track on
+ * them. Album.type comes with it, so "EP" is read rather than guessed.
  *
  * The sections are the shared widgets in inline mode, so rows and cards behave
  * exactly as they do everywhere else -- context menu, hearts, play context --
