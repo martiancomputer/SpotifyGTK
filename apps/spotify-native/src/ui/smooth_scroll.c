@@ -4,8 +4,13 @@
 
 #include "smooth_scroll.h"
 
+#include <math.h>
+
 #define SMOOTH_SCROLL_STEP  118.0   /* px travelled per wheel notch */
-#define SMOOTH_SCROLL_EASE  0.24    /* fraction of the remaining gap per frame */
+#define SMOOTH_SCROLL_EASE  0.24    /* fraction of the remaining gap, per 60Hz frame */
+#define SMOOTH_SCROLL_FRAME_US 16666.0  /* what that fraction is calibrated against */
+/* A long stall should catch up, not teleport: past this the easing saturates. */
+#define SMOOTH_SCROLL_MAX_FRAMES 6.0
 
 typedef struct {
   GtkScrolledWindow *scroller;      /* borrowed; owns this via set_data */
@@ -13,6 +18,7 @@ typedef struct {
   guint              tick;
   gdouble            target;
   gdouble            last_set;      /* what we last wrote, to spot outside changes */
+  gint64             last_frame_us; /* to ease by elapsed time, not by frame count */
 } SmoothScroll;
 
 static GtkAdjustment *
@@ -28,7 +34,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 {
   SmoothScroll  *ss  = user_data;
   GtkAdjustment *adj = adjustment_for (ss);
-  (void) widget; (void) clock;
+  (void) widget;
 
   if (!adj) {
     ss->tick = 0;
@@ -52,7 +58,31 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
     return G_SOURCE_REMOVE;
   }
 
-  gtk_adjustment_set_value (adj, value + remaining * SMOOTH_SCROLL_EASE);
+  /*
+   * Ease by elapsed time, not by frame.
+   *
+   * A fixed fraction per frame is only a fixed speed if the frames arrive on
+   * time. This app drops around one frame in six even when idle -- measured,
+   * steady, roughly ten a second, with occasional half-second hitches while a
+   * large list loads -- so a per-frame ease produced half as many steps at
+   * twice the size exactly when the machine was busiest. That is mechanically
+   * the same motion as GtkScrolledWindow's stepped wheel handling, which is
+   * why scrolling "went back to default GTK" while media was loading and
+   * recovered afterwards. It was never switching handlers.
+   *
+   * Raising the per-frame fraction to the elapsed number of 60Hz frames keeps
+   * the travel time constant however the frames actually land, so jank costs
+   * smoothness rather than changing the character of the motion.
+   */
+  gint64  now_us  = gdk_frame_clock_get_frame_time (clock);
+  gdouble frames  = (ss->last_frame_us > 0)
+    ? (gdouble) (now_us - ss->last_frame_us) / SMOOTH_SCROLL_FRAME_US : 1.0;
+  frames = CLAMP (frames, 0.1, SMOOTH_SCROLL_MAX_FRAMES);
+  ss->last_frame_us = now_us;
+
+  gdouble factor = 1.0 - pow (1.0 - SMOOTH_SCROLL_EASE, frames);
+
+  gtk_adjustment_set_value (adj, value + remaining * factor);
   ss->last_set = gtk_adjustment_get_value (adj);
   return G_SOURCE_CONTINUE;
 }
@@ -99,9 +129,11 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
 
   ss->target   = CLAMP (base + delta * SMOOTH_SCROLL_STEP, lower, upper);
   ss->last_set = value;
-  if (ss->tick == 0)
+  if (ss->tick == 0) {
+    ss->last_frame_us = 0;   /* first frame of a new flick eases by one frame */
     ss->tick = gtk_widget_add_tick_callback (GTK_WIDGET (ss->scroller),
                                              smooth_scroll_tick, ss, NULL);
+  }
   return GDK_EVENT_STOP;
 }
 
