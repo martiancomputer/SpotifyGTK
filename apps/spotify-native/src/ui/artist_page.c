@@ -5,6 +5,7 @@
 #include "artist_page.h"
 
 #include "cover_loader.h"
+#include "smooth_scroll.h"
 
 #include <string.h>
 
@@ -624,6 +625,15 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   gtk_widget_set_vexpand (scroller, TRUE);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  /*
+   * The wheel animation every other page has. Its absence here is why
+   * scrolling seemed to lose smoothness at random: it was not intermittent,
+   * it was this page. Every release's track list is inline and therefore does
+   * not scroll itself, so without this the page fell through to
+   * GtkScrolledWindow's stepped wheel handling -- one notch, one jump.
+   */
+  spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
+                                   GTK_ORIENTATION_VERTICAL);
   gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
 
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
