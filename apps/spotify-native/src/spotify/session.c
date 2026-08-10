@@ -1312,15 +1312,87 @@ typedef struct {
  */
 static GHashTable *artist_image_cache;   /* owned strings both sides */
 
+/*
+ * ...and on disk, so a restart does not pay for it again.
+ *
+ * The images themselves are already cached as files, keyed by id -- but the id
+ * is what costs the round trip, so caching the art without caching the lookup
+ * still meant 858 ms before a banner could even be asked for. A few hundred
+ * artists is a few tens of KB, next to a cache budget measured in gigabytes.
+ *
+ * Stale entries are harmless: an artist who changes their banner gets the old
+ * id, which either still resolves or 404s and falls back, and either way the
+ * next fetch of the overview corrects it.
+ */
+static gchar *
+artist_image_map_path (void)
+{
+  return g_build_filename (g_get_user_cache_dir (), "spotifygtk",
+                           "artist-images", NULL);
+}
+
+static void
+artist_image_map_load (void)
+{
+  if (artist_image_cache)
+    return;
+  artist_image_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                              g_free, g_free);
+
+  g_autofree gchar *path = artist_image_map_path ();
+  g_autofree gchar *data = NULL;
+  if (!path || !g_file_get_contents (path, &data, NULL, NULL))
+    return;
+
+  g_auto(GStrv) lines = g_strsplit (data, "\n", -1);
+  for (guint i = 0; lines[i]; i++) {
+    if (!*lines[i])
+      continue;
+    gchar *sp = strchr (lines[i], ' ');
+    if (!sp)
+      continue;
+    *sp = '\0';
+    g_hash_table_insert (artist_image_cache, g_strdup (lines[i]),
+                         g_strdup (sp + 1));
+  }
+}
+
+static void
+artist_image_map_save (void)
+{
+  if (!artist_image_cache)
+    return;
+
+  g_autofree gchar *path = artist_image_map_path ();
+  if (!path)
+    return;
+  g_autofree gchar *dir = g_path_get_dirname (path);
+  g_mkdir_with_parents (dir, 0700);
+
+  GString *out = g_string_new (NULL);
+  GHashTableIter it;
+  gpointer k, v;
+  g_hash_table_iter_init (&it, artist_image_cache);
+  while (g_hash_table_iter_next (&it, &k, &v))
+    g_string_append_printf (out, "%s %s\n", (const gchar *) k, (const gchar *) v);
+
+  /* Nothing to handle on failure: the map is an optimisation, and an unwritten
+   * one costs exactly the round trip it was there to save. */
+  g_file_set_contents (path, out->str, (gssize) out->len, NULL);
+  g_string_free (out, TRUE);
+}
+
 static void
 artist_image_done (ArtistImageOp *op, const gchar *cover_id)
 {
   if (cover_id && *cover_id && op->uri) {
-    if (!artist_image_cache)
-      artist_image_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                                  g_free, g_free);
-    g_hash_table_insert (artist_image_cache, g_strdup (op->uri),
-                         g_strdup (cover_id));
+    artist_image_map_load ();
+    const gchar *known = g_hash_table_lookup (artist_image_cache, op->uri);
+    if (g_strcmp0 (known, cover_id) != 0) {
+      g_hash_table_insert (artist_image_cache, g_strdup (op->uri),
+                           g_strdup (cover_id));
+      artist_image_map_save ();
+    }
   }
   if (op->callback)
     op->callback (cover_id, op->user_data);
@@ -1377,13 +1449,12 @@ start_artist_image (gpointer user_data)
   ArtistImageOp *op = user_data;
   SpotifyNativeSession *self = op->session;
 
-  /* Already known from an earlier visit: answer without a round trip. */
-  if (artist_image_cache) {
-    const gchar *known = g_hash_table_lookup (artist_image_cache, op->uri);
-    if (known) {
-      artist_image_done (op, known);
-      return G_SOURCE_REMOVE;
-    }
+  /* Already known, from this session or an earlier one: no round trip. */
+  artist_image_map_load ();
+  const gchar *known = g_hash_table_lookup (artist_image_cache, op->uri);
+  if (known) {
+    artist_image_done (op, known);
+    return G_SOURCE_REMOVE;
   }
 
   g_mutex_lock (&self->lock);
