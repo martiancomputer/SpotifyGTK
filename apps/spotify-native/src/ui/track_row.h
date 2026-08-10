@@ -37,6 +37,10 @@ void spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self,
  * lists, so it changes without the track changing. */
 void spotifygtk_track_row_set_number (SpotifyGtkTrackRow *self, gint track_number);
 
+/* While held, a bind records the cover it wants but does not fetch it. The
+ * owning list lifts this and calls retry_cover() when scrolling settles. */
+void spotifygtk_track_row_set_cover_hold (SpotifyGtkTrackRow *self, gboolean hold);
+
 void spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
                                             const SpotifyNativeTrack *track,
                                             gint                      track_number);

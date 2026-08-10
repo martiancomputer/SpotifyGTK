@@ -76,8 +76,10 @@ on_scroll_settled (gpointer user_data)
    * speculative work. */
   spotifygtk_cover_set_deferred (FALSE);
 
-  for (guint i = 0; i < self->bound_rows->len; i++)
+  for (guint i = 0; i < self->bound_rows->len; i++) {
+    spotifygtk_track_row_set_cover_hold (g_ptr_array_index (self->bound_rows, i), FALSE);
     spotifygtk_track_row_retry_cover (g_ptr_array_index (self->bound_rows, i));
+  }
 
   /* Warm ahead in the direction just travelled. The visible window is derived
    * from the adjustment rather than asked of the view, which has no API for
@@ -308,6 +310,10 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
    * single-row splice renumbers correctly, which is what lets an unlike remove
    * one row instead of rebuilding the whole list.
    */
+  /* settle_id is live only while the view is moving, so this is exactly "the
+   * user is scrolling right now". */
+  spotifygtk_track_row_set_cover_hold (row, self->settle_id != 0);
+
   spotifygtk_track_row_set_native_track (row,
     spotifygtk_track_item_get_track (item), 0);
   spotifygtk_track_row_set_number (row,
@@ -676,6 +682,7 @@ spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
   self->numbered = numbered;
 }
+
 
 void
 spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks)

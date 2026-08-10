@@ -347,20 +347,36 @@ promote_queued (const gchar *cache_key)
   }
 }
 
+static void complete_waiters (const gchar *cover_id, GdkTexture *texture);
+static gboolean waiters_all_cancelled (const gchar *cache_key);
+static void drop_waiters (const gchar *cache_key);
+
 /* Start as many queued fetches as the cap allows, newest first. */
 static void
 cover_pump (void)
 {
+  /* Callbacks reached from here can ask for more art, and a nested pump would
+   * pop from the queue this one is walking. */
+  static gboolean pumping = FALSE;
+  if (pumping)
+    return;
+  pumping = TRUE;
+
   while (cover_active < COVER_MAX_INFLIGHT) {
     QueuedFetch *q = g_queue_pop_tail (&cover_queue);
     if (!q)
-      return;
+      break;
 
     /* Every waiter for this cover has gone -- the rows were recycled while it
      * sat in the queue. Dropping it here is the whole point of queueing in our
-     * own code rather than libsoup's, where it could not be reconsidered. */
-    if (!g_hash_table_contains (in_flight, q->cache_key)) {
+     * own code rather than libsoup's, where it could not be reconsidered.
+     *
+     * complete_waiters() rather than a bare drop, so the in_flight entry goes
+     * with it: leaving the key behind would make every later request for the
+     * same art join a fetch that is never going to run. */
+    if (waiters_all_cancelled (q->cache_key)) {
       cover_stats.dropped++;
+      drop_waiters (q->cache_key);
       queued_fetch_free (q);
       continue;
     }
@@ -369,6 +385,8 @@ cover_pump (void)
     issue_fetch (q->cache_key, q->target_px);
     queued_fetch_free (q);
   }
+
+  pumping = FALSE;
 }
 
 typedef struct {
@@ -376,6 +394,32 @@ typedef struct {
   gpointer             user_data;
   GCancellable        *cancellable;   /* owned, may be NULL */
 } PendingRequest;
+
+/*
+ * Has everyone who asked for this cover stopped caring?
+ *
+ * Cancelling a request does not remove it from in_flight -- cancellation is
+ * only consulted when the bytes arrive -- so the presence of the key says
+ * nothing about whether anyone is still waiting. Checking the key alone is
+ * what let a scroll decode artwork for every row it flew past: the rows were
+ * long recycled and their requests long cancelled, and every one still passed
+ * the test and went on to fetch and decode.
+ */
+static gboolean
+waiters_all_cancelled (const gchar *cache_key)
+{
+  GList *waiters = g_hash_table_lookup (in_flight, cache_key);
+  if (!waiters)
+    return TRUE;
+
+  for (GList *l = waiters; l; l = l->next) {
+    const PendingRequest *req = l->data;
+    if (!req->cancellable || !g_cancellable_is_cancelled (req->cancellable))
+      return FALSE;
+  }
+  return TRUE;
+}
+
 
 /*
  * Cover-fetch statistics.
@@ -529,6 +573,32 @@ pending_request_free (PendingRequest *req)
 }
 
 /* Hand `texture` (possibly NULL) to everyone waiting on this id. */
+/*
+ * Free an entry whose waiters have all been cancelled, without delivering.
+ *
+ * complete_waiters() would do the freeing too, but it walks the list calling
+ * callbacks -- and a callback typically asks for another cover, which pushes
+ * onto the queue that cover_pump() is in the middle of iterating. That
+ * re-entrancy corrupted the queue and crashed in g_queue_push_tail. Nothing is
+ * lost by not delivering: every waiter here is cancelled, which is exactly the
+ * case complete_waiters() skips.
+ */
+static void
+drop_waiters (const gchar *cache_key)
+{
+  GList *waiters = g_hash_table_lookup (in_flight, cache_key);
+  if (!waiters) {
+    g_hash_table_remove (in_flight, cache_key);
+    return;
+  }
+  g_hash_table_remove (in_flight, cache_key);
+  for (GList *l = waiters; l; l = l->next) {
+    cover_stats.skipped++;
+    pending_request_free (l->data);
+  }
+  g_list_free (waiters);
+}
+
 static void
 complete_waiters (const gchar *cover_id, GdkTexture *texture)
 {

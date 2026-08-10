@@ -53,6 +53,7 @@ struct _SpotifyGtkTrackRow {
   /* Cancelled when the row is reused or destroyed, so a slow cover cannot
    * land on a row that now shows a different track. */
   GCancellable *cover_cancellable;
+  gboolean      cover_hold;   /* record what is wanted, fetch when the list settles */
   /* The cover this row wants, kept so a load skipped during a scroll can be
    * reissued once the list settles. */
   gchar        *pending_cover_id;
@@ -319,8 +320,32 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
   self->cover_shown = FALSE;
   gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
   gtk_widget_set_visible (GTK_WIDGET (self->track_num), self->row_number > 0);
+
+  /*
+   * Held: the list this row belongs to is mid-scroll, so the row is very
+   * likely to be recycled before anyone reads it. pending_cover_id is set
+   * above, which is all retry_cover() needs, and the list retries every row it
+   * still has when it settles.
+   *
+   * Note what this deliberately is not: the old global "deferred" flag, which
+   * answered requests with NULL and forgot them. That is where three separate
+   * "artwork never loads" bugs came from -- the flag was global while the
+   * retry that lifted it was per-list, so whichever list settled first
+   * re-asked only for its own rows and everything else was lost. Here the list
+   * that holds is the list that retries, so there is no one else to lose.
+   */
+  if (self->cover_hold)
+    return;
+
   spotifygtk_cover_load_deferrable (cover_id, 96, self->cover_cancellable,
                                     on_row_cover_loaded, self);
+}
+
+void
+spotifygtk_track_row_set_cover_hold (SpotifyGtkTrackRow *self, gboolean hold)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+  self->cover_hold = hold;
 }
 
 static void
