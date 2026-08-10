@@ -1557,6 +1557,21 @@ clear_key_timeout (LiveTestState *state)
   state->key_timeout_source = NULL;
 }
 
+/* The AP link playback uses, kept across tracks; see the reuse site below. */
+static SpotifyApSession  *engine_ap      = NULL;
+
+/* The connection has gone; do not hand it to the next track. */
+static void
+on_engine_ap_disconnected (SpotifyApSession *session, GError *error, gpointer user_data)
+{
+  (void) user_data;
+  if (session != engine_ap)
+    return;   /* an older one already replaced */
+  g_message ("[engine] AP link dropped (%s); it will be rebuilt on the next track.",
+             error ? error->message : "no reason given");
+  g_clear_object (&engine_ap);
+}
+
 static gboolean
 on_audio_key_attempt_timeout (gpointer user_data)
 {
@@ -1577,6 +1592,27 @@ on_audio_key_attempt_timeout (gpointer user_data)
              "not itself a verdict on entitlement -- an unentitled account is "
              "normally refused explicitly and promptly, with a reason code.",
              AUDIO_KEY_ATTEMPT_TIMEOUT_S);
+  /*
+   * Throw the shared AP connection away.
+   *
+   * An audio key is the only thing playback asks of the AP link, so a request
+   * that is never answered is the first and only sign that the link has died.
+   * It dies silently: the server drops an idle socket during a long pause, and
+   * nothing on this side notices, because is_live() reports the three flags
+   * set at login and none of them is touched by the far end going away.
+   *
+   * Without this the dead session stayed cached and every later attempt wrote
+   * another request into the same closed socket and waited out the same eight
+   * seconds -- nothing played again until the app was restarted. Dropping it
+   * here means the next attempt builds a fresh connection.
+   */
+  if (engine_ap) {
+    g_message ("[live-test] no key came back; dropping the AP connection so the "
+               "next attempt reconnects instead of reusing a dead one.");
+    spotifygtk_ap_session_disconnect (engine_ap);
+    g_clear_object (&engine_ap);
+  }
+
   /* The UI only gets the generic "Native playback failed" from player_service.c;
    * there is no ERROR stage on SpotifyNativeEngineStage to carry a reason. The
    * log line above is the only place this is currently explained. */
@@ -1696,7 +1732,7 @@ static void wire_session_to_state (LiveTestState *state, SpotifyApSession *sessi
  * is what makes a shared context safe without a dedicated host thread.
  */
 static GMainContext     *engine_context = NULL;
-static SpotifyApSession  *engine_ap      = NULL;
+
 static SpotifyCdnFetcher *engine_cdn     = NULL;
 
 /*
@@ -3053,6 +3089,15 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   if (!reusing_ap) {
     g_clear_object (&engine_ap);
     engine_ap = spotifygtk_ap_session_new ();
+    /*
+     * Forget it the moment the link goes, rather than finding out by way of an
+     * audio key that never arrives. ap.c does not reconnect by itself -- it
+     * says so at the end of its receive loop -- so something has to notice,
+     * and the cost of not noticing is eight seconds of nothing followed by a
+     * failed track.
+     */
+    g_signal_connect (engine_ap, "disconnected",
+                      G_CALLBACK (on_engine_ap_disconnected), NULL);
   }
   SpotifyApSession *session = engine_ap;
   /* Stashed here rather than threaded through as a separate callback
