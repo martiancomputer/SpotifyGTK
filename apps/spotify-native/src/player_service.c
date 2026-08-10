@@ -32,6 +32,12 @@ struct _SpotifyNativePlayerService {
    */
   GPtrArray *inflight;       /* InflightTrack* */
   guint64    audible_seq;    /* sink slot currently sounding */
+
+  /* A seek that has to wait for a run to exist before it can be applied; see
+   * spotifygtk_player_service_seek(). Paired with its URI so a seek meant for
+   * one track cannot land on whatever happens to start next. */
+  gchar     *pending_seek_uri;
+  gint64     pending_seek_ms;
 };
 
 typedef struct {
@@ -323,6 +329,19 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   self->track_uri = g_strdup (track_uri);
   self->cancellable = g_cancellable_new ();
   self->control = spotifygtk_native_engine_control_new ();
+
+  /* A seek that was waiting for this run. Requested before the engine starts,
+   * so it is consumed at the first wait point rather than after a second of
+   * the track has already been heard from the top. */
+  if (self->pending_seek_uri && g_strcmp0 (self->pending_seek_uri, track_uri) == 0) {
+    spotifygtk_native_engine_control_request_seek (self->control, self->pending_seek_ms);
+    g_clear_pointer (&self->pending_seek_uri, g_free);
+    self->pending_seek_ms = 0;
+  } else if (self->pending_seek_uri) {
+    /* Something else started first; the seek is no longer meaningful. */
+    g_clear_pointer (&self->pending_seek_uri, g_free);
+    self->pending_seek_ms = 0;
+  }
   spotifygtk_native_engine_control_set_volume (self->control,
                                               self->volume_percent / 100.0);
   spotifygtk_native_engine_control_set_eq (self->control,
@@ -400,9 +419,55 @@ void
 spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 position_ms)
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+
   SpotifyNativeEngineControl *c = active_control (self);
   if (!c)
     return;
+
+  /*
+   * Seeking into a track whose producer has already exited.
+   *
+   * A track's engine run finishes several seconds before its audio does --
+   * that overlap is what makes the handover gapless -- so for those last
+   * seconds the sounding track has no engine loop left to consume a seek.
+   * request_seek() would set a flag nobody reads: the drag appeared to do
+   * nothing and the slider snapped back to wherever the sink had got to,
+   * which is what "it is impossible to bring it to the start, it auto
+   * reverts" was.
+   *
+   * The run is gone, so there is nothing to seek; the track has to be played
+   * again from the target instead. The URI is known because the sounding
+   * track is in `inflight`, which is what active_control() just matched on.
+   */
+  if (c != self->control) {
+    const gchar *uri = NULL;
+    guint64 seq = spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ());
+    for (guint i = 0; i < self->inflight->len; i++) {
+      InflightTrack *t = g_ptr_array_index (self->inflight, i);
+      if (spotifygtk_native_engine_control_get_sink_seq (t->control) == seq) {
+        uri = t->uri;
+        break;
+      }
+    }
+
+    if (uri) {
+      g_autofree gchar *want = g_strdup (uri);
+      g_autoptr(GError) err = NULL;
+      g_message ("player-service: seek into a track whose run has ended; "
+                 "restarting it at %" G_GINT64_FORMAT " ms", position_ms);
+      g_free (self->pending_seek_uri);
+      self->pending_seek_uri = g_strdup (want);
+      self->pending_seek_ms  = position_ms;
+      if (!spotifygtk_player_service_start_uri (self, want, &err)) {
+        g_warning ("player-service: could not restart for the seek: %s",
+                   err ? err->message : "unknown");
+        g_clear_pointer (&self->pending_seek_uri, g_free);
+        self->pending_seek_ms = 0;
+      }
+      return;
+    }
+  }
+
   /* The engine consumes this at its next wait point and preserves pause state
    * across the seek (see do_seek in the engine). */
   spotifygtk_native_engine_control_request_seek (c, position_ms);
@@ -435,6 +500,7 @@ spotifygtk_player_service_dispose (GObject *object)
   g_clear_object (&self->cancellable);
   g_clear_pointer (&self->track_uri, g_free);
   g_clear_pointer (&self->pending_uri, g_free);
+  g_clear_pointer (&self->pending_seek_uri, g_free);
   g_clear_pointer (&self->inflight, g_ptr_array_unref);
   g_clear_pointer (&self->main_context, g_main_context_unref);
   G_OBJECT_CLASS (spotifygtk_player_service_parent_class)->dispose (object);

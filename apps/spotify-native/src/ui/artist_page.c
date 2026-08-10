@@ -59,18 +59,23 @@
  *
  * These sort, they do not filter. The heading says "Albums, EPs and Singles",
  * so all three are always on the page and the buttons decide which comes
- * first -- exactly what the sort on Liked Songs does, and the reason there is
- * no "All" button here: nothing is ever being hidden for it to restore.
+ * first -- exactly what the sort on Liked Songs does.
+ *
+ * "All" is the fourth key and the default: no kind is promoted and the
+ * releases keep the order the catalogue gave them, which is roughly newest
+ * first. It is not a filter reset -- nothing is ever hidden here -- it is the
+ * way back to an unsorted page, which the other three had no way to restore.
  */
 typedef enum {
-  RELEASE_ALBUM = 0,
+  RELEASE_ALL = 0,
+  RELEASE_ALBUM,
   RELEASE_EP,
   RELEASE_SINGLE,
   N_RELEASE_KINDS
 } ReleaseKind;
 
 static const gchar *const KIND_LABELS[N_RELEASE_KINDS] = {
-  "Album", "EP", "Singles"
+  "All", "Album", "EP", "Singles"
 };
 
 /* One release out of the artist's discography. */
@@ -217,10 +222,15 @@ compare_releases (gconstpointer a, gconstpointer b, gpointer user_data)
   const Release *x = *(const Release **) a;
   const Release *y = *(const Release **) b;
 
-  gboolean xf = (release_kind_of (x) == self->sort_kind);
-  gboolean yf = (release_kind_of (y) == self->sort_kind);
-  if (xf != yf)
-    return self->sort_desc[self->sort_kind] ? (xf - yf) : (yf - xf);
+  /* "All" promotes nothing; the tiebreak below is the whole order. */
+  if (self->sort_kind != RELEASE_ALL) {
+    gboolean xf = (release_kind_of (x) == self->sort_kind);
+    gboolean yf = (release_kind_of (y) == self->sort_kind);
+    if (xf != yf)
+      return self->sort_desc[self->sort_kind] ? (xf - yf) : (yf - xf);
+  } else if (self->sort_desc[RELEASE_ALL]) {
+    return (x->first_seen < y->first_seen) - (x->first_seen > y->first_seen);
+  }
 
   /* Stable within a group: the resolve's own order, which is Spotify's. */
   return (x->first_seen > y->first_seen) - (x->first_seen < y->first_seen);
