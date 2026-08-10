@@ -111,7 +111,18 @@ mapped_pixels_free (gpointer data)
  * distinct ids (see dup_cover_id), so an album's 300px and 640px versions are
  * separate files, correctly.
  */
-#define COVER_DISK_BUDGET (256 * 1024 * 1024)
+/*
+ * Measured on a real cache: 3167 files, 374 MB, almost all album art at
+ * around 110 KB each. 256 MB was under that, so a prune at every startup was
+ * throwing away a third of a working cache and re-fetching it during the
+ * session -- the cache paying for itself less often than it could.
+ *
+ * A gigabyte is a rounding error on a desktop and buys roughly nine thousand
+ * covers, which is more art than a large library has. Disk is also the whole
+ * point: a file read beats the CDN every time, and every image that stays
+ * here is one that never queues behind a scroll.
+ */
+#define COVER_DISK_BUDGET (1024 * 1024 * 1024)
 
 typedef struct { gchar *path; gint64 mtime; gsize size; } DiskEntry;
 
