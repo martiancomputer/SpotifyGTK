@@ -66,6 +66,50 @@ struct _SpotifyGtkTrackList {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list, GTK_TYPE_BOX)
 
+/*
+ * Is this row anywhere near the viewport?
+ *
+ * GtkListView keeps far more items bound than are on screen -- measured at
+ * 206 against a dozen visible -- and bound_rows follows it, so "every row we
+ * hold" is not "every row being looked at". Retrying artwork for all of them
+ * on every settle asked for around two hundred covers at a time, nearly all
+ * of them for rows a long way off screen, which is most of the fetching a
+ * scroll did.
+ *
+ * A viewport's worth of margin either side, so a small nudge still has its
+ * art ready rather than waiting for the next settle.
+ */
+static gboolean
+row_near_viewport (SpotifyGtkTrackList *self, GtkWidget *row)
+{
+  if (!self->scroller)
+    return TRUE;   /* nothing to measure against; do not skip on a guess */
+
+  /*
+   * Unmapped is the answer, not a missing one.
+   *
+   * GtkListView unmaps the rows it is holding but not showing, and that is
+   * most of them: 192 of 206 after a scroll. Treating unmapped as "cannot
+   * tell, assume visible" -- which is what this did at first -- let every one
+   * of those through, so the filter rejected nothing and the settle went on
+   * asking for two hundred covers. On the first settle, before anything has
+   * scrolled, every bound row is mapped, so nothing is skipped while a page
+   * is filling.
+   */
+  if (!gtk_widget_get_mapped (row))
+    return FALSE;
+
+  graphene_rect_t bounds;
+  if (!gtk_widget_compute_bounds (row, self->scroller, &bounds))
+    return TRUE;
+
+  gdouble view_h = gtk_widget_get_height (self->scroller);
+  gdouble margin = view_h > 0 ? view_h : 600.0;
+
+  return (bounds.origin.y + bounds.size.height) > -margin
+      && bounds.origin.y < (view_h + margin);
+}
+
 static gboolean
 on_scroll_settled (gpointer user_data)
 {
@@ -77,8 +121,10 @@ on_scroll_settled (gpointer user_data)
   spotifygtk_cover_set_deferred (FALSE);
 
   for (guint i = 0; i < self->bound_rows->len; i++) {
-    spotifygtk_track_row_set_cover_hold (g_ptr_array_index (self->bound_rows, i), FALSE);
-    spotifygtk_track_row_retry_cover (g_ptr_array_index (self->bound_rows, i));
+    GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
+    spotifygtk_track_row_set_cover_hold (SPOTIFYGTK_TRACK_ROW (row), FALSE);
+    if (row_near_viewport (self, row))
+      spotifygtk_track_row_retry_cover (SPOTIFYGTK_TRACK_ROW (row));
   }
 
   /* Warm ahead in the direction just travelled. The visible window is derived
@@ -609,9 +655,14 @@ spotifygtk_track_list_release_covers (SpotifyGtkTrackList *self)
     spotifygtk_track_row_release_cover (g_ptr_array_index (self->bound_rows, i));
 }
 
-/* Ask every bound row for its artwork again. The counterpart to
+/* Ask the rows on screen for their artwork again. The counterpart to
  * release_covers: a page returning to view does not rebind its rows, so
- * something has to say "you may load again". */
+ * something has to say "you may load again".
+ *
+ * Only the ones being looked at, for the same reason the settle path filters:
+ * bound_rows follows GtkListView's recycling pool, which is an order of
+ * magnitude larger than the viewport, so "every bound row" meant re-fetching
+ * a couple of hundred covers every time a page was returned to. */
 void
 spotifygtk_track_list_reload_covers (SpotifyGtkTrackList *self)
 {
@@ -619,8 +670,11 @@ spotifygtk_track_list_reload_covers (SpotifyGtkTrackList *self)
   if (!self->bound_rows)
     return;
 
-  for (guint i = 0; i < self->bound_rows->len; i++)
-    spotifygtk_track_row_retry_cover (g_ptr_array_index (self->bound_rows, i));
+  for (guint i = 0; i < self->bound_rows->len; i++) {
+    GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
+    if (row_near_viewport (self, row))
+      spotifygtk_track_row_retry_cover (SPOTIFYGTK_TRACK_ROW (row));
+  }
 }
 
 SpotifyGtkTrackList *
@@ -682,6 +736,7 @@ spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
   self->numbered = numbered;
 }
+
 
 
 void
