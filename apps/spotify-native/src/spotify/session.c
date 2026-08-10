@@ -1301,9 +1301,27 @@ typedef struct {
   gpointer                     user_data;
 } ArtistImageOp;
 
+/*
+ * artist uri -> banner image id, for the life of the session.
+ *
+ * Measured cold: 858 ms to learn the id, 240 ms to fetch and decode it. All
+ * of that first number is one pathfinder round trip returning the entire
+ * artist overview -- discography, top tracks, related artists -- to extract a
+ * single string. The query is persisted, so it cannot be narrowed. What can be
+ * avoided is asking twice for an artist already visited.
+ */
+static GHashTable *artist_image_cache;   /* owned strings both sides */
+
 static void
 artist_image_done (ArtistImageOp *op, const gchar *cover_id)
 {
+  if (cover_id && *cover_id && op->uri) {
+    if (!artist_image_cache)
+      artist_image_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                  g_free, g_free);
+    g_hash_table_insert (artist_image_cache, g_strdup (op->uri),
+                         g_strdup (cover_id));
+  }
   if (op->callback)
     op->callback (cover_id, op->user_data);
   g_free (op->uri);
@@ -1358,6 +1376,15 @@ start_artist_image (gpointer user_data)
 {
   ArtistImageOp *op = user_data;
   SpotifyNativeSession *self = op->session;
+
+  /* Already known from an earlier visit: answer without a round trip. */
+  if (artist_image_cache) {
+    const gchar *known = g_hash_table_lookup (artist_image_cache, op->uri);
+    if (known) {
+      artist_image_done (op, known);
+      return G_SOURCE_REMOVE;
+    }
+  }
 
   g_mutex_lock (&self->lock);
   g_autofree gchar *bearer = g_strdup (self->bearer_token);
