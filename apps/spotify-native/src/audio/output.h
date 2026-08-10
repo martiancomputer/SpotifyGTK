@@ -33,6 +33,9 @@ typedef struct {
   gsize    (*write)   (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames);
   void     (*set_volume) (SpotifyAudioOutput *self, gdouble volume_0_to_1);
   void     (*drain)   (SpotifyAudioOutput *self);
+  /* Throw away audio the device still holds. Optional; NULL means the backend
+   * cannot, and the caller lives with the tail playing out. */
+  void     (*flush)   (SpotifyAudioOutput *self);
   void     (*close)   (SpotifyAudioOutput *self);
 } AudioBackendVtable;
 
@@ -53,6 +56,15 @@ SpotifyAudioOutput *spotifygtk_output_open (gint sample_rate, gint channels);
 gsize spotifygtk_output_write      (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames);
 void  spotifygtk_output_set_volume (SpotifyAudioOutput *self, gdouble volume_0_to_1);
 void  spotifygtk_output_drain      (SpotifyAudioOutput *self);
+
+/*
+ * Discard whatever the device has buffered but has not yet sounded.
+ *
+ * For abandoning a track: the sink dropping its own queue is not enough,
+ * because a second or so has already been handed to the device and will play
+ * regardless -- heard as a fragment of the old track between it and the next.
+ */
+void  spotifygtk_output_flush      (SpotifyAudioOutput *self);
 void  spotifygtk_output_close      (SpotifyAudioOutput *self);
 
 const gchar *spotifygtk_output_backend_name (AudioBackendKind kind);

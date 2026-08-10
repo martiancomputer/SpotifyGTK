@@ -53,6 +53,21 @@ pulse_drain (SpotifyAudioOutput *self)
 }
 
 static void
+pulse_flush (SpotifyAudioOutput *self)
+{
+#if HAVE_PULSE
+  PulseData *data = self->backend_data;
+  int error = 0;
+  /* Drops what is buffered without waiting for it, which is the difference
+   * between this and drain: a skip should be immediate, not polite. */
+  if (pa_simple_flush (data->stream, &error) < 0)
+    g_warning ("PulseAudio flush failed: %s", pa_strerror (error));
+#else
+  (void) self;
+#endif
+}
+
+static void
 pulse_close (SpotifyAudioOutput *self)
 {
 #if HAVE_PULSE
@@ -68,6 +83,7 @@ static const AudioBackendVtable PULSE_VTABLE = {
   .write      = pulse_write,
   .set_volume = NULL,   /* volume handled via PulseAudio's per-stream cork/volume API later */
   .drain      = pulse_drain,
+  .flush      = pulse_flush,
   .close      = pulse_close,
 };
 

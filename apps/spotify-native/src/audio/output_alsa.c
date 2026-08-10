@@ -47,6 +47,16 @@ alsa_write (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames)
 }
 
 static void
+alsa_flush (SpotifyAudioOutput *self)
+{
+  AlsaData *data = self->backend_data;
+  /* drop discards the ring; the device is then in SETUP and needs preparing
+   * again before it will take anything. */
+  snd_pcm_drop (data->handle);
+  snd_pcm_prepare (data->handle);
+}
+
+static void
 alsa_drain (SpotifyAudioOutput *self)
 {
 #if HAVE_ALSA
@@ -73,6 +83,7 @@ static const AudioBackendVtable ALSA_VTABLE = {
   .write      = alsa_write,
   .set_volume = NULL,  /* ALSA mixer volume control is a separate, optional path */
   .drain      = alsa_drain,
+  .flush      = alsa_flush,
   .close      = alsa_close,
 };
 

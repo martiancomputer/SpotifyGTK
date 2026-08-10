@@ -106,6 +106,15 @@ pipewire_drain (SpotifyAudioOutput *self)
 }
 
 static void
+pipewire_flush (SpotifyAudioOutput *self)
+{
+  PipewireData *data = self->backend_data;
+  pw_thread_loop_lock (data->loop);
+  data->ring_head = data->ring_tail = data->ring_fill = 0;
+  pw_thread_loop_unlock (data->loop);
+}
+
+static void
 pipewire_close (SpotifyAudioOutput *self)
 {
   PipewireData *data = self->backend_data;
@@ -122,6 +131,7 @@ static const AudioBackendVtable PIPEWIRE_VTABLE = {
   .write      = pipewire_write,
   .set_volume = NULL,  /* per-stream volume via pw_stream_set_control(), TODO */
   .drain      = pipewire_drain,
+  .flush      = pipewire_flush,
   .close      = pipewire_close,
 };
 

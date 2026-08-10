@@ -109,6 +109,24 @@ head_track (SpotifyAudioSink *self)
         pcm_frame_free (f);
       t->queued = 0;
       t->cancelled = TRUE;
+
+      /*
+       * Drop what the device is still holding, too.
+       *
+       * Emptying this queue is only half of abandoning a track: a second or so
+       * has already been handed to the device and plays regardless of anything
+       * decided here. Heard, that is the sink going quiet mid-phrase and then
+       * a disconnected fragment of the old track arriving before the new one
+       * starts -- the buffer being cleared, and then a chop.
+       *
+       * Only when this track was actually sounding. Cancelling one that never
+       * reached the device would flush audio belonging to the track ahead of
+       * it, and the writer works strictly in order, so anything in the device
+       * now is this track's.
+       */
+      if (t->started && self->output)
+        spotifygtk_output_flush (self->output);
+
       g_cond_broadcast (&self->cond);
     }
 

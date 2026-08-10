@@ -97,6 +97,13 @@ spotifygtk_output_drain (SpotifyAudioOutput *self)
 }
 
 void
+spotifygtk_output_flush (SpotifyAudioOutput *self)
+{
+  if (self && self->vtable && self->vtable->flush)
+    self->vtable->flush (self);
+}
+
+void
 spotifygtk_output_close (SpotifyAudioOutput *self)
 {
   if (!self) return;
