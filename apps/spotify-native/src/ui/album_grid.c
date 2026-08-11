@@ -190,6 +190,49 @@ card_retry_cover (GtkWidget *card)
                                     on_card_cover_loaded, art);
 }
 
+/*
+ * Is this card anywhere near the viewport?
+ *
+ * GtkGridView keeps far more cards bound than it shows, exactly as the list
+ * does with rows, and a shelf holds a hundred. Retrying art for every bound
+ * card decoded 350 covers on the home page against the thirty or so on
+ * screen -- at 352x352 that is 165 MB of pixels, which is most of what this
+ * process holds. Card art is the expensive kind: memory goes as the square of
+ * the decode size, and cards decode at twice their nominal width on purpose.
+ *
+ * Both axes, because a shelf scrolls sideways and the page scrolls down.
+ */
+/* A card just came on screen: now its art is worth fetching. The handler stays
+ * connected for the card's life -- cards are recycled, and each rebind sets a
+ * fresh cover-id that this then picks up on the next map. */
+static void
+on_card_mapped (GtkWidget *card, gpointer user_data)
+{
+  (void) user_data;
+  card_retry_cover (card);
+}
+
+static gboolean
+card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
+{
+  if (!self->scroller)
+    return TRUE;                /* nothing to measure against */
+  if (!gtk_widget_get_mapped (card))
+    return FALSE;               /* an answer, not a missing one */
+
+  graphene_rect_t b;
+  if (!gtk_widget_compute_bounds (card, self->scroller, &b))
+    return TRUE;
+
+  gdouble vw = gtk_widget_get_width (self->scroller);
+  gdouble vh = gtk_widget_get_height (self->scroller);
+  gdouble mx = vw > 0 ? vw : 600.0;
+  gdouble my = vh > 0 ? vh : 600.0;
+
+  return (b.origin.x + b.size.width)  > -mx && b.origin.x < (vw + mx)
+      && (b.origin.y + b.size.height) > -my && b.origin.y < (vh + my);
+}
+
 static gboolean
 on_grid_settled (gpointer user_data)
 {
@@ -197,8 +240,11 @@ on_grid_settled (gpointer user_data)
   self->settle_id = 0;
 
   spotifygtk_cover_set_deferred (FALSE);
-  for (guint i = 0; i < self->bound_cards->len; i++)
-    card_retry_cover (g_ptr_array_index (self->bound_cards, i));
+  for (guint i = 0; i < self->bound_cards->len; i++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+    if (card_near_viewport (self, card))
+      card_retry_cover (card);
+  }
 
   return G_SOURCE_REMOVE;
 }
@@ -440,11 +486,28 @@ card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem
   g_object_set_data_full (G_OBJECT (card), "cover-id",
                           g_strdup (item->cover_id), g_free);
 
+  /*
+   * Ask when the card is mapped, not when it is bound.
+   *
+   * GtkGridView binds far more cards than it shows -- a shelf holds a hundred
+   * and the home page bound 350 against the thirty on screen, every one of
+   * them decoding a 352x352 texture. At half a megabyte each that was 165 MB
+   * of pixels, most of what this process holds, for art nobody could see.
+   *
+   * Mapping is GTK's own answer to "is this on screen", and it arrives at
+   * exactly the right moment: a card that scrolls into view is mapped, and
+   * one that never does is never decoded. Requesting on bind could not tell
+   * the difference, and filtering on bind is worse than useless -- a card is
+   * not mapped *yet* at that point, so it would suppress everything and
+   * nothing would bring it back on a page that does not scroll.
+   */
   if (item->cover_id && *item->cover_id) {
-    GCancellable *cancel = g_cancellable_new ();
-    g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
-    spotifygtk_cover_load_deferrable (item->cover_id, card_decode_px (card), cancel,
-                                      on_card_cover_loaded, art);
+    if (gtk_widget_get_mapped (card))
+      card_retry_cover (card);
+    else if (!g_object_get_data (G_OBJECT (card), "map-armed")) {
+      g_object_set_data (G_OBJECT (card), "map-armed", GINT_TO_POINTER (1));
+      g_signal_connect (card, "map", G_CALLBACK (on_card_mapped), NULL);
+    }
   }
   (void) self;
 }

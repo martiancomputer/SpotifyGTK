@@ -471,6 +471,15 @@ spotifygtk_cover_log_stats (const gchar *context)
              g_queue_get_length (&cover_queue), cover_stats.peak_queue,
              cover_active, COVER_MAX_INFLIGHT);
 
+  /* The number that answers "is artwork where the memory goes": decoded
+   * pixels still mapped, against the process's own dirty pages. */
+  g_message ("cover stats (%s): %u textures cached, %.1f MB cached, "
+             "%.1f MB of decoded pixels still mapped",
+             context ? context : "",
+             cover_cache ? g_hash_table_size (cover_cache) : 0,
+             cover_cache_bytes / 1048576.0,
+             mapped_live_bytes / 1048576.0);
+
   if (cover_stats.fetched > 0) {
     g_message ("cover stats (%s): fetch avg %.0f ms, worst %.0f ms; "
                "decode avg %.0f ms; avg payload %.1f KB; %u in cache, %.1f MB",

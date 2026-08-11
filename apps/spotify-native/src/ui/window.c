@@ -181,6 +181,7 @@ static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static gint order_pos_of (SpotifyGtkNativeWindow *self, gint ctx_index);
 static void rebuild_order (SpotifyGtkNativeWindow *self, gint keep);
 static void show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track);
+static gboolean dev_nav_probe (gpointer data);
 static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
                                  const gchar *title, const gchar *kind);
 static void spotifygtk_native_window_collapse_queue (SpotifyGtkNativeWindow *self);
@@ -1835,6 +1836,15 @@ on_artist_follow_toggled (const gchar *artist_uri, gpointer user_data)
                                         !following);
 }
 
+static gboolean
+dev_nav_probe (gpointer data)
+{
+  SpotifyGtkNativeWindow *self = data;
+  g_message ("NAVPROBE leaving the page");
+  navigate_raw (self, "home");
+  return G_SOURCE_REMOVE;
+}
+
 static void
 wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
 {
@@ -2198,6 +2208,8 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
 
     /* Development aid: open straight onto a page so its load can be watched
      * without driving the UI by hand. */
+    if (g_getenv ("SPOTIFY_NAV_PROBE"))
+      g_timeout_add_seconds (30, dev_nav_probe, self);
     const gchar *start = g_getenv ("SPOTIFY_DEV_START_PAGE");
     if (start && g_str_has_prefix (start, "spotify:"))
       navigate_to_context (self, start, "Dev", "artist");
