@@ -1,7 +1,8 @@
 # Deleting playlists, liking albums, following artists
 
-Read-only research. **No write has been attempted for any of these**, on any
-account — see the note at the bottom.
+Liking albums and following artists are **proven live** against the throwaway
+account (`315kroxz…`): each written, read back present, removed, read back
+absent. Deleting a playlist is still inference — see the end.
 
 ## Liking an album, following an artist
 
@@ -31,14 +32,39 @@ spotify.collection_cosmos.proto.CollectionShow
 spotify.collection_cosmos.proto.CollectionAddRemoveItem
 ```
 
-So:
+### The obvious set name is wrong
 
-| action | call |
+`"album"` is in the string table next to `"artist"` and looks like the answer.
+It is not: reading *or* writing that set answers **403**. Probing every
+candidate read-only:
+
+| set | result |
 |---|---|
-| like an album | set `"album"`, uri `spotify:album:<id>`, `is_removed = FALSE` |
-| unlike an album | same, `is_removed = TRUE` |
-| follow an artist | set `"artist"`, uri `spotify:artist:<id>` |
-| unfollow an artist | same, `is_removed = TRUE` |
+| `collection` | 200 — liked tracks |
+| `artist` | 200 — followed artists |
+| `show` | 200 |
+| `album`, `albums`, `artists`, `episode`, `your_library` | **403** |
+
+Saved albums live in **`collection`**, the same set as liked songs,
+distinguished only by the URI. Writing `spotify:album:<id>` to `collection`
+returned 200 and the album came back as the first item on the next read.
+
+| action | set | uri |
+|---|---|---|
+| like an album | `collection` | `spotify:album:<id>` |
+| follow an artist | `artist` | `spotify:artist:<id>` |
+| the reverse of either | same | `is_removed = TRUE` |
+
+The write encoder sends the URI as a string and lets the server infer the
+type, so nothing else changes between the two.
+
+**Consequence worth knowing:** because albums share the liked-songs set,
+anything reading `collection` gets album URIs mixed in with track URIs.
+`window.c` accumulates that set into `liked_uris` with no type filter. It is
+harmless today -- the Liked Songs page is built from a context resolve rather
+than from that set, and an album URI never matches a track URI when marking
+hearts -- but a "saved album" indicator would want to read it deliberately
+rather than by accident.
 
 Reading them back is `spotifygtk_collection_v2_read_page()` with the same set,
 which is how the library's saved albums and followed artists would be listed.
@@ -105,13 +131,13 @@ removal against that revision and index. Getting the index wrong removes the
 wrong playlist, which is why this one deserves the throwaway account and a
 list with nothing in it worth keeping.
 
-## Why none of this has been run
+## Accounts
 
-The account that lost 4,806 liked songs lost them to a *collection write*
-issued while probing — see [[liked-songs-incident]]. Two of the three
-operations above are collection writes and the third removes playlists.
+`qaeqggik…` is the main account. `315kroxz…` is the throwaway, and is what
+every write above was run against. Worth noting that the engine harness
+authenticates from the same stored token as the GUI, so it follows whichever
+account is signed in -- it is not pinned to one.
 
-The logs currently show two different usernames across builds
-(`315kroxz…` and `qaeqggik…`), and nothing on disk says which is the
-throwaway. **Confirm the signed-in account before the first write of any of
-these.**
+The playlist removal has **not** been run. It is the only destructive one, its
+`REM = 3` is inference rather than a measurement, and an off-by-one in the
+index removes a different playlist than the one intended.

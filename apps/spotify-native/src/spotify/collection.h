@@ -66,6 +66,20 @@ G_BEGIN_DECLS
 #define SPOTIFYGTK_COLLECTION_SET_LIKED "collection"
 
 /*
+ * Followed artists are their own set. Saved albums are not: they go in
+ * "collection", the same set as liked songs, distinguished only by the URI.
+ *
+ * Both proven against the throwaway account -- a write returning 200 and the
+ * item present on the read back, then removed and absent again. The string
+ * table lists "album" alongside "artist" and it looks like the obvious name,
+ * but reading or writing that set answers 403; the guess was wrong and only
+ * the live check caught it. Readable sets are collection, artist and show.
+ * See research/library-writes.md.
+ */
+#define SPOTIFYGTK_COLLECTION_SET_ARTISTS "artist"
+#define SPOTIFYGTK_COLLECTION_SET_ALBUMS  SPOTIFYGTK_COLLECTION_SET_LIKED
+
+/*
  * Encode a WriteRequest. Exposed separately from the send so it can be tested
  * without a network or an AP session — proto3 omits default-valued fields, so
  * `added_at` of 0 and `is_removed` of FALSE are absent from the output rather
