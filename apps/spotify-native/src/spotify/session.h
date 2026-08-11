@@ -157,6 +157,24 @@ typedef struct {
 void spotifygtk_native_release_free (SpotifyNativeRelease *release);
 
 /*
+ * Metadata for albums the caller already has URIs for -- name, year, cover.
+ * One batched request; the returned releases carry no tracks.
+ *
+ * For the library's saved albums, which come out of the collection rather than
+ * out of any artist.
+ */
+void spotifygtk_native_session_load_albums (SpotifyNativeSession *self,
+                                            const gchar *const   *uris,
+                                            guint                 n_uris,
+                                            GCancellable         *cancellable,
+                                            GAsyncReadyCallback   callback,
+                                            gpointer              user_data);
+
+GPtrArray *spotifygtk_native_session_load_albums_finish (SpotifyNativeSession *self,
+                                                         GAsyncResult         *result,
+                                                         GError              **error);
+
+/*
  * The artist's whole discography, with every track of every release.
  *
  * Three requests, whatever the size of the catalogue: ARTIST_V4 for the

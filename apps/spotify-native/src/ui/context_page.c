@@ -12,6 +12,8 @@
 #define CONTEXT_PAGE_LIMIT 200
 
 static void on_action_clicked (GtkButton *button, gpointer user_data);
+static gboolean align_action_to_durations (GtkWidget *w, GdkFrameClock *clock,
+                                           gpointer data);
 
 struct _SpotifyGtkContextPage {
   GtkBox parent_instance;
@@ -22,6 +24,7 @@ struct _SpotifyGtkContextPage {
   /* Save an album, or drop a playlist from the library. One button, because
    * the page is one page and only ever shows one of the two. */
   GtkWidget           *action_btn;
+  GtkWidget           *title_row;
   gchar               *current_kind;
   SpotifyGtkContextActionFunc action_fn;
   gpointer                    action_data;
@@ -166,12 +169,56 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   g_signal_connect (self->action_btn, "clicked",
                     G_CALLBACK (on_action_clicked), self);
   gtk_box_append (GTK_BOX (title_row), self->action_btn);
+  self->title_row = title_row;
 
   gtk_box_append (GTK_BOX (self), title_row);
 
   self->list = spotifygtk_track_list_new ();
   spotifygtk_track_list_set_numbered (self->list, TRUE);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->list));
+
+  gtk_widget_add_tick_callback (GTK_WIDGET (self), align_action_to_durations,
+                                self, NULL);
+}
+
+/*
+ * Keep the action button's right edge on the duration column.
+ *
+ * The durations are inset by the list's scrollbar and the row's own padding;
+ * the header is not, so left alone the button overhangs them. Measured from a
+ * laid-out row rather than guessed -- the same lesson as the artist page,
+ * where the gutter turned out to be 44px against an assumed dozen.
+ */
+static gboolean
+align_action_to_durations (GtkWidget *w, GdkFrameClock *clock, gpointer data)
+{
+  SpotifyGtkContextPage *self = data;
+  (void) w; (void) clock;
+
+  if (!self->title_row || !self->list)
+    return G_SOURCE_REMOVE;
+
+  gdouble dur_right = 0;
+  if (!spotifygtk_track_list_duration_edge (self->list, GTK_WIDGET (self), &dur_right))
+    return G_SOURCE_CONTINUE;   /* no row laid out yet */
+
+  graphene_rect_t page;
+  if (!gtk_widget_compute_bounds (GTK_WIDGET (self), GTK_WIDGET (self), &page))
+    return G_SOURCE_CONTINUE;
+
+  gint want = (gint) (page.size.width - dur_right);
+  if (want < 0)
+    want = 0;
+  gtk_widget_set_margin_end (self->title_row, want);
+
+  /*
+   * Once is enough. What is being measured is the *inset* from the page's
+   * right edge, and the durations are right-aligned, so the inset does not
+   * change with the window's width -- only the absolute position does. A tick
+   * that stayed armed would cost a bounds computation every frame forever, on
+   * a page whose scroll performance was just paid for.
+   */
+  return G_SOURCE_REMOVE;
 }
 
 static void
@@ -234,6 +281,9 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
 {
   g_free (self->current_kind);
   self->current_kind = g_strdup (kind);
+
+  gtk_widget_add_tick_callback (GTK_WIDGET (self), align_action_to_durations,
+                                self, NULL);
 
   g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
   if (!uri || !*uri)

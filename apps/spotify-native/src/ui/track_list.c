@@ -655,6 +655,26 @@ spotifygtk_track_list_release_covers (SpotifyGtkTrackList *self)
     spotifygtk_track_row_release_cover (g_ptr_array_index (self->bound_rows, i));
 }
 
+/* The duration column's right edge, from whichever row is bound. All rows
+ * share the column, so the first one that answers is as good as any. */
+gboolean
+spotifygtk_track_list_duration_edge (SpotifyGtkTrackList *self,
+                                     GtkWidget *relative_to, gdouble *out_x)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self), FALSE);
+  if (!self->bound_rows)
+    return FALSE;
+
+  for (guint i = 0; i < self->bound_rows->len; i++) {
+    GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
+    if (gtk_widget_get_mapped (row) &&
+        spotifygtk_track_row_duration_edge (SPOTIFYGTK_TRACK_ROW (row),
+                                            relative_to, out_x))
+      return TRUE;
+  }
+  return FALSE;
+}
+
 /* Ask the rows on screen for their artwork again. The counterpart to
  * release_covers: a page returning to view does not rebind its rows, so
  * something has to say "you may load again".

@@ -46,6 +46,12 @@ void spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
                                             gint                      track_number);
 gboolean spotifygtk_track_row_has_cover (SpotifyGtkTrackRow *self);
 
+/* Right edge of the duration column, for a header that wants to line up with
+ * it. FALSE if the row is not laid out yet. */
+gboolean spotifygtk_track_row_duration_edge (SpotifyGtkTrackRow *self,
+                                             GtkWidget *relative_to,
+                                             gdouble *out_x);
+
 /* Release the row's artwork; see album_grid's release_covers for why. */
 void spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self);
 

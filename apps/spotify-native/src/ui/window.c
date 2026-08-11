@@ -1452,6 +1452,10 @@ on_new_playlist_response (gboolean ok, gint32 status, const gchar *uri,
       spotifygtk_playlist_add_tracks (m, uri, tracks, 1, on_playlist_add_done,
                                       g_strdup ("the new playlist"));
     }
+    /* The grid is a list short until it is rebuilt, and nothing else was going
+     * to invalidate it -- a new playlist stayed invisible until the app was
+     * restarted. Deleting one already does this; creating one did not. */
+    p->window->playlists_loaded = FALSE;
   }
   playlist_pick_free (p);
 }
@@ -1553,11 +1557,23 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
     return;
   }
 
-  GtkWidget *dialog = gtk_window_new ();
-  gtk_window_set_title (GTK_WINDOW (dialog), "Add to Playlist");
+  /*
+   * An AdwWindow with its own header, not a bare GtkWindow.
+   *
+   * A GtkWindow here got the desktop's decorations and Adwaita's stock blue
+   * for the default button, so the one dialog in the app looked like it came
+   * from a different program. This carries the app's own header bar and
+   * palette instead.
+   */
+  GtkWidget *dialog = adw_window_new ();
+  gtk_window_set_title (GTK_WINDOW (dialog), "Add to playlist");
   gtk_window_set_modal (GTK_WINDOW (dialog), TRUE);
   gtk_window_set_transient_for (GTK_WINDOW (dialog), GTK_WINDOW (self));
-  gtk_window_set_default_size (GTK_WINDOW (dialog), 320, 400);
+  gtk_window_set_default_size (GTK_WINDOW (dialog), 360, 420);
+
+  GtkWidget *dialog_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *dialog_header = adw_header_bar_new ();
+  gtk_box_append (GTK_BOX (dialog_box), dialog_header);
 
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
   gtk_widget_set_margin_start (box, 12);
@@ -1581,7 +1597,9 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   gtk_box_append (GTK_BOX (new_row), p->name_entry);
 
   GtkWidget *new_btn = gtk_button_new_with_label ("Create");
-  gtk_widget_add_css_class (new_btn, "suggested-action");
+  /* The app's accent, not Adwaita's: login-button is the same treatment the
+   * one other primary action in the app already uses. */
+  gtk_widget_add_css_class (new_btn, "login-button");
   g_signal_connect (new_btn, "clicked", G_CALLBACK (on_new_playlist_clicked), p);
   gtk_box_append (GTK_BOX (new_row), new_btn);
 
@@ -1598,7 +1616,8 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), p->list_box);
   gtk_box_append (GTK_BOX (box), scroller);
 
-  gtk_window_set_child (GTK_WINDOW (dialog), box);
+  gtk_box_append (GTK_BOX (dialog_box), box);
+  adw_window_set_content (ADW_WINDOW (dialog), dialog_box);
   g_object_set_data_full (G_OBJECT (dialog), "pick", p, playlist_pick_free);
 
   spotifygtk_playlist_list (m, user, on_playlists_listed, p);

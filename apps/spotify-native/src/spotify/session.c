@@ -1199,6 +1199,128 @@ disco_request_albums (DiscoOp *op)
                                            n, bearer, ctoken, on_disco_albums, op);
 }
 
+/*
+ * Album metadata for a known list of album URIs.
+ *
+ * The middle leg of the discography load on its own, for callers that already
+ * know which albums they want -- the library's saved albums, which come out of
+ * the collection rather than out of an artist.
+ */
+typedef struct {
+  SpotifyNativeSession *session;
+  GTask                *task;
+  GPtrArray            *uris;      /* gchar* */
+} AlbumsOp;
+
+static void
+albums_op_free (AlbumsOp *op)
+{
+  g_clear_pointer (&op->uris, g_ptr_array_unref);
+  g_free (op);
+}
+
+static void
+on_albums_meta (GPtrArray *albums, GError *error, gpointer user_data)
+{
+  AlbumsOp *op = user_data;
+
+  if (error) {
+    g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                             "could not load album metadata: %s", error->message);
+    g_object_unref (op->task);
+    albums_op_free (op);
+    return;
+  }
+
+  GPtrArray *out = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_release_free);
+
+  for (guint i = 0; albums && i < albums->len; i++) {
+    const SpotifyRelease *a = g_ptr_array_index (albums, i);
+    if (!a->uri)
+      continue;
+    SpotifyNativeRelease *r = g_new0 (SpotifyNativeRelease, 1);
+    r->uri      = g_strdup (a->uri);
+    r->name     = g_strdup (a->name);
+    r->year     = a->year;
+    r->type     = a->type;
+    r->cover_id = g_strdup (a->cover_id);
+    r->tracks   = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_track_free);
+    g_ptr_array_add (out, r);
+  }
+
+  g_task_return_pointer (op->task, out, (GDestroyNotify) g_ptr_array_unref);
+  g_object_unref (op->task);
+  albums_op_free (op);
+}
+
+static gboolean
+start_load_albums (gpointer user_data)
+{
+  AlbumsOp *op = user_data;
+
+  g_mutex_lock (&op->session->lock);
+  g_autofree gchar *bearer = g_strdup (op->session->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (op->session->client_token);
+  g_mutex_unlock (&op->session->lock);
+
+  if (!op->session->spclient || op->uris->len == 0) {
+    g_task_return_pointer (op->task,
+                           g_ptr_array_new_with_free_func (
+                             (GDestroyNotify) spotifygtk_native_release_free),
+                           (GDestroyNotify) g_ptr_array_unref);
+    g_object_unref (op->task);
+    albums_op_free (op);
+    return G_SOURCE_REMOVE;
+  }
+
+  spotifygtk_spclient_get_albums_metadata (op->session->spclient,
+                                           (const gchar *const *) op->uris->pdata,
+                                           op->uris->len, bearer, ctoken,
+                                           on_albums_meta, op);
+  return G_SOURCE_REMOVE;
+}
+
+void
+spotifygtk_native_session_load_albums (SpotifyNativeSession *self,
+                                       const gchar *const   *uris,
+                                       guint                 n_uris,
+                                       GCancellable         *cancellable,
+                                       GAsyncReadyCallback   callback,
+                                       gpointer              user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+
+  GTask *task = g_task_new (self, cancellable, callback, user_data);
+  g_task_set_source_tag (task, spotifygtk_native_session_load_albums);
+
+  if (!self->context) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
+                             "session has not been started");
+    g_object_unref (task);
+    return;
+  }
+
+  AlbumsOp *op = g_new0 (AlbumsOp, 1);
+  op->session = self;
+  op->task    = task;
+  op->uris    = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < n_uris; i++)
+    if (uris[i]) g_ptr_array_add (op->uris, g_strdup (uris[i]));
+
+  g_main_context_invoke (self->context, start_load_albums, op);
+}
+
+GPtrArray *
+spotifygtk_native_session_load_albums_finish (SpotifyNativeSession *self,
+                                              GAsyncResult         *result,
+                                              GError              **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+  return g_task_propagate_pointer (G_TASK (result), error);
+}
+
 /* First leg: every release URI the artist has, and which group it sits in. */
 static void
 on_disco_releases (GPtrArray *releases, GError *error, gpointer user_data)

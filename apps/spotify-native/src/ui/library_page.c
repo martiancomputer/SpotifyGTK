@@ -13,12 +13,14 @@
 
 #include "library_page.h"
 #include "album_grid.h"
+#include "../spotify/collection.h"
 
 struct _SpotifyGtkLibraryPage {
   GtkBox parent_instance;
 
   SpotifyGtkAlbumGrid  *albums;
   GtkWidget            *albums_status;   /* "Loading…" / empty note */
+  GPtrArray            *saved_album_uris; /* gchar*, gathered across pages */
   GtkWidget            *header_revealer; /* title + heading, folds away on scroll */
   SpotifyNativeSession *session;         /* not owned */
   GCancellable         *load_cancel;
@@ -34,6 +36,7 @@ spotifygtk_library_page_dispose (GObject *object)
     g_cancellable_cancel (self->load_cancel);
     g_clear_object (&self->load_cancel);
   }
+  g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   self->session = NULL;
   G_OBJECT_CLASS (spotifygtk_library_page_parent_class)->dispose (object);
 }
@@ -44,12 +47,23 @@ spotifygtk_library_page_class_init (SpotifyGtkLibraryPageClass *klass)
   G_OBJECT_CLASS (klass)->dispose = spotifygtk_library_page_dispose;
 }
 
-/* === Loading albums from the collection === */
+/* === Loading saved albums === */
 
+/*
+ * The albums the user actually saved, not the albums their liked songs happen
+ * to sit on.
+ *
+ * This grid used to be built by grouping liked tracks, which was the only
+ * thing available before saved albums could be read: liking one song put its
+ * whole album here, and nothing the user did to this page could remove it.
+ * Saved albums live in the collection set alongside liked tracks, told apart
+ * by the URI -- see research/library-writes.md -- so the real list is a filter
+ * over that read, and the names and covers are one batched lookup.
+ */
 typedef struct { GWeakRef page; } LibLoad;
 
 static void
-on_albums_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
+on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   LibLoad *cl = user_data;
   g_autoptr(SpotifyGtkLibraryPage) self = g_weak_ref_get (&cl->page);
@@ -57,26 +71,72 @@ on_albums_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   g_free (cl);
 
   g_autoptr(GError) err = NULL;
-  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+  g_autoptr(GPtrArray) albums = spotifygtk_native_session_load_albums_finish (
     SPOTIFYGTK_NATIVE_SESSION (source), result, &err);
 
   if (!self)
     return;
-  if (!tracks) {
+  if (!albums) {
     if (!g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
       gtk_label_set_text (GTK_LABEL (self->albums_status),
-                          "Could not load your library right now.");
+                          "Could not load your albums right now.");
     return;
   }
 
-  /* Show every distinct album in the collection -- there are far fewer albums
-   * than the tracks they come from, so this cap is never the binding one. */
-  guint n = spotifygtk_album_grid_set_from_tracks (self->albums, tracks,
-                                                   SPOTIFYGTK_SESSION_MAX_TRACKS);
-  gtk_widget_set_visible (self->albums_status, n == 0);
-  if (n == 0)
+  spotifygtk_album_grid_clear (self->albums);
+  for (guint i = 0; i < albums->len; i++) {
+    const SpotifyNativeRelease *a = g_ptr_array_index (albums, i);
+    g_autofree gchar *sub = a->year > 0 ? g_strdup_printf ("%d", a->year) : NULL;
+    spotifygtk_album_grid_add_card (self->albums, a->uri,
+                                    a->name ? a->name : "Unknown album",
+                                    sub, a->cover_id);
+  }
+
+  gtk_widget_set_visible (self->albums_status, albums->len == 0);
+  if (albums->len == 0)
     gtk_label_set_text (GTK_LABEL (self->albums_status),
-                        "No saved tracks to draw albums from yet.");
+                        "No saved albums yet.");
+}
+
+/* Every album URI in the collection set. Liked tracks share that set and are
+ * skipped here by prefix. */
+static void
+on_saved_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
+               guint n_items, const gchar *next_token, gpointer user_data)
+{
+  SpotifyGtkLibraryPage *self = user_data;
+
+  if (!ok) {
+    gtk_label_set_text (GTK_LABEL (self->albums_status),
+                        "Could not read your library right now.");
+    g_message ("library: saved-album read failed (status %u)", status);
+    return;
+  }
+
+  if (!self->saved_album_uris)
+    self->saved_album_uris = g_ptr_array_new_with_free_func (g_free);
+
+  for (guint i = 0; i < n_items; i++) {
+    if (!items[i].uri || items[i].is_removed)
+      continue;
+    if (g_str_has_prefix (items[i].uri, "spotify:album:"))
+      g_ptr_array_add (self->saved_album_uris, g_strdup (items[i].uri));
+  }
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = spotifygtk_native_session_dup_username (self->session);
+
+  if (next_token && *next_token && m && user) {
+    spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                        next_token, 500, on_saved_page, self);
+    return;
+  }
+
+  LibLoad *cl = g_new0 (LibLoad, 1);
+  g_weak_ref_init (&cl->page, self);
+  spotifygtk_native_session_load_albums (self->session,
+    (const gchar *const *) self->saved_album_uris->pdata,
+    self->saved_album_uris->len, self->load_cancel, on_album_meta_loaded, cl);
 }
 
 void
@@ -95,19 +155,18 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
       spotifygtk_native_session_get_state (session) != SPOTIFYGTK_SESSION_READY)
     return;
 
-  g_autofree gchar *uri = spotifygtk_native_session_dup_collection_uri (session);
-  if (!uri)
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (session);
+  g_autofree gchar *user = spotifygtk_native_session_dup_username (session);
+  if (!m || !user)
     return;
 
   gtk_label_set_text (GTK_LABEL (self->albums_status), "Loading…");
   gtk_widget_set_visible (self->albums_status, TRUE);
 
   self->load_cancel = g_cancellable_new ();
-  LibLoad *cl = g_new0 (LibLoad, 1);
-  g_weak_ref_init (&cl->page, self);
-  spotifygtk_native_session_load_tracks (session, uri, SPOTIFYGTK_SESSION_MAX_TRACKS,
-                                         self->load_cancel,
-                                         on_albums_loaded, cl);
+  g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
+  spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                      NULL, 500, on_saved_page, self);
 }
 
 SpotifyGtkAlbumGrid *

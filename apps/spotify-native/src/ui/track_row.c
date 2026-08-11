@@ -665,6 +665,29 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
  * A fresh cancellable goes with it, so the reload is still cancellable.
  */
 /* Whether this row is currently showing artwork. Diagnostic. */
+/*
+ * Right edge of the duration column, in `relative_to` coordinates.
+ *
+ * The header's action button lines up with this rather than with the page
+ * edge: the durations are inset by the list's scrollbar and the row's own
+ * padding, and guessing either was going to be wrong by enough to see.
+ */
+gboolean
+spotifygtk_track_row_duration_edge (SpotifyGtkTrackRow *self,
+                                    GtkWidget *relative_to, gdouble *out_x)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self), FALSE);
+  if (!self->status_slot || !relative_to)
+    return FALSE;
+
+  graphene_rect_t b;
+  if (!gtk_widget_compute_bounds (self->status_slot, relative_to, &b))
+    return FALSE;
+
+  *out_x = b.origin.x + b.size.width;
+  return TRUE;
+}
+
 gboolean
 spotifygtk_track_row_has_cover (SpotifyGtkTrackRow *self)
 {
