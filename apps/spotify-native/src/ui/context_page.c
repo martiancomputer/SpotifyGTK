@@ -204,15 +204,12 @@ align_action_to_durations (GtkWidget *w, GdkFrameClock *clock, gpointer data)
     return G_SOURCE_REMOVE;
   }
 
-  gdouble dur_right = 0;
-  if (!spotifygtk_track_list_duration_edge (self->list, GTK_WIDGET (self), &dur_right))
+  gdouble inset = 0;
+  if (!spotifygtk_track_list_duration_inset (self->list, &inset))
     return G_SOURCE_CONTINUE;   /* no row laid out yet */
 
-  graphene_rect_t page;
-  if (!gtk_widget_compute_bounds (GTK_WIDGET (self), GTK_WIDGET (self), &page))
-    return G_SOURCE_CONTINUE;
-
-  gint want = (gint) (page.size.width - dur_right);
+  gint page_w = gtk_widget_get_width (GTK_WIDGET (self));
+  gint want = (gint) inset;
 
   /*
    * Refuse a value that cannot be an inset.
@@ -226,11 +223,13 @@ align_action_to_durations (GtkWidget *w, GdkFrameClock *clock, gpointer data)
    * An inset is a small fraction of the width. Anything else means the layout
    * is not settled yet, so wait for a frame where it is.
    */
-  if (page.size.width <= 0 || dur_right <= 0 ||
-      want < 0 || want > (gint) (page.size.width / 4))
+  if (page_w <= 0 || want < 0 || want > page_w / 4)
     return G_SOURCE_CONTINUE;
 
-  gtk_widget_set_margin_end (self->title_row, want);
+  if (gtk_widget_get_margin_end (self->title_row) != want) {
+    gtk_widget_set_margin_end (self->title_row, want);
+    return G_SOURCE_CONTINUE;   /* settle, then confirm */
+  }
   self->align_tick = 0;
 
   /*

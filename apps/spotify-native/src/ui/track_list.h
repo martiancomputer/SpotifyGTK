@@ -74,11 +74,12 @@ void spotifygtk_track_list_clear (SpotifyGtkTrackList *self);
 /* Number rows 1..n rather than showing per-row art. */
 /* Size to content and let an outer scroller do the scrolling, for a list that
  * is one section of a longer page rather than the page itself. */
-/* Right edge of the duration column in `relative_to` coordinates, for a header
- * that wants to align with it. FALSE until a row is laid out. */
-gboolean spotifygtk_track_list_duration_edge (SpotifyGtkTrackList *self,
-                                              GtkWidget *relative_to,
-                                              gdouble *out_x);
+/* How far the duration column sits in from this list's right edge, for a
+ * header that wants to line up with it. An inset rather than a position, so a
+ * margin set from it cannot move what it measured. FALSE until a row is laid
+ * out. */
+gboolean spotifygtk_track_list_duration_inset (SpotifyGtkTrackList *self,
+                                               gdouble *out_inset);
 
 void spotifygtk_track_list_set_inline (SpotifyGtkTrackList *self, gboolean inlined);
 

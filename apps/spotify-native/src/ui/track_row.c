@@ -685,6 +685,7 @@ spotifygtk_track_row_duration_edge (SpotifyGtkTrackRow *self,
     return FALSE;
 
   *out_x = b.origin.x + b.size.width;
+
   return TRUE;
 }
 

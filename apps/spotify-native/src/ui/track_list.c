@@ -655,22 +655,38 @@ spotifygtk_track_list_release_covers (SpotifyGtkTrackList *self)
     spotifygtk_track_row_release_cover (g_ptr_array_index (self->bound_rows, i));
 }
 
-/* The duration column's right edge, from whichever row is bound. All rows
- * share the column, so the first one that answers is as good as any. */
+/*
+ * How far the duration column sits in from this list's own right edge.
+ *
+ * An inset rather than a position, and measured against the list rather than
+ * against the page, because the caller uses it to set a margin on a *sibling*
+ * of this list. Measured against the page, that margin changed the page's
+ * width demand, which moved the durations, which changed the next
+ * measurement -- the alignment chased itself and settled somewhere wrong.
+ * Nothing here can be affected by what the header does.
+ */
 gboolean
-spotifygtk_track_list_duration_edge (SpotifyGtkTrackList *self,
-                                     GtkWidget *relative_to, gdouble *out_x)
+spotifygtk_track_list_duration_inset (SpotifyGtkTrackList *self,
+                                      gdouble *out_inset)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self), FALSE);
   if (!self->bound_rows)
     return FALSE;
 
+  gint width = gtk_widget_get_width (GTK_WIDGET (self));
+  if (width <= 0)
+    return FALSE;
+
   for (guint i = 0; i < self->bound_rows->len; i++) {
     GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
+    gdouble edge = 0;
     if (gtk_widget_get_mapped (row) &&
         spotifygtk_track_row_duration_edge (SPOTIFYGTK_TRACK_ROW (row),
-                                            relative_to, out_x))
+                                            GTK_WIDGET (self), &edge) &&
+        edge > 0) {
+      *out_inset = (gdouble) width - edge;
       return TRUE;
+    }
   }
   return FALSE;
 }
