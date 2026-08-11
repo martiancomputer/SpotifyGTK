@@ -25,6 +25,7 @@ struct _SpotifyGtkContextPage {
    * the page is one page and only ever shows one of the two. */
   GtkWidget           *action_btn;
   GtkWidget           *title_row;
+  guint                align_tick;   /* 0 when none is pending */
   gchar               *current_kind;
   SpotifyGtkContextActionFunc action_fn;
   gpointer                    action_data;
@@ -177,8 +178,11 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   spotifygtk_track_list_set_numbered (self->list, TRUE);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->list));
 
-  gtk_widget_add_tick_callback (GTK_WIDGET (self), align_action_to_durations,
-                                self, NULL);
+  /* One at a time: a tick is armed per load, and each removes itself once it
+   * has a usable number, so navigating repeatedly must not stack them up. */
+  if (self->align_tick == 0)
+    self->align_tick = gtk_widget_add_tick_callback (
+      GTK_WIDGET (self), align_action_to_durations, self, NULL);
 }
 
 /*
@@ -195,8 +199,10 @@ align_action_to_durations (GtkWidget *w, GdkFrameClock *clock, gpointer data)
   SpotifyGtkContextPage *self = data;
   (void) w; (void) clock;
 
-  if (!self->title_row || !self->list)
+  if (!self->title_row || !self->list) {
+    self->align_tick = 0;
     return G_SOURCE_REMOVE;
+  }
 
   gdouble dur_right = 0;
   if (!spotifygtk_track_list_duration_edge (self->list, GTK_WIDGET (self), &dur_right))
@@ -207,9 +213,25 @@ align_action_to_durations (GtkWidget *w, GdkFrameClock *clock, gpointer data)
     return G_SOURCE_CONTINUE;
 
   gint want = (gint) (page.size.width - dur_right);
-  if (want < 0)
-    want = 0;
+
+  /*
+   * Refuse a value that cannot be an inset.
+   *
+   * A row can be mapped a frame before it is allocated, and then its bounds
+   * read as zero -- so this computed the whole page width as the "inset",
+   * which widened the header past the window, pushed the app off the screen
+   * and squeezed the title to an ellipsis. Worse, it then removed the tick, so
+   * it stayed that way until the page was loaded again.
+   *
+   * An inset is a small fraction of the width. Anything else means the layout
+   * is not settled yet, so wait for a frame where it is.
+   */
+  if (page.size.width <= 0 || dur_right <= 0 ||
+      want < 0 || want > (gint) (page.size.width / 4))
+    return G_SOURCE_CONTINUE;
+
   gtk_widget_set_margin_end (self->title_row, want);
+  self->align_tick = 0;
 
   /*
    * Once is enough. What is being measured is the *inset* from the page's
@@ -279,13 +301,15 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
                               const gchar           *title,
                               const gchar           *kind)
 {
+  g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
+
   g_free (self->current_kind);
   self->current_kind = g_strdup (kind);
 
-  gtk_widget_add_tick_callback (GTK_WIDGET (self), align_action_to_durations,
-                                self, NULL);
-
-  g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
+  /* Re-measure for this context's list, unless one is already pending. */
+  if (self->align_tick == 0)
+    self->align_tick = gtk_widget_add_tick_callback (
+      GTK_WIDGET (self), align_action_to_durations, self, NULL);
   if (!uri || !*uri)
     return;
 
