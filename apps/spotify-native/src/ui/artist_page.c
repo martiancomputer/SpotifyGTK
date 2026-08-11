@@ -106,6 +106,9 @@ struct _SpotifyGtkArtistPage {
   GtkLabel            *kind_label;
   GtkLabel            *title_label;
   GtkLabel            *year_label;
+  GtkWidget           *follow_btn;
+  SpotifyGtkArtistFollowFunc follow_fn;
+  gpointer                   follow_data;
 
   GtkPicture          *hero_art;   /* a banner, not an icon -- see init */
   GtkLabel            *hero_caption;
@@ -189,6 +192,39 @@ on_artist_image (const gchar *cover_id, gpointer user_data)
   gint scale = gtk_widget_get_scale_factor (GTK_WIDGET (self));
   spotifygtk_cover_load (cover_id, HERO_IMAGE_PX * MAX (1, scale), NULL,
                          on_hero_cover_loaded, self->hero_art);
+}
+
+static void on_follow_clicked (GtkButton *button, gpointer user_data);
+
+static void
+on_follow_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkArtistPage *self = user_data;
+  (void) button;
+  if (self->follow_fn && self->current_uri)
+    self->follow_fn (self->current_uri, self->follow_data);
+}
+
+void
+spotifygtk_artist_page_set_follow_handler (SpotifyGtkArtistPage      *self,
+                                           SpotifyGtkArtistFollowFunc fn,
+                                           gpointer                   user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
+  self->follow_fn   = fn;
+  self->follow_data = user_data;
+}
+
+void
+spotifygtk_artist_page_set_following (SpotifyGtkArtistPage *self,
+                                      gboolean following)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
+  if (!self->follow_btn)
+    return;
+  gtk_button_set_label (GTK_BUTTON (self->follow_btn),
+                        following ? "Following" : "Follow");
+  gtk_widget_set_visible (self->follow_btn, TRUE);
 }
 
 static void
@@ -624,6 +660,15 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   GtkWidget *title_slack = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_hexpand (title_slack, TRUE);
   gtk_box_append (GTK_BOX (title_row), title_slack);
+
+  self->follow_btn = gtk_button_new_with_label ("Follow");
+  gtk_widget_add_css_class (self->follow_btn, "flat");
+  gtk_widget_set_valign (self->follow_btn, GTK_ALIGN_CENTER);
+  gtk_widget_set_visible (self->follow_btn, FALSE);
+  g_signal_connect (self->follow_btn, "clicked",
+                    G_CALLBACK (on_follow_clicked), self);
+  gtk_box_append (GTK_BOX (title_row), self->follow_btn);
+
   gtk_box_append (GTK_BOX (self), title_row);
 
   /*

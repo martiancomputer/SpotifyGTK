@@ -1,8 +1,7 @@
 # Deleting playlists, liking albums, following artists
 
-Liking albums and following artists are **proven live** against the throwaway
-account (`315kroxz…`): each written, read back present, removed, read back
-absent. Deleting a playlist is still inference — see the end.
+All three are **proven live** against the throwaway account (`315kroxz…`):
+each written, read back present, removed, read back absent.
 
 ## Liking an album, following an artist
 
@@ -117,9 +116,8 @@ The values are not consecutive from zero, and two are already known here:
 | UPDATE_LIST_ATTRIBUTES | **6** (documented) |
 | UPDATE_ITEM_URIS | 7 |
 
-So `REM = 3` is derived from two anchors rather than assumed — but it is still
-inference, and it is the one number here that a live check should confirm
-before it is trusted.
+`REM = 3` was derived from those two anchors and has since been confirmed by
+running it.
 
 ### What a REM needs
 
@@ -127,9 +125,25 @@ Unlike the collection, playlist changes are revision-checked and
 position-based: `playlist.c` already reads the rootlist head for its revision
 before posting. A `Rem` additionally needs the item's **index** in the
 rootlist, so the flow is read the rootlist, find the entry, then post the
-removal against that revision and index. Getting the index wrong removes the
-wrong playlist, which is why this one deserves the throwaway account and a
-list with nothing in it worth keeping.
+removal against that revision and index.
+
+Getting the index wrong removes a different playlist, so
+`spotifygtk_playlist_remove()` refuses rather than guesses: no URI match in the
+rootlist means it does nothing and reports failure.
+
+Run end to end on the throwaway, creating something disposable first so that a
+wrong index would have been visible against a known list:
+
+```
+[before]        3 entries
+create          -> spotify:playlist:0DVN16wAz7x0ufl9EbMfI1
+[after-create]  4 entries, the new one at index 3
+unfollowing spotify:playlist:0DVN…  at rootlist index 3 of 4   -> 200
+[after-remove]  3 entries, identical URIs, identical order
+```
+
+The last line is the point: the removal took the intended entry and moved
+nothing else.
 
 ## Accounts
 
@@ -138,6 +152,5 @@ every write above was run against. Worth noting that the engine harness
 authenticates from the same stored token as the GUI, so it follows whichever
 account is signed in -- it is not pinned to one.
 
-The playlist removal has **not** been run. It is the only destructive one, its
-`REM = 3` is inference rather than a measurement, and an off-by-one in the
-index removes a different playlist than the one intended.
+Every write recorded here was run against `315kroxz…` and reversed afterwards,
+so the account is back where it started.

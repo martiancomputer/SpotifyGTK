@@ -34,6 +34,25 @@ void spotifygtk_context_page_set_session (SpotifyGtkContextPage *self,
 /* Load `uri` and render its tracks. `title` is the album/artist name shown
  * large; `kind` is the small label above it ("Album", "Artist"). Re-loading
  * the same URI that is already shown is a no-op. */
+/*
+ * The header's one action: saving an album, or dropping a playlist from the
+ * library. The page only ever shows one of the two, so it is one button whose
+ * label the window sets, and the window owns what the click means -- it is
+ * the thing that holds the session and the library state.
+ */
+typedef void (*SpotifyGtkContextActionFunc) (const gchar *uri,
+                                             const gchar *kind,
+                                             gpointer     user_data);
+
+void spotifygtk_context_page_set_action_handler (SpotifyGtkContextPage      *self,
+                                                 SpotifyGtkContextActionFunc fn,
+                                                 gpointer                    user_data);
+
+/* Label and visibility of that button. Hidden when the page shows something
+ * with no action, so nothing has to guess from the label. */
+void spotifygtk_context_page_set_action (SpotifyGtkContextPage *self,
+                                         const gchar *label, gboolean visible);
+
 void spotifygtk_context_page_load (SpotifyGtkContextPage *self,
                                    const gchar           *uri,
                                    const gchar           *title,

@@ -71,6 +71,23 @@ typedef struct {
   gchar *name;
 } SpotifyPlaylistEntry;
 
+/*
+ * Remove a playlist from the user's library.
+ *
+ * There is no delete: a playlist is *unfollowed*, which takes it out of the
+ * rootlist and leaves the playlist itself alone. The same operation applies
+ * whether the user made it or saved someone else's.
+ *
+ * The rootlist op is position-based, so this reads the rootlist, finds the
+ * entry by URI and removes that index. If the URI is not there it does
+ * nothing and reports failure rather than removing a neighbour.
+ */
+void spotifygtk_playlist_remove (SpotifyMercury            *mercury,
+                                 const gchar               *username,
+                                 const gchar               *playlist_uri,
+                                 SpotifyPlaylistOpCallback  callback,
+                                 gpointer                   user_data);
+
 void spotifygtk_playlist_entries_free (SpotifyPlaylistEntry *entries, guint n);
 
 /* Entries are owned by the callee and valid for the callback's duration. */

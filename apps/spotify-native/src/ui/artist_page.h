@@ -58,6 +58,23 @@ void spotifygtk_artist_page_set_list_wire (SpotifyGtkArtistPage *self,
                                            SpotifyGtkArtistListWireFunc fn,
                                            gpointer user_data);
 
+/*
+ * Following. The button is on this page but the write is not: the window holds
+ * the session and the set of followed artists, so it is told the click
+ * happened and tells the page back what the state now is.
+ */
+typedef void (*SpotifyGtkArtistFollowFunc) (const gchar *artist_uri,
+                                            gpointer     user_data);
+
+void spotifygtk_artist_page_set_follow_handler (SpotifyGtkArtistPage      *self,
+                                                SpotifyGtkArtistFollowFunc fn,
+                                                gpointer                   user_data);
+
+/* Sets the label and shows the button. Hidden until this is called, so a page
+ * with no session behind it does not offer an action that cannot work. */
+void spotifygtk_artist_page_set_following (SpotifyGtkArtistPage *self,
+                                           gboolean following);
+
 void spotifygtk_artist_page_set_session (SpotifyGtkArtistPage *self,
                                          SpotifyNativeSession *session);
 

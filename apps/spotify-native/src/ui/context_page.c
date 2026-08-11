@@ -11,11 +11,20 @@
 
 #define CONTEXT_PAGE_LIMIT 200
 
+static void on_action_clicked (GtkButton *button, gpointer user_data);
+
 struct _SpotifyGtkContextPage {
   GtkBox parent_instance;
 
   GtkLabel            *kind_label;
   GtkLabel            *title_label;
+
+  /* Save an album, or drop a playlist from the library. One button, because
+   * the page is one page and only ever shows one of the two. */
+  GtkWidget           *action_btn;
+  gchar               *current_kind;
+  SpotifyGtkContextActionFunc action_fn;
+  gpointer                    action_data;
   GtkLabel            *year_label;
   SpotifyGtkTrackList *list;
 
@@ -89,6 +98,7 @@ spotifygtk_context_page_dispose (GObject *object)
   g_clear_object (&self->in_flight);
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_uri, g_free);
+  g_clear_pointer (&self->current_kind, g_free);
 
   G_OBJECT_CLASS (spotifygtk_context_page_parent_class)->dispose (object);
 }
@@ -149,11 +159,49 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   gtk_widget_set_hexpand (title_slack, TRUE);
   gtk_box_append (GTK_BOX (title_row), title_slack);
 
+  self->action_btn = gtk_button_new_with_label ("");
+  gtk_widget_add_css_class (self->action_btn, "flat");
+  gtk_widget_set_valign (self->action_btn, GTK_ALIGN_CENTER);
+  gtk_widget_set_visible (self->action_btn, FALSE);
+  g_signal_connect (self->action_btn, "clicked",
+                    G_CALLBACK (on_action_clicked), self);
+  gtk_box_append (GTK_BOX (title_row), self->action_btn);
+
   gtk_box_append (GTK_BOX (self), title_row);
 
   self->list = spotifygtk_track_list_new ();
   spotifygtk_track_list_set_numbered (self->list, TRUE);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->list));
+}
+
+static void
+on_action_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkContextPage *self = user_data;
+  (void) button;
+  if (self->action_fn && self->current_uri)
+    self->action_fn (self->current_uri, self->current_kind, self->action_data);
+}
+
+void
+spotifygtk_context_page_set_action_handler (SpotifyGtkContextPage      *self,
+                                            SpotifyGtkContextActionFunc fn,
+                                            gpointer                    user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
+  self->action_fn   = fn;
+  self->action_data = user_data;
+}
+
+void
+spotifygtk_context_page_set_action (SpotifyGtkContextPage *self,
+                                    const gchar *label, gboolean visible)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
+  if (!self->action_btn)
+    return;
+  gtk_button_set_label (GTK_BUTTON (self->action_btn), label ? label : "");
+  gtk_widget_set_visible (self->action_btn, visible);
 }
 
 SpotifyGtkContextPage *
@@ -177,6 +225,9 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
                               const gchar           *title,
                               const gchar           *kind)
 {
+  g_free (self->current_kind);
+  self->current_kind = g_strdup (kind);
+
   g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
   if (!uri || !*uri)
     return;

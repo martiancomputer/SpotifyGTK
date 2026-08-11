@@ -23,6 +23,22 @@
 #define PL_OP_KIND         1
 #define PL_OP_ADD          2
 #define PL_OP_KIND_ADD     2
+/*
+ * Removing a playlist is unfollowing it: an Op on the rootlist, not on the
+ * playlist. Op.Kind is not consecutive -- ADD = 2 above is proven and
+ * UPDATE_LIST_ATTRIBUTES = 6 below is proven, and the descriptor's order
+ * (KIND_UNKNOWN, ADD, REM, MOV, UPDATE_ITEM_ATTRIBUTES, UPDATE_LIST_ATTRIBUTES,
+ * UPDATE_ITEM_URIS) puts REM between them at 3.
+ *
+ * Rem is position-based: from_index and length, not a URI. So the rootlist has
+ * to be read, the entry found by URI, and the removal posted against that
+ * index -- and if the index is wrong a different playlist goes instead, which
+ * is why remove() below refuses rather than guesses when it cannot find one.
+ */
+#define PL_OP_KIND_REM     3
+#define PL_OP_REM          3
+#define PL_REM_FROM_INDEX  1
+#define PL_REM_LENGTH      2
 #define PL_DELTA_OPS       2
 #define PL_CHANGES_BASE    1
 #define PL_CHANGES_DELTAS  2
@@ -418,6 +434,135 @@ on_rootlist_read (MercuryResponse *response, gpointer user_data)
     g_free (g_array_index (out, SpotifyPlaylistEntry, i).uri);
   g_array_free (out, TRUE);
   g_free (ctx);
+}
+
+/* ── Removing (unfollowing) a playlist ─────────────────────────────────── */
+
+typedef struct {
+  SpotifyMercury            *mercury;
+  gchar                     *username;
+  gchar                     *uri;
+  SpotifyPlaylistOpCallback  callback;
+  gpointer                   user_data;
+} RemoveCtx;
+
+static void
+remove_ctx_free (RemoveCtx *ctx)
+{
+  g_clear_object (&ctx->mercury);
+  g_free (ctx->username);
+  g_free (ctx->uri);
+  g_free (ctx);
+}
+
+static void
+on_rootlist_removed (MercuryResponse *response, gpointer user_data)
+{
+  RemoveCtx *ctx = user_data;
+  gboolean ok = status_ok (response);
+  if (!ok)
+    g_warning ("playlist: removing %s from the rootlist failed (status %d)",
+               ctx->uri, response ? response->status_code : 0);
+  if (ctx->callback)
+    ctx->callback (ok, response ? response->status_code : 0, ctx->user_data);
+  remove_ctx_free (ctx);
+}
+
+static void
+on_remove_rootlist_head (MercuryResponse *response, gpointer user_data)
+{
+  RemoveCtx *ctx = user_data;
+
+  if (!status_ok (response) || !response->parts || response->parts->len == 0) {
+    if (ctx->callback)
+      ctx->callback (FALSE, response ? response->status_code : 0, ctx->user_data);
+    remove_ctx_free (ctx);
+    return;
+  }
+
+  gsize len = 0;
+  const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
+
+  const guint8 *rev = NULL; gsize rev_len = 0;
+  pb_find_bytes_field (d, len, PL_SLC_REVISION, &rev, &rev_len);
+
+  /* Find the entry's position. The op names an index, so this is the whole
+   * safety of the operation: no match means do nothing at all. */
+  gint index = -1;
+  guint seen = 0;
+  const guint8 *contents = NULL; gsize clen = 0;
+  if (pb_find_bytes_field (d, len, PL_SLC_CONTENTS, &contents, &clen)) {
+    gsize pos = 0; guint32 fn; PbWireType wt;
+    const guint8 *fd; gsize fl; guint64 fv;
+    while (pb_read_field (contents, clen, &pos, &fn, &wt, &fd, &fl, &fv)) {
+      if (fn != PL_LISTITEMS_ITEMS || wt != PB_WIRE_LENGTH_DELIMITED)
+        continue;
+      const guint8 *u = NULL; gsize ul = 0;
+      if (pb_find_bytes_field (fd, fl, PL_ITEM_URI, &u, &ul)) {
+        g_autofree gchar *entry = g_strndup ((const gchar *) u, ul);
+        if (g_strcmp0 (entry, ctx->uri) == 0 && index < 0)
+          index = (gint) seen;
+      }
+      seen++;
+    }
+  }
+
+  if (index < 0) {
+    g_warning ("playlist: %s is not in the rootlist (%u entries); not removing "
+               "anything", ctx->uri, seen);
+    if (ctx->callback)
+      ctx->callback (FALSE, 404, ctx->user_data);
+    remove_ctx_free (ctx);
+    return;
+  }
+
+  g_message ("playlist: unfollowing %s at rootlist index %d of %u",
+             ctx->uri, index, seen);
+
+  g_autoptr(GByteArray) rem = g_byte_array_new ();
+  pb_write_varint_field (rem, PL_REM_FROM_INDEX, (guint64) index);
+  pb_write_varint_field (rem, PL_REM_LENGTH, 1);
+
+  g_autoptr(GByteArray) op = g_byte_array_new ();
+  pb_write_varint_field (op, PL_OP_KIND, PL_OP_KIND_REM);
+  pb_write_message_field (op, PL_OP_REM, rem->data, rem->len);
+
+  g_autoptr(GByteArray) delta = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (delta, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (delta, PL_DELTA_OPS, op->data, op->len);
+
+  g_autoptr(GByteArray) changes = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (changes, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (changes, PL_CHANGES_DELTAS, delta->data, delta->len);
+
+  g_autofree gchar *uri = g_strdup_printf (
+    "hm://playlist/v2/user/%s/rootlist/changes", ctx->username);
+  g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
+  spotifygtk_mercury_request_full (ctx->mercury, MERCURY_METHOD_SEND, "POST",
+                                   uri, body, on_rootlist_removed, ctx);
+}
+
+void
+spotifygtk_playlist_remove (SpotifyMercury            *mercury,
+                            const gchar               *username,
+                            const gchar               *playlist_uri,
+                            SpotifyPlaylistOpCallback  callback,
+                            gpointer                   user_data)
+{
+  g_return_if_fail (mercury != NULL);
+  g_return_if_fail (username != NULL && playlist_uri != NULL);
+
+  RemoveCtx *ctx = g_new0 (RemoveCtx, 1);
+  ctx->mercury   = g_object_ref (mercury);
+  ctx->username  = g_strdup (username);
+  ctx->uri       = g_strdup (playlist_uri);
+  ctx->callback  = callback;
+  ctx->user_data = user_data;
+
+  g_autofree gchar *rl = g_strdup_printf ("hm://playlist/v2/user/%s/rootlist",
+                                          username);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_GET, "GET", rl, NULL,
+                                   on_remove_rootlist_head, ctx);
 }
 
 void

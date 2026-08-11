@@ -83,6 +83,9 @@ struct _SpotifyGtkNativeWindow {
   /* Every liked track URI, read at sign-in. The lists keep their own copies
    * for the rows they show; this is the authority. */
   GHashTable *liked_uris;
+  /* Followed artists. Their own collection set, unlike saved albums, which
+   * share liked_uris because the catalogue keeps them in the same set. */
+  GHashTable *followed_uris;
 
   /*
    * The set under construction while a read is in flight. The live set is only
@@ -830,6 +833,49 @@ liked_fetch_page (SpotifyGtkNativeWindow *self, const gchar *token)
   spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
                                       token, LIKED_PAGE_SIZE,
                                       on_liked_page, self);
+}
+
+/* The followed-artists set, for the artist page's button. Its own set, so its
+ * own read; small enough that a page or two covers any real account. */
+static void
+on_followed_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
+                  guint n_items, const gchar *next_token, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+
+  if (!ok) {
+    g_message ("library: could not read followed artists (status %u)", status);
+    return;
+  }
+
+  if (!self->followed_uris)
+    self->followed_uris = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                 g_free, NULL);
+
+  for (guint i = 0; i < n_items; i++) {
+    if (!items[i].uri || items[i].is_removed)
+      continue;
+    g_hash_table_add (self->followed_uris, g_strdup (items[i].uri));
+  }
+
+  if (next_token && *next_token) {
+    SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+    g_autofree gchar *user = spotifygtk_native_session_dup_username (self->session);
+    if (m && user)
+      spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_ARTISTS,
+                                          next_token, 500, on_followed_page, self);
+  }
+}
+
+static void
+spotifygtk_native_window_reload_followed (SpotifyGtkNativeWindow *self)
+{
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = spotifygtk_native_session_dup_username (self->session);
+  if (!m || !user)
+    return;
+  spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_ARTISTS,
+                                      NULL, 500, on_followed_page, self);
 }
 
 static void
@@ -1651,6 +1697,125 @@ on_wired_list_gone (gpointer data, GObject *where_the_list_was)
     g_ptr_array_remove_fast (self->track_lists, where_the_list_was);
 }
 
+
+/* ── Library actions ─────────────────────────────────────────────────────── */
+
+/*
+ * Saving an album and following an artist are the same collection write as
+ * liking a track, with a different set -- artists have their own, albums live
+ * in the liked-songs set and are told apart by the URI. Removing a playlist is
+ * not a collection write at all: it is an unfollow on the rootlist.
+ * See research/library-writes.md; all three are proven live.
+ */
+static void
+on_library_write_done (gboolean ok, guint16 status, gpointer user_data)
+{
+  gchar *what = user_data;
+  if (!ok)
+    g_warning ("library: %s failed (status %u)", what, status);
+  g_free (what);
+}
+
+static gboolean
+album_is_saved (SpotifyGtkNativeWindow *self, const gchar *uri)
+{
+  return self->liked_uris && uri && g_hash_table_contains (self->liked_uris, uri);
+}
+
+static gboolean
+artist_is_followed (SpotifyGtkNativeWindow *self, const gchar *uri)
+{
+  return self->followed_uris && uri &&
+         g_hash_table_contains (self->followed_uris, uri);
+}
+
+static void
+context_refresh_action (SpotifyGtkNativeWindow *self, const gchar *uri,
+                        const gchar *kind)
+{
+  if (!self->context_page)
+    return;
+
+  if (uri && g_str_has_prefix (uri, "spotify:album:")) {
+    spotifygtk_context_page_set_action (self->context_page,
+      album_is_saved (self, uri) ? "Saved" : "Save", TRUE);
+  } else if (uri && g_str_has_prefix (uri, "spotify:playlist:")) {
+    spotifygtk_context_page_set_action (self->context_page,
+      "Remove from library", TRUE);
+  } else {
+    spotifygtk_context_page_set_action (self->context_page, "", FALSE);
+  }
+  (void) kind;
+}
+
+static void
+on_playlist_removed (gboolean ok, gint32 status, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  if (!ok) {
+    g_warning ("library: could not remove the playlist (status %d)", status);
+    return;
+  }
+  /* The grid is now a list short; the next visit rebuilds it. */
+  self->playlists_loaded = FALSE;
+  navigate_raw (self, "playlists");
+}
+
+static void
+on_context_action (const gchar *uri, const gchar *kind, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) kind;
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = spotifygtk_native_session_dup_username (self->session);
+  if (!m || !user || !uri)
+    return;
+
+  if (g_str_has_prefix (uri, "spotify:album:")) {
+    gboolean saved = album_is_saved (self, uri);
+    const gchar *uris[1] = { uri };
+    spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_ALBUMS,
+                                    uris, 1, saved, on_library_write_done,
+                                    g_strdup (saved ? "unsave album" : "save album"));
+    /* Reflected immediately; the next collection read confirms it. */
+    if (saved) g_hash_table_remove (self->liked_uris, uri);
+    else       g_hash_table_add (self->liked_uris, g_strdup (uri));
+    context_refresh_action (self, uri, kind);
+    return;
+  }
+
+  if (g_str_has_prefix (uri, "spotify:playlist:"))
+    spotifygtk_playlist_remove (m, user, uri, on_playlist_removed, self);
+}
+
+static void
+on_artist_follow_toggled (const gchar *artist_uri, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = spotifygtk_native_session_dup_username (self->session);
+  if (!m || !user || !artist_uri)
+    return;
+
+  if (!self->followed_uris)
+    self->followed_uris = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                 g_free, NULL);
+
+  gboolean following = artist_is_followed (self, artist_uri);
+  const gchar *uris[1] = { artist_uri };
+  spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_ARTISTS,
+                                  uris, 1, following, on_library_write_done,
+                                  g_strdup (following ? "unfollow artist"
+                                                      : "follow artist"));
+  if (following) g_hash_table_remove (self->followed_uris, artist_uri);
+  else           g_hash_table_add (self->followed_uris, g_strdup (artist_uri));
+
+  spotifygtk_artist_page_set_following (self->artist_page,
+                                        !following);
+}
+
 static void
 wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
 {
@@ -1994,6 +2159,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
      * the collection does not matter. */
     flush_pending_likes (self);
     spotifygtk_native_window_reload_liked (self);
+    spotifygtk_native_window_reload_followed (self);
     subscribe_collection_changes (self);
 
     /*
@@ -2244,12 +2410,15 @@ navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
    * releases as cards -- rather than the bare track list an album gets. */
   if (uri && g_str_has_prefix (uri, "spotify:artist:")) {
     spotifygtk_artist_page_show (self->artist_page, uri, title);
+    spotifygtk_artist_page_set_following (self->artist_page,
+                                          artist_is_followed (self, uri));
     navigate_raw (self, "artist");
     nav_record (self, "artist", uri, title, kind);
     return;
   }
 
   spotifygtk_context_page_load (self->context_page, uri, title, kind);
+  context_refresh_action (self, uri, kind);
   navigate_raw (self, "context");
   nav_record (self, "context", uri, title, kind);
 }
@@ -2855,6 +3024,11 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_prev_clicked), self);
   g_signal_connect (self->playback_bar, "volume-changed",
                     G_CALLBACK (on_volume_changed), self);
+  spotifygtk_context_page_set_action_handler (self->context_page,
+                                              on_context_action, self);
+  spotifygtk_artist_page_set_follow_handler (self->artist_page,
+                                             on_artist_follow_toggled, self);
+
   g_signal_connect (self->playback_bar, "seek",
                     G_CALLBACK (on_seek_requested), self);
   g_signal_connect (self->playback_bar, "queue-clicked",
@@ -2912,6 +3086,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->display_tracks, g_hash_table_unref);
   g_clear_pointer (&self->awaiting_uri, g_free);
   g_clear_pointer (&self->liked_uris, g_hash_table_unref);
+  g_clear_pointer (&self->followed_uris, g_hash_table_unref);
   g_clear_pointer (&self->liked_building, g_hash_table_unref);
   /* Unhook first: a weak-ref callback firing after this point would write
    * into a window that is already going away. */
