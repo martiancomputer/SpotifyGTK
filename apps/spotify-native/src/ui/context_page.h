@@ -48,10 +48,13 @@ void spotifygtk_context_page_set_action_handler (SpotifyGtkContextPage      *sel
                                                  SpotifyGtkContextActionFunc fn,
                                                  gpointer                    user_data);
 
-/* Label and visibility of that button. Hidden when the page shows something
- * with no action, so nothing has to guess from the label. */
+/* Label, visibility and weight of that button. `destructive` turns it red on
+ * hover -- at rest it stays ordinary, because a page that shouts every time it
+ * opens teaches people to ignore it. Hidden when there is no action, so nothing
+ * has to be inferred from a stale label. */
 void spotifygtk_context_page_set_action (SpotifyGtkContextPage *self,
-                                         const gchar *label, gboolean visible);
+                                         const gchar *label, gboolean visible,
+                                         gboolean destructive);
 
 void spotifygtk_context_page_load (SpotifyGtkContextPage *self,
                                    const gchar           *uri,

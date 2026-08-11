@@ -195,13 +195,20 @@ spotifygtk_context_page_set_action_handler (SpotifyGtkContextPage      *self,
 
 void
 spotifygtk_context_page_set_action (SpotifyGtkContextPage *self,
-                                    const gchar *label, gboolean visible)
+                                    const gchar *label, gboolean visible,
+                                    gboolean destructive)
 {
   g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
   if (!self->action_btn)
     return;
   gtk_button_set_label (GTK_BUTTON (self->action_btn), label ? label : "");
   gtk_widget_set_visible (self->action_btn, visible);
+
+  /* Colour on hover only, and only for the one that destroys something. */
+  if (destructive)
+    gtk_widget_add_css_class (self->action_btn, "destructive-hover");
+  else
+    gtk_widget_remove_css_class (self->action_btn, "destructive-hover");
 }
 
 SpotifyGtkContextPage *

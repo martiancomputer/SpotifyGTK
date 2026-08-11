@@ -33,6 +33,10 @@
  * contributes nothing to measurement and is allocated the overlay's size, so
  * the sizer decides the height and the picture fills whatever it is given.
  */
+/* The scrolling content's right margin. The fixed header adds the scrollbar
+ * gutter to this so both edges line up -- see align_title_to_hero(). */
+#define CONTENT_MARGIN_END  12
+
 #define HERO_HEIGHT         300
 /*
  * Decode size for the banner.
@@ -107,6 +111,8 @@ struct _SpotifyGtkArtistPage {
   GtkLabel            *title_label;
   GtkLabel            *year_label;
   GtkWidget           *follow_btn;
+  GtkWidget           *title_row;   /* right edge kept level with the hero */
+  GtkWidget           *scroller;
   SpotifyGtkArtistFollowFunc follow_fn;
   gpointer                   follow_data;
 
@@ -195,6 +201,40 @@ on_artist_image (const gchar *cover_id, gpointer user_data)
 }
 
 static void on_follow_clicked (GtkButton *button, gpointer user_data);
+
+/*
+ * Keep the header's right edge level with the hero's.
+ *
+ * The title row is fixed above the scroller, while the hero lives inside it in
+ * a box with a margin -- so the hero is inset by that margin *plus* the
+ * scrollbar gutter, and the Follow button was not. Measured rather than
+ * hardcoded: the gutter is whatever the scrollbar is actually allocated, and
+ * the margin is the one the content box carries.
+ */
+static gboolean
+align_title_to_hero (GtkWidget *w, GdkFrameClock *clock, gpointer data)
+{
+  SpotifyGtkArtistPage *self = data;
+  (void) w; (void) clock;
+
+  if (!self->title_row || !self->scroller)
+    return G_SOURCE_REMOVE;
+
+  GtkWidget *vsb = gtk_scrolled_window_get_vscrollbar (
+    GTK_SCROLLED_WINDOW (self->scroller));
+  gint gutter = vsb ? gtk_widget_get_width (vsb) : 0;
+
+  /* Not laid out yet; come back next frame rather than guess. */
+  if (gutter <= 0)
+    return G_SOURCE_CONTINUE;
+
+  gint want = gutter + CONTENT_MARGIN_END;
+  if (gtk_widget_get_margin_end (self->title_row) != want) {
+    gtk_widget_set_margin_end (self->title_row, want);
+    return G_SOURCE_CONTINUE;   /* verify after it has been laid out */
+  }
+  return G_SOURCE_REMOVE;
+}
 
 static void
 on_follow_clicked (GtkButton *button, gpointer user_data)
@@ -669,6 +709,7 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
                     G_CALLBACK (on_follow_clicked), self);
   gtk_box_append (GTK_BOX (title_row), self->follow_btn);
 
+  self->title_row = title_row;
   gtk_box_append (GTK_BOX (self), title_row);
 
   /*
@@ -677,6 +718,7 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
    * the note on set_inline().
    */
   GtkWidget *scroller = gtk_scrolled_window_new ();
+  self->scroller = scroller;
   gtk_widget_set_vexpand (scroller, TRUE);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
@@ -692,7 +734,7 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
 
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
-  gtk_widget_set_margin_end (content, 12);
+  gtk_widget_set_margin_end (content, CONTENT_MARGIN_END);
 
   /*
    * The hero: one curved panel the full width of the page, carrying the
@@ -801,6 +843,8 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
   gtk_box_append (GTK_BOX (self), scroller);
+
+  gtk_widget_add_tick_callback (GTK_WIDGET (self), align_title_to_hero, self, NULL);
 }
 
 SpotifyGtkArtistPage *

@@ -1738,12 +1738,12 @@ context_refresh_action (SpotifyGtkNativeWindow *self, const gchar *uri,
 
   if (uri && g_str_has_prefix (uri, "spotify:album:")) {
     spotifygtk_context_page_set_action (self->context_page,
-      album_is_saved (self, uri) ? "Saved" : "Save", TRUE);
+      album_is_saved (self, uri) ? "Saved" : "Save", TRUE, FALSE);
   } else if (uri && g_str_has_prefix (uri, "spotify:playlist:")) {
     spotifygtk_context_page_set_action (self->context_page,
-      "Remove from library", TRUE);
+      "Delete playlist", TRUE, TRUE);
   } else {
-    spotifygtk_context_page_set_action (self->context_page, "", FALSE);
+    spotifygtk_context_page_set_action (self->context_page, "", FALSE, FALSE);
   }
   (void) kind;
 }
@@ -2645,6 +2645,11 @@ static const gchar *theme_body =
 
   /* ── Scrollbars ────────────────────────────────────────────── */
   /* Non-overlay, so it sits in a gutter beside the list, not over it. */
+  /* Destructive header action: ordinary until the pointer is on it, then the
+   * colour says what it does. Red at rest would shout on every playlist page. */
+  ".destructive-hover:hover { background-color: @destructive; color: #ffffff; }"
+  ".destructive-hover:hover label { color: #ffffff; }"
+
   "scrollbar { background-color: transparent; border: none; }"
   "scrollbar slider { background-color: @trough; border-radius: 6px;"
   "  min-width: 8px; margin: 2px; }"
@@ -2661,6 +2666,7 @@ static const gchar *palette_dark =
   "@define-color fg_dim #9a9a9a;     @define-color fg_dimmer #7a7a7a;"
   "@define-color fg_sidebar #b8b8b8;"
   "@define-color accent #1db954;     @define-color selection #60A5FA;"
+  "@define-color destructive #e5484d;"
   "@define-color on_accent #0a0a0a;"
   "@define-color ctrl_fill #ffffff;  @define-color ctrl_fill_hover #f0f0f0;"
   "@define-color ctrl_on_fill #0a0a0a;"
@@ -2681,6 +2687,7 @@ static const gchar *palette_white =
   "@define-color fg_dim #6a6a6a;     @define-color fg_dimmer #8a8a8a;"
   "@define-color fg_sidebar #565656;"
   "@define-color accent #1db954;     @define-color selection #2f6fed;"
+  "@define-color destructive #d32f2f;"
   "@define-color on_accent #ffffff;"
   "@define-color ctrl_fill #0a0a0a;  @define-color ctrl_fill_hover #2a2a2a;"
   "@define-color ctrl_on_fill #ffffff;"
@@ -2701,6 +2708,7 @@ static const gchar *palette_milk =
   "@define-color fg_dim #75695a;     @define-color fg_dimmer #9a8d78;"
   "@define-color fg_sidebar #6a5f4f;"
   "@define-color accent #1db954;     @define-color selection #2f6fed;"
+  "@define-color destructive #d32f2f;"
   "@define-color on_accent #ffffff;"
   "@define-color ctrl_fill #2a241b;  @define-color ctrl_fill_hover #43392c;"
   "@define-color ctrl_on_fill #f5f0e6;"
