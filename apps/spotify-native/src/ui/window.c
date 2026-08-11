@@ -1331,6 +1331,7 @@ typedef struct {
   gchar                  *track_uri;
   GtkWindow              *dialog;
   GtkWidget              *list_box;
+  GtkWidget              *name_entry;   /* NULL once the dialog is gone */
 } PlaylistPick;
 
 static void
@@ -1428,11 +1429,28 @@ on_new_playlist_clicked (GtkButton *button, gpointer user_data)
   owned->window    = p->window;
   owned->track_uri = g_strdup (p->track_uri);
 
-  g_autoptr(GDateTime) now = g_date_time_new_now_local ();
-  g_autofree gchar *stamp = g_date_time_format (now, "%Y-%m-%d %H:%M");
-  g_autofree gchar *name = g_strdup_printf ("New Playlist %s", stamp);
+  /*
+   * Whatever was typed, or a dated default if the field was left empty.
+   *
+   * The field is the point: this used to name every playlist "New Playlist"
+   * followed by a timestamp and create it on the click, so the only way to
+   * have a playlist called anything was to rename it in another client. The
+   * default is kept for an empty field because a playlist with no name at all
+   * is worse than a dull one.
+   */
+  const gchar *typed = p->name_entry
+    ? gtk_editable_get_text (GTK_EDITABLE (p->name_entry)) : NULL;
+  g_autofree gchar *trimmed = typed ? g_strstrip (g_strdup (typed)) : NULL;
 
-  spotifygtk_playlist_create (m, user, name, on_new_playlist_response, owned);
+  g_autofree gchar *fallback = NULL;
+  if (!trimmed || !*trimmed) {
+    g_autoptr(GDateTime) now = g_date_time_new_now_local ();
+    g_autofree gchar *stamp = g_date_time_format (now, "%Y-%m-%d %H:%M");
+    fallback = g_strdup_printf ("New Playlist %s", stamp);
+  }
+
+  spotifygtk_playlist_create (m, user, (trimmed && *trimmed) ? trimmed : fallback,
+                              on_new_playlist_response, owned);
   gtk_window_destroy (p->dialog);
 }
 
@@ -1506,9 +1524,26 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   p->track_uri = g_strdup (track->uri);
   p->dialog    = GTK_WINDOW (dialog);
 
-  GtkWidget *new_btn = gtk_button_new_with_label ("New Playlist");
+  /* Name first, then the button that uses it. Enter in the field creates,
+   * which is what a one-field form should do. */
+  GtkWidget *new_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+
+  p->name_entry = gtk_entry_new ();
+  gtk_entry_set_placeholder_text (GTK_ENTRY (p->name_entry), "New playlist name");
+  gtk_entry_set_activates_default (GTK_ENTRY (p->name_entry), TRUE);
+  gtk_widget_set_hexpand (p->name_entry, TRUE);
+  gtk_box_append (GTK_BOX (new_row), p->name_entry);
+
+  GtkWidget *new_btn = gtk_button_new_with_label ("Create");
+  gtk_widget_add_css_class (new_btn, "suggested-action");
   g_signal_connect (new_btn, "clicked", G_CALLBACK (on_new_playlist_clicked), p);
-  gtk_box_append (GTK_BOX (box), new_btn);
+  gtk_box_append (GTK_BOX (new_row), new_btn);
+
+  /* Enter in the entry does the same as the button. */
+  g_signal_connect_swapped (p->name_entry, "activate",
+                            G_CALLBACK (gtk_widget_activate), new_btn);
+
+  gtk_box_append (GTK_BOX (box), new_row);
   gtk_box_append (GTK_BOX (box), gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
 
   GtkWidget *scroller = gtk_scrolled_window_new ();
