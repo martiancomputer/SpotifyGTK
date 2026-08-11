@@ -9,11 +9,22 @@ progress so a re-run resumes instead of starting over.
 """
 import json, os, sys, time, datetime, subprocess, urllib.request, urllib.error, urllib.parse
 
-TSV      = "~/SpotifyGTK/.local-backups/liked-songs-4806.tsv"
-PROGRESS = "~/SpotifyGTK/.local-backups/restore-progress.txt"
+# Paths and the client id come from the environment. They used to be literals,
+# which put one machine's home directory and one person's Spotify application
+# id into a public repository -- neither of which anyone else can use anyway.
+TSV      = os.environ.get("RESTORE_TSV")      or os.path.expanduser(
+    "~/.local/share/spotifygtk/liked-songs-backup.tsv")
+PROGRESS = os.environ.get("RESTORE_PROGRESS") or os.path.expanduser(
+    "~/.local/share/spotifygtk/restore-progress.txt")
 TOKEN    = os.path.expanduser("~/.config/spotifygtk/tokens")
 BATCH    = 50
-CLIENT_ID = "<set SPOTIFY_CLIENT_ID>"
+CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
+
+if not CLIENT_ID:
+    sys.exit("Set SPOTIFY_CLIENT_ID to your own Spotify application's client id.\n"
+             "Create one at https://developer.spotify.com/dashboard -- the id of\n"
+             "the app whose refresh token is in the keyring.")
+
 
 def keyring_blob():
     try:
