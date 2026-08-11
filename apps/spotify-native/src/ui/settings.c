@@ -22,7 +22,19 @@ struct _SpotifyGtkSettings {
   gdouble  eq_gains[SPOTIFYGTK_SETTINGS_EQ_BANDS];  /* dB per band */
 
   gchar *path;
+
+  GPtrArray *pins;   /* SpotifyGtkPin* */
 };
+
+static void
+pin_free (gpointer data)
+{
+  SpotifyGtkPin *p = data;
+  g_free (p->uri);
+  g_free (p->name);
+  g_free (p->type);
+  g_free (p);
+}
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkSettings, spotifygtk_settings, G_TYPE_OBJECT)
 
@@ -63,6 +75,23 @@ load (SpotifyGtkSettings *self)
   for (gsize i = 0; g && i < n && i < SPOTIFYGTK_SETTINGS_EQ_BANDS; i++)
     self->eq_gains[i] = CLAMP (g[i], -12.0, 12.0);
 
+  /* Pins. The three lists are written together, but a hand-edited file may
+   * disagree, so this walks the shortest and drops the rest rather than
+   * indexing off the end of one of them. */
+  gsize nu = 0, nn = 0, nt = 0;
+  g_auto(GStrv) uris  = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-uris",  &nu, NULL);
+  g_auto(GStrv) names = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-names", &nn, NULL);
+  g_auto(GStrv) types = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-types", &nt, NULL);
+  for (gsize i = 0; uris && i < nu; i++) {
+    if (!uris[i] || !*uris[i])
+      continue;
+    SpotifyGtkPin *p = g_new0 (SpotifyGtkPin, 1);
+    p->uri  = g_strdup (uris[i]);
+    p->name = g_strdup ((names && i < nn) ? names[i] : uris[i]);
+    p->type = g_strdup ((types && i < nt) ? types[i] : "");
+    g_ptr_array_add (self->pins, p);
+  }
+
   /* A hand-edited or truncated file must not put the UI into a state its
    * own controls cannot represent, so anything out of range falls back. */
   if (self->theme > SPOTIFYGTK_THEME_MILK)
@@ -87,6 +116,25 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains,
                               SPOTIFYGTK_SETTINGS_EQ_BANDS);
 
+  if (self->pins && self->pins->len > 0) {
+    g_autofree const gchar **uris  = g_new0 (const gchar *, self->pins->len);
+    g_autofree const gchar **names = g_new0 (const gchar *, self->pins->len);
+    g_autofree const gchar **types = g_new0 (const gchar *, self->pins->len);
+    for (guint i = 0; i < self->pins->len; i++) {
+      const SpotifyGtkPin *p = g_ptr_array_index (self->pins, i);
+      uris[i]  = p->uri;
+      names[i] = p->name ? p->name : "";
+      types[i] = p->type ? p->type : "";
+    }
+    g_key_file_set_string_list (kf, SETTINGS_GROUP, "pinned-uris",  uris,  self->pins->len);
+    g_key_file_set_string_list (kf, SETTINGS_GROUP, "pinned-names", names, self->pins->len);
+    g_key_file_set_string_list (kf, SETTINGS_GROUP, "pinned-types", types, self->pins->len);
+  } else {
+    g_key_file_remove_key (kf, SETTINGS_GROUP, "pinned-uris",  NULL);
+    g_key_file_remove_key (kf, SETTINGS_GROUP, "pinned-names", NULL);
+    g_key_file_remove_key (kf, SETTINGS_GROUP, "pinned-types", NULL);
+  }
+
   g_autofree gchar *dir = g_path_get_dirname (self->path);
   g_mkdir_with_parents (dir, 0700);
 
@@ -101,6 +149,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->theme       = SPOTIFYGTK_THEME_DARK;
   self->media_mode  = SPOTIFYGTK_MEDIA_FULL;
   self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
+  self->pins        = g_ptr_array_new_with_free_func (pin_free);
 
   self->path = g_build_filename (g_get_user_config_dir (),
                                  "spotify-native", "settings.ini", NULL);
@@ -231,5 +280,67 @@ spotifygtk_settings_sample_rate_hz (SpotifyGtkSampleRate rate)
     case SPOTIFYGTK_SAMPLE_RATE_48000: return 48000;
     case SPOTIFYGTK_SAMPLE_RATE_96000: return 96000;
     default:                           return 0;   /* follow the stream */
+  }
+}
+
+/* ── Pins ────────────────────────────────────────────────────────────────
+ *
+ * Kept in the order they were pinned, which is the order the sidebar shows.
+ * Every mutation saves immediately: a pin that survives until the next clean
+ * shutdown but not a crash is worse than no pin at all.
+ */
+GPtrArray *
+spotifygtk_settings_get_pins (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), NULL);
+  return self->pins;
+}
+
+gboolean
+spotifygtk_settings_is_pinned (SpotifyGtkSettings *self, const gchar *uri)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  if (!uri)
+    return FALSE;
+  for (guint i = 0; i < self->pins->len; i++)
+    if (g_strcmp0 (((SpotifyGtkPin *) g_ptr_array_index (self->pins, i))->uri, uri) == 0)
+      return TRUE;
+  return FALSE;
+}
+
+void
+spotifygtk_settings_add_pin (SpotifyGtkSettings *self, const gchar *uri,
+                             const gchar *name, const gchar *type)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (!uri || !*uri || spotifygtk_settings_is_pinned (self, uri))
+    return;
+
+  SpotifyGtkPin *p = g_new0 (SpotifyGtkPin, 1);
+  p->uri  = g_strdup (uri);
+  p->name = g_strdup (name && *name ? name : uri);
+  p->type = g_strdup (type ? type : "");
+  g_ptr_array_add (self->pins, p);
+
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+void
+spotifygtk_settings_remove_pin (SpotifyGtkSettings *self, const gchar *uri)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (!uri)
+    return;
+
+  for (guint i = 0; i < self->pins->len; i++) {
+    if (g_strcmp0 (((SpotifyGtkPin *) g_ptr_array_index (self->pins, i))->uri, uri) == 0) {
+      /* remove_index, not remove_index_fast: the order is the order they were
+       * pinned in, and that is the order the sidebar shows. */
+      g_ptr_array_remove_index (self->pins, i);
+      save (self);
+      g_signal_emit (self, signals[CHANGED], 0);
+      return;
+    }
   }
 }

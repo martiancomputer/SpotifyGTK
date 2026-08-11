@@ -23,6 +23,7 @@ SpotifyGtkSidebar *spotifygtk_sidebar_new (void);
 /* Signals:
  * - page-activated    (const gchar *page_id)
  * - pinned-activated  (const gchar *pinned_id)
+ * - pin-requested     ()   the bottom action; the window knows what is on screen
  * - collapse-toggled  ()
  */
 

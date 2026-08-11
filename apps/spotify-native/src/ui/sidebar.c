@@ -23,6 +23,7 @@ G_DEFINE_FINAL_TYPE (SpotifyGtkSidebar, spotifygtk_sidebar, GTK_TYPE_BOX)
 enum {
   PAGE_ACTIVATED,
   PINNED_ACTIVATED,
+  PIN_REQUESTED,
   COLLAPSE_TOGGLED,
   N_SIGNALS
 };
@@ -62,6 +63,12 @@ on_nav_row_activated (GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
 }
 
 static void
+emit_pin_requested (SpotifyGtkSidebar *self)
+{
+  g_signal_emit (self, signals[PIN_REQUESTED], 0);
+}
+
+static void
 on_pinned_row_activated (GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
 {
   SpotifyGtkSidebar *self = user_data;
@@ -96,6 +103,12 @@ spotifygtk_sidebar_class_init (SpotifyGtkSidebarClass *klass)
   signals[PAGE_ACTIVATED] = g_signal_new ("page-activated",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  /* "Pin whatever is on screen" -- the sidebar has no idea what that is, so it
+   * only reports the click and the window decides. */
+  signals[PIN_REQUESTED] = g_signal_new ("pin-requested",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 0);
 
   signals[PINNED_ACTIVATED] = g_signal_new ("pinned-activated",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
@@ -213,10 +226,10 @@ spotifygtk_sidebar_init (SpotifyGtkSidebar *self)
                                                 "list-add-symbolic");
   gtk_widget_set_margin_start (pin_action, 10);
   gtk_widget_set_margin_end (pin_action, 10);
-  /* Pinning needs somewhere to persist to, and there is no settings store
-   * yet — disabled rather than silently doing nothing. */
-  gtk_widget_set_sensitive (pin_action, FALSE);
-  gtk_widget_set_tooltip_text (pin_action, "Pinning isn’t implemented yet");
+  gtk_widget_set_tooltip_text (pin_action,
+                               "Pin the album or playlist you are looking at");
+  g_signal_connect_swapped (pin_action, "clicked",
+                            G_CALLBACK (emit_pin_requested), self);
   gtk_box_append (GTK_BOX (self), pin_action);
 
   GtkWidget *collapse_action = build_sidebar_action ("Collapse", "go-previous-symbolic");

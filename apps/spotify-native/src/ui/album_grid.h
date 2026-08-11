@@ -17,6 +17,14 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (SpotifyGtkAlbumGrid, spotifygtk_album_grid,
                       SPOTIFYGTK, ALBUM_GRID, GtkBox)
 
+/*
+ * Whether a URI is currently pinned. The grid needs this only to label its
+ * context menu item -- "Pin" or "Unpin" -- and the pin store lives with the
+ * window, so it answers. A callback rather than a signal: a signal cannot
+ * return a value, and the menu has to know before it is built.
+ */
+typedef gboolean (*SpotifyGtkAlbumPinQuery) (const gchar *uri, gpointer user_data);
+
 /* A horizontal, scrolling shelf (Home/Search) or a wrapping grid (Library). */
 SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_shelf (void);
 SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_grid (void);
@@ -26,6 +34,10 @@ SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_grid (void);
  * of SpotifyNativeTrack*), in first-seen order, up to `max_albums`. The array
  * is only read, not kept. Returns how many cards were shown.
  */
+void spotifygtk_album_grid_set_pin_query (SpotifyGtkAlbumGrid    *self,
+                                          SpotifyGtkAlbumPinQuery fn,
+                                          gpointer                user_data);
+
 guint spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
                                              GPtrArray           *tracks,
                                              guint                max_albums);

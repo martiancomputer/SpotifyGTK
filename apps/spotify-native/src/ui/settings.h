@@ -84,4 +84,32 @@ void           spotifygtk_settings_reset_eq       (SpotifyGtkSettings *self);
  * (no conversion). */
 gint spotifygtk_settings_sample_rate_hz (SpotifyGtkSampleRate rate);
 
+/* ── Pinned albums and playlists ──────────────────────────────────────────
+ *
+ * A pin is a URI, the name to show, and the type line under it. Stored as
+ * three parallel lists rather than one delimited string: a name can contain
+ * anything, and inventing a separator that album titles are guaranteed not to
+ * use is the kind of assumption that breaks on one record in a thousand.
+ *
+ * Order is the order they were pinned. Pinning something already pinned is a
+ * no-op rather than a duplicate.
+ */
+typedef struct {
+  gchar *uri;
+  gchar *name;
+  gchar *type;   /* "Album" / "Playlist", for the row's second line */
+} SpotifyGtkPin;
+
+/* The pins, in order. Owned by the settings object; valid until it changes. */
+GPtrArray *spotifygtk_settings_get_pins (SpotifyGtkSettings *self);
+
+gboolean spotifygtk_settings_is_pinned (SpotifyGtkSettings *self,
+                                        const gchar *uri);
+
+/* Both persist immediately and emit "changed". Adding something already
+ * pinned, or removing something that is not, does nothing. */
+void spotifygtk_settings_add_pin (SpotifyGtkSettings *self, const gchar *uri,
+                                  const gchar *name, const gchar *type);
+void spotifygtk_settings_remove_pin (SpotifyGtkSettings *self, const gchar *uri);
+
 G_END_DECLS

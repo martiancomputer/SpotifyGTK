@@ -160,12 +160,15 @@ struct _SpotifyGtkAlbumGrid {
   guint          settle_id;
   GPtrArray     *bound_cards;   /* borrowed GtkWidget*, live bindings */
 
+  SpotifyGtkAlbumPinQuery pin_query;
+  gpointer                pin_query_data;
+
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkAlbumGrid, spotifygtk_album_grid, GTK_TYPE_BOX)
 
 enum { ALBUM_ACTIVATED, ALBUM_ADD_TO_LIKED, ALBUM_ADD_TO_QUEUE,
-       CARD_NEEDS_RESOLVE, N_SIGNALS };
+       ALBUM_TOGGLE_PIN, CARD_NEEDS_RESOLVE, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 #define GRID_SETTLE_MS 180
@@ -335,6 +338,7 @@ album_menu_emit_and_close (GtkButton *button, guint signal_id)
 }
 
 static void on_album_menu_like  (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_ADD_TO_LIKED); }
+static void on_album_menu_pin   (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_TOGGLE_PIN); }
 static void on_album_menu_queue (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_ADD_TO_QUEUE); }
 
 static void
@@ -358,6 +362,14 @@ on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
                                G_CALLBACK (on_album_menu_like), NULL);
   spotifygtk_context_menu_add (menu, "Add to Queue", TRUE, NULL,
                                G_CALLBACK (on_album_menu_queue), NULL);
+
+  /* The label has to say what the click will do, so it needs the current
+   * state. The window owns the pin store, so it is asked -- a plain callback
+   * rather than a signal, because a signal cannot return an answer. */
+  gboolean pinned = self->pin_query && self->pin_query (uri, self->pin_query_data);
+  spotifygtk_context_menu_add (menu, pinned ? "Unpin from sidebar"
+                                            : "Pin to sidebar",
+                               TRUE, NULL, G_CALLBACK (on_album_menu_pin), NULL);
   /* The grid model carries the artist's display name but not its URI, so
    * there is nothing to navigate to yet. */
   spotifygtk_context_menu_add (menu, "Go to Artist", FALSE,
@@ -699,6 +711,16 @@ spotifygtk_album_grid_add_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
 
 
 
+void
+spotifygtk_album_grid_set_pin_query (SpotifyGtkAlbumGrid    *self,
+                                     SpotifyGtkAlbumPinQuery fn,
+                                     gpointer                user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  self->pin_query      = fn;
+  self->pin_query_data = user_data;
+}
+
 guint
 spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
                                        GPtrArray           *tracks,
@@ -784,6 +806,13 @@ spotifygtk_album_grid_class_init (SpotifyGtkAlbumGridClass *klass)
 
   signals[ALBUM_ADD_TO_QUEUE] = g_signal_new (
     "album-add-to-queue", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+    NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  /* Toggle rather than pin/unpin as two signals: the menu already decided
+   * which way it is going when it chose the label, and the store is the
+   * authority either way. */
+  signals[ALBUM_TOGGLE_PIN] = g_signal_new (
+    "album-toggle-pin", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
     NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 

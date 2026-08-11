@@ -1685,12 +1685,127 @@ on_album_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
   (void) grid;
 }
 
+/* ── Pinning ─────────────────────────────────────────────────────────────
+ *
+ * The store is the settings file; the sidebar is a view of it. So a toggle
+ * writes and then the sidebar is rebuilt from what was written, rather than
+ * the two being kept in step by hand and drifting apart.
+ */
+static void
+refresh_pinned_sidebar (SpotifyGtkNativeWindow *self)
+{
+  if (!self->sidebar)
+    return;
+
+  spotifygtk_sidebar_clear_pinned (self->sidebar);
+
+  GPtrArray *pins = spotifygtk_settings_get_pins (spotifygtk_settings_get_default ());
+  for (guint i = 0; pins && i < pins->len; i++) {
+    const SpotifyGtkPin *p = g_ptr_array_index (pins, i);
+    spotifygtk_sidebar_add_pinned (self->sidebar, p->uri, p->name, p->type);
+  }
+}
+
+/* "Album" or "Playlist", from the URI -- the thing being pinned always has
+ * one, and it is the only part of a card that is reliably present. */
+static const gchar *
+pin_type_for_uri (const gchar *uri)
+{
+  if (!uri)
+    return "";
+  if (g_str_has_prefix (uri, "spotify:playlist:"))
+    return "Playlist";
+  if (g_str_has_prefix (uri, "spotify:album:"))
+    return "Album";
+  if (g_str_has_prefix (uri, "spotify:artist:"))
+    return "Artist";
+  return "";
+}
+
+static gboolean
+window_is_pinned (const gchar *uri, gpointer user_data)
+{
+  (void) user_data;
+  return spotifygtk_settings_is_pinned (spotifygtk_settings_get_default (), uri);
+}
+
+static void
+toggle_pin (SpotifyGtkNativeWindow *self, const gchar *uri, const gchar *name)
+{
+  SpotifyGtkSettings *st = spotifygtk_settings_get_default ();
+  if (!uri || !*uri)
+    return;
+
+  if (spotifygtk_settings_is_pinned (st, uri))
+    spotifygtk_settings_remove_pin (st, uri);
+  else
+    spotifygtk_settings_add_pin (st, uri, name, pin_type_for_uri (uri));
+
+  refresh_pinned_sidebar (self);
+}
+
+static void
+on_album_toggle_pin (SpotifyGtkAlbumGrid *grid, const gchar *uri, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) grid;
+
+  /* The name the card was showing, if this window knows it; the store falls
+   * back to the URI when it does not, so a pin is never nameless. */
+  const gchar *name = NULL;
+  if (self->display_tracks && uri) {
+    const SpotifyNativeTrack *t = g_hash_table_lookup (self->display_tracks, uri);
+    if (t) name = t->album;
+  }
+  toggle_pin (self, uri, name);
+}
+
+/* The sidebar's own action: pin whatever the content area is showing. Only an
+ * album or a playlist -- Liked Songs and Search have nothing to pin. */
+static void
+on_pin_requested (SpotifyGtkSidebar *sidebar, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) sidebar;
+
+  const gchar *page = gtk_stack_get_visible_child_name (self->page_stack);
+  if (g_strcmp0 (page, "context") != 0 || !self->nav_history ||
+      self->nav_history->len == 0) {
+    g_message ("pin: nothing pinnable on screen");
+    return;
+  }
+
+  const NavEntry *e = g_ptr_array_index (self->nav_history,
+                                         self->nav_history->len - 1);
+  if (!e || !e->uri)
+    return;
+  if (!g_str_has_prefix (e->uri, "spotify:album:") &&
+      !g_str_has_prefix (e->uri, "spotify:playlist:")) {
+    g_message ("pin: %s is not an album or a playlist", e->uri);
+    return;
+  }
+
+  toggle_pin (self, e->uri, e->title);
+}
+
+static void
+on_pinned_activated (SpotifyGtkSidebar *sidebar, const gchar *uri, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) sidebar;
+  if (!uri)
+    return;
+  navigate_to_context (self, uri, NULL, pin_type_for_uri (uri));
+}
+
 static void
 wire_album_grid (SpotifyGtkNativeWindow *self, SpotifyGtkAlbumGrid *grid)
 {
   if (!grid)
     return;
   g_signal_connect (grid, "album-activated", G_CALLBACK (on_album_activated), self);
+  g_signal_connect (grid, "album-toggle-pin", G_CALLBACK (on_album_toggle_pin), self);
+  spotifygtk_album_grid_set_pin_query (grid, window_is_pinned, self);
 }
 
 /* Connect the window to one page's inner list: activation drives play +
@@ -2899,8 +3014,16 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_add_css_class (GTK_WIDGET (self->sidebar), "sidebar");
   g_signal_connect (self->sidebar, "page-activated",
                     G_CALLBACK (on_sidebar_page_activated), self);
+  g_signal_connect (self->sidebar, "pin-requested",
+                    G_CALLBACK (on_pin_requested), self);
+  g_signal_connect (self->sidebar, "pinned-activated",
+                    G_CALLBACK (on_pinned_activated), self);
   g_signal_connect (self->sidebar, "collapse-toggled",
                     G_CALLBACK (on_sidebar_collapse_toggled), self);
+  /* Pins outlive the session, so they are on screen before sign-in rather
+   * than appearing once something has loaded. */
+  refresh_pinned_sidebar (self);
+
   gtk_paned_set_start_child (self->main_paned, GTK_WIDGET (self->sidebar));
   gtk_paned_set_resize_start_child (self->main_paned, FALSE);
   gtk_paned_set_shrink_start_child (self->main_paned, FALSE);
