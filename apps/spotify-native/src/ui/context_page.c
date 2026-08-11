@@ -121,7 +121,13 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
   gtk_widget_set_margin_end (GTK_WIDGET (self), 12);
   gtk_widget_set_margin_top (GTK_WIDGET (self), 24);
-  gtk_widget_set_margin_bottom (GTK_WIDGET (self), 24);
+  /*
+   * No bottom margin. It was 24px, and it cost twice: a dead band above the
+   * playback bar, and a viewport shortened by that much so the last row was
+   * cut wherever the new edge fell. Liked Songs and Search had the same margin
+   * removed for the same reason; this page kept it and so kept the stray
+   * rectangle after they lost it.
+   */
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
 
@@ -209,27 +215,40 @@ align_action_to_durations (GtkWidget *w, GdkFrameClock *clock, gpointer data)
     return G_SOURCE_CONTINUE;   /* no row laid out yet */
 
   gint page_w = gtk_widget_get_width (GTK_WIDGET (self));
-  gint want = (gint) inset;
 
   /*
-   * Refuse a value that cannot be an inset.
+   * Line up the label, not the widget.
    *
-   * A row can be mapped a frame before it is allocated, and then its bounds
-   * read as zero -- so this computed the whole page width as the "inset",
-   * which widened the header past the window, pushed the app off the screen
-   * and squeezed the title to an ellipsis. Worse, it then removed the tick, so
-   * it stayed that way until the page was loaded again.
-   *
-   * An inset is a small fraction of the width. Anything else means the layout
-   * is not settled yet, so wait for a frame where it is.
+   * A button's text sits inside its padding, so putting the button's *edge* on
+   * the column left the word short of the numbers by that padding -- edges
+   * aligned, text visibly not. Rather than model the padding (which read as
+   * zero when asked directly), this measures where the label actually landed
+   * and corrects by the difference. One step: moving the margin moves the
+   * label by the same amount, and nothing here feeds back into the durations.
    */
-  if (page_w <= 0 || want < 0 || want > page_w / 4)
-    return G_SOURCE_CONTINUE;
+  GtkWidget *ch = gtk_button_get_child (GTK_BUTTON (self->action_btn));
+  graphene_rect_t lb;
+  gint margin = gtk_widget_get_margin_end (self->title_row);
 
-  if (gtk_widget_get_margin_end (self->title_row) != want) {
+  if (!gtk_widget_get_mapped (self->action_btn) || !ch ||
+      !gtk_widget_compute_bounds (ch, GTK_WIDGET (self), &lb)) {
+    /* Nothing to align against yet -- put the edge roughly right and wait. */
+    if (margin != (gint) inset)
+      gtk_widget_set_margin_end (self->title_row, (gint) inset);
+    return G_SOURCE_CONTINUE;
+  }
+
+  gdouble label_inset = page_w - (lb.origin.x + lb.size.width);
+  gdouble error = label_inset - inset;
+
+  if (ABS (error) > 1.0) {
+    gint want = margin - (gint) error;
+    if (want < 0 || want > page_w / 4)
+      return G_SOURCE_CONTINUE;
     gtk_widget_set_margin_end (self->title_row, want);
     return G_SOURCE_CONTINUE;   /* settle, then confirm */
   }
+
   self->align_tick = 0;
 
   /*
