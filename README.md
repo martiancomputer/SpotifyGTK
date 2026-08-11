@@ -16,14 +16,14 @@ audio keys, CDN decrypt and Ogg/Vorbis playback, with a GTK4 interface.
 
 | | |
 |:---:|:---:|
-| ![Artist page, dark](media/01-artist-dark.png) | ![Artist page, light](media/02-artist-light.png) |
-| **Artist page** — banner, top tracks, full discography | **Light theme** — the same page, one of three palettes |
-| ![Album page, dark](media/03-album-dark.png) | ![Album page, light](media/04-album-light.png) |
+| ![Artist page, dark theme](media/01-artist-dark.png) | ![Artist page, light theme](media/02-artist-light.png) |
+| **Artist** — banner, top tracks and the full discography | **Artist, light theme** — one of three palettes |
+| ![Album page, dark theme](media/03-album-dark.png) | ![Album page, light theme](media/04-album-light.png) |
 | **Album** — save it to your library from the header | **Album, light theme** |
-| ![Search](media/05-search.png) | ![Now Playing](media/06-now-playing.png) |
-| **Search** — albums and tracks together | **Now Playing** — queue and artwork |
-| ![Following an artist](media/07-artist-following.png) | |
-| **Following** — follow and unfollow from the artist page | |
+| ![Search results](media/05-search.png) | ![Liked Songs](media/08-liked-dark.png) |
+| **Search** — albums and tracks together | **Liked Songs** — filter as you type, sort by date, length or title |
+| ![Now Playing panel](media/06-now-playing.png) | ![Following an artist](media/07-artist-following.png) |
+| **Now Playing** — artwork and the queue | **Following** — follow and unfollow from the artist page |
 
 ---
 
@@ -125,6 +125,12 @@ the design principles are in [research/internals.md](research/internals.md).
 ## License
 
 **GNU General Public License v3.0** — see [LICENSE](LICENSE).
+
+One additional term, under GPLv3 Section 7(b): redistributions and works based
+on this one must keep the attribution and link back to
+<https://github.com/martiancomputer/SpotifyGTK> in their documentation and
+credits. That is an attribution requirement, not a restriction — every freedom
+the GPL grants still applies.
 
 Portions of `apps/spotify-native` are ported from or reference
 [`librespot`](https://github.com/librespot-org/librespot) and the `shannon`
