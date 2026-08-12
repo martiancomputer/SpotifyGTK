@@ -3041,6 +3041,67 @@ on_settings_theme_changed (SpotifyGtkSettings *settings, gpointer user_data)
 }
 
 /* === Construction === */
+/*
+ * Drop the icon from our own title bar.
+ *
+ * This desktop asks for "icon:minimize,maximize,close", and the moment the
+ * window had an icon name to draw, that leading slot started drawing it --
+ * putting an app icon in the header bar, which is not what the header bar is
+ * for. The icon belongs in the task bar, and that comes from the desktop file
+ * rather than from here.
+ *
+ * Only the icon token is removed. Button order, and which buttons appear at
+ * all, stay whatever the desktop asked for, so this does not quietly override
+ * a preference while fixing an unrelated one.
+ */
+static gchar *
+layout_without_icon (const gchar *layout)
+{
+  if (!layout)
+    return NULL;
+
+  g_auto(GStrv) sides = g_strsplit (layout, ":", 2);
+  GString *out = g_string_new (NULL);
+
+  for (guint s = 0; sides[s]; s++) {
+    if (s > 0)
+      g_string_append_c (out, ':');
+
+    g_auto(GStrv) items = g_strsplit (sides[s], ",", -1);
+    gboolean first = TRUE;
+    for (guint i = 0; items[i]; i++) {
+      if (g_strcmp0 (items[i], "icon") == 0)
+        continue;
+      if (!first)
+        g_string_append_c (out, ',');
+      g_string_append (out, items[i]);
+      first = FALSE;
+    }
+  }
+
+  return g_string_free (out, FALSE);
+}
+
+static void
+sync_decoration_layout (GtkHeaderBar *header)
+{
+  GtkSettings *settings = gtk_settings_get_default ();
+  if (!settings)
+    return;
+
+  g_autofree gchar *layout = NULL;
+  g_object_get (settings, "gtk-decoration-layout", &layout, NULL);
+
+  g_autofree gchar *stripped = layout_without_icon (layout);
+  gtk_header_bar_set_decoration_layout (header, stripped);
+}
+
+static void
+on_decoration_layout_changed (GtkHeaderBar *header)
+{
+  sync_decoration_layout (header);
+}
+
 static void
 spotifygtk_native_window_constructed (GObject *object)
 {
@@ -3084,6 +3145,11 @@ spotifygtk_native_window_constructed (GObject *object)
    * controls and drag-to-move come from GTK instead of being drawn on. */
   GtkWidget *header = gtk_header_bar_new ();
   gtk_header_bar_set_show_title_buttons (GTK_HEADER_BAR (header), TRUE);
+  sync_decoration_layout (GTK_HEADER_BAR (header));
+  g_signal_connect_object (gtk_settings_get_default (),
+                           "notify::gtk-decoration-layout",
+                           G_CALLBACK (on_decoration_layout_changed),
+                           header, G_CONNECT_SWAPPED);
 
   GtkWidget *menu_btn = gtk_button_new_from_icon_name ("open-menu-symbolic");
   self->menu_btn = menu_btn;
