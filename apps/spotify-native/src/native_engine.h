@@ -9,6 +9,10 @@ typedef enum {
   SPOTIFYGTK_ENGINE_CONNECTING,
   SPOTIFYGTK_ENGINE_BUFFERING,
   SPOTIFYGTK_ENGINE_PLAYING,
+  /* The server has no playable file for this track. Distinct from a failure:
+   * nothing is wrong and retrying cannot help, so the caller should move on
+   * rather than stop. */
+  SPOTIFYGTK_ENGINE_UNAVAILABLE,
 } SpotifyNativeEngineStage;
 
 typedef void (*SpotifyNativeEngineProgressFunc) (SpotifyNativeEngineStage stage,

@@ -1853,6 +1853,16 @@ on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError 
       g_warning ("[live-test] No suitable OGG_VORBIS file found.");
       state->ok = FALSE;
     }
+  } else if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND)) {
+    /*
+     * The track has no playable file. Not a credential problem, so the cache
+     * stays: invalidating it here made one unavailable track throw away
+     * working credentials and slow down every track after it.
+     */
+    g_message ("[live-test] track unavailable: %s", error->message);
+    report_progress (state, SPOTIFYGTK_ENGINE_UNAVAILABLE,
+                     "This track is not available.");
+    state->ok = FALSE;
   } else {
     g_warning ("[live-test] get_track_metadata failed: %s", error ? error->message : "unknown error");
     /* This is the first request made with the streaming credentials, so it is

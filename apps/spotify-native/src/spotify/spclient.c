@@ -221,12 +221,28 @@ on_track_response (GObject *source, GAsyncResult *result, gpointer user_data)
   extract_audio_files_from_track (any_val_data, any_val_len, NULL, 0, files);
 
   if (files->len == 0) {
+    /*
+     * Parsed fine; the server simply has no playable file for this track.
+     *
+     * This used to dump the whole response as hex and report a malformed
+     * Track proto, which sent every reading of it -- including mine -- after
+     * a parser bug that was not there. Confirmed against the other metadata
+     * path: hm://metadata/4/track/<gid> returns the identical 563-byte Track
+     * with no AudioFile either, so the absence is the server's answer and not
+     * something this client can parse its way out of.
+     *
+     * NOT_FOUND rather than FAILED so the caller can tell "this track cannot
+     * play" from "this attempt went wrong", and skip instead of retrying.
+     */
     g_array_free (files, TRUE);
-    {
-      g_autofree gchar *hex = bytes_to_hex (data, len);
-      g_message ("Failed at parsing. raw hex: %s", hex);
-      goto parse_error;
-    }
+    GError *gone = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+      "track is unavailable: the server returned no playable audio files");
+    g_message ("spclient: %s", gone->message);
+    if (cl->callback) cl->callback (NULL, 0, gone, cl->user_data);
+    g_error_free (gone);
+    g_bytes_unref (bytes);
+    g_free (cl);
+    return;
   }
 
   g_message ("spclient: track has %u audio file(s)", files->len);

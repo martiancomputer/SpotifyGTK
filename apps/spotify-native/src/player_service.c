@@ -15,6 +15,7 @@ struct _SpotifyNativePlayerService {
   gchar *track_uri;
   gchar *pending_uri;   /* track requested while another was still playing */
   gchar *retry_uri;     /* a failed track, being given one second chance */
+  gboolean unavailable; /* set when the server has no file for this track */
   gint volume_percent;
   gdouble  eq_gains[SPOTIFYGTK_EQ_BANDS];
   gint     output_rate;   /* 0 = follow the stream */
@@ -232,6 +233,14 @@ engine_progress (SpotifyNativeEngineStage stage, const gchar *message,
     case SPOTIFYGTK_ENGINE_PLAYING:
       event->state = SPOTIFYGTK_PLAYER_PLAYING;
       break;
+    case SPOTIFYGTK_ENGINE_UNAVAILABLE:
+      /* Noted for the finish handler, which decides between retrying and
+       * moving on. The state itself stays IDLE: this is not an error in the
+       * player, and painting it as one flashes a broken-looking bar before
+       * the next track starts. */
+      self->unavailable = TRUE;
+      event->state = SPOTIFYGTK_PLAYER_IDLE;
+      break;
     case SPOTIFYGTK_ENGINE_IDLE:
     default:
       event->state = SPOTIFYGTK_PLAYER_IDLE;
@@ -298,6 +307,21 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
    * Once only, and tracked by URI, so a track that genuinely cannot play
    * fails twice and stops rather than looping.
    */
+  /*
+   * A track the server has no file for cannot be retried into existence, and
+   * the retry below is specifically for a dropped AP link. Retrying doubled
+   * the dead air before playback simply stopped.
+   */
+  if (!ok && self->unavailable) {
+    g_message ("player-service: %s is unavailable; not retrying",
+               self->track_uri ? self->track_uri : "(no uri)");
+    self->unavailable = FALSE;
+    emit_state (self, SPOTIFYGTK_PLAYER_UNAVAILABLE, "This track is not available.");
+    g_object_unref (self);
+    (void) source;
+    return;
+  }
+
   if (!ok && self->track_uri && g_strcmp0 (self->retry_uri, self->track_uri) != 0) {
     g_autofree gchar *again = g_strdup (self->track_uri);
     g_autoptr(GError) retry_err = NULL;
@@ -343,6 +367,7 @@ gboolean
 spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
                                      const gchar *track_uri, GError **error)
 {
+  self->unavailable = FALSE;
   g_return_val_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self), FALSE);
 
   /* Picking a different track while one is playing used to fail outright

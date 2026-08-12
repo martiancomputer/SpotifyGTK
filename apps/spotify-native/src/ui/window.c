@@ -2244,6 +2244,18 @@ on_player_state_changed (SpotifyNativePlayerService *player,
     g_warning ("Player error: %s", message);
   }
 
+  /*
+   * An unavailable track used to stop playback dead: the click did nothing,
+   * nothing said why, and the queue never moved. Spotify greys these out; we
+   * only learn at play time, so the next best thing is to say so and carry on
+   * down the queue the way finishing the track would have.
+   */
+  if (state == SPOTIFYGTK_PLAYER_UNAVAILABLE) {
+    g_message ("player: %s unavailable, skipping to the next track",
+               uri ? uri : "(no uri)");
+    advance_next (self, FALSE);
+  }
+
   (void) player;
 }
 

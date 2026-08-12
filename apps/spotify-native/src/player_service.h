@@ -16,6 +16,8 @@ typedef enum {
   SPOTIFYGTK_PLAYER_PAUSED,
   SPOTIFYGTK_PLAYER_STOPPING,
   SPOTIFYGTK_PLAYER_ERROR,
+  /* The server has no file for this track; the UI moves to the next one. */
+  SPOTIFYGTK_PLAYER_UNAVAILABLE,
 } SpotifyNativePlayerState;
 
 SpotifyNativePlayerService *spotifygtk_player_service_new (void);
