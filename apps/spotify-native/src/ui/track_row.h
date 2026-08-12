@@ -71,6 +71,11 @@ void spotifygtk_track_row_set_like_visible (SpotifyGtkTrackRow *self, gboolean v
 
 void spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self);
 
+/* Grey a track the server has no file for. Learned when playback is attempted
+ * -- the list metadata cannot be trusted for this, see window.c. */
+void spotifygtk_track_row_set_unavailable (SpotifyGtkTrackRow *self,
+                                           gboolean            unavailable);
+
 void spotifygtk_track_row_set_playing (SpotifyGtkTrackRow *self,
                                        gboolean is_playing,
                                        gboolean is_paused);

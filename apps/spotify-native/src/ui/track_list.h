@@ -26,6 +26,10 @@ void spotifygtk_track_list_set_liked_set (SpotifyGtkTrackList *self, GHashTable 
 /* Repaint hearts for rows currently on screen, after the shared set changes. */
 void spotifygtk_track_list_refresh_liked (SpotifyGtkTrackList *self);
 
+/* Same borrowed-set arrangement as the liked set above. */
+void spotifygtk_track_list_set_unavailable_set (SpotifyGtkTrackList *self, GHashTable *set);
+void spotifygtk_track_list_refresh_unavailable (SpotifyGtkTrackList *self);
+
 /* Show or hide the per-row like control. Hidden on the Liked Songs page. */
 void spotifygtk_track_list_set_show_like (SpotifyGtkTrackList *self, gboolean show);
 

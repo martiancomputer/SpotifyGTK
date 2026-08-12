@@ -24,6 +24,7 @@ struct _SpotifyGtkSettings {
   gchar *path;
 
   GPtrArray *pins;   /* SpotifyGtkPin* */
+  GHashTable *unavailable;   /* track uri -> seen; the server had no file */
 };
 
 static void
@@ -79,6 +80,13 @@ load (SpotifyGtkSettings *self)
   /* Pins. The three lists are written together, but a hand-edited file may
    * disagree, so this walks the shortest and drops the rest rather than
    * indexing off the end of one of them. */
+  gsize nun = 0;
+  g_auto(GStrv) unavail = g_key_file_get_string_list (kf, SETTINGS_GROUP,
+                                                     "unavailable-uris", &nun, NULL);
+  for (gsize i = 0; unavail && i < nun; i++)
+    if (unavail[i] && *unavail[i])
+      g_hash_table_add (self->unavailable, g_strdup (unavail[i]));
+
   gsize nu = 0, nn = 0, nt = 0, nc = 0;
   g_auto(GStrv) uris  = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-uris",  &nu, NULL);
   g_auto(GStrv) names = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-names", &nn, NULL);
@@ -145,6 +153,23 @@ save (SpotifyGtkSettings *self)
     g_key_file_remove_key (kf, SETTINGS_GROUP, "pinned-covers", NULL);
   }
 
+  /*
+   * Remembered across runs on purpose: the list metadata does not say whether
+   * a track has a file -- the batch response omits the field for entities that
+   * play perfectly well, measured at 605 of 4800 -- so the only reliable
+   * source is having tried. Throwing that away at exit would mean rediscovering
+   * each dead track by stalling on it again.
+   */
+  if (g_hash_table_size (self->unavailable) > 0) {
+    guint n = g_hash_table_size (self->unavailable);
+    g_autofree const gchar **list = g_new0 (const gchar *, n + 1);
+    GHashTableIter it; gpointer k; guint i = 0;
+    g_hash_table_iter_init (&it, self->unavailable);
+    while (g_hash_table_iter_next (&it, &k, NULL))
+      list[i++] = k;
+    g_key_file_set_string_list (kf, SETTINGS_GROUP, "unavailable-uris", list, n);
+  }
+
   g_autofree gchar *dir = g_path_get_dirname (self->path);
   g_mkdir_with_parents (dir, 0700);
 
@@ -160,6 +185,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->media_mode  = SPOTIFYGTK_MEDIA_FULL;
   self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
+  self->unavailable = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
   self->path = g_build_filename (g_get_user_config_dir (),
                                  "spotify-native", "settings.ini", NULL);
@@ -291,6 +317,28 @@ spotifygtk_settings_sample_rate_hz (SpotifyGtkSampleRate rate)
     case SPOTIFYGTK_SAMPLE_RATE_96000: return 96000;
     default:                           return 0;   /* follow the stream */
   }
+}
+
+/* ── Unavailable tracks ──────────────────────────────────────────────────
+ *
+ * Learned by trying to play, because nothing in the list metadata says so
+ * reliably. Saved on every addition for the same reason the pins are.
+ */
+GHashTable *
+spotifygtk_settings_get_unavailable (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), NULL);
+  return self->unavailable;
+}
+
+void
+spotifygtk_settings_mark_unavailable (SpotifyGtkSettings *self, const gchar *uri)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (!uri || !*uri || g_hash_table_contains (self->unavailable, uri))
+    return;
+  g_hash_table_add (self->unavailable, g_strdup (uri));
+  save (self);
 }
 
 /* ── Pins ────────────────────────────────────────────────────────────────

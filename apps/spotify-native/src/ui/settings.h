@@ -104,6 +104,12 @@ typedef struct {
 /* The pins, in order. Owned by the settings object; valid until it changes. */
 GPtrArray *spotifygtk_settings_get_pins (SpotifyGtkSettings *self);
 
+/* Tracks the server refused to give a file for, learned by trying. The table
+ * is owned by the settings object and borrowed by the lists. */
+GHashTable *spotifygtk_settings_get_unavailable (SpotifyGtkSettings *self);
+void        spotifygtk_settings_mark_unavailable (SpotifyGtkSettings *self,
+                                                  const gchar        *uri);
+
 gboolean spotifygtk_settings_is_pinned (SpotifyGtkSettings *self,
                                         const gchar *uri);
 

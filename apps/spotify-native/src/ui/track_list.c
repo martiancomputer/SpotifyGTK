@@ -42,6 +42,7 @@ struct _SpotifyGtkTrackList {
    * (URIs x lists x bound rows). One shared table costs one copy and no fan-out.
    */
   GHashTable *liked_set;
+  GHashTable *unavailable_set;   /* borrowed, like liked_set */
 
   /* Scroll settle detection. Cover loading is suppressed while the adjustment
    * is moving and resumed once it has been still for SETTLE_MS. */
@@ -373,6 +374,9 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   spotifygtk_track_row_set_liked (row,
     self->liked_set && bt && bt->uri &&
     g_hash_table_contains (self->liked_set, bt->uri));
+  spotifygtk_track_row_set_unavailable (row,
+    self->unavailable_set && bt && bt->uri &&
+    g_hash_table_contains (self->unavailable_set, bt->uri));
 
   /* Connect for the lifetime of this binding; disconnected in unbind. The
    * item ref is stashed so play-clicked knows which track it is. */
@@ -569,6 +573,30 @@ spotifygtk_track_list_set_liked_set (SpotifyGtkTrackList *self, GHashTable *set)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
   self->liked_set = set;
+}
+
+void
+spotifygtk_track_list_set_unavailable_set (SpotifyGtkTrackList *self, GHashTable *set)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  self->unavailable_set = set;
+}
+
+void
+spotifygtk_track_list_refresh_unavailable (SpotifyGtkTrackList *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  if (!self->unavailable_set || !self->bound_rows)
+    return;
+
+  for (guint i = 0; i < self->bound_rows->len; i++) {
+    GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
+    SpotifyGtkTrackItem *item = g_object_get_data (G_OBJECT (row), "bound-item");
+    const SpotifyNativeTrack *t = item ? spotifygtk_track_item_get_track (item) : NULL;
+    if (t && t->uri)
+      spotifygtk_track_row_set_unavailable (SPOTIFYGTK_TRACK_ROW (row),
+        g_hash_table_contains (self->unavailable_set, t->uri));
+  }
 }
 
 /*

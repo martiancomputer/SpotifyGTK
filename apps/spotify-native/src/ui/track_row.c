@@ -732,6 +732,20 @@ spotifygtk_track_row_set_show_artists (SpotifyGtkTrackRow *self, gboolean show)
 }
 
 void
+spotifygtk_track_row_set_unavailable (SpotifyGtkTrackRow *self, gboolean unavailable)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+
+  if (unavailable)
+    gtk_widget_add_css_class (GTK_WIDGET (self), "track-unavailable");
+  else
+    gtk_widget_remove_css_class (GTK_WIDGET (self), "track-unavailable");
+
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self),
+                               unavailable ? "Not available on Spotify" : NULL);
+}
+
+void
 spotifygtk_track_row_set_playing (SpotifyGtkTrackRow *self, gboolean is_playing, gboolean is_paused)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));

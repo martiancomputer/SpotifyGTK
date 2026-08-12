@@ -473,6 +473,26 @@ play_context_at (SpotifyGtkNativeWindow *self, gint index, gboolean handover)
  * plays out; a press stops the current track immediately, so the display must
  * follow immediately too.
  */
+/*
+ * Has this track already proved unplayable?
+ *
+ * Learned rather than read from the catalogue on purpose: the batch metadata
+ * behind these lists leaves the file field out for entities that play fine
+ * -- 605 of 4800 in one library load, two of which were then confirmed
+ * playable one at a time -- so trusting it would grey out working tracks.
+ */
+static gboolean
+context_index_is_unavailable (SpotifyGtkNativeWindow *self, guint idx)
+{
+  if (!self->play_context || idx >= self->play_context->len)
+    return FALSE;
+  const SpotifyNativeTrack *t = g_ptr_array_index (self->play_context, idx);
+  if (!t || !t->uri)
+    return FALSE;
+  return g_hash_table_contains (
+    spotifygtk_settings_get_unavailable (spotifygtk_settings_get_default ()), t->uri);
+}
+
 static gboolean
 advance_next (SpotifyGtkNativeWindow *self, gboolean handover)
 {
@@ -502,8 +522,17 @@ advance_next (SpotifyGtkNativeWindow *self, gboolean handover)
   gint pos = self->order_pos >= 0 ? self->order_pos
                                   : order_pos_of (self, self->context_index);
 
-  if (pos + 1 < (gint) self->order->len) {
-    play_context_at (self, (gint) g_array_index (self->order, guint, pos + 1), handover);
+  /*
+   * Step over tracks already known to have no file. Skipping them here rather
+   * than starting them and failing means the queue moves at once instead of
+   * stalling on each one, which is what a run of dead tracks on one disc of a
+   * release used to feel like.
+   */
+  for (gint next = pos + 1; next < (gint) self->order->len; next++) {
+    guint idx = g_array_index (self->order, guint, next);
+    if (context_index_is_unavailable (self, idx))
+      continue;
+    play_context_at (self, (gint) idx, handover);
     return TRUE;
   }
 
@@ -2083,6 +2112,8 @@ wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
   /* Borrowed, not copied: a list consults it on every bind, so a page built
    * before or after the read finishes is equally correct. */
   spotifygtk_track_list_set_liked_set (list, self->liked_uris);
+  spotifygtk_track_list_set_unavailable_set (list,
+    spotifygtk_settings_get_unavailable (spotifygtk_settings_get_default ()));
 
   g_signal_connect (list, "track-activated", G_CALLBACK (on_list_track_activated), self);
   g_signal_connect (list, "add-to-queue",    G_CALLBACK (on_list_add_to_queue),    self);
@@ -2253,6 +2284,12 @@ on_player_state_changed (SpotifyNativePlayerService *player,
   if (state == SPOTIFYGTK_PLAYER_UNAVAILABLE) {
     g_message ("player: %s unavailable, skipping to the next track",
                uri ? uri : "(no uri)");
+    if (uri) {
+      spotifygtk_settings_mark_unavailable (spotifygtk_settings_get_default (), uri);
+      for (guint i = 0; self->track_lists && i < self->track_lists->len; i++)
+        spotifygtk_track_list_refresh_unavailable (
+          g_ptr_array_index (self->track_lists, i));
+    }
     advance_next (self, FALSE);
   }
 
@@ -2914,6 +2951,10 @@ static const gchar *theme_body =
   /* Non-overlay, so it sits in a gutter beside the list, not over it. */
   /* Destructive header action: ordinary until the pointer is on it, then the
    * colour says what it does. Red at rest would shout on every playlist page. */
+  /* Greyed rather than hidden: the track is part of the release and its
+   * absence would look like a gap in the tracklist. Dimmed to read as
+   * unavailable at a glance, the way Spotify greys them. */
+  ".track-unavailable { opacity: 0.42; }"
   ".destructive-hover:hover { background-color: @destructive; color: #ffffff; }"
   ".destructive-hover:hover label { color: #ffffff; }"
 
