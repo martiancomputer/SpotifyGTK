@@ -14,6 +14,7 @@ struct _SpotifyNativePlayerService {
   GMainContext *main_context;
   gchar *track_uri;
   gchar *pending_uri;   /* track requested while another was still playing */
+  gchar *retry_uri;     /* a failed track, being given one second chance */
   gint volume_percent;
   gdouble  eq_gains[SPOTIFYGTK_EQ_BANDS];
   gint     output_rate;   /* 0 = follow the stream */
@@ -285,6 +286,42 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
   }
 
   /*
+   * One automatic retry for a failed track.
+   *
+   * The common failure is an audio key that never comes back, which is what a
+   * dead AP link looks like from here: the link is dropped on that timeout so
+   * the *next* attempt reconnects, but the attempt that discovered it is lost.
+   * From the outside that is a song that simply does not play, at random,
+   * with the next one fine -- so the attempt that discovered the problem is
+   * the one worth repeating.
+   *
+   * Once only, and tracked by URI, so a track that genuinely cannot play
+   * fails twice and stops rather than looping.
+   */
+  if (!ok && self->track_uri && g_strcmp0 (self->retry_uri, self->track_uri) != 0) {
+    g_autofree gchar *again = g_strdup (self->track_uri);
+    g_autoptr(GError) retry_err = NULL;
+
+    g_free (self->retry_uri);
+    self->retry_uri = g_strdup (again);
+
+    g_message ("player-service: %s failed; retrying once (a dropped AP link "
+               "fails the attempt that discovers it)", again);
+
+    if (spotifygtk_player_service_start_uri (self, again, &retry_err)) {
+      g_object_unref (self);
+      (void) source;
+      return;
+    }
+    g_warning ("player-service: retry could not start: %s",
+               retry_err ? retry_err->message : "unknown error");
+  }
+
+  /* Cleared on success so the next failure of this track gets its own retry. */
+  if (ok)
+    g_clear_pointer (&self->retry_uri, g_free);
+
+  /*
    * Do not stop the position timer here. This run is finished producing, but
    * the sink may still have several seconds of its audio to play, and the
    * timer is what announces the handover and keeps position moving until it
@@ -500,6 +537,7 @@ spotifygtk_player_service_dispose (GObject *object)
   g_clear_object (&self->cancellable);
   g_clear_pointer (&self->track_uri, g_free);
   g_clear_pointer (&self->pending_uri, g_free);
+  g_clear_pointer (&self->retry_uri, g_free);
   g_clear_pointer (&self->pending_seek_uri, g_free);
   g_clear_pointer (&self->inflight, g_ptr_array_unref);
   g_clear_pointer (&self->main_context, g_main_context_unref);

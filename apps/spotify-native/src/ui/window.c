@@ -674,6 +674,7 @@ subscribe_collection_changes (SpotifyGtkNativeWindow *self)
 
 static void set_row_liked_for_uri (SpotifyGtkNativeWindow *self,
                                   const gchar *uri, gboolean liked);
+static void note_local_write (SpotifyGtkNativeWindow *self);
 
 
 typedef struct {
@@ -1052,7 +1053,7 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
 
   SPOTIFYGTK_DEBUG ("like: %s %s (set now %u)", liked ? "add" : "remove",
                     track->uri, g_hash_table_size (self->liked_uris));
-  self->last_local_write_us = g_get_monotonic_time ();
+  note_local_write (self);
 
   const gchar *uris[] = { track->uri };
   spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
@@ -1842,6 +1843,25 @@ on_wired_list_gone (gpointer data, GObject *where_the_list_was)
  * not a collection write at all: it is an unfollow on the rootlist.
  * See research/library-writes.md; all three are proven live.
  */
+/*
+ * Mark a write as ours.
+ *
+ * The collection subscription cannot tell whose change it is reporting, so
+ * every write of ours comes back as an event. on_collection_settled() uses
+ * this stamp to recognise the echo and skip re-reading the whole collection --
+ * ten round trips to arrive back where it started, and a rebuilt page with it.
+ *
+ * Liking a track set this from the start. Saving an album and following an
+ * artist did not, because they were written later and the stamp lives at the
+ * call site rather than inside the write. That is why those two lagged and
+ * flashed the page while liking a track did not.
+ */
+static void
+note_local_write (SpotifyGtkNativeWindow *self)
+{
+  self->last_local_write_us = g_get_monotonic_time ();
+}
+
 static void
 on_library_write_done (gboolean ok, guint16 status, gpointer user_data)
 {
@@ -1910,6 +1930,7 @@ on_context_action (const gchar *uri, const gchar *kind, gpointer user_data)
   if (g_str_has_prefix (uri, "spotify:album:")) {
     gboolean saved = album_is_saved (self, uri);
     const gchar *uris[1] = { uri };
+    note_local_write (self);
     spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_ALBUMS,
                                     uris, 1, saved, on_library_write_done,
                                     g_strdup (saved ? "unsave album" : "save album"));
@@ -1940,6 +1961,7 @@ on_artist_follow_toggled (const gchar *artist_uri, gpointer user_data)
 
   gboolean following = artist_is_followed (self, artist_uri);
   const gchar *uris[1] = { artist_uri };
+  note_local_write (self);
   spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_ARTISTS,
                                   uris, 1, following, on_library_write_done,
                                   g_strdup (following ? "unfollow artist"

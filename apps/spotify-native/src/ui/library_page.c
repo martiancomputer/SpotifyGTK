@@ -21,6 +21,11 @@ struct _SpotifyGtkLibraryPage {
   SpotifyGtkAlbumGrid  *albums;
   GtkWidget            *albums_status;   /* "Loading…" / empty note */
   GPtrArray            *saved_album_uris; /* gchar*, gathered across pages */
+  /* Invalidates callbacks from a previous load. Without it a second load
+   * clears and re-splices the model while the first one's reads are still
+   * arriving, and a splice destroys the item a bound card is showing -- the
+   * failure album_grid.c's add_card comment describes. */
+  guint                 generation;
   GtkWidget            *header_revealer; /* title + heading, folds away on scroll */
   SpotifyNativeSession *session;         /* not owned */
   GCancellable         *load_cancel;
@@ -60,13 +65,14 @@ spotifygtk_library_page_class_init (SpotifyGtkLibraryPageClass *klass)
  * by the URI -- see research/library-writes.md -- so the real list is a filter
  * over that read, and the names and covers are one batched lookup.
  */
-typedef struct { GWeakRef page; } LibLoad;
+typedef struct { GWeakRef page; guint generation; } LibLoad;
 
 static void
 on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   LibLoad *cl = user_data;
   g_autoptr(SpotifyGtkLibraryPage) self = g_weak_ref_get (&cl->page);
+  guint cl_generation = cl->generation;
   g_weak_ref_clear (&cl->page);
   g_free (cl);
 
@@ -76,6 +82,8 @@ on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   if (!self)
     return;
+  if (cl_generation != self->generation)
+    return;   /* a newer load has already replaced this one */
   if (!albums) {
     if (!g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
       gtk_label_set_text (GTK_LABEL (self->albums_status),
@@ -105,6 +113,7 @@ on_saved_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
                guint n_items, const gchar *next_token, gpointer user_data)
 {
   SpotifyGtkLibraryPage *self = user_data;
+  guint mine = self->generation;
 
   if (!ok) {
     gtk_label_set_text (GTK_LABEL (self->albums_status),
@@ -134,6 +143,7 @@ on_saved_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
 
   LibLoad *cl = g_new0 (LibLoad, 1);
   g_weak_ref_init (&cl->page, self);
+  cl->generation = mine;
   spotifygtk_native_session_load_albums (self->session,
     (const gchar *const *) self->saved_album_uris->pdata,
     self->saved_album_uris->len, self->load_cancel, on_album_meta_loaded, cl);
@@ -164,6 +174,7 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
   gtk_widget_set_visible (self->albums_status, TRUE);
 
   self->load_cancel = g_cancellable_new ();
+  self->generation++;
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
                                       NULL, 500, on_saved_page, self);
