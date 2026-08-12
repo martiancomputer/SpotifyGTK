@@ -73,7 +73,7 @@ menu_anchor_destroyed (GtkWidget *anchor, gpointer user_data)
 {
   GtkWidget *popover = user_data;
   (void) anchor;
-  if (GTK_IS_WIDGET (popover) && gtk_widget_get_parent (popover))
+  if (gtk_widget_get_parent (popover))
     gtk_widget_unparent (popover);
 }
 
@@ -128,7 +128,15 @@ spotifygtk_context_menu_present (SpotifyGtkContextMenu *menu, GtkWidget *anchor,
    * GtkPopover") and the popover leaks along with its context. Unparenting
    * here is safe in a way doing it from "closed" is not: nothing is mid-hide.
    */
-  g_signal_connect (anchor, "destroy", G_CALLBACK (menu_anchor_destroyed), popover);
+  /*
+   * connect_object, not connect: the popover is normally destroyed first, by
+   * the close path above, and a plain handler would then be left holding a
+   * freed pointer to dereference when the anchor eventually goes. That
+   * crashed -- SIGSEGV in this handler, reached from a track row's dispose.
+   * connect_object disconnects itself when the popover is finalised.
+   */
+  g_signal_connect_object (anchor, "destroy",
+                           G_CALLBACK (menu_anchor_destroyed), popover, 0);
 
   gtk_popover_popup (GTK_POPOVER (popover));
   g_free (menu);

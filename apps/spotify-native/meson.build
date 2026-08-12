@@ -137,6 +137,10 @@ add_project_arguments(
 conf = configuration_data()
 conf.set_quoted('APP_VERSION', meson.project_version())
 conf.set_quoted('APP_ID', 'com.github.spotifygtk.SpotifyNative')
+# For running uninstalled: the icon lives in the source tree rather than in an
+# installed theme, so a build-dir run needs to be told where to look.
+conf.set_quoted('SPOTIFYGTK_SRC_DATA_DIR',
+                join_paths(meson.current_source_dir(), 'data'))
 conf.set_quoted('APP_PROFILE', profile)
 conf.set10('SPOTIFY_NATIVE_NIGHTLY', is_nightly)
 conf.set10('HAVE_OPENSSL',  openssl_dep.found())

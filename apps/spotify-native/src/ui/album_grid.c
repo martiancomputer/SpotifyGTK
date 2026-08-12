@@ -273,6 +273,7 @@ on_grid_settled (gpointer user_data)
 static void
 on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
 {
+
   SpotifyGtkAlbumGrid *self = user_data;
   (void) adj;
 
@@ -296,8 +297,22 @@ static void
 on_card_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
   GtkImage *art = user_data;
-  if (!texture)
-    return;   /* keep the placeholder; the settle pass may come back for it */
+  if (!texture) {
+    /*
+     * Keep the placeholder and ask for a retry.
+     *
+     * This used to just return, on the assumption that the settle pass would
+     * come back for it -- but that pass is only ever armed by a scroll, so a
+     * card that failed while the page sat still kept the placeholder until
+     * something happened to move the list. Arming it here means the retry
+     * does not depend on the user scrolling.
+     */
+    SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
+      gtk_widget_get_ancestor (GTK_WIDGET (art), SPOTIFYGTK_TYPE_ALBUM_GRID);
+    if (grid && !grid->settle_id)
+      grid->settle_id = g_timeout_add (GRID_SETTLE_MS, on_grid_settled, grid);
+    return;
+  }
 
   gtk_image_set_from_paintable (art, GDK_PAINTABLE (texture));
 

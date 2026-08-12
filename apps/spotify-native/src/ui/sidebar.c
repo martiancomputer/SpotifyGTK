@@ -68,9 +68,10 @@ on_nav_row_activated (GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
 static void
 on_pinned_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
-  GtkWidget *art = user_data;
+  GtkWidget *art = user_data;   /* referenced by the caller; released here */
   if (texture && GTK_IS_IMAGE (art))
     gtk_image_set_from_paintable (GTK_IMAGE (art), GDK_PAINTABLE (texture));
+  g_object_unref (art);
 }
 
 static void
@@ -288,12 +289,17 @@ spotifygtk_sidebar_add_pinned (SpotifyGtkSidebar *self,
   gtk_box_append (GTK_BOX (box), art);
 
   if (cover_id && *cover_id) {
-    /* Rows live as long as the pin list, and the list is rebuilt wholesale, so
-     * a cancellable per row would only ever be cancelled with the row. The
-     * weak pointer is what makes a late delivery safe. */
-    g_object_add_weak_pointer (G_OBJECT (art), (gpointer *) &art);
+    /*
+     * Hold a reference for the length of the request.
+     *
+     * This tried a weak pointer first, and passed the address of this local --
+     * so GObject would have written NULL into a stack slot belonging to
+     * whatever ran next. A reference is both simpler and correct here: the
+     * request has no cancellable, so the callback always runs and always has
+     * somewhere to give the reference back.
+     */
     spotifygtk_cover_load (cover_id, PINNED_ART_PX, NULL,
-                           on_pinned_cover_loaded, art);
+                           on_pinned_cover_loaded, g_object_ref (art));
   }
 
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 1);

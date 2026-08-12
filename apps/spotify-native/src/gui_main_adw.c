@@ -41,7 +41,27 @@ on_activate (GtkApplication *app, gpointer user_data)
   if (g_getenv ("SPOTIFY_COVER_STATS"))
     g_timeout_add_seconds (15, (GSourceFunc) stats_tick, NULL);
 
+  /*
+   * Name the window's icon, and make sure the name resolves.
+   *
+   * Only the legacy gui_main did this, so the libadwaita build -- the one that
+   * ships -- presented a generic placeholder in the launcher, the task
+   * switcher and the window list, despite data/ carrying a perfectly good
+   * SVG all along. Setting the default covers every window the app opens.
+   *
+   * The search path is for running uninstalled: the icon lives in the source
+   * tree, not in any theme directory, so a build-dir run would otherwise find
+   * nothing to draw and fall back to the same placeholder.
+   */
+  gtk_window_set_default_icon_name (APP_ID);
+
+  if (g_file_test (SPOTIFYGTK_SRC_DATA_DIR, G_FILE_TEST_IS_DIR))
+    gtk_icon_theme_add_search_path (
+      gtk_icon_theme_get_for_display (gdk_display_get_default ()),
+      SPOTIFYGTK_SRC_DATA_DIR);
+
   SpotifyGtkNativeWindow *win = spotifygtk_native_window_new (app);
+  gtk_window_set_icon_name (GTK_WINDOW (win), APP_ID);
   gtk_window_present (GTK_WINDOW (win));
   (void) user_data;
 }

@@ -1692,6 +1692,81 @@ on_album_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
  * writes and then the sidebar is rebuilt from what was written, rather than
  * the two being kept in step by hand and drifting apart.
  */
+/*
+ * Fill in artwork for pins made before covers were recorded.
+ *
+ * Otherwise a pin from before that change shows a disc forever, and the only
+ * way to fix it is to unpin and pin again. One resolve per uncovered pin, once
+ * per session: the first track of the album or playlist carries the art, which
+ * is the same thing the grids use, and it works for both without asking what
+ * kind of thing the URI names.
+ */
+static void refresh_pinned_sidebar (SpotifyGtkNativeWindow *self);
+
+typedef struct { GWeakRef win; gchar *uri; } PinArtOp;
+
+static void
+on_pin_art_resolved (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  PinArtOp *op = user_data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&op->win);
+  g_autoptr(GError) err = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &err);
+
+  if (self && tracks && tracks->len > 0) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, 0);
+    if (t && t->cover_id && *t->cover_id) {
+      SpotifyGtkSettings *st = spotifygtk_settings_get_default ();
+      GPtrArray *pins = spotifygtk_settings_get_pins (st);
+      for (guint i = 0; pins && i < pins->len; i++) {
+        SpotifyGtkPin *p = g_ptr_array_index (pins, i);
+        if (g_strcmp0 (p->uri, op->uri) == 0 && !p->cover_id) {
+          /* Re-add so the store persists it; add_pin is a no-op while the
+           * pin is present, so it is removed first. */
+          g_autofree gchar *name = g_strdup (p->name);
+          g_autofree gchar *type = g_strdup (p->type);
+          spotifygtk_settings_remove_pin (st, op->uri);
+          spotifygtk_settings_add_pin (st, op->uri, name, type, t->cover_id);
+          refresh_pinned_sidebar (self);
+          break;
+        }
+      }
+    }
+  }
+
+  g_weak_ref_clear (&op->win);
+  g_free (op->uri);
+  g_free (op);
+}
+
+static void
+backfill_pin_art (SpotifyGtkNativeWindow *self)
+{
+  static GHashTable *tried;   /* uri -> once per session, however it turns out */
+
+  if (!self->session ||
+      spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY)
+    return;
+
+  if (!tried)
+    tried = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
+  GPtrArray *pins = spotifygtk_settings_get_pins (spotifygtk_settings_get_default ());
+  for (guint i = 0; pins && i < pins->len; i++) {
+    const SpotifyGtkPin *p = g_ptr_array_index (pins, i);
+    if (p->cover_id || !p->uri || g_hash_table_contains (tried, p->uri))
+      continue;
+    g_hash_table_add (tried, g_strdup (p->uri));
+
+    PinArtOp *op = g_new0 (PinArtOp, 1);
+    g_weak_ref_init (&op->win, self);
+    op->uri = g_strdup (p->uri);
+    spotifygtk_native_session_load_tracks (self->session, p->uri, 1, NULL,
+                                           on_pin_art_resolved, op);
+  }
+}
+
 static void
 refresh_pinned_sidebar (SpotifyGtkNativeWindow *self)
 {
@@ -2337,6 +2412,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     flush_pending_likes (self);
     spotifygtk_native_window_reload_liked (self);
     spotifygtk_native_window_reload_followed (self);
+    backfill_pin_art (self);
     subscribe_collection_changes (self);
 
     /*
