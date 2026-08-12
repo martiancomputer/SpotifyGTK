@@ -51,16 +51,27 @@ G_DEFINE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, G_TYPE_OBJECT)
  * retrying.
  */
 /*
- * Sized against the largest range actually requested, not against a guess.
+ * Sized against two things at once: the slowest healthy transfer, and the
+ * buffer this is protecting.
  *
- * This was 12s while the read-ahead chunk was raised to 256KB in the same
- * session -- and 256KB on a slow link legitimately takes longer than that
- * (13s at 20KB/s). So the deadline began killing transfers that were slow but
- * perfectly healthy, turning a survivable slowdown into a dead stream. It has
- * to clear the worst case for a real chunk by a wide margin, because the cost
- * of firing too early is far higher than the cost of waiting.
+ * It has to be longer than a slow-but-working fetch. It was 12s when the
+ * read-ahead chunk became 256KB, and 256KB at 20KB/s legitimately takes 13s,
+ * so it started killing healthy transfers and turning a survivable slowdown
+ * into a dead stream. That is why it went to 45s.
+ *
+ * But it also has to be shorter than the audio already queued, or a stall is
+ * not noticed until long after the sound has stopped. At 45s against a 10s
+ * buffer, any stall meant 35 seconds of silence before the retry that would
+ * have fixed it was even attempted -- which is what "music randomly stops"
+ * was. The 45s figure also passes a transfer running at 5.7KB/s, seven times
+ * too slow to sustain the 40KB/s that 320kbps playback consumes.
+ *
+ * Those two constraints did not overlap while the buffer was 10s. It is 30s
+ * now (see SINK_TRACK_MAX_FRAMES), so 25s sits between them: twice the
+ * worst healthy case, and five seconds of audio still in hand when the retry
+ * starts.
  */
-#define CDN_REQUEST_DEADLINE_S 45
+#define CDN_REQUEST_DEADLINE_S 25
 
 typedef struct {
   SpotifyCdnFetcher *self;

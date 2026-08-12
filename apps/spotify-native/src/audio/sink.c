@@ -17,7 +17,18 @@
  * Roughly ten seconds at 44.1kHz. Enough to ride out a slow CDN range, short
  * enough that a skip does not have to throw much away.
  */
-#define SINK_TRACK_MAX_FRAMES 441000u
+/*
+ * How much decoded audio one track may hold: 30 seconds at 44.1kHz.
+ *
+ * It was 10s, which is less than the CDN fetch deadline, so a stalled range
+ * emptied this long before the fetch was given up on and retried. The buffer
+ * has to outlast the deadline for a retry to be invisible rather than audible.
+ *
+ * 5MB of PCM per queued track, against the ~95MB of card art this process
+ * stopped holding when covers moved to load-on-map. Cheap for the thing it
+ * buys.
+ */
+#define SINK_TRACK_MAX_FRAMES 1323000u
 
 /* One track's worth of audio, waiting its turn. */
 typedef struct {

@@ -67,6 +67,16 @@ menu_unparent_idle (gpointer data)
   return G_SOURCE_REMOVE;
 }
 
+/* The widget the menu hangs off is going away; take the menu with it. */
+static void
+menu_anchor_destroyed (GtkWidget *anchor, gpointer user_data)
+{
+  GtkWidget *popover = user_data;
+  (void) anchor;
+  if (GTK_IS_WIDGET (popover) && gtk_widget_get_parent (popover))
+    gtk_widget_unparent (popover);
+}
+
 static void
 menu_close_deferred (GtkPopover *popover, gpointer user_data)
 {
@@ -108,6 +118,17 @@ spotifygtk_context_menu_present (SpotifyGtkContextMenu *menu, GtkWidget *anchor,
    * merely hidden, which is a safe moment to take it apart.
    */
   g_signal_connect (popover, "closed", G_CALLBACK (menu_close_deferred), NULL);
+
+  /*
+   * The anchor can go first.
+   *
+   * A card is recycled or a whole grid is replaced while its menu is still
+   * open, and then the anchor is finalised with the popover still parented to
+   * it -- GTK says so ("Finalizing GtkButton, but it still has children left:
+   * GtkPopover") and the popover leaks along with its context. Unparenting
+   * here is safe in a way doing it from "closed" is not: nothing is mid-hide.
+   */
+  g_signal_connect (anchor, "destroy", G_CALLBACK (menu_anchor_destroyed), popover);
 
   gtk_popover_popup (GTK_POPOVER (popover));
   g_free (menu);
