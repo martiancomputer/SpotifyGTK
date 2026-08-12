@@ -331,6 +331,7 @@ typedef struct {
   SpotifyGtkAlbumGrid *grid;
   gchar               *uri;
   gchar               *name;
+  gchar               *cover_id;   /* so a pin can show the same art */
 } AlbumMenuCtx;
 
 static void
@@ -339,6 +340,7 @@ album_menu_ctx_free (gpointer data)
   AlbumMenuCtx *ctx = data;
   g_free (ctx->uri);
   g_free (ctx->name);
+  g_free (ctx->cover_id);
   g_free (ctx);
 }
 
@@ -353,7 +355,8 @@ album_menu_emit_and_close (GtkButton *button, guint signal_id)
      * a pin made this way was labelled "spotify:album:...". The menu context
      * already carries the name the card was showing. */
     if (signal_id == ALBUM_TOGGLE_PIN)
-      g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri, ctx->name);
+      g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri, ctx->name,
+                     ctx->cover_id);
     else
       g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri);
   }
@@ -382,6 +385,7 @@ on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
   ctx->grid = self;
   ctx->uri  = g_strdup (uri);
   ctx->name = g_strdup (g_object_get_data (G_OBJECT (card), "album-name"));
+  ctx->cover_id = g_strdup (g_object_get_data (G_OBJECT (card), "cover-id"));
 
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
   spotifygtk_context_menu_add (menu, "Add to Liked Songs", TRUE, NULL,
@@ -720,6 +724,46 @@ spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self)
  * card. It crashed when a playlist card was clicked while its art arrived.
  * Resolve first, add once.
  */
+/*
+ * Replace every card in one model change.
+ *
+ * clear() followed by add_card() in a loop is N+1 model mutations, and each
+ * one destroys the items bound cards are showing and forces a rebind -- which
+ * is the hazard add_card's comment below describes, and which crashed inside
+ * GTK's own teardown when a cover landed during it. One splice has one
+ * intermediate state instead of N.
+ *
+ * In-flight art is cancelled first: nothing should be holding a pointer into
+ * a card that is about to be rebound.
+ */
+void
+spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid       *self,
+                                 const SpotifyGtkCardSpec  *cards,
+                                 guint                      n_cards)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+
+  spotifygtk_album_grid_release_covers (self);
+
+  g_autofree gpointer *items = g_new0 (gpointer, MAX (n_cards, 1));
+  guint n = 0;
+  for (guint i = 0; i < n_cards; i++) {
+    if (!cards[i].uri)
+      continue;
+    items[n++] = album_item_new (cards[i].uri,
+                                 cards[i].title    ? cards[i].title    : cards[i].uri,
+                                 cards[i].subtitle ? cards[i].subtitle : "",
+                                 cards[i].cover_id);
+  }
+
+  g_list_store_splice (self->store, 0,
+                       g_list_model_get_n_items (G_LIST_MODEL (self->store)),
+                       items, n);
+
+  for (guint i = 0; i < n; i++)
+    g_object_unref (items[i]);
+}
+
 void
 spotifygtk_album_grid_add_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
                                 const gchar *title, const gchar *subtitle,
@@ -840,7 +884,8 @@ spotifygtk_album_grid_class_init (SpotifyGtkAlbumGridClass *klass)
    * authority either way. */
   signals[ALBUM_TOGGLE_PIN] = g_signal_new (
     "album-toggle-pin", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
-    NULL, NULL, NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_STRING);
+    NULL, NULL, NULL, G_TYPE_NONE, 3,
+    G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 }
 
 static void

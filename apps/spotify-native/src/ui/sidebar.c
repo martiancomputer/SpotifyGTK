@@ -8,6 +8,7 @@
  */
 
 #include "sidebar.h"
+#include "cover_loader.h"
 #include "smooth_scroll.h"
 
 struct _SpotifyGtkSidebar {
@@ -60,6 +61,16 @@ on_nav_row_activated (GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
     g_signal_emit (self, signals[PAGE_ACTIVATED], 0, NAV_ITEMS[idx].id);
   }
   (void) box;
+}
+
+#define PINNED_ART_PX 84   /* 42pt row art, doubled so it is not soft */
+
+static void
+on_pinned_cover_loaded (GdkTexture *texture, gpointer user_data)
+{
+  GtkWidget *art = user_data;
+  if (texture && GTK_IS_IMAGE (art))
+    gtk_image_set_from_paintable (GTK_IMAGE (art), GDK_PAINTABLE (texture));
 }
 
 static void
@@ -250,7 +261,8 @@ void
 spotifygtk_sidebar_add_pinned (SpotifyGtkSidebar *self,
                                const gchar *id,
                                const gchar *name,
-                               const gchar *type)
+                               const gchar *type,
+                               const gchar *cover_id)
 {
   g_return_if_fail (SPOTIFYGTK_IS_SIDEBAR (self));
 
@@ -263,13 +275,26 @@ spotifygtk_sidebar_add_pinned (SpotifyGtkSidebar *self,
   gtk_widget_set_margin_top (box, 6);
   gtk_widget_set_margin_bottom (box, 6);
 
-  /* Artwork placeholder. The image cache still lives in spotify-connect,
-   * so there is nothing to decode covers with here yet. */
+  /*
+   * The pin's artwork, or a disc if it has none. The note that used to be here
+   * said covers could not be decoded from the sidebar because the image cache
+   * lived in the other app; that has not been true for a long time, and it is
+   * why every pinned row showed a placeholder.
+   */
   GtkWidget *art = gtk_image_new_from_icon_name ("media-optical-symbolic");
   gtk_image_set_pixel_size (GTK_IMAGE (art), 22);
   gtk_widget_set_size_request (art, 42, 42);
   gtk_widget_add_css_class (art, "art-thumb");
   gtk_box_append (GTK_BOX (box), art);
+
+  if (cover_id && *cover_id) {
+    /* Rows live as long as the pin list, and the list is rebuilt wholesale, so
+     * a cancellable per row would only ever be cancelled with the row. The
+     * weak pointer is what makes a late delivery safe. */
+    g_object_add_weak_pointer (G_OBJECT (art), (gpointer *) &art);
+    spotifygtk_cover_load (cover_id, PINNED_ART_PX, NULL,
+                           on_pinned_cover_loaded, art);
+  }
 
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 1);
   gtk_widget_set_valign (info, GTK_ALIGN_CENTER);

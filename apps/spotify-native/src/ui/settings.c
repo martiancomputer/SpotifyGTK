@@ -33,6 +33,7 @@ pin_free (gpointer data)
   g_free (p->uri);
   g_free (p->name);
   g_free (p->type);
+  g_free (p->cover_id);
   g_free (p);
 }
 
@@ -78,10 +79,11 @@ load (SpotifyGtkSettings *self)
   /* Pins. The three lists are written together, but a hand-edited file may
    * disagree, so this walks the shortest and drops the rest rather than
    * indexing off the end of one of them. */
-  gsize nu = 0, nn = 0, nt = 0;
+  gsize nu = 0, nn = 0, nt = 0, nc = 0;
   g_auto(GStrv) uris  = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-uris",  &nu, NULL);
   g_auto(GStrv) names = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-names", &nn, NULL);
   g_auto(GStrv) types = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-types", &nt, NULL);
+  g_auto(GStrv) covers = g_key_file_get_string_list (kf, SETTINGS_GROUP, "pinned-covers", &nc, NULL);
   for (gsize i = 0; uris && i < nu; i++) {
     if (!uris[i] || !*uris[i])
       continue;
@@ -89,6 +91,10 @@ load (SpotifyGtkSettings *self)
     p->uri  = g_strdup (uris[i]);
     p->name = g_strdup ((names && i < nn) ? names[i] : uris[i]);
     p->type = g_strdup ((types && i < nt) ? types[i] : "");
+    /* Empty means "pinned before covers were stored"; the row shows its
+     * placeholder rather than asking the loader for nothing. */
+    if (covers && i < nc && covers[i] && *covers[i])
+      p->cover_id = g_strdup (covers[i]);
     g_ptr_array_add (self->pins, p);
   }
 
@@ -120,19 +126,23 @@ save (SpotifyGtkSettings *self)
     g_autofree const gchar **uris  = g_new0 (const gchar *, self->pins->len);
     g_autofree const gchar **names = g_new0 (const gchar *, self->pins->len);
     g_autofree const gchar **types = g_new0 (const gchar *, self->pins->len);
+    g_autofree const gchar **covers = g_new0 (const gchar *, self->pins->len);
     for (guint i = 0; i < self->pins->len; i++) {
       const SpotifyGtkPin *p = g_ptr_array_index (self->pins, i);
       uris[i]  = p->uri;
       names[i] = p->name ? p->name : "";
       types[i] = p->type ? p->type : "";
+      covers[i] = p->cover_id ? p->cover_id : "";
     }
     g_key_file_set_string_list (kf, SETTINGS_GROUP, "pinned-uris",  uris,  self->pins->len);
     g_key_file_set_string_list (kf, SETTINGS_GROUP, "pinned-names", names, self->pins->len);
     g_key_file_set_string_list (kf, SETTINGS_GROUP, "pinned-types", types, self->pins->len);
+    g_key_file_set_string_list (kf, SETTINGS_GROUP, "pinned-covers", covers, self->pins->len);
   } else {
     g_key_file_remove_key (kf, SETTINGS_GROUP, "pinned-uris",  NULL);
     g_key_file_remove_key (kf, SETTINGS_GROUP, "pinned-names", NULL);
     g_key_file_remove_key (kf, SETTINGS_GROUP, "pinned-types", NULL);
+    g_key_file_remove_key (kf, SETTINGS_GROUP, "pinned-covers", NULL);
   }
 
   g_autofree gchar *dir = g_path_get_dirname (self->path);
@@ -310,7 +320,8 @@ spotifygtk_settings_is_pinned (SpotifyGtkSettings *self, const gchar *uri)
 
 void
 spotifygtk_settings_add_pin (SpotifyGtkSettings *self, const gchar *uri,
-                             const gchar *name, const gchar *type)
+                             const gchar *name, const gchar *type,
+                             const gchar *cover_id)
 {
   g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
   if (!uri || !*uri || spotifygtk_settings_is_pinned (self, uri))
@@ -320,6 +331,7 @@ spotifygtk_settings_add_pin (SpotifyGtkSettings *self, const gchar *uri,
   p->uri  = g_strdup (uri);
   p->name = g_strdup (name && *name ? name : uri);
   p->type = g_strdup (type ? type : "");
+  p->cover_id = (cover_id && *cover_id) ? g_strdup (cover_id) : NULL;
   g_ptr_array_add (self->pins, p);
 
   save (self);

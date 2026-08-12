@@ -31,7 +31,8 @@ SpotifyGtkSidebar *spotifygtk_sidebar_new (void);
 void spotifygtk_sidebar_add_pinned (SpotifyGtkSidebar *self,
                                     const gchar *id,
                                     const gchar *name,
-                                    const gchar *type);
+                                    const gchar *type,
+                                    const gchar *cover_id);
 void spotifygtk_sidebar_clear_pinned (SpotifyGtkSidebar *self);
 
 G_END_DECLS

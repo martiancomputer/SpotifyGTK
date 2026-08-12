@@ -49,6 +49,23 @@ guint spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
  * afterwards: doing that meant splicing the model, which destroys the item a
  * card is bound to and forces a rebind while cover loads are still in flight
  * against that card -- it crashed. Resolve first, then add. */
+/* One card's worth of finished detail, for set_cards(). */
+typedef struct {
+  const gchar *uri;
+  const gchar *title;
+  const gchar *subtitle;
+  const gchar *cover_id;
+} SpotifyGtkCardSpec;
+
+/*
+ * Replace the whole grid in a single model change. Prefer this to clear() plus
+ * a loop of add_card(): that is N+1 mutations, each destroying the items bound
+ * cards are showing, and it crashes if a cover lands in the middle of one.
+ */
+void spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid      *self,
+                                      const SpotifyGtkCardSpec *cards,
+                                      guint                     n_cards);
+
 void spotifygtk_album_grid_add_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
                                      const gchar *title, const gchar *subtitle,
                                      const gchar *cover_id);

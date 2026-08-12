@@ -97,7 +97,8 @@ gint spotifygtk_settings_sample_rate_hz (SpotifyGtkSampleRate rate);
 typedef struct {
   gchar *uri;
   gchar *name;
-  gchar *type;   /* "Album" / "Playlist", for the row's second line */
+  gchar *type;      /* "Album" / "Playlist", for the row's second line */
+  gchar *cover_id;  /* may be NULL: pinned before art was known */
 } SpotifyGtkPin;
 
 /* The pins, in order. Owned by the settings object; valid until it changes. */
@@ -109,7 +110,8 @@ gboolean spotifygtk_settings_is_pinned (SpotifyGtkSettings *self,
 /* Both persist immediately and emit "changed". Adding something already
  * pinned, or removing something that is not, does nothing. */
 void spotifygtk_settings_add_pin (SpotifyGtkSettings *self, const gchar *uri,
-                                  const gchar *name, const gchar *type);
+                                  const gchar *name, const gchar *type,
+                                  const gchar *cover_id);
 void spotifygtk_settings_remove_pin (SpotifyGtkSettings *self, const gchar *uri);
 
 G_END_DECLS

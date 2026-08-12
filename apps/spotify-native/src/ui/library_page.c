@@ -91,14 +91,22 @@ on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  spotifygtk_album_grid_clear (self->albums);
+  /* One model change, not one per album: see set_cards(). Clearing and then
+   * appending in a loop is what crashed inside GTK's teardown when a cover
+   * landed partway through. */
+  g_autofree SpotifyGtkCardSpec *specs = g_new0 (SpotifyGtkCardSpec,
+                                                 MAX (albums->len, 1));
+  g_autoptr(GPtrArray) subs = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < albums->len; i++) {
     const SpotifyNativeRelease *a = g_ptr_array_index (albums, i);
-    g_autofree gchar *sub = a->year > 0 ? g_strdup_printf ("%d", a->year) : NULL;
-    spotifygtk_album_grid_add_card (self->albums, a->uri,
-                                    a->name ? a->name : "Unknown album",
-                                    sub, a->cover_id);
+    gchar *sub = a->year > 0 ? g_strdup_printf ("%d", a->year) : g_strdup ("");
+    g_ptr_array_add (subs, sub);
+    specs[i].uri      = a->uri;
+    specs[i].title    = a->name ? a->name : "Unknown album";
+    specs[i].subtitle = sub;
+    specs[i].cover_id = a->cover_id;
   }
+  spotifygtk_album_grid_set_cards (self->albums, specs, albums->len);
 
   gtk_widget_set_visible (self->albums_status, albums->len == 0);
   if (albums->len == 0)

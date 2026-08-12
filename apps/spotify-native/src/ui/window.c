@@ -1703,7 +1703,8 @@ refresh_pinned_sidebar (SpotifyGtkNativeWindow *self)
   GPtrArray *pins = spotifygtk_settings_get_pins (spotifygtk_settings_get_default ());
   for (guint i = 0; pins && i < pins->len; i++) {
     const SpotifyGtkPin *p = g_ptr_array_index (pins, i);
-    spotifygtk_sidebar_add_pinned (self->sidebar, p->uri, p->name, p->type);
+    spotifygtk_sidebar_add_pinned (self->sidebar, p->uri, p->name, p->type,
+                                   p->cover_id);
   }
 }
 
@@ -1731,7 +1732,8 @@ window_is_pinned (const gchar *uri, gpointer user_data)
 }
 
 static void
-toggle_pin (SpotifyGtkNativeWindow *self, const gchar *uri, const gchar *name)
+toggle_pin (SpotifyGtkNativeWindow *self, const gchar *uri, const gchar *name,
+            const gchar *cover_id)
 {
   SpotifyGtkSettings *st = spotifygtk_settings_get_default ();
   if (!uri || !*uri)
@@ -1740,21 +1742,22 @@ toggle_pin (SpotifyGtkNativeWindow *self, const gchar *uri, const gchar *name)
   if (spotifygtk_settings_is_pinned (st, uri))
     spotifygtk_settings_remove_pin (st, uri);
   else
-    spotifygtk_settings_add_pin (st, uri, name, pin_type_for_uri (uri));
+    spotifygtk_settings_add_pin (st, uri, name, pin_type_for_uri (uri), cover_id);
 
   refresh_pinned_sidebar (self);
 }
 
 static void
 on_album_toggle_pin (SpotifyGtkAlbumGrid *grid, const gchar *uri,
-                     const gchar *name, gpointer user_data)
+                     const gchar *name, const gchar *cover_id,
+                     gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   (void) grid;
-  /* The name comes from the card itself. Looking it up here was wrong:
-   * display_tracks is keyed by *track* URI, so an album never matched and
-   * every pin fell back to showing its URI. */
-  toggle_pin (self, uri, name);
+  /* Name and art both come from the card itself. Looking the name up here was
+   * wrong: display_tracks is keyed by *track* URI, so an album never matched
+   * and every pin fell back to showing its URI. */
+  toggle_pin (self, uri, name, cover_id);
 }
 
 /* The sidebar's own action: pin whatever the content area is showing. Only an
@@ -1782,7 +1785,9 @@ on_pin_requested (SpotifyGtkSidebar *sidebar, gpointer user_data)
     return;
   }
 
-  toggle_pin (self, e->uri, e->title);
+  /* The sidebar action has no card to take art from; the pin gets its cover
+   * the next time it is made from a grid. */
+  toggle_pin (self, e->uri, e->title, NULL);
 }
 
 static void
