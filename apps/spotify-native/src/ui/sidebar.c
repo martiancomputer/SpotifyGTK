@@ -288,7 +288,20 @@ spotifygtk_sidebar_add_pinned (SpotifyGtkSidebar *self,
 
   gtk_box_append (GTK_BOX (box), info);
 
-  GtkWidget *pin = gtk_image_new_from_icon_name ("view-pin-symbolic");
+  /*
+   * Not every icon theme has a pin. "view-pin-symbolic" is in Adwaita but not
+   * in Breeze, and a missing symbolic icon does not fall back quietly -- it
+   * draws the broken-image tile, in red, on every pinned row. Ask the theme
+   * first and use the star it definitely has if the pin is not there.
+   */
+  const gchar *pin_icon = "starred-symbolic";
+  GdkDisplay *display = gtk_widget_get_display (GTK_WIDGET (self));
+  if (display) {
+    GtkIconTheme *theme = gtk_icon_theme_get_for_display (display);
+    if (theme && gtk_icon_theme_has_icon (theme, "view-pin-symbolic"))
+      pin_icon = "view-pin-symbolic";
+  }
+  GtkWidget *pin = gtk_image_new_from_icon_name (pin_icon);
   gtk_image_set_pixel_size (GTK_IMAGE (pin), 14);
   gtk_widget_add_css_class (pin, "pin-icon");
   gtk_widget_set_valign (pin, GTK_ALIGN_CENTER);

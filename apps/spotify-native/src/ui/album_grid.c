@@ -208,6 +208,24 @@ card_retry_cover (GtkWidget *card)
 /* A card just came on screen: now its art is worth fetching. The handler stays
  * connected for the card's life -- cards are recycled, and each rebind sets a
  * fresh cover-id that this then picks up on the next map. */
+/*
+ * Cancel a card's cover the moment it starts being torn down.
+ *
+ * The cancellable lives in the card's qdata, which GObject frees at *finalize*
+ * -- but the art child is destroyed earlier, at dispose. Between the two, a
+ * cover that lands is written into a GtkImage that has already gone: an abort
+ * inside gtk_image_set_from_paintable, seen twice. "destroy" runs before the
+ * children go, which closes that window.
+ */
+static void
+on_card_destroy (GtkWidget *card, gpointer user_data)
+{
+  (void) user_data;
+  GCancellable *c = g_object_get_data (G_OBJECT (card), "cover-cancel");
+  if (c)
+    g_cancellable_cancel (c);
+}
+
 static void
 on_card_mapped (GtkWidget *card, gpointer user_data)
 {
@@ -329,8 +347,16 @@ album_menu_emit_and_close (GtkButton *button, guint signal_id)
 {
   GtkWidget *w = GTK_WIDGET (button);
   AlbumMenuCtx *ctx = spotifygtk_context_menu_get_context (w);
-  if (ctx)
-    g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri);
+  if (ctx) {
+    /* Pinning needs the name as well as the URI -- the sidebar row shows it,
+     * and the window has no way to look up an album's title from its URI, so
+     * a pin made this way was labelled "spotify:album:...". The menu context
+     * already carries the name the card was showing. */
+    if (signal_id == ALBUM_TOGGLE_PIN)
+      g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri, ctx->name);
+    else
+      g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri);
+  }
 
   GtkPopover *popover = spotifygtk_context_menu_get_popover (w);
   if (popover)
@@ -431,6 +457,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_box_append (GTK_BOX (box), sub);
 
   g_object_set_data (G_OBJECT (card), "art",   art);
+  g_signal_connect (card, "destroy", G_CALLBACK (on_card_destroy), NULL);
   g_object_set_data (G_OBJECT (card), "title", title);
   g_object_set_data (G_OBJECT (card), "sub",   sub);
 
@@ -813,7 +840,7 @@ spotifygtk_album_grid_class_init (SpotifyGtkAlbumGridClass *klass)
    * authority either way. */
   signals[ALBUM_TOGGLE_PIN] = g_signal_new (
     "album-toggle-pin", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
-    NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+    NULL, NULL, NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_STRING);
 }
 
 static void

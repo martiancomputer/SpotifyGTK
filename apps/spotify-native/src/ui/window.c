@@ -1746,18 +1746,14 @@ toggle_pin (SpotifyGtkNativeWindow *self, const gchar *uri, const gchar *name)
 }
 
 static void
-on_album_toggle_pin (SpotifyGtkAlbumGrid *grid, const gchar *uri, gpointer user_data)
+on_album_toggle_pin (SpotifyGtkAlbumGrid *grid, const gchar *uri,
+                     const gchar *name, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   (void) grid;
-
-  /* The name the card was showing, if this window knows it; the store falls
-   * back to the URI when it does not, so a pin is never nameless. */
-  const gchar *name = NULL;
-  if (self->display_tracks && uri) {
-    const SpotifyNativeTrack *t = g_hash_table_lookup (self->display_tracks, uri);
-    if (t) name = t->album;
-  }
+  /* The name comes from the card itself. Looking it up here was wrong:
+   * display_tracks is keyed by *track* URI, so an album never matched and
+   * every pin fell back to showing its URI. */
   toggle_pin (self, uri, name);
 }
 
@@ -1796,7 +1792,17 @@ on_pinned_activated (SpotifyGtkSidebar *sidebar, const gchar *uri, gpointer user
   (void) sidebar;
   if (!uri)
     return;
-  navigate_to_context (self, uri, NULL, pin_type_for_uri (uri));
+
+  /* The stored name, so the page has a title. Navigating with NULL left the
+   * album page headed by nothing at all. */
+  const gchar *title = NULL;
+  GPtrArray *pins = spotifygtk_settings_get_pins (spotifygtk_settings_get_default ());
+  for (guint i = 0; pins && i < pins->len; i++) {
+    const SpotifyGtkPin *p = g_ptr_array_index (pins, i);
+    if (g_strcmp0 (p->uri, uri) == 0) { title = p->name; break; }
+  }
+
+  navigate_to_context (self, uri, title, pin_type_for_uri (uri));
 }
 
 static void
