@@ -2982,6 +2982,20 @@ on_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   LiveTestState     *state  = user_data;
   g_autoptr(GError)  err    = NULL;
 
+  /*
+   * The run that asked to connect may be gone -- starting another track while
+   * this connect was still in flight frees the state under it. Every other
+   * async callback here checks this; this one did not, and it is the only one
+   * that did not.
+   *
+   * It crashed both ways: the success path read state->progress and jumped to
+   * the garbage in it, and the failure path *wrote* state->connect_attempts++
+   * into freed memory, which is heap corruption that surfaces later as an
+   * abort inside an unrelated teardown. Three cores, one missing line.
+   */
+  if (!run_is_current (state))
+    return;
+
   if (!spotifygtk_ap_session_connect_finish (session, result, &err)) {
     /* Spotify refuses new AP connections once a client opens them too
      * quickly, and this engine opens a fresh one for every track — so
