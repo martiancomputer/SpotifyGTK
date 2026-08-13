@@ -5,7 +5,11 @@
 #include "cover_loader.h"
 #include <stdlib.h>
 #include <string.h>
+#ifdef G_OS_WIN32
+#include <windows.h>
+#else
 #include <sys/mman.h>
+#endif
 #include <glib/gstdio.h>
 
 #include <libsoup/soup.h>
@@ -86,13 +90,47 @@ typedef struct {
 } MappedPixels;
 
 static gsize mapped_live_bytes = 0;   /* pixel memory actually still mapped */
+/*
+ * Pages for one decoded cover, taken from and returned to the OS.
+ *
+ * Not g_malloc, and the reason is at the call site: a thumbnail is small
+ * enough that the C heap keeps it on a free list instead of giving it back, so
+ * evicting covers freed memory without shrinking the process. Whole pages come
+ * back on release.
+ *
+ * Windows has no mmap. VirtualAlloc is the same idea and the same guarantee --
+ * MEM_RELEASE returns the reservation to the OS rather than to a heap.
+ */
+static guchar *
+pixel_pages_alloc (gsize len)
+{
+#ifdef G_OS_WIN32
+  return VirtualAlloc (NULL, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+  guchar *p = mmap (NULL, len, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  return p == MAP_FAILED ? NULL : p;
+#endif
+}
+
+static void
+pixel_pages_free (guchar *addr, gsize len)
+{
+#ifdef G_OS_WIN32
+  (void) len;   /* MEM_RELEASE frees the whole reservation and demands a 0 size */
+  VirtualFree (addr, 0, MEM_RELEASE);
+#else
+  munmap (addr, len);
+#endif
+}
+
 
 static void
 mapped_pixels_free (gpointer data)
 {
   MappedPixels *m = data;
   mapped_live_bytes -= MIN (m->len, mapped_live_bytes);
-  munmap (m->addr, m->len);
+  pixel_pages_free (m->addr, m->len);
   g_free (m);
 }
 
@@ -710,9 +748,8 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
    * a page that stays resident for the life of the process otherwise.
    */
   gsize  pix_len = (gsize) rowstride * h;
-  guchar *mapped = mmap (NULL, pix_len, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (mapped == MAP_FAILED) {
+  guchar *mapped = pixel_pages_alloc (pix_len);
+  if (!mapped) {
     g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
                              "could not map %" G_GSIZE_FORMAT " bytes for a cover",
                              pix_len);
