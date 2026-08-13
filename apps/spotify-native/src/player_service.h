@@ -26,6 +26,15 @@ gboolean spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
                                               const gchar *track_uri,
                                               GError **error);
 void     spotifygtk_player_service_stop  (SpotifyNativePlayerService *self);
+
+/*
+ * Throw away audio already decoded for tracks that are on their way out.
+ *
+ * Call before starting a track the listener picked directly. A gapless
+ * handover must not: the queued tail of the outgoing track is the thing that
+ * makes it gapless.
+ */
+void     spotifygtk_player_service_drop_queued_audio (SpotifyNativePlayerService *self);
 void     spotifygtk_player_service_pause (SpotifyNativePlayerService *self);
 void     spotifygtk_player_service_resume (SpotifyNativePlayerService *self);
 gboolean spotifygtk_player_service_is_paused (SpotifyNativePlayerService *self);

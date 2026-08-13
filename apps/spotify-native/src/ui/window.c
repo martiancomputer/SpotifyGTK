@@ -389,6 +389,18 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
   }
 
   GError *error = NULL;
+  /*
+   * Picked by hand, so nothing already decoded is wanted.
+   *
+   * The run producing the sounding track may have exited seconds ago -- the
+   * sink can hold half a minute of it -- in which case the service has no
+   * active task to supersede and the new track would simply queue behind that
+   * backlog. That is the song that "does not play until the current one
+   * elapses". A handover deliberately keeps the tail instead.
+   */
+  if (!handover)
+    spotifygtk_player_service_drop_queued_audio (self->player);
+
   if (!spotifygtk_player_service_start_uri (self->player, track->uri, &error)) {
     g_warning ("Playback failed: %s", error->message);
     g_error_free (error);

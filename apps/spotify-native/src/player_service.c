@@ -45,6 +45,7 @@ struct _SpotifyNativePlayerService {
 typedef struct {
   gchar                      *uri;
   SpotifyNativeEngineControl *control;   /* referenced */
+  GCancellable               *cancellable;  /* referenced; the sink watches it */
 } InflightTrack;
 
 static void
@@ -53,6 +54,7 @@ inflight_track_free (gpointer data)
   InflightTrack *t = data;
   g_free (t->uri);
   spotifygtk_native_engine_control_free (t->control);
+  g_clear_object (&t->cancellable);
   g_free (t);
 }
 
@@ -98,6 +100,35 @@ active_control (SpotifyNativePlayerService *self)
   }
   /* Nothing sounding yet: the track just started is the one a command means. */
   return self->control;
+}
+
+/*
+ * Drop audio the listener has just decided against.
+ *
+ * A track's engine run finishes well before its audio does -- up to the
+ * sink's thirty seconds of buffer -- and that overlap is exactly what makes
+ * the handover gapless. The cost is that for those seconds the sounding track
+ * is an older run, and stop() only ever cancelled self->cancellable, which by
+ * then belongs to a newer one. Nothing cancelled the run whose audio was
+ * actually coming out of the speakers.
+ *
+ * So picking another song left up to half a minute of the previous one queued
+ * ahead of it, and a seek into the tail restarted the track behind that same
+ * backlog: the position jumped to where it was asked for, seconds late.
+ *
+ * Cancelling a track's cancellable is what makes the sink abandon it,
+ * buffered frames and the device's own buffer included -- see the writer in
+ * sink.c. Only ever called for an explicit action: a natural handover must
+ * not come through here, or gapless stops being gapless.
+ */
+static void
+abandon_queued_audio (SpotifyNativePlayerService *self)
+{
+  for (guint i = 0; i < self->inflight->len; i++) {
+    InflightTrack *t = g_ptr_array_index (self->inflight, i);
+    if (t->cancellable)
+      g_cancellable_cancel (t->cancellable);
+  }
 }
 
 /*
@@ -380,6 +411,10 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
     g_free (self->pending_uri);
     self->pending_uri = g_strdup (track_uri);
 
+    /* Everything already decoded belongs to a track the listener has moved
+     * on from. Without this the new one waits behind it. */
+    abandon_queued_audio (self);
+
     /* Resume first: a paused worker is blocked on the pause condition and
      * would never observe the cancellation. */
     spotifygtk_native_engine_control_resume (self->control);
@@ -416,6 +451,7 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   InflightTrack *entry = g_new0 (InflightTrack, 1);
   entry->uri     = g_strdup (track_uri);
   entry->control = spotifygtk_native_engine_control_ref (self->control);
+  entry->cancellable = self->cancellable ? g_object_ref (self->cancellable) : NULL;
   g_ptr_array_add (self->inflight, entry);
 
   self->task = g_task_new (self, self->cancellable, on_engine_finished, g_object_ref (self));
@@ -428,6 +464,13 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   start_position_timer (self);
   (void) error;
   return TRUE;
+}
+
+void
+spotifygtk_player_service_drop_queued_audio (SpotifyNativePlayerService *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+  abandon_queued_audio (self);
 }
 
 void
@@ -520,6 +563,11 @@ spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 positio
       g_free (self->pending_seek_uri);
       self->pending_seek_uri = g_strdup (want);
       self->pending_seek_ms  = position_ms;
+
+      /* The tail still queued is audio from before the seek. Kept, it plays
+       * on while the restarted track waits behind it, which is the drag
+       * appearing to take effect several seconds late. */
+      abandon_queued_audio (self);
       if (!spotifygtk_player_service_start_uri (self, want, &err)) {
         g_warning ("player-service: could not restart for the seek: %s",
                    err ? err->message : "unknown");
