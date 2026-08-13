@@ -139,8 +139,15 @@ conf.set_quoted('APP_VERSION', meson.project_version())
 conf.set_quoted('APP_ID', 'com.github.spotifygtk.SpotifyNative')
 # For running uninstalled: the icon lives in the source tree rather than in an
 # installed theme, so a build-dir run needs to be told where to look.
+#
+# Separators normalised because set_quoted does not escape backslashes, and a
+# Windows source path goes into the C string exactly as it is. A checkout under
+# C:\Users -- the default -- then puts \U in a string literal, which is not a
+# stray escape the compiler shrugs at but a universal character name: "error:
+# incomplete universal character name". Forward slashes are accepted by both
+# Windows and glib.
 conf.set_quoted('SPOTIFYGTK_SRC_DATA_DIR',
-                join_paths(meson.current_source_dir(), 'data'))
+                join_paths(meson.current_source_dir(), 'data').replace('\\', '/'))
 conf.set_quoted('APP_PROFILE', profile)
 conf.set10('SPOTIFY_NATIVE_NIGHTLY', is_nightly)
 conf.set10('HAVE_OPENSSL',  openssl_dep.found())
