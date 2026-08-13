@@ -125,6 +125,64 @@ jobs:
           name: spotify-native-logs-${{ matrix.profile }}
           path: apps/spotify-native/build/meson-logs/
 
+  spotify-native-windows:
+    name: spotify-native (windows, msys2 ucrt64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # UCRT64 rather than MINGW64: it is what the port's README documents and
+      # what its dependency list is written against. MSVC is not a target.
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-libsoup3
+            mingw-w64-ucrt-x86_64-json-glib
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libogg
+            mingw-w64-ucrt-x86_64-libvorbis
+
+      # No native file: the audio backend on Windows is WASAPI, chosen by
+      # host_machine rather than by profile, so stable and nightly would
+      # configure the same build.
+      #
+      # allow_old_gtk for the reason the Linux job gives -- this compiles and
+      # runs tests, and never puts a window on screen, so the layout floor
+      # cannot affect what it verifies. It also keeps the job from going red
+      # over whichever GTK MSYS2 happens to ship that week.
+      - name: Configure (Meson)
+        working-directory: apps/spotify-native
+        run: meson setup build -Dtests=true -Dallow_old_gtk=true
+
+      - name: Build
+        working-directory: apps/spotify-native
+        run: ninja -C build
+
+      - name: Run tests
+        working-directory: apps/spotify-native
+        run: meson test -C build --print-errorlogs
+
+      - name: Upload build artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotify-native-logs-windows
+          path: apps/spotify-native/build/meson-logs/
+
   lint:
     name: Lint (cppcheck)
     runs-on: ubuntu-24.04
