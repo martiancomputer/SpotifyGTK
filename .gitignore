@@ -45,3 +45,7 @@ apps/spotify-native-windows/build/
 spotify-native.log
 spotify-native.prev.log
 .local-backups/
+
+# Profiling build and heaptrack captures
+build-prof/
+heaptrack.*.zst
