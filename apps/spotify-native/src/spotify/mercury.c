@@ -610,6 +610,27 @@ static void
 spotifygtk_mercury_dispose (GObject *object)
 {
   SpotifyMercury *self = SPOTIFYGTK_MERCURY (object);
+
+  /*
+   * Take the packet handlers down before anything they read goes away.
+   *
+   * new() registers four of them with `self` as their user data, and the AP
+   * session outlives this object -- it is shared, and this only ever held a
+   * reference. So a Mercury packet arriving after the last unref called
+   * on_mercury_packet with a freed `self`, whose first act is to look up
+   * self->pending: a segfault inside g_hash_table_lookup, from a socket
+   * callback, with nothing of ours on the stack above it.
+   *
+   * Clearing a handler is set_handler with NULL, which the dispatcher checks
+   * for; the same thing the login path does when it is finished with its own.
+   */
+  if (self->ap_session) {
+    spotifygtk_ap_session_set_handler (self->ap_session, AP_CMD_MERCURY_REQ,   NULL, NULL);
+    spotifygtk_ap_session_set_handler (self->ap_session, AP_CMD_MERCURY_SUB,   NULL, NULL);
+    spotifygtk_ap_session_set_handler (self->ap_session, AP_CMD_MERCURY_UNSUB, NULL, NULL);
+    spotifygtk_ap_session_set_handler (self->ap_session, AP_CMD_MERCURY_EVENT, NULL, NULL);
+  }
+
   g_clear_object (&self->ap_session);
   g_clear_pointer (&self->pending,        g_hash_table_unref);
   g_clear_pointer (&self->subscriptions,  g_hash_table_unref);
