@@ -85,6 +85,7 @@ typedef struct {
   GCancellable      *cancel;        /* this request only */
   gboolean           reported;      /* the caller has already been told */
   gulong             parent_id;     /* handler on the shared cancellable */
+  GCancellable      *parent;        /* the exact one parent_id belongs to */
   GSource           *deadline;
   gboolean           timed_out;
 } FetchClosure;
@@ -97,10 +98,23 @@ fetch_closure_disarm (FetchClosure *cl)
     g_source_unref (cl->deadline);
     cl->deadline = NULL;
   }
-  if (cl->parent_id && cl->self && cl->self->cancellable) {
-    g_cancellable_disconnect (cl->self->cancellable, cl->parent_id);
+  /*
+   * Disconnect from the cancellable the handler was actually put on, not
+   * whichever one the fetcher holds now.
+   *
+   * The fetcher outlives a track and set_cancellable swaps in a new one per
+   * run, so a request that completed after a track change was disconnecting
+   * an id from the old cancellable against the new one. glib said so on every
+   * such completion -- "instance ... has no handler with id" -- and the
+   * consequences were both a handler and a ref left on the old cancellable
+   * for good, and an id that could match an unrelated live handler on the new
+   * one and silently disconnect someone else's.
+   */
+  if (cl->parent_id && cl->parent) {
+    g_cancellable_disconnect (cl->parent, cl->parent_id);
     cl->parent_id = 0;
   }
+  g_clear_object (&cl->parent);
   g_clear_object (&cl->cancel);
 }
 
@@ -308,7 +322,26 @@ spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
 {
   g_return_if_fail (SPOTIFYGTK_IS_CDN_FETCHER (self));
 
-  SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, cdn_url);
+  /*
+   * A missing or unparseable URL used to be carried right through: soup_message_new
+   * answers NULL, and everything after it -- the Range header, the ref, the send --
+   * asserted against that NULL in turn. The request then never completed, so its
+   * closure, cancellable and deadline were never freed and, worse, whoever was
+   * waiting on the chunk waited for good.
+   *
+   * Answer the caller instead. It has an error path already; what it did not have
+   * was a reply.
+   */
+  SoupMessage *msg = cdn_url ? soup_message_new (SOUP_METHOD_GET, cdn_url) : NULL;
+  if (!msg) {
+    g_autoptr(GError) bad = g_error_new (G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                         "no usable CDN url for offset %" G_GOFFSET_FORMAT,
+                                         offset);
+    g_warning ("cdn: %s", bad->message);
+    if (callback)
+      callback (NULL, offset, bad, user_data);
+    return;
+  }
 
   goffset actual_offset = offset + STREAM_HEADER_OFFSET;
   g_autofree gchar *range = g_strdup_printf ("bytes=%" G_GOFFSET_FORMAT "-%" G_GOFFSET_FORMAT,
@@ -331,11 +364,13 @@ spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
   /* Chained to the engine's cancellable so a Stop still aborts this, while the
    * deadline below can cancel just this request without touching the rest. */
   cl->cancel = g_cancellable_new ();
-  if (self->cancellable)
-    cl->parent_id = g_cancellable_connect (self->cancellable,
+  if (self->cancellable) {
+    cl->parent = g_object_ref (self->cancellable);
+    cl->parent_id = g_cancellable_connect (cl->parent,
                                            G_CALLBACK (g_cancellable_cancel),
                                            g_object_ref (cl->cancel),
                                            g_object_unref);
+  }
 
   cl->deadline = g_timeout_source_new_seconds (CDN_REQUEST_DEADLINE_S);
   g_source_set_callback (cl->deadline, on_request_deadline, cl, NULL);
