@@ -53,8 +53,26 @@ with a `$` prompt: that is where everything below is typed.
 Which one you open matters more than it looks. The installer creates several
 (MSYS, MINGW64, UCRT64, CLANG64) and they are *not* interchangeable --
 packages installed in one are invisible from another, and this build is
-written against UCRT64. If the prompt does not say `UCRT64` in magenta, close
-it and open the right one.
+written against UCRT64.
+
+Check the prompt before typing anything. It names the environment you are in:
+
+```
+you@PC UCRT64 ~           <- right
+you@PC MINGW64 ~          <- wrong, close it and open MSYS2 UCRT64
+```
+
+Colour is no help here, MINGW64 is magenta too. Read the word. Getting this
+wrong does not say "wrong shell" -- the ucrt64 packages are simply not on
+PATH, so meson resolves to a different one and fails about python instead:
+
+```
+ERROR: This python3 seems to be msys/python on MSYS2 Windows, but you are in
+a MinGW environment
+```
+
+Nothing is broken and nothing needs reinstalling; open the UCRT64 terminal
+and carry on.
 
 **Already had MSYS2 installed?** Update it before anything else, or you will
 be installing today's packages against a months-old database:
@@ -122,6 +140,8 @@ in your user profile and reused, so this happens once.
 
 | What you see | What it is |
 |---|---|
+| `ERROR: This python3 seems to be msys/python ... but you are in a MinGW environment` | The MINGW64 terminal with UCRT64 packages installed. Open "MSYS2 UCRT64" instead; nothing needs reinstalling. |
+| `ERROR: Neither directory contains a build file meson.build` | One directory too high. The project is `apps/spotify-native`, not `apps`. |
 | `pacman` is not recognised as a command | You are in Command Prompt or PowerShell. `pacman` ships with MSYS2 and exists only in its terminal -- open "MSYS2 UCRT64" from the Start menu. |
 | `bash: pacman: command not found` | An MSYS2 terminal, but not one of them has it on PATH -- reopen "MSYS2 UCRT64". |
 | `Dependency gtk4 found: NO` | Step 3 was run in the wrong shell — most often "MSYS2 MSYS" rather than UCRT64. Packages do not carry across. |
