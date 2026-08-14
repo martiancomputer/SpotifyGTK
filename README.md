@@ -79,6 +79,9 @@ Add `libpipewire-0.3-dev` / `pipewire-devel` / `pipewire` for the nightly track.
 First run opens a browser to authorise your account; the token is stored
 locally and reused.
 
+Building on **Windows** is a different set of steps —
+see [apps/spotify-native-windows/README.md](apps/spotify-native-windows/README.md#building-and-running-it-on-windows).
+
 ---
 
 ## What works
@@ -89,7 +92,10 @@ You can like tracks, save albums, follow artists, and create and delete
 playlists. There is a 15-band equaliser, an optional resampler, shuffle and
 repeat.
 
-Windows is supported and plays through WASAPI.
+Windows is supported and plays through WASAPI — sign-in, streaming and
+playback are all verified on real hardware. Build it with
+[the Windows instructions](apps/spotify-native-windows/README.md#building-and-running-it-on-windows),
+which are step-by-step from installing MSYS2 onwards.
 
 Per-subsystem status, architecture and measured performance live in
 [research/internals.md](research/internals.md).

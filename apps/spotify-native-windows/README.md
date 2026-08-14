@@ -25,20 +25,96 @@ into a build directory here.
 | Backend probe order | `../spotify-native/src/audio/output.c` | WASAPI is the whole candidate list, not a fallback. |
 | Link deps | `../spotify-native/meson.build` | `ole32` for COM; PulseAudio/ALSA/PipeWire are not looked for. |
 
-## Building natively on Windows (recommended)
+## Building and running it on Windows
 
-Under **MSYS2 UCRT64**. MSVC is not supported — GLib/GTK on MSVC is possible but
-buys nothing here.
+Requires **Windows 10 or 11, 64-bit**, about 3 GB of disk, and a **Spotify
+Premium account** — free accounts cannot play through this client and never
+will, which is a server-side gate rather than a missing feature. See the
+[main README](../../README.md#requirements).
+
+Everything below is done in MSYS2. It is a build environment, not something
+that stays running afterwards.
+
+### 1. Install MSYS2
+
+Download and run the installer from <https://www.msys2.org>. Accept the
+defaults.
+
+### 2. Open the UCRT64 shell
+
+From the Start menu, open **"MSYS2 UCRT64"**.
+
+This matters more than it looks: the installer creates several shells
+(MSYS, MINGW64, UCRT64, CLANG64) and they are *not* interchangeable. Packages
+installed in one are invisible to another, and the whole build is written
+against UCRT64. If the prompt does not say `UCRT64` in magenta, close it and
+open the right one.
+
+### 3. Install the toolchain and libraries
+
+Paste this in one go. It is the same list CI installs on every push, so it is
+known to work rather than merely plausible:
 
 ```bash
-pacman -S --needed \
-  mingw-w64-ucrt-x86_64-{gcc,meson,ninja,pkgconf} \
-  mingw-w64-ucrt-x86_64-{glib2,gtk4,libadwaita,libsoup3,json-glib} \
-  mingw-w64-ucrt-x86_64-{openssl,libogg,libvorbis}
+pacman -S --needed git \
+  mingw-w64-ucrt-x86_64-gcc \
+  mingw-w64-ucrt-x86_64-meson \
+  mingw-w64-ucrt-x86_64-ninja \
+  mingw-w64-ucrt-x86_64-pkgconf \
+  mingw-w64-ucrt-x86_64-glib2 \
+  mingw-w64-ucrt-x86_64-gtk4 \
+  mingw-w64-ucrt-x86_64-libadwaita \
+  mingw-w64-ucrt-x86_64-libsoup3 \
+  mingw-w64-ucrt-x86_64-json-glib \
+  mingw-w64-ucrt-x86_64-openssl \
+  mingw-w64-ucrt-x86_64-libogg \
+  mingw-w64-ucrt-x86_64-libvorbis
+```
 
-meson setup build ../spotify-native
+That pulls in around 110 packages and takes a few minutes.
+
+### 4. Get the source and build it
+
+```bash
+git clone https://github.com/martiancomputer/SpotifyGTK.git
+cd SpotifyGTK/apps/spotify-native
+meson setup build
 meson compile -C build
 ```
+
+No cross file and no extra options: on Windows the audio backend is chosen
+from `host_machine`, so WASAPI is selected for you.
+
+MSYS2 currently ships GTK 4.22.4, which is exactly what the interface is laid
+out against, so the version floor is satisfied. If a future MSYS2 update ships
+something older, `meson setup` says so and names the flag to override it.
+
+### 5. Run it
+
+```bash
+./build/src/spotify-native.exe
+```
+
+**Run it from the UCRT64 shell.** Double-clicking the `.exe` in Explorer will
+fail to start: it needs the GTK DLLs, and only this shell has them on its PATH.
+To get something that runs anywhere, see [Packaging](#packaging) below.
+
+On first run a browser opens for you to sign in to Spotify. The token is stored
+in your user profile and reused, so this happens once.
+
+### If something goes wrong
+
+| What you see | What it is |
+|---|---|
+| `bash: pacman: command not found` | Not an MSYS2 shell. Open "MSYS2 UCRT64" from the Start menu. |
+| `Dependency gtk4 found: NO` | Step 3 was run in the wrong shell — most often "MSYS2 MSYS" rather than UCRT64. Packages do not carry across. |
+| The `.exe` exits immediately with no message when double-clicked | Expected outside the UCRT64 shell; the GTK DLLs are not on PATH. Run it from the shell, or build a bundle. |
+| `TLS support is not available` on every request | A bundle missing `lib/gio/modules/` (glib-networking). It reads like a network fault and is not. |
+| Sign-in succeeds but nothing plays | Check the account is Premium. The audio-key exchange is refused for free accounts, for every format. |
+
+A log of each run is written to `spotify-native.log` beside the executable,
+with the previous run kept as `spotify-native.prev.log`. That is the thing to
+attach to a bug report.
 
 ## Cross-compiling from Linux
 
