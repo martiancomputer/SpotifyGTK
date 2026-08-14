@@ -40,15 +40,31 @@ that stays running afterwards.
 Download and run the installer from <https://www.msys2.org>. Accept the
 defaults.
 
-### 2. Open the UCRT64 shell
+MSYS2 is a Unix-like environment that lives on Windows: a bash shell, the
+usual command-line tools, and `pacman`, the package manager Arch Linux uses.
+Every command below is typed into **its** terminal, not into Command Prompt
+or PowerShell -- `pacman` does not exist there and never will.
 
-From the Start menu, open **"MSYS2 UCRT64"**.
+### 2. Open the UCRT64 terminal
 
-This matters more than it looks: the installer creates several shells
-(MSYS, MINGW64, UCRT64, CLANG64) and they are *not* interchangeable. Packages
-installed in one are invisible to another, and the whole build is written
-against UCRT64. If the prompt does not say `UCRT64` in magenta, close it and
-open the right one.
+From the Start menu, open **"MSYS2 UCRT64"**. A black terminal window opens
+with a `$` prompt: that is where everything below is typed.
+
+Which one you open matters more than it looks. The installer creates several
+(MSYS, MINGW64, UCRT64, CLANG64) and they are *not* interchangeable --
+packages installed in one are invisible from another, and this build is
+written against UCRT64. If the prompt does not say `UCRT64` in magenta, close
+it and open the right one.
+
+**Already had MSYS2 installed?** Update it before anything else, or you will
+be installing today's packages against a months-old database:
+
+```bash
+pacman -Syu
+```
+
+If it tells you to close the terminal, do so, reopen **MSYS2 UCRT64**, and run
+`pacman -Syu` once more before continuing.
 
 ### 3. Install the toolchain and libraries
 
@@ -106,7 +122,8 @@ in your user profile and reused, so this happens once.
 
 | What you see | What it is |
 |---|---|
-| `bash: pacman: command not found` | Not an MSYS2 shell. Open "MSYS2 UCRT64" from the Start menu. |
+| `pacman` is not recognised as a command | You are in Command Prompt or PowerShell. `pacman` ships with MSYS2 and exists only in its terminal -- open "MSYS2 UCRT64" from the Start menu. |
+| `bash: pacman: command not found` | An MSYS2 terminal, but not one of them has it on PATH -- reopen "MSYS2 UCRT64". |
 | `Dependency gtk4 found: NO` | Step 3 was run in the wrong shell — most often "MSYS2 MSYS" rather than UCRT64. Packages do not carry across. |
 | The `.exe` exits immediately with no message when double-clicked | Expected outside the UCRT64 shell; the GTK DLLs are not on PATH. Run it from the shell, or build a bundle. |
 | `TLS support is not available` on every request | A bundle missing `lib/gio/modules/` (glib-networking). It reads like a network fault and is not. |
