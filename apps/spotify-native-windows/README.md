@@ -134,6 +134,12 @@ the Adwaita icon theme (the UI uses `*-symbolic` icons throughout), gdk-pixbuf
 loaders, and compiled GSettings schemas. `./build.sh --bundle` assembles those
 into `build/dist/`. Turning that into an installer (NSIS/MSIX) is not done.
 
+The DLL closure is walked to a fixpoint rather than in one pass, because the
+modules are loaded with dlopen and nothing links them: a walk starting at the
+executable cannot reach `lib/gio/modules` or the gdk-pixbuf loaders, and so
+misses their dependencies as well. Those are copied first and everything in
+`dist` is then re-walked until a pass adds nothing.
+
 ## Status — honest
 
 ### Verified, on real Windows
@@ -174,10 +180,6 @@ Concrete catches from the port, each of which broke something real:
 
 ### Not verified / known wrong
 
-- **`build.sh --bundle` still walks dependencies in a single pass.** The fixpoint
-  loop described above was worked out separately and has not been folded back
-  into the tracked script, so a bundle produced by it may be missing the DLLs
-  that only loadable modules pull in.
 - `g_chmod (path, 0600)` on the stored token is a silent no-op on Windows. The
   file sits in the user profile, which is ACL'd, but the "chmod 600" claim in
   `native_auth.c`'s header is not true there. DPAPI (`CryptProtectData`) is the
