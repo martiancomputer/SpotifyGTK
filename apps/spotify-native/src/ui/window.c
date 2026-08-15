@@ -2315,6 +2315,29 @@ on_prev_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
   (void) bar;
 }
 
+/*
+ * Tell every list which row is current.
+ *
+ * One place, because there are three moments it has to happen -- the player
+ * changing state, a page rebuilding its rows, and one track handing over to
+ * the next -- and the third was missing. A gapless handover changes the
+ * sounding track without changing the player's state, so the equaliser stayed
+ * on whichever row was current at the last state change and the list disagreed
+ * with the playback bar until something else happened to refresh it.
+ */
+static void
+broadcast_playing_uri (SpotifyGtkNativeWindow *self)
+{
+  gboolean is_playing =
+    spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING;
+  const gchar *uri = self->current_track_uri;
+
+  spotifygtk_search_page_set_playing_uri (self->search_page, uri, is_playing);
+  spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, uri, is_playing);
+  spotifygtk_context_page_set_playing_uri (self->context_page, uri, is_playing);
+  spotifygtk_artist_page_set_playing_uri (self->artist_page, uri, is_playing);
+}
+
 /* === Player state === */
 static void
 on_player_state_changed (SpotifyNativePlayerService *player,
@@ -2346,13 +2369,11 @@ on_player_state_changed (SpotifyNativePlayerService *player,
 
   spotifygtk_playback_bar_set_playing (self->playback_bar, is_playing);
 
-  /* Tell every list which row is current, so the equaliser follows the track
-   * across pages rather than only appearing on the one that started it. */
+  /* So the equaliser follows the track across pages rather than only appearing
+   * on the one that started it. */
   const gchar *uri = has_track ? self->current_track_uri : NULL;
   spotifygtk_search_page_set_playing_uri (self->search_page, uri, is_playing);
   spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, uri, is_playing);
-  spotifygtk_artist_page_set_playing_uri (self->artist_page,
-                                          self->current_track_uri, is_playing);
   spotifygtk_context_page_set_playing_uri (self->context_page, uri, is_playing);
   spotifygtk_artist_page_set_playing_uri (self->artist_page, uri, is_playing);
 
@@ -2718,14 +2739,7 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
     reload_playlists (self);
 
   /* A page that has just (re)built its rows does not know what is playing. */
-  gboolean is_playing =
-    spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING;
-  spotifygtk_search_page_set_playing_uri (self->search_page,
-                                          self->current_track_uri, is_playing);
-  spotifygtk_liked_songs_page_set_playing_uri (self->liked_page,
-                                               self->current_track_uri, is_playing);
-  spotifygtk_context_page_set_playing_uri (self->context_page,
-                                           self->current_track_uri, is_playing);
+  broadcast_playing_uri (self);
 }
 
 /* Plain-page navigation that records history (sidebar clicks, etc.). */
@@ -2788,6 +2802,7 @@ on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
   self->current_track_duration_ms = track->duration_ms;
   spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
   show_now_playing (self, track);
+  broadcast_playing_uri (self);
 }
 
 static void

@@ -20,6 +20,16 @@ else is as reported.
       *note:* plausible cause matched to the symptom, not a reproduction. If it
       still happens, say so — it would mean a second cause.
 
+- [x] **The playing-row indicator sticks on a track that has finished.** Seen on
+      Liked Songs: the equaliser stayed on "Unhappy Woman (Remix)" while
+      "Oligarch" played, with the playback bar and Now Playing panel both
+      correct. `on_now_playing_changed()` updated `current_track_uri`, the
+      progress bar and the panel, but never told the lists — so the indicator
+      only moved when something *else* refreshed it, either a player state
+      change or a page navigation. A gapless handover is neither: the sounding
+      track changes without the state changing. One `broadcast_playing_uri()`
+      now serves all three moments, including the handover that was missing.
+
 - [ ] **The old scroll problem still returns occasionally.** Rare now, and
       everything scrolls smoothly the rest of the time.
       *note:* the easing landed in `1d38030` (ease by elapsed time, not by
