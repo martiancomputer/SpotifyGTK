@@ -90,9 +90,23 @@ else is as reported.
 
 ## Features
 
-- [ ] **Discord activity.** Work out how the official client does it first.
-      *note:* Rich Presence is a local IPC socket rather than anything network
-      side, so this is observable from a running official client.
+- [!] **Discord activity.** Blocked on a decision, and the answer to "how does
+      the official client do it" is that **it does not**. Discord's "Listening
+      to Spotify" card comes from the account link in Discord's own settings —
+      Discord reads the playback state from Spotify server-side, which is why it
+      carries album art, a live progress bar and a "Play on Spotify" button that
+      other people can click. None of that is reachable by a local client, and
+      no third-party app can produce that card.
+      What *is* reachable is ordinary Rich Presence over the local IPC socket,
+      which shows as a generic activity under our own name.
+      *note:* **measured here: there is no `discord-ipc-*` socket on this
+      machine and no Discord desktop client installed** — Discord is being used
+      in a browser, and a browser tab cannot receive Rich Presence. So this
+      would do nothing as things stand. It needs the Discord desktop app, plus
+      an application id registered on Discord's developer portal to appear
+      under a name at all. Both are yours to decide before any code is worth
+      writing. (The account-link explanation above is background knowledge, not
+      something probed here.)
 
 - [~] **"Remove from this Playlist" in the track context menu**, shown when
       viewing a playlist. Dynamic: replaces "Add to playlist" when the track is
@@ -173,8 +187,17 @@ else is as reported.
       *note:* **artwork is not done.** It is an image upload rather than a
       playlist4 op, so it is a different endpoint and a separate piece of work.
 
-- [ ] **Profile picture and username in Settings**, under a new `# User`
-      heading, above the logout button.
+- [~] **Profile picture and username in Settings**, under a new `# User`
+      heading, above the logout button. The heading and the account are in,
+      above the log-out row — which is the one place it matters, since this
+      client can hold either of two accounts and the button gave no clue which
+      it was about to forget. Verified: the label reads the signed-in id.
+      *note:* **the picture is not done, and it is not a small addition.** The
+      client shows the Spotify user id because that is what it has. A display
+      name and an avatar live behind the Web API, which nothing in this codebase
+      speaks — no bearer token is exposed and `api.spotify.com` appears nowhere
+      — so it needs an endpoint found and proven first, the same way everything
+      else here was.
 
 ---
 

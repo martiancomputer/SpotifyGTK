@@ -19,6 +19,7 @@ struct _SpotifyGtkSettingsPage {
   GtkBox parent_instance;
   SpotifyGtkSettings *settings;
   SpotifyGtkEqGraph  *eq_graph;
+  GtkWidget          *account_name;   /* filled once the session knows who */
 };
 
 /* The stored array and the filter must agree on how many bands there are. */
@@ -419,6 +420,30 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
 
   gtk_box_append (GTK_BOX (content), perf_group);
 
+  /* ── User ──────────────────────────────────────────────────── */
+  GtkWidget *user_group = build_group ("User");
+
+  /*
+   * Who is signed in, above the button that signs them out -- which is the
+   * one place it matters, since this client can hold either of two accounts
+   * and the log-out button gives no clue which it is about to forget.
+   *
+   * The Spotify user id, because that is what the client actually has. A
+   * display name and a picture live behind the Web API, which nothing here
+   * speaks; that is its own piece of work rather than something to fake.
+   */
+  self->account_name = gtk_label_new ("Not signed in");
+  gtk_widget_add_css_class (self->account_name, "normal-text");
+  gtk_label_set_xalign (GTK_LABEL (self->account_name), 1.0);
+  gtk_label_set_ellipsize (GTK_LABEL (self->account_name), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_valign (self->account_name, GTK_ALIGN_CENTER);
+
+  gtk_box_append (GTK_BOX (user_group),
+                  build_row ("Account",
+                             "The Spotify account this client is signed in as.",
+                             self->account_name));
+  gtk_box_append (GTK_BOX (content), user_group);
+
   /* --- Account --- */
   GtkWidget *account_group = build_group ("Account");
 
@@ -466,6 +491,17 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
   gtk_box_append (GTK_BOX (self), scroller);
+}
+
+void
+spotifygtk_settings_page_set_account (SpotifyGtkSettingsPage *self,
+                                      const gchar            *username)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS_PAGE (self));
+  if (!self->account_name)
+    return;
+  gtk_label_set_text (GTK_LABEL (self->account_name),
+                      (username && *username) ? username : "Not signed in");
 }
 
 SpotifyGtkSettingsPage *

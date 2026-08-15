@@ -2789,6 +2789,11 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     spotifygtk_native_window_reload_liked (self);
     spotifygtk_native_window_reload_followed (self);
 
+    {
+      g_autofree gchar *who = spotifygtk_native_session_dup_username (self->session);
+      spotifygtk_settings_page_set_account (self->settings_page, who);
+    }
+
     subscribe_collection_changes (self);
 
     /*
