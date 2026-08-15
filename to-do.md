@@ -30,7 +30,7 @@ else is as reported.
 - [ ] **Unsaving an album sometimes does nothing visually**, though the write
       does reach the server and the album is removed there.
 
-- [ ] **Seeking inside the last 30 seconds drops the track entirely.** Playback
+- [~] **Seeking inside the last 30 seconds drops the track entirely.** Playback
       stops, the song has to be started again, and it does not land on the
       requested position.
       *note:* almost certainly `df850df`, which is mine and landed today. That
@@ -40,10 +40,19 @@ else is as reported.
       Before that change the same seek arrived late (the "rubber-band"); now it
       does not arrive. **Treat as a regression, not a new bug**, and consider
       whether reverting is the right first move while it is diagnosed.
+      *note (cfeef29):* half of it fixed. seek() returned early when nothing
+      was audible, and after the abandon nothing is — so every further drag did
+      nothing, which is the "does not go to the intended position" half. A seek
+      now goes to the running engine, or is held for the track that is coming.
+      Whether the **restart** itself fails is still open; the path now logs
+      which branch it took, so one reproduction will say.
 
-- [ ] **Remove cover art from pinned sidebar items; text only.**
-      *note:* the sentence ended mid-thought ("keep them text only, with") —
-      what should replace the art, if anything?
+- [x] **Remove cover art from pinned sidebar items; text only.** Done. Name and
+      type remain; `cover_id` is still stored, so this is presentation only and
+      nothing needs re-pinning if it comes back. The backfill that fetched art
+      for old pins is gone with it — cover requests at startup went 105 -> 100.
+      *note:* the sentence ended mid-thought ("keep them text only, with"), so
+      if something was meant to replace the art, say what.
 
 ---
 
@@ -62,8 +71,9 @@ else is as reported.
 
 - [ ] **Find out how Spotify does Smart Shuffle.**
 
-- [ ] **Context menu on pinned sidebar items**, with "Unpin". Not dynamic —
-      it is the pinned list, so the item is pinned by definition.
+- [x] **Context menu on pinned sidebar items**, with "Unpin". Done — right-click
+      a pinned row. Not dynamic, as asked: the row exists because the thing is
+      pinned, so the only verb is the one that undoes it.
 
 - [ ] **Use less Spotify green.**
 

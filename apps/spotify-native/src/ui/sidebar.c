@@ -8,7 +8,7 @@
  */
 
 #include "sidebar.h"
-#include "cover_loader.h"
+#include "context_menu.h"
 #include "smooth_scroll.h"
 
 struct _SpotifyGtkSidebar {
@@ -25,11 +25,50 @@ enum {
   PAGE_ACTIVATED,
   PINNED_ACTIVATED,
   PIN_REQUESTED,
+  UNPIN_REQUESTED,
   COLLAPSE_TOGGLED,
   N_SIGNALS
 };
 
 static guint signals[N_SIGNALS];
+
+/*
+ * Right-click on a pinned row.
+ *
+ * Not dynamic, unlike the same menu on an album card: this is the pinned list,
+ * so the thing under the pointer is pinned by definition and the only sensible
+ * verb is the one that undoes it.
+ */
+static void
+on_pinned_menu_unpin (GtkButton *entry, gpointer user_data)
+{
+  const gchar *uri = spotifygtk_context_menu_get_context (GTK_WIDGET (entry));
+  GtkPopover *popover = spotifygtk_context_menu_get_popover (GTK_WIDGET (entry));
+  SpotifyGtkSidebar *self = user_data;
+
+  if (uri)
+    g_signal_emit (self, signals[UNPIN_REQUESTED], 0, uri);
+  if (popover)
+    gtk_popover_popdown (popover);
+}
+
+static void
+on_pinned_right_click (GtkGestureClick *gesture, gint n_press,
+                       gdouble x, gdouble y, gpointer user_data)
+{
+  SpotifyGtkSidebar *self = user_data;
+  GtkWidget *row = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  const gchar *uri = g_object_get_data (G_OBJECT (row), "pinned-id");
+  (void) n_press;
+
+  if (!uri)
+    return;
+
+  SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
+  spotifygtk_context_menu_add (menu, "Unpin", TRUE, NULL,
+                               G_CALLBACK (on_pinned_menu_unpin), self);
+  spotifygtk_context_menu_present (menu, row, x, y, g_strdup (uri), g_free);
+}
 
 /* Navigation items matching the reference.
  *
@@ -64,15 +103,6 @@ on_nav_row_activated (GtkListBox *box, GtkListBoxRow *row, gpointer user_data)
 }
 
 #define PINNED_ART_PX 84   /* 42pt row art, doubled so it is not soft */
-
-static void
-on_pinned_cover_loaded (GdkTexture *texture, gpointer user_data)
-{
-  GtkWidget *art = user_data;   /* referenced by the caller; released here */
-  if (texture && GTK_IS_IMAGE (art))
-    gtk_image_set_from_paintable (GTK_IMAGE (art), GDK_PAINTABLE (texture));
-  g_object_unref (art);
-}
 
 static void
 emit_pin_requested (SpotifyGtkSidebar *self)
@@ -123,6 +153,10 @@ spotifygtk_sidebar_class_init (SpotifyGtkSidebarClass *klass)
     G_TYPE_NONE, 0);
 
   signals[PINNED_ACTIVATED] = g_signal_new ("pinned-activated",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  signals[UNPIN_REQUESTED] = g_signal_new ("unpin-requested",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_STRING);
 
@@ -277,30 +311,12 @@ spotifygtk_sidebar_add_pinned (SpotifyGtkSidebar *self,
   gtk_widget_set_margin_bottom (box, 6);
 
   /*
-   * The pin's artwork, or a disc if it has none. The note that used to be here
-   * said covers could not be decoded from the sidebar because the image cache
-   * lived in the other app; that has not been true for a long time, and it is
-   * why every pinned row showed a placeholder.
+   * Text only, by request. These rows carried a 42px cover each; the sidebar
+   * reads more quietly without them and the art was never what anyone was
+   * scanning for. cover_id is still stored against the pin, so this is a
+   * presentation change and nothing has to be re-pinned if it comes back.
    */
-  GtkWidget *art = gtk_image_new_from_icon_name ("media-optical-symbolic");
-  gtk_image_set_pixel_size (GTK_IMAGE (art), 22);
-  gtk_widget_set_size_request (art, 42, 42);
-  gtk_widget_add_css_class (art, "art-thumb");
-  gtk_box_append (GTK_BOX (box), art);
-
-  if (cover_id && *cover_id) {
-    /*
-     * Hold a reference for the length of the request.
-     *
-     * This tried a weak pointer first, and passed the address of this local --
-     * so GObject would have written NULL into a stack slot belonging to
-     * whatever ran next. A reference is both simpler and correct here: the
-     * request has no cancellable, so the callback always runs and always has
-     * somewhere to give the reference back.
-     */
-    spotifygtk_cover_load (cover_id, PINNED_ART_PX, NULL,
-                           on_pinned_cover_loaded, g_object_ref (art));
-  }
+  (void) cover_id;
 
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 1);
   gtk_widget_set_valign (info, GTK_ALIGN_CENTER);
@@ -340,6 +356,11 @@ spotifygtk_sidebar_add_pinned (SpotifyGtkSidebar *self,
 
   gtk_list_box_row_set_child (GTK_LIST_BOX_ROW (row), box);
   g_object_set_data_full (G_OBJECT (row), "pinned-id", g_strdup (id), g_free);
+
+  GtkGesture *right = gtk_gesture_click_new ();
+  gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (right), GDK_BUTTON_SECONDARY);
+  g_signal_connect (right, "pressed", G_CALLBACK (on_pinned_right_click), self);
+  gtk_widget_add_controller (row, GTK_EVENT_CONTROLLER (right));
 
   gtk_list_box_append (self->pinned_list, row);
 }
