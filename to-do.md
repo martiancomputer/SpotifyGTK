@@ -180,6 +180,19 @@ else is as reported.
 
 ## Carried over from earlier today
 
+- [ ] **Six crashes on 2026-08-15** — 10:27, 15:22, 18:27, 21:33, 22:31, 23:09,
+      alternating SIGABRT and SIGSEGV. No frame of ours near the top of any of
+      them. The clearest (21:33) is `on_header_read` emitting a signal and
+      `g_closure_invoke` jumping to `0x7f860000012e` — a garbage function
+      pointer, which is a damaged closure rather than a dangling user_data (that
+      would fault *inside* a handler, not on the way to one). Consistent with
+      one corruption bug underneath all six.
+      *note:* **the release build cannot be trusted to unwind.** gdb produced
+      `spotifygtk_album_grid_set_content_margins (self=0x7, start=22001, …)` on
+      several threads at once — stack scanning without frame pointers, and it
+      would have been reported as the culprit if taken at face value. Use
+      systemd's own trace (`coredumpctl info`), or run `build-prof/`.
+
 - [ ] **A use-after-free is still live.** Core from 14:50 on 2026-08-14: GTK
       validating its CSS tree in the frame-clock paint idle, dereferencing an
       unmapped node, with no frame of ours on the stack. `build-asan/` is built
