@@ -139,7 +139,21 @@ else is as reported.
       throwaway is not Premium, so the harness's audio-key step fails and quits
       its loop before an async chain of writes can finish.
 
-- [ ] **Find out how Spotify does Smart Shuffle.**
+- [x] **Find out how Spotify does Smart Shuffle.** Probed the shipped binary;
+      written up in `apps/spotify-native/research/shuffle.md`. Short version:
+      two different things are called shuffle. **Order** is a property of the
+      context — the server sends a `ShuffleAlgorithm`, and its `Burned` variant
+      carries a `shuffle_seed`, so order is derived rather than rolled, which
+      is why Spotify's shuffle is the same on every device and survives a
+      restart. **Smart Shuffle** is not an algorithm at all: it is a mode gated
+      on a device capability (`supports_smart_shuffle_mode`, sitting among
+      `supports_dj` and friends), and the recommended tracks arrive with the
+      context from the server.
+      *note:* so Smart Shuffle cannot be implemented locally — there is nothing
+      to compute. Matching the *order* is possible in principle by using the
+      seed, but its derivation is not in the descriptors. The reachable win is
+      a better local shuffle: artist separation and track separation are the
+      two scorers whose inputs we have.
 
 - [x] **Context menu on pinned sidebar items**, with "Unpin". Done — right-click
       a pinned row. Not dynamic, as asked: the row exists because the thing is
