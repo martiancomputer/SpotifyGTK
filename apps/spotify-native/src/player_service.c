@@ -526,8 +526,40 @@ spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 positio
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
 
   SpotifyNativeEngineControl *c = active_control (self);
-  if (!c)
+
+  /*
+   * Nothing is sounding right now.
+   *
+   * Two ways to be here: a track is still buffering and has not reached the
+   * sink, or its tail was just abandoned for a restart and the replacement has
+   * not started producing. Both are moments the listener can still be dragging
+   * the slider, and this used to return and drop the drag on the floor -- so
+   * the second attempt at a seek did nothing at all, having already lost the
+   * audio to the first.
+   *
+   * A run that exists can take the seek directly; it consumes it at its next
+   * wait point. Otherwise remember it against the track that is coming, which
+   * is the same mechanism the restart below uses.
+   */
+  if (!c) {
+    if (self->control) {
+      g_message ("player-service: seek to %" G_GINT64_FORMAT " ms with nothing "
+                 "audible yet; handing it to the running engine", position_ms);
+      spotifygtk_native_engine_control_request_seek (self->control, position_ms);
+      return;
+    }
+
+    const gchar *want = self->pending_uri ? self->pending_uri : self->track_uri;
+    if (!want)
+      return;
+
+    g_message ("player-service: seek to %" G_GINT64_FORMAT " ms with no run; "
+               "holding it for %s", position_ms, want);
+    g_free (self->pending_seek_uri);
+    self->pending_seek_uri = g_strdup (want);
+    self->pending_seek_ms  = position_ms;
     return;
+  }
 
   /*
    * Seeking into a track whose producer has already exited.
@@ -559,7 +591,8 @@ spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 positio
       g_autofree gchar *want = g_strdup (uri);
       g_autoptr(GError) err = NULL;
       g_message ("player-service: seek into a track whose run has ended; "
-                 "restarting it at %" G_GINT64_FORMAT " ms", position_ms);
+                 "restarting %s at %" G_GINT64_FORMAT " ms (a run is %s)",
+                 want, position_ms, self->task ? "active, so it queues" : "not active");
       g_free (self->pending_seek_uri);
       self->pending_seek_uri = g_strdup (want);
       self->pending_seek_ms  = position_ms;
