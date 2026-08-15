@@ -31,9 +31,21 @@ else is as reported.
       now serves all three moments, including the handover that was missing.
 
 - [ ] **`GLib-CRITICAL: Source ID N was not found when attempting to remove it`,
-      occasionally at shutdown.** Seen twice in ~20 runs, never reproducibly. A
-      timer removed twice, or removed after firing. Harmless in itself but it
-      is a lifetime bug and the same class as things that have crashed here.
+      occasionally at shutdown.** Seen twice in ~20 runs, never reproducibly.
+      *note:* **audited, and the obvious cause is not there.** All 19
+      `g_timeout_add` registrations and all 21 `g_source_remove` calls were
+      checked: every callback that returns `G_SOURCE_REMOVE` clears its own id
+      first, every removal is either guarded by the id being non-zero or uses
+      `g_clear_handle_id`, and the `g_source_destroy` sites work on pointers
+      rather than ids. `on_collection_changed` — the one that removes and
+      re-arms on every collection event, and so the likeliest — guards,
+      removes and reassigns correctly.
+      So it is not the "forgot to zero the id" class, which is what it looks
+      like. What is left is a race (a source firing as it is being removed) or
+      a source attached to a context other than the default, which
+      `g_source_remove` does not search — `main.c` already notes that trap for
+      the engine's private context. Needs a reproduction, and it is harmless
+      enough that it is not worth guessing at.
 
 - [ ] **The old scroll problem still returns occasionally.** Rare now, and
       everything scrolls smoothly the rest of the time.
