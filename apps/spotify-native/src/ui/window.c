@@ -1669,9 +1669,30 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   gtk_window_set_transient_for (GTK_WINDOW (dialog), GTK_WINDOW (self));
   gtk_window_set_default_size (GTK_WINDOW (dialog), 360, 420);
 
+  /*
+   * Fixed in place, and titled in its own content.
+   *
+   * It carried an AdwHeaderBar, which is a drag handle: the one dialog in the
+   * app could be thrown around the desktop independently of the window it
+   * belongs to, which is not how the rest of this reads. Without a title bar
+   * there is nothing to drag it by, and the title moves inside where it looks
+   * like part of the client rather than part of the desktop.
+   *
+   * A sheet drawn inside the window -- AdwDialog -- would be the fuller answer
+   * to "fit in with the client", but it needs libadwaita 1.5 and the floor
+   * here is 1.4.
+   */
+  gtk_window_set_resizable (GTK_WINDOW (dialog), FALSE);
+
   GtkWidget *dialog_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-  GtkWidget *dialog_header = adw_header_bar_new ();
-  gtk_box_append (GTK_BOX (dialog_box), dialog_header);
+
+  GtkWidget *dialog_title = gtk_label_new ("Add to playlist");
+  gtk_widget_add_css_class (dialog_title, "dialog-title");
+  gtk_label_set_xalign (GTK_LABEL (dialog_title), 0.0);
+  gtk_widget_set_margin_start (dialog_title, 18);
+  gtk_widget_set_margin_end (dialog_title, 18);
+  gtk_widget_set_margin_top (dialog_title, 18);
+  gtk_box_append (GTK_BOX (dialog_box), dialog_title);
 
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 6);
   gtk_widget_set_margin_start (box, 12);
@@ -1683,6 +1704,10 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   p->window    = self;
   p->track_uri = g_strdup (track->uri);
   p->dialog    = GTK_WINDOW (dialog);
+
+  /* The close button went with the header bar, so Escape has to work. GTK
+   * gives a modal window that for free, but only while it can be closed. */
+  gtk_window_set_deletable (GTK_WINDOW (dialog), TRUE);
 
   /* Name first, then the button that uses it. Enter in the field creates,
    * which is what a one-field form should do. */
@@ -3020,6 +3045,7 @@ static const gchar *theme_body =
   /* Greyed rather than hidden: the track is part of the release and its
    * absence would look like a gap in the tracklist. Dimmed to read as
    * unavailable at a glance, the way Spotify greys them. */
+  ".dialog-title { font-size: 15px; font-weight: 700; color: @fg_strong; }"
   ".track-unavailable { opacity: 0.42; }"
   ".destructive-hover:hover { background-color: @destructive; color: #ffffff; }"
   ".destructive-hover:hover label { color: #ffffff; }"

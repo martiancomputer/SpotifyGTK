@@ -11,7 +11,14 @@ else is as reported.
 
 ## Bugs
 
-- [ ] **Scrolling randomly jumps the viewport to the top or bottom.**
+- [~] **Scrolling randomly jumps the viewport to the top or bottom.** The smooth
+      scroller clamped its target once, at wheel time, against the bounds as
+      they were then — and these lists grow and shrink under the pointer. When
+      the content shrank mid-flick the animation kept driving past the new end,
+      GTK clamped every step, and the view slid to one end and stayed. Now
+      re-clamped each tick, stopping where the list can actually go.
+      *note:* plausible cause matched to the symptom, not a reproduction. If it
+      still happens, say so — it would mean a second cause.
 
 - [ ] **The old scroll problem still returns occasionally.** Rare now, and
       everything scrolls smoothly the rest of the time.
@@ -100,8 +107,14 @@ else is as reported.
       fill (position is read from where the fill ends, not its colour) and the
       equaliser bars. Say if it has gone too far the other way.
 
-- [ ] **Rework the playlist creation wizard** to fit the rest of the client,
-      and make it non-movable.
+- [~] **Rework the playlist creation wizard** to fit the rest of the client,
+      and make it non-movable. Non-movable done: the AdwHeaderBar it carried
+      *was* the drag handle, so it is gone and the title now sits in the
+      dialog's own content; also fixed-size, with Escape to close.
+      *note:* the fuller answer to "fit in with the client" is AdwDialog, a
+      sheet drawn inside the window rather than a separate one. That needs
+      libadwaita 1.5 and the floor here is 1.4 (Ubuntu 24.04 ships 1.5.0, so in
+      practice nothing would be lost) — your call whether to raise it.
 
 - [ ] **Edit playlist name and artwork.**
 

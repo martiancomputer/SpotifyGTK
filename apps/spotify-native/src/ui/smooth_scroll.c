@@ -51,6 +51,32 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
     return G_SOURCE_REMOVE;
   }
 
+  /*
+   * Re-clamp against the bounds as they are now, not as they were when the
+   * wheel turned.
+   *
+   * These lists grow and shrink under the pointer -- rows spliced in, a grid
+   * replaced, a page rebuilt -- and the target was clamped once, at wheel
+   * time. When the content shrank afterwards the animation went on driving
+   * toward a position past the end, and GTK clamped every step, so the view
+   * slid to the bottom and stayed. The same in reverse put it at the top.
+   * That is the viewport "randomly" jumping to one end.
+   */
+  gdouble lower = gtk_adjustment_get_lower (adj);
+  gdouble upper = gtk_adjustment_get_upper (adj) - gtk_adjustment_get_page_size (adj);
+  if (upper < lower)
+    upper = lower;
+
+  gdouble clamped = CLAMP (ss->target, lower, upper);
+  if (clamped != ss->target) {
+    /* The content moved out from under the gesture. Finish where the list can
+     * actually go and stop, rather than animating into a wall. */
+    ss->target = clamped;
+    gtk_adjustment_set_value (adj, clamped);
+    ss->tick = 0;
+    return G_SOURCE_REMOVE;
+  }
+
   gdouble remaining = ss->target - value;
   if (ABS (remaining) < 0.5) {
     gtk_adjustment_set_value (adj, ss->target);
