@@ -365,15 +365,24 @@ album_menu_emit_and_close (GtkButton *button, guint signal_id)
   GtkWidget *w = GTK_WIDGET (button);
   AlbumMenuCtx *ctx = spotifygtk_context_menu_get_context (w);
   if (ctx) {
-    /* Pinning needs the name as well as the URI -- the sidebar row shows it,
-     * and the window has no way to look up an album's title from its URI, so
-     * a pin made this way was labelled "spotify:album:...". The menu context
-     * already carries the name the card was showing. */
-    if (signal_id == ALBUM_TOGGLE_PIN)
-      g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri, ctx->name,
-                     ctx->cover_id);
-    else
-      g_signal_emit (ctx->grid, signals[signal_id], 0, ctx->uri);
+    /*
+     * All three, always, whatever the signal takes.
+     *
+     * g_signal_emit reads exactly as many arguments as the signal was
+     * declared with, so passing more than that is harmless -- while passing
+     * fewer is not. This used to send three only for the pin and one for
+     * everything else, which meant declaring a new three-argument signal and
+     * routing it through here read one argument off the varargs and two off
+     * whatever happened to be on the stack. The marshaller then took those
+     * for strings and called g_strdup on them: a segfault while emitting,
+     * before any handler ran.
+     *
+     * Pinning is why more than the URI is here at all -- the sidebar row shows
+     * the name, and the window cannot look a title up from a URI, so a pin
+     * made this way was labelled "spotify:album:...".
+     */
+    g_signal_emit (ctx->grid, signals[signal_id], 0,
+                   ctx->uri, ctx->name, ctx->cover_id);
   }
 
   GtkPopover *popover = spotifygtk_context_menu_get_popover (w);

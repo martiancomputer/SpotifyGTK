@@ -147,6 +147,12 @@ else is as reported.
       *note:* the rename needed nothing new on the wire. Creating a playlist
       was always create-then-rename, so the UPDATE_LIST_ATTRIBUTES op was
       already proven; this only exposes it.
+      *note:* then it crashed on click, caught by ASan. album_menu_emit_and_close
+      sent three arguments for the pin and one for everything else, and the new
+      signal was declared with three — so emitting it read one argument off the
+      varargs and two off the stack, and the marshaller called g_strdup on
+      them. It now always sends all three: g_signal_emit reads exactly as many
+      as the signal declares, so too many is harmless and too few is not.
       *note:* the menu entry did nothing at first. The playlists grid is wired
       by hand — it activates into a playlist rather than an album — so it never
       got the rename or pin handlers, while the menu offered them anyway. The
