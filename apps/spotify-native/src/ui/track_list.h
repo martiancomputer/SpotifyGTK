@@ -26,6 +26,14 @@ void spotifygtk_track_list_set_liked_set (SpotifyGtkTrackList *self, GHashTable 
 /* Repaint hearts for rows currently on screen, after the shared set changes. */
 void spotifygtk_track_list_refresh_liked (SpotifyGtkTrackList *self);
 
+/*
+ * The playlist this list is showing, or NULL for anything else. Only the track
+ * context menu reads it, to offer removal from that playlist instead of
+ * addition to some other one.
+ */
+void spotifygtk_track_list_set_playlist_uri (SpotifyGtkTrackList *self, const gchar *uri);
+const gchar *spotifygtk_track_list_get_playlist_uri (SpotifyGtkTrackList *self);
+
 /* Same borrowed-set arrangement as the liked set above. */
 void spotifygtk_track_list_set_unavailable_set (SpotifyGtkTrackList *self, GHashTable *set);
 void spotifygtk_track_list_refresh_unavailable (SpotifyGtkTrackList *self);

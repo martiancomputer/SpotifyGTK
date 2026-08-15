@@ -542,6 +542,161 @@ on_remove_rootlist_head (MercuryResponse *response, gpointer user_data)
                                    uri, body, on_rootlist_removed, ctx);
 }
 
+
+/* ── Removing one track from a playlist ─────────────────────────────────── */
+
+typedef struct {
+  SpotifyMercury           *mercury;
+  gchar                    *id;        /* bare playlist id */
+  gchar                    *track_uri;
+  gint                      expected;  /* row the caller meant, or -1 */
+  SpotifyPlaylistOpCallback callback;
+  gpointer                  user_data;
+} RemoveTrackCtx;
+
+static void
+remove_track_ctx_free (RemoveTrackCtx *ctx)
+{
+  g_clear_object (&ctx->mercury);
+  g_free (ctx->id);
+  g_free (ctx->track_uri);
+  g_free (ctx);
+}
+
+static void
+on_track_removed (MercuryResponse *response, gpointer user_data)
+{
+  RemoveTrackCtx *ctx = user_data;
+  gboolean ok = status_ok (response);
+  if (!ok)
+    g_warning ("playlist: removing %s from %s failed (status %d)",
+               ctx->track_uri, ctx->id, response ? response->status_code : 0);
+  if (ctx->callback)
+    ctx->callback (ok, response ? response->status_code : 0, ctx->user_data);
+  remove_track_ctx_free (ctx);
+}
+
+static void
+on_remove_track_head (MercuryResponse *response, gpointer user_data)
+{
+  RemoveTrackCtx *ctx = user_data;
+
+  if (!status_ok (response) || !response->parts || response->parts->len == 0) {
+    if (ctx->callback)
+      ctx->callback (FALSE, response ? response->status_code : 0, ctx->user_data);
+    remove_track_ctx_free (ctx);
+    return;
+  }
+
+  gsize len = 0;
+  const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
+
+  const guint8 *rev = NULL; gsize rev_len = 0;
+  pb_find_bytes_field (d, len, PL_SLC_REVISION, &rev, &rev_len);
+
+  /*
+   * Collect every position holding this track, rather than stopping at the
+   * first. A playlist is allowed to contain the same track twice, and "the
+   * first one" is not what the listener right-clicked.
+   */
+  g_autoptr(GArray) matches = g_array_new (FALSE, FALSE, sizeof (guint));
+  guint seen = 0;
+  const guint8 *contents = NULL; gsize clen = 0;
+  if (pb_find_bytes_field (d, len, PL_SLC_CONTENTS, &contents, &clen)) {
+    gsize pos = 0; guint32 fn; PbWireType wt;
+    const guint8 *fd; gsize fl; guint64 fv;
+    while (pb_read_field (contents, clen, &pos, &fn, &wt, &fd, &fl, &fv)) {
+      if (fn != PL_LISTITEMS_ITEMS || wt != PB_WIRE_LENGTH_DELIMITED)
+        continue;
+      const guint8 *u = NULL; gsize ul = 0;
+      if (pb_find_bytes_field (fd, fl, PL_ITEM_URI, &u, &ul)) {
+        g_autofree gchar *entry = g_strndup ((const gchar *) u, ul);
+        if (g_strcmp0 (entry, ctx->track_uri) == 0)
+          g_array_append_val (matches, seen);
+      }
+      seen++;
+    }
+  }
+
+  /*
+   * Prefer the row the caller named, once the server agrees that row holds
+   * this track. Failing that, one match is unambiguous and is taken. Several
+   * matches with no usable position is exactly the case where guessing removes
+   * the wrong copy, so it does nothing instead.
+   */
+  gint index = -1;
+  for (guint i = 0; i < matches->len; i++)
+    if ((gint) g_array_index (matches, guint, i) == ctx->expected)
+      index = ctx->expected;
+
+  if (index < 0 && matches->len == 1)
+    index = (gint) g_array_index (matches, guint, 0);
+
+  if (index < 0) {
+    if (matches->len == 0)
+      g_warning ("playlist: %s is not in %s (%u items); removing nothing",
+                 ctx->track_uri, ctx->id, seen);
+    else
+      g_warning ("playlist: %s appears %u times in %s and row %d is not one of "
+                 "them; removing nothing rather than the wrong copy",
+                 ctx->track_uri, matches->len, ctx->id, ctx->expected);
+    if (ctx->callback)
+      ctx->callback (FALSE, 409, ctx->user_data);
+    remove_track_ctx_free (ctx);
+    return;
+  }
+
+  g_message ("playlist: removing %s from %s at index %d of %u",
+             ctx->track_uri, ctx->id, index, seen);
+
+  g_autoptr(GByteArray) rem = g_byte_array_new ();
+  pb_write_varint_field (rem, PL_REM_FROM_INDEX, (guint64) index);
+  pb_write_varint_field (rem, PL_REM_LENGTH, 1);
+
+  g_autoptr(GByteArray) op = g_byte_array_new ();
+  pb_write_varint_field (op, PL_OP_KIND, PL_OP_KIND_REM);
+  pb_write_message_field (op, PL_OP_REM, rem->data, rem->len);
+
+  g_autoptr(GByteArray) delta = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (delta, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (delta, PL_DELTA_OPS, op->data, op->len);
+
+  g_autoptr(GByteArray) changes = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (changes, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (changes, PL_CHANGES_DELTAS, delta->data, delta->len);
+
+  g_autofree gchar *uri =
+    g_strdup_printf ("hm://playlist/v2/playlist/%s/changes", ctx->id);
+  g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
+  spotifygtk_mercury_request_full (ctx->mercury, MERCURY_METHOD_SEND, "POST",
+                                   uri, body, on_track_removed, ctx);
+}
+
+void
+spotifygtk_playlist_remove_track (SpotifyMercury            *mercury,
+                                  const gchar               *playlist_uri,
+                                  const gchar               *track_uri,
+                                  gint                       expected_index,
+                                  SpotifyPlaylistOpCallback  callback,
+                                  gpointer                   user_data)
+{
+  g_return_if_fail (mercury != NULL);
+  g_return_if_fail (playlist_uri != NULL && track_uri != NULL);
+
+  RemoveTrackCtx *ctx = g_new0 (RemoveTrackCtx, 1);
+  ctx->mercury   = g_object_ref (mercury);
+  ctx->id        = g_strdup (playlist_id_of (playlist_uri));
+  ctx->track_uri = g_strdup (track_uri);
+  ctx->expected  = expected_index;
+  ctx->callback  = callback;
+  ctx->user_data = user_data;
+
+  /* Head first, for the revision the change is based on and the positions. */
+  g_autofree gchar *head = g_strdup_printf ("hm://playlist/v2/playlist/%s", ctx->id);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_GET, "GET",
+                                   head, NULL, on_remove_track_head, ctx);
+}
+
 void
 spotifygtk_playlist_remove (SpotifyMercury            *mercury,
                             const gchar               *username,

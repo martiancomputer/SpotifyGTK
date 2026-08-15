@@ -88,6 +88,22 @@ void spotifygtk_playlist_remove (SpotifyMercury            *mercury,
                                  SpotifyPlaylistOpCallback  callback,
                                  gpointer                   user_data);
 
+/*
+ * Remove one track from a playlist.
+ *
+ * Position-based like every other Rem, so the index is the whole safety of it:
+ * name the wrong one and a different track goes. A playlist may hold the same
+ * track more than once, so the caller passes the row it means -- pass -1 if
+ * there is genuinely no position to hand -- and this refuses rather than
+ * guesses when that cannot be reconciled with what the server returns.
+ */
+void spotifygtk_playlist_remove_track (SpotifyMercury            *mercury,
+                                       const gchar               *playlist_uri,
+                                       const gchar               *track_uri,
+                                       gint                       expected_index,
+                                       SpotifyPlaylistOpCallback  callback,
+                                       gpointer                   user_data);
+
 void spotifygtk_playlist_entries_free (SpotifyPlaylistEntry *entries, guint n);
 
 /* Entries are owned by the callee and valid for the callback's duration. */

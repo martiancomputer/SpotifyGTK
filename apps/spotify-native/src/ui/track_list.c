@@ -43,6 +43,7 @@ struct _SpotifyGtkTrackList {
    */
   GHashTable *liked_set;
   GHashTable *unavailable_set;   /* borrowed, like liked_set */
+  gchar      *playlist_uri;      /* set only while showing a playlist */
 
   /* Scroll settle detection. Cover loading is suppressed while the adjustment
    * is moving and resumed once it has been still for SETTLE_MS. */
@@ -185,7 +186,8 @@ on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
 }
 
 enum { TRACK_ACTIVATED, ADD_TO_QUEUE, GO_TO_ALBUM, GO_TO_ARTIST,
-       ADD_TO_LIKED, REMOVE_FROM_LIKED, ADD_TO_PLAYLIST, N_SIGNALS };
+       ADD_TO_LIKED, REMOVE_FROM_LIKED, ADD_TO_PLAYLIST,
+       REMOVE_FROM_PLAYLIST, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 /* === Right-click context menu === */
@@ -196,6 +198,7 @@ static guint signals[N_SIGNALS];
 typedef struct {
   SpotifyGtkTrackList *list;
   SpotifyNativeTrack  *track;   /* owned copy */
+  gint                 position;  /* the row it came from, for a playlist Rem */
 } MenuCtx;
 
 static void
@@ -223,6 +226,19 @@ static void on_menu_add_to_liked      (GtkButton *b, gpointer d) { (void) d; men
 static void on_menu_remove_from_liked (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, REMOVE_FROM_LIKED); }
 static void on_menu_add_to_playlist (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_PLAYLIST); }
 static void on_menu_add_to_queue (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_QUEUE); }
+
+static void
+on_menu_remove_from_playlist (GtkButton *b, gpointer d)
+{
+  MenuCtx *ctx = spotifygtk_context_menu_get_context (GTK_WIDGET (b));
+  GtkPopover *popover = spotifygtk_context_menu_get_popover (GTK_WIDGET (b));
+  (void) d;
+  if (ctx && ctx->list)
+    g_signal_emit (ctx->list, signals[REMOVE_FROM_PLAYLIST], 0,
+                   (gpointer) ctx->track, ctx->position);
+  if (popover)
+    gtk_popover_popdown (popover);
+}
 static void on_menu_go_to_album  (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, GO_TO_ALBUM); }
 static void on_menu_go_to_artist (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, GO_TO_ARTIST); }
 
@@ -242,6 +258,7 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
   MenuCtx *ctx = g_new0 (MenuCtx, 1);
   ctx->list  = self;
   ctx->track = spotifygtk_native_track_copy (track);
+  ctx->position = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (row), "row-position"));
 
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
 
@@ -257,8 +274,17 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
                                TRUE, NULL,
                                liked ? G_CALLBACK (on_menu_remove_from_liked)
                                      : G_CALLBACK (on_menu_add_to_liked), NULL);
-  spotifygtk_context_menu_add (menu, "Add to Playlist…", TRUE, NULL,
-                               G_CALLBACK (on_menu_add_to_playlist), NULL);
+  /*
+   * Inside a playlist the useful verb is the opposite one. Every row on this
+   * page is in the playlist being viewed, by definition, so there is nothing
+   * to check -- the entry swaps rather than being added alongside.
+   */
+  if (self->playlist_uri)
+    spotifygtk_context_menu_add (menu, "Remove from this Playlist", TRUE, NULL,
+                                 G_CALLBACK (on_menu_remove_from_playlist), NULL);
+  else
+    spotifygtk_context_menu_add (menu, "Add to Playlist…", TRUE, NULL,
+                                 G_CALLBACK (on_menu_add_to_playlist), NULL);
   spotifygtk_context_menu_add (menu, "Add to Queue", TRUE, NULL,
                                G_CALLBACK (on_menu_add_to_queue), NULL);
   spotifygtk_context_menu_add (menu, "Go to Artist",
@@ -365,6 +391,11 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     spotifygtk_track_item_get_track (item), 0);
   spotifygtk_track_row_set_number (row,
     self->numbered ? (gint) gtk_list_item_get_position (list_item) + 1 : 0);
+
+  /* Kept whether or not the list is numbered: the playlist removal needs the
+   * row, and it is position-based. */
+  g_object_set_data (G_OBJECT (row), "row-position",
+                     GINT_TO_POINTER ((gint) gtk_list_item_get_position (list_item)));
   spotifygtk_track_row_set_playing (row,
     spotifygtk_track_item_get_playing (item),
     spotifygtk_track_item_get_paused (item));
@@ -481,6 +512,12 @@ spotifygtk_track_list_class_init (SpotifyGtkTrackListClass *klass)
   signals[ADD_TO_PLAYLIST] = g_signal_new ("add-to-playlist",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_POINTER);
+
+  /* Carries the row as well as the track: a playlist may hold the same track
+   * twice, and the position is what makes the removal unambiguous. */
+  signals[REMOVE_FROM_PLAYLIST] = g_signal_new ("remove-from-playlist",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 2, G_TYPE_POINTER, G_TYPE_INT);
 }
 
 static void
@@ -573,6 +610,21 @@ spotifygtk_track_list_set_liked_set (SpotifyGtkTrackList *self, GHashTable *set)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
   self->liked_set = set;
+}
+
+void
+spotifygtk_track_list_set_playlist_uri (SpotifyGtkTrackList *self, const gchar *uri)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  g_free (self->playlist_uri);
+  self->playlist_uri = g_strdup (uri);
+}
+
+const gchar *
+spotifygtk_track_list_get_playlist_uri (SpotifyGtkTrackList *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self), NULL);
+  return self->playlist_uri;
 }
 
 void

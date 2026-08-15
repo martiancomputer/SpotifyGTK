@@ -1408,6 +1408,61 @@ reload_playlists (SpotifyGtkNativeWindow *self)
   spotifygtk_playlist_list (m, user, on_page_playlists_listed, self);
 }
 
+/*
+ * Remove one track from the playlist being viewed.
+ *
+ * The row is passed through because the op is position-based and a playlist
+ * may hold the same track twice; playlist.c reconciles it with what the server
+ * returns and refuses if it cannot.
+ */
+typedef struct { GWeakRef win; gchar *uri; gint position; } RemoveTrackOp;
+
+static void
+on_track_removed_from_playlist (gboolean ok, gint32 status, gpointer user_data)
+{
+  RemoveTrackOp *op = user_data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&op->win);
+
+  if (self && ok) {
+    /* Drop the row rather than reloading: the page is already right except for
+     * this one entry, and a reload loses the scroll position. */
+    spotifygtk_track_list_remove_position (
+      spotifygtk_context_page_get_list (self->context_page), (guint) op->position);
+    note_local_write (self);
+  } else if (self) {
+    g_warning ("window: could not remove %s from the playlist (status %d)",
+               op->uri, status);
+  }
+
+  g_weak_ref_clear (&op->win);
+  g_free (op->uri);
+  g_free (op);
+}
+
+static void
+on_list_remove_from_playlist (SpotifyGtkTrackList *list, gpointer track_ptr,
+                              gint position, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  const SpotifyNativeTrack *track = track_ptr;
+
+  const gchar *playlist = spotifygtk_track_list_get_playlist_uri (list);
+  if (!track || !track->uri || !playlist)
+    return;
+
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  if (!m)
+    return;
+
+  RemoveTrackOp *op = g_new0 (RemoveTrackOp, 1);
+  g_weak_ref_init (&op->win, self);
+  op->uri = g_strdup (track->uri);
+  op->position = position;
+
+  spotifygtk_playlist_remove_track (m, playlist, track->uri,
+                                    position, on_track_removed_from_playlist, op);
+}
+
 /* ── Add to Playlist ────────────────────────────────────────────────────────
  *
  * The rootlist gives URIs but no names, so a chooser that showed only URIs
@@ -1959,6 +2014,13 @@ context_refresh_action (SpotifyGtkNativeWindow *self, const gchar *uri,
   if (!self->context_page)
     return;
 
+  /* The track menu needs this to offer removal from the playlist being viewed
+   * rather than addition to some other one. Cleared for anything else, so an
+   * album page cannot offer to remove from a playlist. */
+  spotifygtk_track_list_set_playlist_uri (
+    spotifygtk_context_page_get_list (self->context_page),
+    (uri && g_str_has_prefix (uri, "spotify:playlist:")) ? uri : NULL);
+
   if (uri && g_str_has_prefix (uri, "spotify:album:")) {
     spotifygtk_context_page_set_action (self->context_page,
       album_is_saved (self, uri) ? "Saved" : "Save", TRUE, FALSE);
@@ -2075,6 +2137,8 @@ wire_track_list (SpotifyGtkNativeWindow *self, SpotifyGtkTrackList *list)
   g_signal_connect (list, "add-to-liked",      G_CALLBACK (on_list_add_to_liked),      self);
   g_signal_connect (list, "remove-from-liked", G_CALLBACK (on_list_remove_from_liked), self);
   g_signal_connect (list, "add-to-playlist",   G_CALLBACK (on_list_add_to_playlist),   self);
+  g_signal_connect (list, "remove-from-playlist",
+                    G_CALLBACK (on_list_remove_from_playlist), self);
 }
 
 /* Argument order adapter for the artist page's per-release lists. */

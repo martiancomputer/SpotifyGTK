@@ -62,12 +62,21 @@ else is as reported.
       *note:* Rich Presence is a local IPC socket rather than anything network
       side, so this is observable from a running official client.
 
-- [ ] **"Remove from this Playlist" in the track context menu**, shown when
+- [~] **"Remove from this Playlist" in the track context menu**, shown when
       viewing a playlist. Dynamic: replaces "Add to playlist" when the track is
       already in the playlist being viewed.
-      *note:* the write is the playlist4 `REM` op — the same one playlist
-      deletion uses, documented in `research/library-writes.md`, including that
-      it is position-based and refuses rather than guesses.
+      Built: menu entry swaps on a playlist page, the row position travels with
+      it, and `spotifygtk_playlist_remove_track()` reconciles that row against
+      what the server returns — taking the named row if it holds the track, a
+      single match if there is only one, and refusing otherwise rather than
+      removing the wrong copy of a duplicated track.
+      *note:* **the write has not been run once.** It compiles and the page
+      builds; nothing has been removed from a real playlist. Verifying it means
+      a live write, and the standing rule from the 2026-08-05 incident is that
+      write probes go to the throwaway account — this machine is signed in as
+      the main one. A self-contained probe (create a disposable playlist, add a
+      track, remove it, read back, unfollow) touches nothing pre-existing and
+      is what proved playlist deletion; say which account to run it against.
 
 - [ ] **Find out how Spotify does Smart Shuffle.**
 
