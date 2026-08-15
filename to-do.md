@@ -30,6 +30,11 @@ else is as reported.
       track changes without the state changing. One `broadcast_playing_uri()`
       now serves all three moments, including the handover that was missing.
 
+- [ ] **`GLib-CRITICAL: Source ID N was not found when attempting to remove it`,
+      occasionally at shutdown.** Seen twice in ~20 runs, never reproducibly. A
+      timer removed twice, or removed after firing. Harmless in itself but it
+      is a lifetime bug and the same class as things that have crashed here.
+
 - [ ] **The old scroll problem still returns occasionally.** Rare now, and
       everything scrolls smoothly the rest of the time.
       *note:* the easing landed in `1d38030` (ease by elapsed time, not by
@@ -97,13 +102,16 @@ else is as reported.
       what the server returns — taking the named row if it holds the track, a
       single match if there is only one, and refusing otherwise rather than
       removing the wrong copy of a duplicated track.
-      *note:* **the write has not been run once.** It compiles and the page
-      builds; nothing has been removed from a real playlist. Verifying it means
-      a live write, and the standing rule from the 2026-08-05 incident is that
-      write probes go to the throwaway account — this machine is signed in as
-      the main one. A self-contained probe (create a disposable playlist, add a
-      track, remove it, read back, unfollow) touches nothing pre-existing and
-      is what proved playlist deletion; say which account to run it against.
+      **Verified live** on the throwaway (`315kroxz…`, confirmed by reading the
+      logged-in username before writing anything). A disposable playlist was
+      created holding A B A C — the duplicate deliberate, since that is the
+      case the code exists to get right — row 2 was removed, and the read-back
+      gave A B C: the *named* row went, the other copy of A survived at index 0
+      and its neighbours are untouched. Both probe playlists were unfollowed
+      afterwards, so nothing was left behind.
+      *note:* the probe had to run inside the GUI rather than the harness. The
+      throwaway is not Premium, so the harness's audio-key step fails and quits
+      its loop before an async chain of writes can finish.
 
 - [ ] **Find out how Spotify does Smart Shuffle.**
 
