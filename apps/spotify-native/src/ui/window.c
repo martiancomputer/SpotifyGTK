@@ -1985,13 +1985,42 @@ note_local_write (SpotifyGtkNativeWindow *self)
   self->last_local_write_us = g_get_monotonic_time ();
 }
 
+/*
+ * A library write has landed.
+ *
+ * Re-stamping matters: the grace window that recognises our own echo was
+ * stamped when the write was *issued*, but the server only emits the change
+ * once it has applied it. A write that took a few seconds therefore spent most
+ * of its grace waiting, and the echo arrived after it had expired -- which is
+ * a full collection re-read and a rebuilt page, for a change we made
+ * ourselves. That is the "sometimes it reloads the whole page" of it, and the
+ * "sometimes" was how long the write took.
+ */
+typedef struct { GWeakRef win; gchar *what; } LibraryWriteOp;
+
 static void
 on_library_write_done (gboolean ok, guint16 status, gpointer user_data)
 {
-  gchar *what = user_data;
+  LibraryWriteOp *op = user_data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&op->win);
+
   if (!ok)
-    g_warning ("library: %s failed (status %u)", what, status);
-  g_free (what);
+    g_warning ("library: %s failed (status %u)", op->what, status);
+  else if (self)
+    note_local_write (self);
+
+  g_weak_ref_clear (&op->win);
+  g_free (op->what);
+  g_free (op);
+}
+
+static LibraryWriteOp *
+library_write_op (SpotifyGtkNativeWindow *self, const gchar *what)
+{
+  LibraryWriteOp *op = g_new0 (LibraryWriteOp, 1);
+  g_weak_ref_init (&op->win, self);
+  op->what = g_strdup (what);
+  return op;
 }
 
 static gboolean
@@ -2063,11 +2092,25 @@ on_context_action (const gchar *uri, const gchar *kind, gpointer user_data)
     note_local_write (self);
     spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_ALBUMS,
                                     uris, 1, saved, on_library_write_done,
-                                    g_strdup (saved ? "unsave album" : "save album"));
+                                    library_write_op (self, saved ? "unsave album"
+                                                                  : "save album"));
     /* Reflected immediately; the next collection read confirms it. */
     if (saved) g_hash_table_remove (self->liked_uris, uri);
     else       g_hash_table_add (self->liked_uris, g_strdup (uri));
     context_refresh_action (self, uri, kind);
+
+    /*
+     * Take the card out of Library too.
+     *
+     * The button flipped, but the grid behind it only ever learned about a
+     * removal from the next full collection read -- which the grace window
+     * above is there to suppress. So unsaving appeared to do nothing at all
+     * while having gone through on the server, and whether it appeared to work
+     * came down to whether the echo happened to land outside the window.
+     */
+    if (saved && self->library_page)
+      spotifygtk_album_grid_remove_uri (
+        spotifygtk_library_page_get_album_grid (self->library_page), uri);
     return;
   }
 
@@ -2094,8 +2137,8 @@ on_artist_follow_toggled (const gchar *artist_uri, gpointer user_data)
   note_local_write (self);
   spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_ARTISTS,
                                   uris, 1, following, on_library_write_done,
-                                  g_strdup (following ? "unfollow artist"
-                                                      : "follow artist"));
+                                  library_write_op (self, following ? "unfollow artist"
+                                                                    : "follow artist"));
   if (following) g_hash_table_remove (self->followed_uris, artist_uri);
   else           g_hash_table_add (self->followed_uris, g_strdup (artist_uri));
 
@@ -2763,7 +2806,10 @@ navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
  *   @bg_panel   sidebar / now-playing panel
  *   @bg_content main content
  *   @bg_card    cards and rows
- *   @accent     green, used only for state
+ *   @accent     green, and genuinely only for state: liked, followed, pinned,
+ *               the active toggle, the selected sidebar row. Anything merely
+ *               decorative or structural takes an @fg tone instead, which is
+ *               why the progress fill and the equaliser bars are not green.
  */
 
 /* The shared rule body. Every colour is an @-name resolved by the palette
@@ -2920,7 +2966,11 @@ static const gchar *theme_body =
   "scale { min-height: 18px; }"
   "scale trough { background-color: @trough; min-height: 4px;"
   "  border-radius: 2px; }"
-  "scale highlight { background-color: @accent; border-radius: 2px; }"
+  /* Neutral, not green. The progress fill is the largest coloured area in the
+   * window and it is not telling anyone anything -- position is read from where
+   * the fill ends, not from its colour. Green is worth more kept for the things
+   * that do carry state, and it goes further when it is rarer. */
+  "scale highlight { background-color: @fg_strong; border-radius: 2px; }"
   "scale:disabled highlight { background-color: @trough_muted; }"
   /* `margin: 0` is load-bearing: libadwaita puts a negative margin on scale
    * sliders, which combines with a smaller min-width to give a negative
@@ -2946,7 +2996,7 @@ static const gchar *theme_body =
    * leaving the compositor animating an offscreen widget forever.
    * NOTE: the eq bars are also drawn in Cairo with a hardcoded green in
    * track_row.c; a non-green accent would want updating there too. */
-  ".eq-bar { background-color: @accent; border-radius: 1px; }"
+  ".eq-bar { background-color: @fg_dim; border-radius: 1px; }"
 
   /* ── Popovers / context menus ──────────────────────────────── */
   /* libadwaita draws its own popover background from the adw color scheme,

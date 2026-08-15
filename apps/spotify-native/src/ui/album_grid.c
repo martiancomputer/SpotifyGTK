@@ -718,6 +718,25 @@ spotifygtk_album_grid_reload_covers (SpotifyGtkAlbumGrid *self)
     card_retry_cover (g_ptr_array_index (self->bound_cards, i));
 }
 
+gboolean
+spotifygtk_album_grid_remove_uri (SpotifyGtkAlbumGrid *self, const gchar *uri)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self), FALSE);
+  if (!uri || !self->store)
+    return FALSE;
+
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  for (guint i = 0; i < n; i++) {
+    g_autoptr(SpotifyGtkAlbumItem) item =
+      g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    if (item && g_strcmp0 (item->uri, uri) == 0) {
+      g_list_store_remove (self->store, i);
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 void
 spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self)
 {

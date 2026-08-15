@@ -25,10 +25,20 @@ else is as reported.
       rows the scroll has passed) or `e91626f` (decode card art when a card is
       shown, not when bound). Confirm which symptom is meant before starting.
 
-- [ ] **Liking a song sometimes reloads the whole Liked Songs page.**
+- [x] **Liking a song sometimes reloads the whole Liked Songs page.** The grace
+      window that recognises our own echo was stamped when the write was
+      *issued*, but the server emits the change only once it has applied it —
+      so a slow write spent its grace waiting and the echo landed after it
+      expired, costing a full collection re-read. Re-stamped when the write
+      lands. That is also what "sometimes" was: how long the write took.
 
-- [ ] **Unsaving an album sometimes does nothing visually**, though the write
-      does reach the server and the album is removed there.
+- [x] **Unsaving an album sometimes does nothing visually**, though the write
+      does reach the server and the album is removed there. Same mechanism seen
+      from the other side: the button flipped, but the Library grid only ever
+      learned of a removal from the next full collection read — the very thing
+      the grace window suppresses. So whether it appeared to work came down to
+      whether the echo landed outside the window. The card is now removed
+      locally, which is what should have happened regardless.
 
 - [~] **Seeking inside the last 30 seconds drops the track entirely.** Playback
       stops, the song has to be started again, and it does not land on the
@@ -84,7 +94,11 @@ else is as reported.
       a pinned row. Not dynamic, as asked: the row exists because the thing is
       pinned, so the only verb is the one that undoes it.
 
-- [ ] **Use less Spotify green.**
+- [x] **Use less Spotify green.** Green is now genuinely state only — liked,
+      followed, pinned, active toggle, selected sidebar row. The two largest
+      green surfaces were carrying no meaning and are neutral now: the progress
+      fill (position is read from where the fill ends, not its colour) and the
+      equaliser bars. Say if it has gone too far the other way.
 
 - [ ] **Rework the playlist creation wizard** to fit the rest of the client,
       and make it non-movable.

@@ -101,6 +101,15 @@ void spotifygtk_album_grid_set_inline (SpotifyGtkAlbumGrid *self, gboolean inlin
 /* Re-request artwork for every bound card, after release_covers. */
 void spotifygtk_album_grid_reload_covers (SpotifyGtkAlbumGrid *self);
 
+/*
+ * Drop the card for `uri`, if it is here. Returns TRUE if one went.
+ *
+ * For a library that has just lost an album: the page is right except for that
+ * one card, and rebuilding it from the server to learn as much costs a reload
+ * and the scroll position with it.
+ */
+gboolean spotifygtk_album_grid_remove_uri (SpotifyGtkAlbumGrid *self, const gchar *uri);
+
 void spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self);
 
 /* Inset the cards while leaving the scrollbar flush with the widget edge.
