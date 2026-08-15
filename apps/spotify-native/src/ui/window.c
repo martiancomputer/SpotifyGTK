@@ -1466,6 +1466,41 @@ on_list_remove_from_playlist (SpotifyGtkTrackList *list, gpointer track_ptr,
                                     position, on_track_removed_from_playlist, op);
 }
 
+/*
+ * Escape closes a dialog.
+ *
+ * These have no title bar -- deliberately, so they cannot be dragged off on
+ * their own -- which also means no close button, and a dialog you can only
+ * leave by completing it is a trap. Nothing is written on the way out: the
+ * work happens in the confirm handler and nowhere else, so dismissing is
+ * discarding.
+ */
+static gboolean
+on_dialog_escape (GtkEventControllerKey *key, guint keyval, guint code,
+                  GdkModifierType state, gpointer user_data)
+{
+  (void) key; (void) code; (void) state;
+  if (keyval != GDK_KEY_Escape)
+    return GDK_EVENT_PROPAGATE;
+  gtk_window_destroy (GTK_WINDOW (user_data));
+  return GDK_EVENT_STOP;
+}
+
+static void
+dialog_bind_escape (GtkWidget *dialog)
+{
+  GtkEventController *key = gtk_event_controller_key_new ();
+  g_signal_connect (key, "key-pressed", G_CALLBACK (on_dialog_escape), dialog);
+  gtk_widget_add_controller (dialog, key);
+}
+
+static void
+on_dialog_cancel (GtkButton *button, gpointer user_data)
+{
+  (void) button;
+  gtk_window_destroy (GTK_WINDOW (user_data));
+}
+
 /* ── Add to Playlist ────────────────────────────────────────────────────────
  *
  * The rootlist gives URIs but no names, so a chooser that showed only URIs
@@ -1750,9 +1785,7 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   gtk_box_append (GTK_BOX (new_row), p->name_entry);
 
   GtkWidget *new_btn = gtk_button_new_with_label ("Create");
-  /* The app's accent, not Adwaita's: login-button is the same treatment the
-   * one other primary action in the app already uses. */
-  gtk_widget_add_css_class (new_btn, "login-button");
+  gtk_widget_add_css_class (new_btn, "dialog-primary");
   g_signal_connect (new_btn, "clicked", G_CALLBACK (on_new_playlist_clicked), p);
   gtk_box_append (GTK_BOX (new_row), new_btn);
 
@@ -1773,6 +1806,17 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   p->list_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), p->list_box);
   gtk_box_append (GTK_BOX (box), scroller);
+
+  /* Picking a playlist closes this, but choosing to pick none had no exit at
+   * all once the title bar went. */
+  GtkWidget *close_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_widget_set_halign (close_row, GTK_ALIGN_END);
+  GtkWidget *close_btn = gtk_button_new_with_label ("Cancel");
+  gtk_widget_add_css_class (close_btn, "dialog-secondary");
+  g_signal_connect (close_btn, "clicked", G_CALLBACK (on_dialog_cancel), dialog);
+  gtk_box_append (GTK_BOX (close_row), close_btn);
+  gtk_box_append (GTK_BOX (box), close_row);
+  dialog_bind_escape (dialog);
 
   gtk_box_append (GTK_BOX (dialog_box), box);
   adw_window_set_content (ADW_WINDOW (dialog), dialog_box);
@@ -2455,12 +2499,22 @@ on_album_rename (SpotifyGtkAlbumGrid *grid, const gchar *uri, const gchar *name,
   r->dialog = GTK_WINDOW (dialog);
   r->entry  = GTK_EDITABLE (entry);
 
+  GtkWidget *actions = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_widget_set_halign (actions, GTK_ALIGN_END);
+
+  GtkWidget *cancel = gtk_button_new_with_label ("Cancel");
+  gtk_widget_add_css_class (cancel, "dialog-secondary");
+  g_signal_connect (cancel, "clicked", G_CALLBACK (on_dialog_cancel), dialog);
+  gtk_box_append (GTK_BOX (actions), cancel);
+
   GtkWidget *save = gtk_button_new_with_label ("Save");
-  gtk_widget_add_css_class (save, "login-button");
-  gtk_widget_set_halign (save, GTK_ALIGN_END);
+  gtk_widget_add_css_class (save, "dialog-primary");
   g_signal_connect (save, "clicked", G_CALLBACK (on_rename_confirm), r);
   g_signal_connect (entry, "activate", G_CALLBACK (on_rename_confirm), r);
-  gtk_box_append (GTK_BOX (box), save);
+  gtk_box_append (GTK_BOX (actions), save);
+
+  gtk_box_append (GTK_BOX (box), actions);
+  dialog_bind_escape (dialog);
 
   g_object_set_data_full (G_OBJECT (dialog), "rename-pick", r, rename_pick_free);
   adw_window_set_content (ADW_WINDOW (dialog), box);
@@ -3214,6 +3268,25 @@ static const gchar *theme_body =
    * absence would look like a gap in the tracklist. Dimmed to read as
    * unavailable at a glance, the way Spotify greys them. */
   ".dialog-title { font-size: 15px; font-weight: 700; color: @fg_strong; }"
+  /*
+   * A dialog's primary action is white, not green.
+   *
+   * login-button is the accent pill, which is right for signing in -- one
+   * green thing on an otherwise empty screen. Reused in dialogs it became the
+   * loudest colour in the window, and for actions that carry no state at all.
+   * White reads as primary without spending the accent on it.
+   */
+  ".dialog-primary { background-color: @fg_strong; color: @bg_chrome;"
+  "  font-size: 13px; font-weight: 700; border-radius: 999px;"
+  "  padding: 8px 22px; min-height: 0; border: none;"
+  "  transition: opacity 140ms ease; }"
+  ".dialog-primary:hover { opacity: 0.86; }"
+  ".dialog-primary:disabled { background-color: @bg_selected; color: @fg_dim; }"
+  ".dialog-secondary { background: transparent; color: @fg;"
+  "  font-size: 13px; font-weight: 600; border-radius: 999px;"
+  "  padding: 8px 18px; min-height: 0; border: none;"
+  "  transition: background-color 140ms ease; }"
+  ".dialog-secondary:hover { background-color: @bg_hover; color: @fg_strong; }"
   ".dialog-section { font-size: 11px; font-weight: 700; letter-spacing: 0.6px;"
   "                  text-transform: uppercase; color: @fg_dim; }"
   ".pick-row { padding: 7px 10px; border-radius: 6px; }"

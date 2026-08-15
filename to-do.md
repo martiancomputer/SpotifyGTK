@@ -129,6 +129,13 @@ else is as reported.
       and make it non-movable. Non-movable done: the AdwHeaderBar it carried
       *was* the drag handle, so it is gone and the title now sits in the
       dialog's own content; also fixed-size, with Escape to close.
+      Buttons rescored: the primary action in a dialog is white now, not the
+      accent pill. login-button is right for signing in — one green thing on an
+      empty screen — but reused in dialogs it was the loudest colour in the
+      window, for actions carrying no state at all. Cancel added to both
+      dialogs and Escape bound: with the title bar gone there was no close
+      button, and a dialog you can only leave by completing it is a trap.
+      Nothing is written on the way out, so dismissing discards.
       Reworked further: the rows showed the raw `spotify:playlist:37i9…` URI
       until each name lookup returned, which is most of why it read as debug
       output — a quiet "Loading…" now, going to the name and from dim to normal
