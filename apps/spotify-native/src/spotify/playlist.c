@@ -543,6 +543,104 @@ on_remove_rootlist_head (MercuryResponse *response, gpointer user_data)
 }
 
 
+/* ── Renaming ───────────────────────────────────────────────────────────── */
+
+typedef struct {
+  SpotifyMercury           *mercury;
+  gchar                    *id;
+  gchar                    *name;
+  SpotifyPlaylistOpCallback callback;
+  gpointer                  user_data;
+} RenameCtx;
+
+static void
+rename_ctx_free (RenameCtx *ctx)
+{
+  g_clear_object (&ctx->mercury);
+  g_free (ctx->id);
+  g_free (ctx->name);
+  g_free (ctx);
+}
+
+static void
+on_renamed (MercuryResponse *response, gpointer user_data)
+{
+  RenameCtx *ctx = user_data;
+  gboolean ok = status_ok (response);
+  if (!ok)
+    g_warning ("playlist: renaming %s failed (status %d)",
+               ctx->id, response ? response->status_code : 0);
+  if (ctx->callback)
+    ctx->callback (ok, response ? response->status_code : 0, ctx->user_data);
+  rename_ctx_free (ctx);
+}
+
+static void
+on_rename_head (MercuryResponse *response, gpointer user_data)
+{
+  RenameCtx *ctx = user_data;
+
+  const guint8 *rev = NULL; gsize rev_len = 0;
+  if (status_ok (response) && response->parts && response->parts->len > 0) {
+    gsize hlen = 0;
+    const guint8 *hd = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &hlen);
+    pb_find_bytes_field (hd, hlen, PL_SLC_REVISION, &rev, &rev_len);
+  }
+
+  g_message ("playlist: renaming %s to \"%s\"", ctx->id, ctx->name);
+
+  g_autoptr(GByteArray) attrs = g_byte_array_new ();
+  pb_write_bytes_field (attrs, PL_LISTATTR_NAME,
+                        (const guint8 *) ctx->name, strlen (ctx->name));
+
+  g_autoptr(GByteArray) partial = g_byte_array_new ();
+  pb_write_message_field (partial, PL_LAPS_VALUES, attrs->data, attrs->len);
+
+  g_autoptr(GByteArray) ula = g_byte_array_new ();
+  pb_write_message_field (ula, PL_ULA_NEW_ATTRIBUTES, partial->data, partial->len);
+
+  g_autoptr(GByteArray) op = g_byte_array_new ();
+  pb_write_varint_field (op, PL_OP_KIND, PL_OP_KIND_UPDATE_LIST);
+  pb_write_message_field (op, PL_OP_UPDATE_LIST, ula->data, ula->len);
+
+  g_autoptr(GByteArray) delta = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (delta, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (delta, PL_DELTA_OPS, op->data, op->len);
+
+  g_autoptr(GByteArray) changes = g_byte_array_new ();
+  if (rev) pb_write_bytes_field (changes, PL_CHANGES_BASE, rev, rev_len);
+  pb_write_message_field (changes, PL_CHANGES_DELTAS, delta->data, delta->len);
+
+  g_autofree gchar *uri =
+    g_strdup_printf ("hm://playlist/v2/playlist/%s/changes", ctx->id);
+  g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
+  spotifygtk_mercury_request_full (ctx->mercury, MERCURY_METHOD_SEND, "POST",
+                                   uri, body, on_renamed, ctx);
+}
+
+void
+spotifygtk_playlist_rename (SpotifyMercury            *mercury,
+                            const gchar               *playlist_uri,
+                            const gchar               *new_name,
+                            SpotifyPlaylistOpCallback  callback,
+                            gpointer                   user_data)
+{
+  g_return_if_fail (mercury != NULL);
+  g_return_if_fail (playlist_uri != NULL && new_name != NULL);
+
+  RenameCtx *ctx = g_new0 (RenameCtx, 1);
+  ctx->mercury   = g_object_ref (mercury);
+  ctx->id        = g_strdup (playlist_id_of (playlist_uri));
+  ctx->name      = g_strdup (new_name);
+  ctx->callback  = callback;
+  ctx->user_data = user_data;
+
+  /* Head first: the change names the revision it is based on. */
+  g_autofree gchar *head = g_strdup_printf ("hm://playlist/v2/playlist/%s", ctx->id);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_GET, "GET",
+                                   head, NULL, on_rename_head, ctx);
+}
+
 /* ── Removing one track from a playlist ─────────────────────────────────── */
 
 typedef struct {

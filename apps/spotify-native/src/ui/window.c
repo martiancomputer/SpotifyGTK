@@ -716,6 +716,9 @@ subscribe_collection_changes (SpotifyGtkNativeWindow *self)
 static void set_row_liked_for_uri (SpotifyGtkNativeWindow *self,
                                   const gchar *uri, gboolean liked);
 static void note_local_write (SpotifyGtkNativeWindow *self);
+static void on_album_rename (SpotifyGtkAlbumGrid *grid, const gchar *uri,
+                             const gchar *name, const gchar *cover_id,
+                             gpointer user_data);
 
 
 typedef struct {
@@ -1954,6 +1957,7 @@ wire_album_grid (SpotifyGtkNativeWindow *self, SpotifyGtkAlbumGrid *grid)
     return;
   g_signal_connect (grid, "album-activated", G_CALLBACK (on_album_activated), self);
   g_signal_connect (grid, "album-toggle-pin", G_CALLBACK (on_album_toggle_pin), self);
+  g_signal_connect (grid, "album-rename", G_CALLBACK (on_album_rename), self);
   spotifygtk_album_grid_set_pin_query (grid, window_is_pinned, self);
 }
 
@@ -2316,6 +2320,107 @@ on_prev_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 }
 
 /*
+ * Rename a playlist from its card's menu.
+ *
+ * Same dialog treatment as the rest: fixed in place, titled in its own content
+ * rather than in a title bar, Escape to close.
+ */
+typedef struct {
+  SpotifyGtkNativeWindow *window;
+  gchar                  *uri;
+  GtkWindow              *dialog;
+  GtkEditable            *entry;
+} RenamePick;
+
+static void
+rename_pick_free (gpointer data)
+{
+  RenamePick *r = data;
+  g_free (r->uri);
+  g_free (r);
+}
+
+static void
+on_rename_done (gboolean ok, gint32 status, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  if (!ok) {
+    g_warning ("window: renaming the playlist failed (status %d)", status);
+    return;
+  }
+  /* The rootlist carries no names, so the card's label comes from the
+   * playlist itself and only a reload will show the new one. */
+  note_local_write (self);
+  reload_playlists (self);
+}
+
+static void
+on_rename_confirm (GtkButton *button, gpointer user_data)
+{
+  RenamePick *r = user_data;
+  const gchar *name = gtk_editable_get_text (r->entry);
+  (void) button;
+
+  if (name && *name) {
+    SpotifyMercury *m = spotifygtk_native_session_get_mercury (r->window->session);
+    if (m)
+      spotifygtk_playlist_rename (m, r->uri, name, on_rename_done, r->window);
+  }
+  gtk_window_destroy (r->dialog);
+}
+
+static void
+on_album_rename (SpotifyGtkAlbumGrid *grid, const gchar *uri, const gchar *name,
+                 const gchar *cover_id, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) grid; (void) cover_id;
+
+  if (!uri || !g_str_has_prefix (uri, "spotify:playlist:"))
+    return;
+
+  GtkWidget *dialog = adw_window_new ();
+  gtk_window_set_title (GTK_WINDOW (dialog), "Rename playlist");
+  gtk_window_set_modal (GTK_WINDOW (dialog), TRUE);
+  gtk_window_set_transient_for (GTK_WINDOW (dialog), GTK_WINDOW (self));
+  gtk_window_set_resizable (GTK_WINDOW (dialog), FALSE);
+  gtk_window_set_default_size (GTK_WINDOW (dialog), 360, -1);
+
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_set_margin_start (box, 18);
+  gtk_widget_set_margin_end (box, 18);
+  gtk_widget_set_margin_top (box, 18);
+  gtk_widget_set_margin_bottom (box, 18);
+
+  GtkWidget *title = gtk_label_new ("Rename playlist");
+  gtk_widget_add_css_class (title, "dialog-title");
+  gtk_label_set_xalign (GTK_LABEL (title), 0.0);
+  gtk_box_append (GTK_BOX (box), title);
+
+  GtkWidget *entry = gtk_entry_new ();
+  gtk_editable_set_text (GTK_EDITABLE (entry), name ? name : "");
+  gtk_entry_set_activates_default (GTK_ENTRY (entry), TRUE);
+  gtk_box_append (GTK_BOX (box), entry);
+
+  RenamePick *r = g_new0 (RenamePick, 1);
+  r->window = self;
+  r->uri    = g_strdup (uri);
+  r->dialog = GTK_WINDOW (dialog);
+  r->entry  = GTK_EDITABLE (entry);
+
+  GtkWidget *save = gtk_button_new_with_label ("Save");
+  gtk_widget_add_css_class (save, "login-button");
+  gtk_widget_set_halign (save, GTK_ALIGN_END);
+  g_signal_connect (save, "clicked", G_CALLBACK (on_rename_confirm), r);
+  g_signal_connect (entry, "activate", G_CALLBACK (on_rename_confirm), r);
+  gtk_box_append (GTK_BOX (box), save);
+
+  g_object_set_data_full (G_OBJECT (dialog), "rename-pick", r, rename_pick_free);
+  adw_window_set_content (ADW_WINDOW (dialog), box);
+  gtk_window_present (GTK_WINDOW (dialog));
+}
+
+/*
  * Tell every list which row is current.
  *
  * One place, because there are three moments it has to happen -- the player
@@ -2567,6 +2672,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     flush_pending_likes (self);
     spotifygtk_native_window_reload_liked (self);
     spotifygtk_native_window_reload_followed (self);
+
     subscribe_collection_changes (self);
 
     /*

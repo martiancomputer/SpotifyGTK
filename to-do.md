@@ -134,7 +134,16 @@ else is as reported.
       libadwaita 1.5 and the floor here is 1.4 (Ubuntu 24.04 ships 1.5.0, so in
       practice nothing would be lost) — your call whether to raise it.
 
-- [ ] **Edit playlist name and artwork.**
+- [~] **Edit playlist name and artwork.** Name done: right-click a playlist card
+      → "Rename…", shown only for playlist URIs since an album's name is the
+      release's, not the user's. **Verified live** on the throwaway — created a
+      disposable playlist, renamed it, read the name back from the playlist
+      itself and got the new one; unfollowed afterwards.
+      *note:* the rename needed nothing new on the wire. Creating a playlist
+      was always create-then-rename, so the UPDATE_LIST_ATTRIBUTES op was
+      already proven; this only exposes it.
+      *note:* **artwork is not done.** It is an image upload rather than a
+      playlist4 op, so it is a different endpoint and a separate piece of work.
 
 - [ ] **Profile picture and username in Settings**, under a new `# User`
       heading, above the logout button.

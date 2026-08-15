@@ -89,6 +89,19 @@ void spotifygtk_playlist_remove (SpotifyMercury            *mercury,
                                  gpointer                   user_data);
 
 /*
+ * Rename a playlist.
+ *
+ * The same UPDATE_LIST_ATTRIBUTES op create() uses to name a new list, which
+ * is why renaming needs nothing new on the wire -- creation has always been a
+ * create followed by a rename.
+ */
+void spotifygtk_playlist_rename (SpotifyMercury            *mercury,
+                                 const gchar               *playlist_uri,
+                                 const gchar               *new_name,
+                                 SpotifyPlaylistOpCallback  callback,
+                                 gpointer                   user_data);
+
+/*
  * Remove one track from a playlist.
  *
  * Position-based like every other Rem, so the index is the whole safety of it:
