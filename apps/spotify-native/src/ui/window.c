@@ -1534,6 +1534,16 @@ on_playlist_name_read (MercuryResponse *response, gpointer user_data)
       pb_find_bytes_field (attrs, alen, 1, &name, &nlen)) {
     g_autofree gchar *n = g_strndup ((const gchar *) name, nlen);
     gtk_button_set_label (GTK_BUTTON (button), n);
+
+    /* set_label rebuilds the child, so the styling has to go back on, and the
+     * row stops being a placeholder: dim while loading, normal once named. */
+    GtkWidget *lbl = gtk_button_get_child (GTK_BUTTON (button));
+    if (GTK_IS_LABEL (lbl)) {
+      gtk_label_set_xalign (GTK_LABEL (lbl), 0.0);
+      gtk_label_set_ellipsize (GTK_LABEL (lbl), PANGO_ELLIPSIZE_END);
+      gtk_widget_remove_css_class (lbl, "dim-text");
+      gtk_widget_add_css_class (lbl, "normal-text");
+    }
   }
   g_object_unref (button);
 }
@@ -1619,13 +1629,25 @@ on_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entries,
   for (guint i = 0; i < n_entries; i++) {
     if (!entries[i].uri)
       continue;
-    /* Labelled with the URI until the name arrives, so the row is clickable
-     * immediately rather than after every lookup has returned. */
-    GtkWidget *row = gtk_button_new_with_label (entries[i].uri);
+    /*
+     * A placeholder, not the URI.
+     *
+     * The row has to exist before its name arrives -- the rootlist carries no
+     * names, so each one is a separate lookup -- but showing
+     * "spotify:playlist:37i9..." in the meantime reads as debug output that
+     * escaped, which is most of why this dialog did not look like the rest of
+     * the app. The row is clickable either way.
+     */
+    GtkWidget *row = gtk_button_new_with_label ("Loading…");
     gtk_button_set_has_frame (GTK_BUTTON (row), FALSE);
     gtk_widget_add_css_class (row, "flat");
-    if (GTK_IS_LABEL (gtk_button_get_child (GTK_BUTTON (row))))
-      gtk_label_set_xalign (GTK_LABEL (gtk_button_get_child (GTK_BUTTON (row))), 0.0);
+    gtk_widget_add_css_class (row, "pick-row");
+    if (GTK_IS_LABEL (gtk_button_get_child (GTK_BUTTON (row)))) {
+      GtkWidget *lbl = gtk_button_get_child (GTK_BUTTON (row));
+      gtk_label_set_xalign (GTK_LABEL (lbl), 0.0);
+      gtk_label_set_ellipsize (GTK_LABEL (lbl), PANGO_ELLIPSIZE_END);
+      gtk_widget_add_css_class (lbl, "dim-text");
+    }
     g_object_set_data_full (G_OBJECT (row), "playlist-uri",
                             g_strdup (entries[i].uri), g_free);
     g_signal_connect (row, "clicked", G_CALLBACK (on_pick_row_activated), p);
@@ -1714,6 +1736,11 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
 
   /* Name first, then the button that uses it. Enter in the field creates,
    * which is what a one-field form should do. */
+  GtkWidget *new_head = gtk_label_new ("New playlist");
+  gtk_widget_add_css_class (new_head, "dialog-section");
+  gtk_label_set_xalign (GTK_LABEL (new_head), 0.0);
+  gtk_box_append (GTK_BOX (box), new_head);
+
   GtkWidget *new_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
 
   p->name_entry = gtk_entry_new ();
@@ -1735,6 +1762,11 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
 
   gtk_box_append (GTK_BOX (box), new_row);
   gtk_box_append (GTK_BOX (box), gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
+
+  GtkWidget *existing_head = gtk_label_new ("Your playlists");
+  gtk_widget_add_css_class (existing_head, "dialog-section");
+  gtk_label_set_xalign (GTK_LABEL (existing_head), 0.0);
+  gtk_box_append (GTK_BOX (box), existing_head);
 
   GtkWidget *scroller = gtk_scrolled_window_new ();
   gtk_widget_set_vexpand (scroller, TRUE);
@@ -1950,15 +1982,30 @@ on_pinned_activated (SpotifyGtkSidebar *sidebar, const gchar *uri, gpointer user
   navigate_to_context (self, uri, title, pin_type_for_uri (uri));
 }
 
+/*
+ * What every grid gets, whatever it is showing.
+ *
+ * Split out because the playlists grid is wired by hand -- it activates into a
+ * playlist rather than an album, so it cannot use wire_album_grid wholesale --
+ * and had therefore quietly missed everything added here since. Rename was
+ * connected in one place and the menu offered it in both, so on the playlists
+ * page the entry appeared, the signal was emitted, and nothing was listening.
+ */
+static void
+wire_album_grid_common (SpotifyGtkNativeWindow *self, SpotifyGtkAlbumGrid *grid)
+{
+  g_signal_connect (grid, "album-toggle-pin", G_CALLBACK (on_album_toggle_pin), self);
+  g_signal_connect (grid, "album-rename", G_CALLBACK (on_album_rename), self);
+  spotifygtk_album_grid_set_pin_query (grid, window_is_pinned, self);
+}
+
 static void
 wire_album_grid (SpotifyGtkNativeWindow *self, SpotifyGtkAlbumGrid *grid)
 {
   if (!grid)
     return;
   g_signal_connect (grid, "album-activated", G_CALLBACK (on_album_activated), self);
-  g_signal_connect (grid, "album-toggle-pin", G_CALLBACK (on_album_toggle_pin), self);
-  g_signal_connect (grid, "album-rename", G_CALLBACK (on_album_rename), self);
-  spotifygtk_album_grid_set_pin_query (grid, window_is_pinned, self);
+  wire_album_grid_common (self, grid);
 }
 
 /* Connect the window to one page's inner list: activation drives play +
@@ -3167,6 +3214,10 @@ static const gchar *theme_body =
    * absence would look like a gap in the tracklist. Dimmed to read as
    * unavailable at a glance, the way Spotify greys them. */
   ".dialog-title { font-size: 15px; font-weight: 700; color: @fg_strong; }"
+  ".dialog-section { font-size: 11px; font-weight: 700; letter-spacing: 0.6px;"
+  "                  text-transform: uppercase; color: @fg_dim; }"
+  ".pick-row { padding: 7px 10px; border-radius: 6px; }"
+  ".pick-row:hover { background-color: @bg_hover; }"
   ".track-unavailable { opacity: 0.42; }"
   ".destructive-hover:hover { background-color: @destructive; color: #ffffff; }"
   ".destructive-hover:hover label { color: #ffffff; }"
@@ -3535,6 +3586,7 @@ spotifygtk_native_window_constructed (GObject *object)
                       G_CALLBACK (on_playlist_card_activated), self);
     g_signal_connect (self->playlists_grid, "card-needs-resolve",
                       G_CALLBACK (on_playlist_card_needs_resolve), self);
+    wire_album_grid_common (self, self->playlists_grid);
     gtk_box_append (GTK_BOX (pl), GTK_WIDGET (self->playlists_grid));
 
     self->playlists_status = gtk_label_new ("Not signed in yet.");

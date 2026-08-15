@@ -97,7 +97,7 @@ else is as reported.
 - [~] **"Remove from this Playlist" in the track context menu**, shown when
       viewing a playlist. Dynamic: replaces "Add to playlist" when the track is
       already in the playlist being viewed.
-      Built: menu entry swaps on a playlist page, the row position travels with
+      **Works through the UI**, confirmed in use. Menu entry swaps on a playlist page, the row position travels with
       it, and `spotifygtk_playlist_remove_track()` reconciles that row against
       what the server returns — taking the named row if it holds the track, a
       single match if there is only one, and refusing otherwise rather than
@@ -129,6 +129,11 @@ else is as reported.
       and make it non-movable. Non-movable done: the AdwHeaderBar it carried
       *was* the drag handle, so it is gone and the title now sits in the
       dialog's own content; also fixed-size, with Escape to close.
+      Reworked further: the rows showed the raw `spotify:playlist:37i9…` URI
+      until each name lookup returned, which is most of why it read as debug
+      output — a quiet "Loading…" now, going to the name and from dim to normal
+      text when it arrives. Sections named ("New playlist" / "Your playlists"),
+      rows padded with a hover, long names ellipsised.
       *note:* the fuller answer to "fit in with the client" is AdwDialog, a
       sheet drawn inside the window rather than a separate one. That needs
       libadwaita 1.5 and the floor here is 1.4 (Ubuntu 24.04 ships 1.5.0, so in
@@ -142,6 +147,10 @@ else is as reported.
       *note:* the rename needed nothing new on the wire. Creating a playlist
       was always create-then-rename, so the UPDATE_LIST_ATTRIBUTES op was
       already proven; this only exposes it.
+      *note:* the menu entry did nothing at first. The playlists grid is wired
+      by hand — it activates into a playlist rather than an album — so it never
+      got the rename or pin handlers, while the menu offered them anyway. The
+      shared part is one function now, called from both.
       *note:* **artwork is not done.** It is an image upload rather than a
       playlist4 op, so it is a different endpoint and a separate piece of work.
 
