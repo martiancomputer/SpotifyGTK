@@ -129,6 +129,12 @@ else is as reported.
       and make it non-movable. Non-movable done: the AdwHeaderBar it carried
       *was* the drag handle, so it is gone and the title now sits in the
       dialog's own content; also fixed-size, with Escape to close.
+      Made non-modal: a modal grab covers the whole parent surface, and with
+      client-side decorations the title bar is part of that surface — so the
+      app could not be moved, resized or closed while a dialog was open, and
+      GTK has no way to exempt a region. Transient alone keeps it above its
+      parent, plus destroy-with-parent now that closing the window underneath
+      is possible.
       Buttons rescored: the primary action in a dialog is white now, not the
       accent pill. login-button is right for signing in — one green thing on an
       empty screen — but reused in dialogs it was the loudest colour in the

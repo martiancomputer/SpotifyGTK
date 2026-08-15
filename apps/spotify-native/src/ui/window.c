@@ -1725,7 +1725,21 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
    */
   GtkWidget *dialog = adw_window_new ();
   gtk_window_set_title (GTK_WINDOW (dialog), "Add to playlist");
-  gtk_window_set_modal (GTK_WINDOW (dialog), TRUE);
+  /*
+   * Transient but not modal.
+   *
+   * A modal grab covers the whole parent surface, and with client-side
+   * decorations the title bar is part of that surface -- so the app could not
+   * be dragged, resized or closed while this was open, and there is no way to
+   * exempt a region from the grab. Transient alone keeps it above its parent,
+   * which is what it was actually for.
+   *
+   * destroy-with-parent because the main window can now be closed while this
+   * is open -- modal had made that impossible -- and a dialog outliving the
+   * window it belongs to would be left pointing at a dead one.
+   */
+  gtk_window_set_modal (GTK_WINDOW (dialog), FALSE);
+  gtk_window_set_destroy_with_parent (GTK_WINDOW (dialog), TRUE);
   gtk_window_set_transient_for (GTK_WINDOW (dialog), GTK_WINDOW (self));
   gtk_window_set_default_size (GTK_WINDOW (dialog), 360, 420);
 
@@ -2472,7 +2486,8 @@ on_album_rename (SpotifyGtkAlbumGrid *grid, const gchar *uri, const gchar *name,
 
   GtkWidget *dialog = adw_window_new ();
   gtk_window_set_title (GTK_WINDOW (dialog), "Rename playlist");
-  gtk_window_set_modal (GTK_WINDOW (dialog), TRUE);
+  gtk_window_set_modal (GTK_WINDOW (dialog), FALSE);   /* see the note above */
+  gtk_window_set_destroy_with_parent (GTK_WINDOW (dialog), TRUE);
   gtk_window_set_transient_for (GTK_WINDOW (dialog), GTK_WINDOW (self));
   gtk_window_set_resizable (GTK_WINDOW (dialog), FALSE);
   gtk_window_set_default_size (GTK_WINDOW (dialog), 360, -1);
