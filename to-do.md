@@ -272,3 +272,15 @@ else is as reported.
       walk is verified logically (`cfb6e1d`) but no bundle has been produced or
       launched on a clean machine. Doing so is what would let someone be handed
       a folder rather than a build guide.
+
+- [ ] **Make Spotify Connect actually work** (device appears as a target, remote
+      control follows). Scoped in `apps/spotify-native/research/connect.md`.
+      `connect.c` today sends JSON over Mercury; the real thing is a dealer
+      WebSocket for a connection id, then a protobuf `PutStateRequest` over
+      HTTPS to spclient with that id in `X-Spotify-Connection-Id`. So the
+      transport is wrong as well as the payload, and there is no dealer at all.
+      Measured: apresolve already returns dealer hosts, and libsoup 3.6.6 has
+      the WebSocket, so no new dependency.
+      *note:* do steps 1–2 first — extend apresolve, then open the dealer and
+      log the connection id. That is the gate: if the dealer refuses a
+      third-party client, none of the encoding matters, and one probe answers it.
