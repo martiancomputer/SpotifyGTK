@@ -286,25 +286,16 @@ else is as reported.
       message carried a 200-character `Spotify-Connection-Id`. The bearer alone
       was enough — no client token, no prior registration. So nothing here is
       gated on being the official client, at least this far in.
-      **Step 3 half done.** Field numbers parsed out of the embedded
-      descriptors (not assumed — `CONNECT_STATE_EXTENDED` is 5, `name` is 3).
-      A 121-byte `PutStateRequest` with the connection id in the header returns
-      **HTTP 200** and a 35 KB `Cluster`, so the encoding is understood. But
-      **the device is not in that cluster**, by name or id — checked, because a
-      200 only means the request parsed.
-      *note:* `player_state` added — an idle one — and it changed nothing: still
-      200, still absent. No `ClusterUpdate` arrives on the dealer either, across
-      ~50s after a successful PUT, so it is not a late merge.
-      *note:* `client_id` now sent — Spotify's own keymaster id, not a
-      dev-portal one (a portal id is Web API scoped, and requiring one would
-      mean every user registering an app first). Unchanged: 200, still absent.
-      Not the cause. Pings also done — the heartbeat is client-driven,
-      `{"type":"ping"}` gets `{"type": "pong"}` back (confirmed), and a
-      re-announce over a live pinged socket is still 200-and-absent. Five
-      explanations ruled out now. Remaining: `member_type`
-      CONNECT_STATE_EXTENDED=5, `put_state_reason` NEW_CONNECTION=9, and
-      answering pings — the probe never replies to anything, and a connection
-      the server treats as dead would have its device reaped.
-      *note:* the authoritative check is not available from here — **does
-      "SpotifyGTK" show in the Connect picker on another client?** The PUT
-      response and the dealer may both be the wrong place to look.
+      **Step 3 done — the device registers.** The returned cluster contains it
+      (`name='SpotifyGTK'`, `can_play=1`), confirmed by parsing `Cluster.device`
+      rather than searching the bytes.
+      *note:* it read as failing for five rounds because the *check* was wrong:
+      `g_strstr_len()` on a 35 KB protobuf stops at the first NUL, so it never
+      found a device entry near the end. `memmem` finds it at once. Everything
+      "ruled out" on the way was ruled out against a verifier that could not
+      say yes — though the dealer heartbeat found along the way is real and
+      confirmed (`{"type":"ping"}` → `{"type": "pong"}`, client-driven).
+      *note:* a phone on a different account has a different cluster and will
+      never show this device. Sign both into the same account to see it.
+      *note:* next is step 4 — handle `ClusterUpdate` on the dealer, so remote
+      control does something.
