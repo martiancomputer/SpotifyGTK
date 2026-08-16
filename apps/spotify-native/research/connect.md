@@ -177,9 +177,19 @@ Tried and ruled out: a device id that was 40 characters but not hex. A real
 - **`put_state_reason`.** `NEW_DEVICE` (3) is what a first announcement looks
   like, but `NEW_CONNECTION` (9) exists and may be what pairs with having just
   opened a dealer socket.
-- **Keeping the socket alive.** The client has `supports_ping_request`, and the
-  probe never answers anything. A connection the server considers dead may have
-  its device reaped immediately.
+- **Keeping the socket alive.** Done, and it works — but it is not the cause.
+  The heartbeat is JSON, and the **client** starts it: sending
+  `{"type":"ping"}` gets `{"type": "pong"}` back, confirmed. (Both strings sit
+  beside `heartbeat` in the shipped client.) A re-announcement 35 seconds
+  later, over a socket that had been pinged and answered, still returns 200
+  with the device absent. So the connection being alive and recognised is not
+  what was missing.
+
+Five explanations are now gone: the device id format, a missing player state, a
+late merge, a missing client id, and a dead connection. What is left is
+`member_type`, `put_state_reason`, and the possibility that the cluster in a
+PUT response simply does not list a device that has never been *active* — in
+which case nothing observable from here will ever show it.
 
 The one check not available from here is the only one that is authoritative:
 **does "SpotifyGTK" appear in the Connect device picker on another client?**

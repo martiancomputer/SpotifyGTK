@@ -419,6 +419,43 @@ connect_put_state (const gchar *bearer, const gchar *connection_id)
  * Read-only: it opens a socket, reads what arrives and says so. Nothing is
  * registered, nothing is written, no device is announced.
  */
+static SoupWebsocketConnection *dealer_ws;   /* probe only; see connect.md */
+static gchar *dealer_conn_id;
+static gchar *dealer_bearer;
+
+/*
+ * The dealer's heartbeat is JSON, {"type":"ping"} and {"type":"pong"}, sitting
+ * beside the string "heartbeat" in the shipped client. Nothing ever pinged us
+ * across fifty seconds, so the client is the one expected to start it -- and a
+ * connection the server treats as dead is a plausible reason for a device to
+ * be accepted and then never listed.
+ */
+static gboolean
+dealer_ping (gpointer user_data)
+{
+  (void) user_data;
+  if (!dealer_ws ||
+      soup_websocket_connection_get_state (dealer_ws) != SOUP_WEBSOCKET_STATE_OPEN)
+    return G_SOURCE_REMOVE;
+
+  soup_websocket_connection_send_text (dealer_ws, "{\"type\":\"ping\"}");
+  g_message ("[dealer] ping sent");
+  return G_SOURCE_CONTINUE;
+}
+
+/* A second announcement once the socket has been held open and pinged, to see
+ * whether being alive is what the first one lacked. */
+static gboolean
+dealer_reput (gpointer user_data)
+{
+  (void) user_data;
+  if (dealer_bearer && dealer_conn_id) {
+    g_message ("[connect] re-announcing after holding the socket open");
+    connect_put_state (dealer_bearer, dealer_conn_id);
+  }
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
                    gpointer user_data)
@@ -429,6 +466,12 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
   (void) ws; (void) type; (void) user_data;
 
   g_message ("[dealer] message (%" G_GSIZE_FORMAT " bytes): %s", len, text);
+
+  /* Answer a ping if one ever arrives, whichever way round it turns out to be. */
+  if (g_strstr_len (text, -1, "\"ping\"")) {
+    soup_websocket_connection_send_text (ws, "{\"type\":\"pong\"}");
+    g_message ("[dealer] pong sent");
+  }
 
   /*
    * From the header, not the uri.
@@ -447,8 +490,15 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
       g_autofree gchar *id = g_strndup (p, (gsize) (end - p));
       g_message ("[dealer] CONNECTION ID (%" G_GSIZE_FORMAT " chars): %s",
                  strlen (id), id);
-      if (g_getenv ("SPOTIFY_PROBE_PUTSTATE"))
-        connect_put_state ((const gchar *) user_data, id);
+      if (g_getenv ("SPOTIFY_PROBE_PUTSTATE")) {
+        g_free (dealer_conn_id);
+        dealer_conn_id = g_strdup (id);
+        g_free (dealer_bearer);
+        dealer_bearer = g_strdup ((const gchar *) user_data);
+        connect_put_state (dealer_bearer, dealer_conn_id);
+        g_timeout_add_seconds (30, dealer_ping, NULL);
+        g_timeout_add_seconds (35, dealer_reput, NULL);
+      }
     }
   }
 }
@@ -476,6 +526,7 @@ on_dealer_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   }
 
   g_message ("[dealer] connected -- the dealer accepted this client");
+  dealer_ws = g_object_ref (ws);
   g_signal_connect (ws, "message", G_CALLBACK (on_dealer_message), user_data);
   g_signal_connect (ws, "closed",  G_CALLBACK (on_dealer_closed), NULL);
   /* Deliberately leaked for the length of the probe: dropping the last

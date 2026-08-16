@@ -298,7 +298,10 @@ else is as reported.
       *note:* `client_id` now sent — Spotify's own keymaster id, not a
       dev-portal one (a portal id is Web API scoped, and requiring one would
       mean every user registering an app first). Unchanged: 200, still absent.
-      Not the cause. Remaining: `member_type`
+      Not the cause. Pings also done — the heartbeat is client-driven,
+      `{"type":"ping"}` gets `{"type": "pong"}` back (confirmed), and a
+      re-announce over a live pinged socket is still 200-and-absent. Five
+      explanations ruled out now. Remaining: `member_type`
       CONNECT_STATE_EXTENDED=5, `put_state_reason` NEW_CONNECTION=9, and
       answering pings — the probe never replies to anything, and a connection
       the server treats as dead would have its device reaped.
