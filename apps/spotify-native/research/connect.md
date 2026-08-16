@@ -244,6 +244,17 @@ last_command_message_id        = the command's message_id         (field 8)
 Those two fields are how a controller learns its command was taken. Without
 them it shows "Connecting…" and gives up, which is what it did.
 
+### Registration is not a one-off
+
+A device that registers and then stops reporting state is dropped. The symptom
+is unmistakable once seen: it appears in the picker, vanishes after a few
+seconds, comes back once, then stays gone -- the "comes back once" being a
+single delayed re-announcement, and nothing after it.
+
+`put_state` therefore runs on a thirty-second keepalive, matching the ping.
+A real client also puts state on every change, which comes with having state
+worth reporting.
+
 4. Play what was transferred. `command.data` is base64 carrying a
    `TransferState` with the context and the position to resume from. Decoding
    that and handing it to `player_service` is the remaining piece -- the

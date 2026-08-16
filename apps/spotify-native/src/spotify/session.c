@@ -694,17 +694,30 @@ dealer_cluster_selftest (void)
   dealer_handle_payloads (json, strlen (json));
 }
 
-/* A second announcement once the socket has been held open and pinged, to see
- * whether being alive is what the first one lacked. */
+/*
+ * Keep saying we are here.
+ *
+ * This began as a one-shot, to find out whether a second announcement over a
+ * live socket behaved differently from the first. It has to be periodic: a
+ * device that registers and then stops reporting state gets dropped, and the
+ * symptom is precisely a device that appears in a phone's picker, vanishes,
+ * comes back once -- when the one-shot fired -- and then stays gone.
+ *
+ * Thirty seconds, matching the ping. A real client also puts state on every
+ * change; that comes with actually having state to report.
+ */
 static gboolean
 dealer_reput (gpointer user_data)
 {
+  static guint n;
   (void) user_data;
-  if (dealer_bearer && dealer_conn_id) {
-    g_message ("[connect] re-announcing after holding the socket open");
-    connect_put_state (dealer_bearer, dealer_conn_id);
-  }
-  return G_SOURCE_REMOVE;
+
+  if (!dealer_bearer || !dealer_conn_id)
+    return G_SOURCE_REMOVE;
+
+  g_message ("[connect] keepalive put_state (%u)", ++n);
+  connect_put_state (dealer_bearer, dealer_conn_id);
+  return G_SOURCE_CONTINUE;
 }
 
 static void
@@ -754,7 +767,7 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
         if (g_getenv ("SPOTIFY_CLUSTER_SELFTEST"))
           dealer_cluster_selftest ();
         g_timeout_add_seconds (30, dealer_ping, NULL);
-        g_timeout_add_seconds (35, dealer_reput, NULL);
+        g_timeout_add_seconds (30, dealer_reput, NULL);
       }
     }
   }
