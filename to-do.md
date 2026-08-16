@@ -292,8 +292,14 @@ else is as reported.
       **HTTP 200** and a 35 KB `Cluster`, so the encoding is understood. But
       **the device is not in that cluster**, by name or id — checked, because a
       200 only means the request parsed.
-      *note:* next, in order: send a `Device.player_state` (we send device_info
-      only, and the server may not list a device that has never reported one);
-      and check the *right* place — the PUT response may predate the merge, so
-      look for "SpotifyGTK" in the device picker on another client, or wait for
-      a `ClusterUpdate` on the dealer socket, which is already open.
+      *note:* `player_state` added — an idle one — and it changed nothing: still
+      200, still absent. No `ClusterUpdate` arrives on the dealer either, across
+      ~50s after a successful PUT, so it is not a late merge.
+      *note:* untested and most plausible: **`client_id` is never sent**
+      (`DeviceInfo` field 13, we pass NULL). Then `member_type`
+      CONNECT_STATE_EXTENDED=5, `put_state_reason` NEW_CONNECTION=9, and
+      answering pings — the probe never replies to anything, and a connection
+      the server treats as dead would have its device reaped.
+      *note:* the authoritative check is not available from here — **does
+      "SpotifyGTK" show in the Connect picker on another client?** The PUT
+      response and the dealer may both be the wrong place to look.

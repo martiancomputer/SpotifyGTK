@@ -227,6 +227,17 @@ static void flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok);
 #define CS_CAP_SUPPORTS_COMMAND  20
 
 #define CS_DEVICE_DEVICE_INFO     1
+#define CS_DEVICE_PLAYER_STATE    2
+
+/* PlayerState, from player.proto's descriptor at 0x87b920. Only the fields an
+ * idle device needs: enough to say "here, and playing nothing". */
+#define CS_PS_TIMESTAMP           1
+#define CS_PS_PLAYBACK_SPEED      9
+#define CS_PS_POSITION            10
+#define CS_PS_IS_PLAYING          12
+#define CS_PS_IS_PAUSED           13
+#define CS_PS_IS_BUFFERING        14
+#define CS_PS_IS_SYSTEM_INITIATED 15
 
 #define CS_PUT_DEVICE             2
 #define CS_PUT_MEMBER_TYPE        3
@@ -269,8 +280,26 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
     pb_write_bytes_field (info, CS_DEVINFO_CLIENT_ID,
                           (const guint8 *) client_id, strlen (client_id));
 
+  /*
+   * An idle player state, because a device that has never reported one may
+   * simply not be listed -- device_info alone registered without appearing.
+   *
+   * playback_speed is a double and pb_write_varint_field cannot express it, so
+   * it is left out rather than written as an integer: a wrong wire type is the
+   * one thing guaranteed to be rejected, and an absent optional field is not.
+   */
+  g_autoptr(GByteArray) ps = g_byte_array_new ();
+  pb_write_varint_field (ps, CS_PS_TIMESTAMP,
+                         (guint64) (g_get_real_time () / 1000));
+  pb_write_varint_field (ps, CS_PS_POSITION, 0);
+  pb_write_varint_field (ps, CS_PS_IS_PLAYING, 0);
+  pb_write_varint_field (ps, CS_PS_IS_PAUSED, 0);
+  pb_write_varint_field (ps, CS_PS_IS_BUFFERING, 0);
+  pb_write_varint_field (ps, CS_PS_IS_SYSTEM_INITIATED, 1);
+
   g_autoptr(GByteArray) device = g_byte_array_new ();
   pb_write_message_field (device, CS_DEVICE_DEVICE_INFO, info->data, info->len);
+  pb_write_message_field (device, CS_DEVICE_PLAYER_STATE, ps->data, ps->len);
 
   g_autoptr(GByteArray) put = g_byte_array_new ();
   pb_write_message_field (put, CS_PUT_DEVICE, device->data, device->len);

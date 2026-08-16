@@ -151,17 +151,38 @@ playlist context and tracks — which is what was actually playing elsewhere.
 Tried and ruled out: a device id that was 40 characters but not hex. A real
 40-hex id behaves identically.
 
-What is left to try, in order of likelihood:
+### Two more hypotheses, both tried and both wrong
 
-- **`Device.player_state` is absent.** We send `device_info` only. The server
-  may not list a device that has never reported a state.
-- **The returned cluster is a snapshot from before the merge.** The
-  authoritative check is not the PUT response at all: it is whether
-  "SpotifyGTK" appears in the device picker on another client, or whether a
-  `ClusterUpdate` naming us arrives over the dealer afterwards. The dealer
-  socket is already open and would receive it.
-- `member_type` — `CONNECT_STATE` (2) is the obvious choice but
-  `CONNECT_STATE_EXTENDED` (5) exists and its meaning is not known.
+- **A player state.** `Device.player_state` is now sent — an idle one:
+  timestamp, position 0, `is_playing` false, `is_paused` false,
+  `is_buffering` false, `is_system_initiated` true. The request grew from 121
+  to 140 bytes and still answers **200 with the device absent**. So "the server
+  will not list a device that has never reported a state" is not the
+  explanation, at least not for a state this minimal.
+- **A `ClusterUpdate` arriving late.** It does not. The dealer socket stays
+  open and logs everything it receives; across ~50 seconds after a successful
+  PUT, the only message ever received is the initial connection id. So the
+  device is not being merged and announced a moment later either.
+
+### What is genuinely untested
+
+- **`client_id` is not being sent.** `DeviceInfo.client_id` is field 13 and we
+  pass NULL. Every real device sends one, and a device with no client id may
+  simply be dropped. This is the most plausible remaining cause and the
+  cheapest to try — `native_auth.c` already holds the id used for OAuth.
+- **`member_type`.** `CONNECT_STATE` (2) is the obvious reading;
+  `CONNECT_STATE_EXTENDED` (5) exists and its meaning is unknown.
+- **`put_state_reason`.** `NEW_DEVICE` (3) is what a first announcement looks
+  like, but `NEW_CONNECTION` (9) exists and may be what pairs with having just
+  opened a dealer socket.
+- **Keeping the socket alive.** The client has `supports_ping_request`, and the
+  probe never answers anything. A connection the server considers dead may have
+  its device reaped immediately.
+
+The one check not available from here is the only one that is authoritative:
+**does "SpotifyGTK" appear in the Connect device picker on another client?**
+The PUT response and the dealer are both saying nothing, and they may both be
+the wrong place to look.
 
 `SPOTIFY_PROBE_DEALER=1 SPOTIFY_PROBE_PUTSTATE=1` reruns it;
 `SPOTIFY_PROBE_CLUSTER=1` additionally dumps what came back.
