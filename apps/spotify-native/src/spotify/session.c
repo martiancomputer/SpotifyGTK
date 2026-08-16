@@ -198,6 +198,10 @@ static void flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok);
 
 
 
+/* This device's id, derived once and compared against the cluster's
+ * active_device_id to notice a transfer. */
+static gchar connect_device_id[41];
+
 /* ── Connect: registering this client as a device ───────────────────────────
  *
  * Step three of research/connect.md. The connection id from the dealer goes in
@@ -382,11 +386,20 @@ connect_put_state (const gchar *bearer, const gchar *connection_id)
   /* 40 hex characters, which is the shape every real device id has -- the
    * first attempt used a readable string of the right length and the server
    * took the request but did not put the device in the cluster. */
-  static gchar device_id[41];
+  /*
+   * sizeof the array, not the pointer.
+   *
+   * Hoisting this to file scope turned `static gchar device_id[41]` into a
+   * `gchar *`, and `sizeof device_id` quietly became 8 -- so g_strlcpy wrote
+   * seven hex characters and a NUL, and the client registered itself as
+   * "86dc1e0". The server accepted it and echoed it back, so the check that
+   * looks for our id in the returned cluster still said yes.
+   */
+  gchar *device_id = connect_device_id;
   if (!device_id[0]) {
     g_autoptr(GChecksum) sum = g_checksum_new (G_CHECKSUM_SHA1);
     g_checksum_update (sum, (const guchar *) bearer, 32);
-    g_strlcpy (device_id, g_checksum_get_string (sum), sizeof device_id);
+    g_strlcpy (device_id, g_checksum_get_string (sum), sizeof connect_device_id);
   }
   g_autofree gchar *url =
     g_strdup_printf ("https://gae2-spclient.spotify.com/connect-state/v1/devices/%s",
@@ -455,6 +468,138 @@ dealer_ping (gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
+
+/* ── Reading what the dealer pushes ─────────────────────────────────────────
+ *
+ * Cluster updates arrive unasked on the socket already held open: a JSON
+ * envelope whose "payloads" array holds base64, which decodes to a
+ * ClusterUpdate. Field numbers from research/connect.md, read out of the
+ * shipped client's descriptors.
+ *
+ * The whole message is parsed, not the truncated copy used for the log line --
+ * these run to 38 KB and the interesting part is nowhere near the front.
+ */
+#define CS_CLUSTERUPDATE_CLUSTER   1
+#define CS_CLUSTER_ACTIVE_DEVICE   2
+#define CS_CLUSTER_PLAYER_STATE    3
+#define CS_PLAYERSTATE_CONTEXT_URI 2
+#define CS_PLAYERSTATE_IS_PLAYING  12
+
+static void
+dealer_handle_cluster (const guint8 *cluster, gsize len)
+{
+  g_autofree gchar *active = NULL;
+  const guint8 *v = NULL; gsize vlen = 0;
+
+  if (pb_find_bytes_field (cluster, len, CS_CLUSTER_ACTIVE_DEVICE, &v, &vlen))
+    active = g_strndup ((const gchar *) v, vlen);
+
+  g_autofree gchar *context = NULL;
+  gboolean playing = FALSE;
+  if (pb_find_bytes_field (cluster, len, CS_CLUSTER_PLAYER_STATE, &v, &vlen)) {
+    const guint8 *c2 = NULL; gsize c2len = 0;
+    if (pb_find_bytes_field (v, vlen, CS_PLAYERSTATE_CONTEXT_URI, &c2, &c2len))
+      context = g_strndup ((const gchar *) c2, c2len);
+
+    gsize pos = 0; guint32 fn; PbWireType wt;
+    const guint8 *fd; gsize fl; guint64 fv;
+    while (pb_read_field (v, vlen, &pos, &fn, &wt, &fd, &fl, &fv))
+      if (fn == CS_PLAYERSTATE_IS_PLAYING && wt == PB_WIRE_VARINT)
+        playing = (fv != 0);
+  }
+
+  gboolean ours = active && connect_device_id[0] &&
+                  g_strcmp0 (active, connect_device_id) == 0;
+
+  g_message ("[cluster] active=%s%s playing=%s context=%s",
+             active ? active : "(none)", ours ? "  <-- THIS DEVICE" : "",
+             playing ? "yes" : "no", context ? context : "(none)");
+
+  if (ours)
+    g_message ("[cluster] TRANSFER: another client has handed playback here. "
+               "Taking it needs a put_state with is_active=1 and the context "
+               "given to the player -- not built yet.");
+}
+
+static void
+dealer_handle_payloads (const gchar *body, gsize len)
+{
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  if (!json_parser_load_from_data (parser, body, (gssize) len, NULL))
+    return;
+
+  JsonNode *root = json_parser_get_root (parser);
+  if (!root || !JSON_NODE_HOLDS_OBJECT (root))
+    return;
+
+  JsonObject *obj = json_node_get_object (root);
+  if (!json_object_has_member (obj, "payloads"))
+    return;
+
+  JsonNode *pn = json_object_get_member (obj, "payloads");
+  if (!JSON_NODE_HOLDS_ARRAY (pn))
+    return;
+
+  JsonArray *arr = json_node_get_array (pn);
+  for (guint i = 0; i < json_array_get_length (arr); i++) {
+    const gchar *b64 = json_array_get_string_element (arr, i);
+    if (!b64)
+      continue;
+
+    gsize raw_len = 0;
+    g_autofree guchar *raw = g_base64_decode (b64, &raw_len);
+    if (!raw || raw_len == 0)
+      continue;
+
+    /* ClusterUpdate.cluster, or nothing we understand yet. */
+    const guint8 *cluster = NULL; gsize clen = 0;
+    if (pb_find_bytes_field (raw, raw_len, CS_CLUSTERUPDATE_CLUSTER,
+                             &cluster, &clen))
+      dealer_handle_cluster (cluster, clen);
+    else
+      g_message ("[cluster] payload %u (%" G_GSIZE_FORMAT " bytes) carried no "
+                 "cluster; not a ClusterUpdate", i, raw_len);
+  }
+}
+
+
+/*
+ * Self-test for the cluster parse.
+ *
+ * Waiting for a real update means waiting for someone to press play on another
+ * device, which is a poor way to find out whether the field numbers are right.
+ * This builds a ClusterUpdate with known contents, wraps it exactly as the
+ * dealer does -- base64 inside a JSON payloads array -- and pushes it through
+ * the same entry point a real message takes.
+ */
+static void
+dealer_cluster_selftest (void)
+{
+  g_autoptr(GByteArray) ps = g_byte_array_new ();
+  pb_write_bytes_field (ps, CS_PLAYERSTATE_CONTEXT_URI,
+                        (const guint8 *) "spotify:playlist:selftest",
+                        strlen ("spotify:playlist:selftest"));
+  pb_write_varint_field (ps, CS_PLAYERSTATE_IS_PLAYING, 1);
+
+  g_autoptr(GByteArray) cl = g_byte_array_new ();
+  pb_write_varint_field (cl, 1, 1786904386515ULL);          /* changed_timestamp_ms */
+  pb_write_bytes_field (cl, CS_CLUSTER_ACTIVE_DEVICE,
+                        (const guint8 *) connect_device_id,
+                        strlen (connect_device_id));
+  pb_write_message_field (cl, CS_CLUSTER_PLAYER_STATE, ps->data, ps->len);
+
+  g_autoptr(GByteArray) cu = g_byte_array_new ();
+  pb_write_message_field (cu, CS_CLUSTERUPDATE_CLUSTER, cl->data, cl->len);
+
+  g_autofree gchar *b64 = g_base64_encode (cu->data, cu->len);
+  g_autofree gchar *json =
+    g_strdup_printf ("{\"payloads\":[\"%s\"],\"type\":\"message\"}", b64);
+
+  g_message ("[cluster-selftest] feeding a %u-byte ClusterUpdate naming this "
+             "device as active", cu->len);
+  dealer_handle_payloads (json, strlen (json));
+}
+
 /* A second announcement once the socket has been held open and pinged, to see
  * whether being alive is what the first one lacked. */
 static gboolean
@@ -478,6 +623,10 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
   (void) ws; (void) type; (void) user_data;
 
   g_message ("[dealer] message (%" G_GSIZE_FORMAT " bytes): %s", len, text);
+
+  /* Parsed from the full body; `text` above is only ever a log line. */
+  if (memmem (d, len, "\"payloads\"", strlen ("\"payloads\"")))
+    dealer_handle_payloads (d, len);
 
   /* Answer a ping if one ever arrives, whichever way round it turns out to be. */
   if (g_strstr_len (text, -1, "\"ping\"")) {
@@ -508,6 +657,8 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
         g_free (dealer_bearer);
         dealer_bearer = g_strdup ((const gchar *) user_data);
         connect_put_state (dealer_bearer, dealer_conn_id);
+        if (g_getenv ("SPOTIFY_CLUSTER_SELFTEST"))
+          dealer_cluster_selftest ();
         g_timeout_add_seconds (30, dealer_ping, NULL);
         g_timeout_add_seconds (35, dealer_reput, NULL);
       }

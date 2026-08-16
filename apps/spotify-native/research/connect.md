@@ -208,14 +208,27 @@ logs the first 700 characters and discards the rest.
 That means step 4 is not "get the server to talk to us" -- it already does.
 It is:
 
-1. Parse the `ClusterUpdate`: base64 out of the JSON `payloads` array, then
-   the protobuf, using the field numbers above.
-2. Notice when `Cluster.active_device_id` is *ours* -- that is a phone handing
-   playback over.
+1. ~~Parse the `ClusterUpdate`.~~ Done. Base64 out of the JSON `payloads`
+   array, then the protobuf; `active_device_id`, `context_uri` and
+   `is_playing` come out.
+2. ~~Notice when `Cluster.active_device_id` is ours.~~ Done — it logs
+   `TRANSFER` when the cluster names this device.
 3. Take it: PUT `is_active = 1` with `put_state_reason = PLAYER_STATE_CHANGED`
-   (4), and hand the context uri and position to `player_service`.
+   (4), and hand the context uri and position to `player_service`. **Not
+   built.** This is the only part that reaches outside `session.c`.
 
-Only the third step touches anything outside this file.
+Verified without waiting for a phone: `SPOTIFY_CLUSTER_SELFTEST=1` builds a
+ClusterUpdate naming this device, wraps it as the dealer does, and pushes it
+through the same entry point a real message takes.
+
+That self-test earned its keep immediately. It printed
+`active=86dc1e0` -- seven characters where a device id is forty. Hoisting
+`static gchar device_id[41]` to file scope had turned the local into a
+`gchar *`, so `sizeof device_id` became 8 and `g_strlcpy` copied seven hex
+digits. The client had been **registering itself as `86dc1e0`**, and the
+server accepted it and echoed it back, so "is our device in the cluster?"
+still answered yes. A real transfer would have been addressed to an id we no
+longer used.
 
 ## Two other things that log showed
 
