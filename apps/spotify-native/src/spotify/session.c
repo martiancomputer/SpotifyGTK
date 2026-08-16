@@ -248,11 +248,20 @@ static gchar connect_device_id[41];
 #define CS_PUT_IS_ACTIVE          4
 #define CS_PUT_REASON             5
 #define CS_PUT_MESSAGE_ID         6
+#define CS_PUT_LAST_CMD_DEVICE    7
+#define CS_PUT_LAST_CMD_MSG_ID    8
 #define CS_PUT_CLIENT_TIMESTAMP  12
 
 #define CS_MEMBER_CONNECT_STATE   2   /* MemberType */
 #define CS_REASON_NEW_DEVICE      3   /* PutStateReason */
+#define CS_REASON_PLAYER_STATE_CHANGED 4
 #define CS_DEVICE_TYPE_COMPUTER   1   /* devices.DeviceType */
+
+/* Set while acknowledging a transfer: the command being answered, and the
+ * intention to become the active device. Cleared after one put_state. */
+static gboolean  connect_claim_active;
+static gchar    *connect_ack_device;
+static guint64   connect_ack_msg_id;
 
 static GBytes *
 connect_build_put_state (const gchar *device_id, const gchar *device_name,
@@ -308,11 +317,28 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
   g_autoptr(GByteArray) put = g_byte_array_new ();
   pb_write_message_field (put, CS_PUT_DEVICE, device->data, device->len);
   pb_write_varint_field (put, CS_PUT_MEMBER_TYPE, CS_MEMBER_CONNECT_STATE);
-  /* Not active: this announces the device exists and can be picked. Claiming
-   * active would be telling the server we are already playing. */
-  pb_write_varint_field (put, CS_PUT_IS_ACTIVE, 0);
-  pb_write_varint_field (put, CS_PUT_REASON, CS_REASON_NEW_DEVICE);
+  /*
+   * Announcing existence, or answering a transfer.
+   *
+   * A first announcement is not active: it says the device exists and can be
+   * picked. Answering a transfer has to claim active and name the command it
+   * is answering -- last_command_sent_by_device_id and last_command_message_id
+   * are how the controller learns its command was taken, and without them the
+   * phone sits on "Connecting…" waiting for an acknowledgement that never
+   * comes.
+   */
+  pb_write_varint_field (put, CS_PUT_IS_ACTIVE, connect_claim_active ? 1 : 0);
+  pb_write_varint_field (put, CS_PUT_REASON,
+                         connect_claim_active ? CS_REASON_PLAYER_STATE_CHANGED
+                                              : CS_REASON_NEW_DEVICE);
   pb_write_varint_field (put, CS_PUT_MESSAGE_ID, 1);
+
+  if (connect_claim_active && connect_ack_device) {
+    pb_write_bytes_field (put, CS_PUT_LAST_CMD_DEVICE,
+                          (const guint8 *) connect_ack_device,
+                          strlen (connect_ack_device));
+    pb_write_varint_field (put, CS_PUT_LAST_CMD_MSG_ID, connect_ack_msg_id);
+  }
   pb_write_varint_field (put, CS_PUT_CLIENT_TIMESTAMP,
                          (guint64) (g_get_real_time () / 1000));
 
@@ -469,6 +495,64 @@ dealer_ping (gpointer user_data)
 }
 
 
+
+/*
+ * A command from a controller.
+ *
+ * Distinct from a cluster update, and shaped differently: "payload" singular,
+ * an object rather than an array, under a message_ident of
+ * hm://connect-state/v1/player/command. Tapping this device in another
+ * client's picker sends endpoint "transfer".
+ *
+ * The reply is a put_state that claims active and names the command being
+ * answered. Until that arrives the controller shows "Connecting…" and
+ * eventually gives up, which is exactly what it did.
+ */
+static void
+dealer_handle_command (JsonObject *root)
+{
+  JsonObject *payload = json_object_get_object_member (root, "payload");
+  if (!payload)
+    return;
+
+  JsonObject *cmd = json_object_has_member (payload, "command")
+                      ? json_object_get_object_member (payload, "command") : NULL;
+  const gchar *endpoint = cmd && json_object_has_member (cmd, "endpoint")
+                            ? json_object_get_string_member (cmd, "endpoint") : NULL;
+
+  const gchar *from = json_object_has_member (payload, "sent_by_device_id")
+                        ? json_object_get_string_member (payload, "sent_by_device_id") : NULL;
+  guint64 msg_id = json_object_has_member (payload, "message_id")
+                     ? (guint64) json_object_get_int_member (payload, "message_id") : 0;
+
+  g_message ("[command] %s from %s (message_id %" G_GUINT64_FORMAT ")",
+             endpoint ? endpoint : "(none)", from ? from : "(unknown)", msg_id);
+
+  if (g_strcmp0 (endpoint, "transfer") != 0) {
+    g_message ("[command] not a transfer; nothing to answer yet");
+    return;
+  }
+
+  if (!dealer_bearer || !dealer_conn_id) {
+    g_warning ("[command] transfer arrived with no connection id to answer on");
+    return;
+  }
+
+  /*
+   * Acknowledge by becoming active. The command's data carries a TransferState
+   * with the context and position to resume from; decoding that and starting
+   * playback is the remaining piece, so this claims the device without yet
+   * playing anything.
+   */
+  g_free (connect_ack_device);
+  connect_ack_device   = g_strdup (from);
+  connect_ack_msg_id   = msg_id;
+  connect_claim_active = TRUE;
+
+  g_message ("[command] answering the transfer: put_state with is_active=1");
+  connect_put_state (dealer_bearer, dealer_conn_id);
+}
+
 /* ── Reading what the dealer pushes ─────────────────────────────────────────
  *
  * Cluster updates arrive unasked on the socket already held open: a JSON
@@ -533,6 +617,16 @@ dealer_handle_payloads (const gchar *body, gsize len)
     return;
 
   JsonObject *obj = json_node_get_object (root);
+
+  /* Commands come as "payload" (an object); cluster updates as "payloads"
+   * (an array of base64). Different shapes, same socket. */
+  const gchar *ident = json_object_has_member (obj, "message_ident")
+                         ? json_object_get_string_member (obj, "message_ident") : NULL;
+  if (ident && strstr (ident, "player/command")) {
+    dealer_handle_command (obj);
+    return;
+  }
+
   if (!json_object_has_member (obj, "payloads"))
     return;
 
@@ -625,7 +719,7 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
   g_message ("[dealer] message (%" G_GSIZE_FORMAT " bytes): %s", len, text);
 
   /* Parsed from the full body; `text` above is only ever a log line. */
-  if (memmem (d, len, "\"payloads\"", strlen ("\"payloads\"")))
+  if (memmem (d, len, "\"payload", strlen ("\"payload")))
     dealer_handle_payloads (d, len);
 
   /* Answer a ping if one ever arrives, whichever way round it turns out to be. */

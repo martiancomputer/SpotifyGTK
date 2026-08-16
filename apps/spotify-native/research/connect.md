@@ -213,9 +213,41 @@ It is:
    `is_playing` come out.
 2. ~~Notice when `Cluster.active_device_id` is ours.~~ Done — it logs
    `TRANSFER` when the cluster names this device.
-3. Take it: PUT `is_active = 1` with `put_state_reason = PLAYER_STATE_CHANGED`
-   (4), and hand the context uri and position to `player_service`. **Not
-   built.** This is the only part that reaches outside `session.c`.
+3. Answer the command. **Built, untested against a phone.**
+
+### A transfer is a command, not a cluster update
+
+Measured when a phone tapped this device in its picker:
+
+```json
+{"message_ident":"hm://connect-state/v1/player/command",
+ "payload":{"message_id":201102425,
+            "sent_by_device_id":"cc384d544fe83dd273e264c23d0ccf9de47b046e",
+            "command":{"endpoint":"transfer","data":"CgYIABAAGAASQAiMpbrfgDQ…"}}}
+```
+
+Two things that matter. It is `"payload"` **singular, an object** -- cluster
+updates use `"payloads"`, an array of base64 -- so a parser written for one
+shape silently ignores the other. And the cluster updates arriving alongside
+said `active_device_id = (none)`: the controller does not make this device
+active on its own. It waits to be answered.
+
+The answer is a put_state that claims active and names the command:
+
+```
+is_active                      = 1
+put_state_reason               = PLAYER_STATE_CHANGED (4)
+last_command_sent_by_device_id = the command's sent_by_device_id  (field 7)
+last_command_message_id        = the command's message_id         (field 8)
+```
+
+Those two fields are how a controller learns its command was taken. Without
+them it shows "Connecting…" and gives up, which is what it did.
+
+4. Play what was transferred. `command.data` is base64 carrying a
+   `TransferState` with the context and the position to resume from. Decoding
+   that and handing it to `player_service` is the remaining piece -- the
+   acknowledgement claims the device without yet playing anything.
 
 Verified without waiting for a phone: `SPOTIFY_CLUSTER_SELFTEST=1` builds a
 ClusterUpdate naming this device, wraps it as the dealer does, and pushes it
