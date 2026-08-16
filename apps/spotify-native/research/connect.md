@@ -112,8 +112,59 @@ this step. `SPOTIFY_PROBE_DEALER=1` reruns it.
 1. ~~Extend `apresolve` to return the `dealer` list.~~ Done — the request asks
    for both types and `spotifygtk_apresolve_parse_type()` reads either.
 2. ~~Open the dealer WebSocket and log the connection id.~~ Done, above.
-3. Encode `DeviceInfo` + `Capabilities` and PUT it, then read the cluster back
-   and confirm the device appears from another client.
+3. **Half done.** The encoding is accepted; the device does not yet appear.
+
+## Step 3, as far as it got — measured
+
+Field numbers were read out of the descriptor bytes rather than assumed, which
+mattered: `MemberType.CONNECT_STATE_EXTENDED` is **5**, not the 3 its position
+suggests, `DeviceInfo.name` is **3**, and `brand`/`model` are **14**/**15** on
+`DeviceInfo` itself rather than on `AudioOutputDeviceInfo`. The numbers came
+from parsing the embedded `FileDescriptorProto` at `0x877f10`
+(`devices.proto` at `0x87b230`).
+
+```
+PutStateRequest  device=2  member_type=3  is_active=4  put_state_reason=5
+                 message_id=6  client_side_timestamp=12
+Device           device_info=1  player_state=2  private_device_info=3
+DeviceInfo       can_play=1 volume=2 name=3 capabilities=4 device_software_version=6
+                 device_type=7 device_id=10 client_id=13 brand=14 model=15
+Capabilities     can_be_player=2 volume_steps=8 supported_types=9
+                 is_controllable=16 supports_transfer_command=19
+                 supports_command_request=20 supports_smart_shuffle_mode=33
+MemberType       SPIRC_V2=0 SPIRC_V3=1 CONNECT_STATE=2 CONNECT_STATE_EXTENDED=5
+PutStateReason   SPIRC_HELLO=1 NEW_DEVICE=3 PLAYER_STATE_CHANGED=4 NEW_CONNECTION=9
+DeviceType       COMPUTER=1 TABLET=2 SMARTPHONE=3 SPEAKER=4
+```
+
+A 121-byte `PutStateRequest` PUT to
+`https://gae2-spclient.spotify.com/connect-state/v1/devices/<id>`, with the
+dealer's connection id in `X-Spotify-Connection-Id`, returns **HTTP 200** and
+~35 KB of `Cluster`. So the body parses — a malformed one answers 400 with an
+empty body, which is the failure mode the Windows client-token block had.
+
+**But the device is not in the cluster that comes back**, by name or by id.
+Checked deliberately, because a 200 only says the request was understood. The
+cluster returned is almost entirely the *web player's* `PlayerState` — its
+playlist context and tracks — which is what was actually playing elsewhere.
+
+Tried and ruled out: a device id that was 40 characters but not hex. A real
+40-hex id behaves identically.
+
+What is left to try, in order of likelihood:
+
+- **`Device.player_state` is absent.** We send `device_info` only. The server
+  may not list a device that has never reported a state.
+- **The returned cluster is a snapshot from before the merge.** The
+  authoritative check is not the PUT response at all: it is whether
+  "SpotifyGTK" appears in the device picker on another client, or whether a
+  `ClusterUpdate` naming us arrives over the dealer afterwards. The dealer
+  socket is already open and would receive it.
+- `member_type` — `CONNECT_STATE` (2) is the obvious choice but
+  `CONNECT_STATE_EXTENDED` (5) exists and its meaning is not known.
+
+`SPOTIFY_PROBE_DEALER=1 SPOTIFY_PROBE_PUTSTATE=1` reruns it;
+`SPOTIFY_PROBE_CLUSTER=1` additionally dumps what came back.
 4. Handle `ClusterUpdate` so remote control actually works.
 
 Steps 1 and 2 are worth doing before any of the encoding: they answer whether

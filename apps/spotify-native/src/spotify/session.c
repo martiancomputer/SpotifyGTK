@@ -16,6 +16,8 @@
 #include "native_auth.h"
 #include "spclient.h"
 
+#include "protobuf_min.h"
+
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
 
@@ -195,6 +197,182 @@ generate_device_id (void)
 static void flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok);
 
 
+
+/* ── Connect: registering this client as a device ───────────────────────────
+ *
+ * Step three of research/connect.md. The connection id from the dealer goes in
+ * the X-Spotify-Connection-Id header of an HTTPS PUT to spclient, carrying a
+ * PutStateRequest. Mercury is not involved, which is what connect.c had wrong.
+ *
+ * Every field number below was read out of the descriptors embedded in the
+ * shipped client rather than remembered -- MemberType.CONNECT_STATE_EXTENDED
+ * is 5, not the 3 its position suggests, and DeviceInfo.name is 3 while brand
+ * and model are 14 and 15. Guessing any of these gets an opaque HTTP 400 with
+ * an empty body, the same failure the Windows client-token block had.
+ */
+#define CS_DEVINFO_CAN_PLAY        1
+#define CS_DEVINFO_VOLUME          2
+#define CS_DEVINFO_NAME            3
+#define CS_DEVINFO_CAPABILITIES    4
+#define CS_DEVINFO_SW_VERSION      6
+#define CS_DEVINFO_DEVICE_TYPE     7
+#define CS_DEVINFO_DEVICE_ID      10
+#define CS_DEVINFO_CLIENT_ID      13
+
+#define CS_CAP_CAN_BE_PLAYER      2
+#define CS_CAP_VOLUME_STEPS       8
+#define CS_CAP_SUPPORTED_TYPES    9
+#define CS_CAP_IS_CONTROLLABLE   16
+#define CS_CAP_SUPPORTS_TRANSFER 19
+#define CS_CAP_SUPPORTS_COMMAND  20
+
+#define CS_DEVICE_DEVICE_INFO     1
+
+#define CS_PUT_DEVICE             2
+#define CS_PUT_MEMBER_TYPE        3
+#define CS_PUT_IS_ACTIVE          4
+#define CS_PUT_REASON             5
+#define CS_PUT_MESSAGE_ID         6
+#define CS_PUT_CLIENT_TIMESTAMP  12
+
+#define CS_MEMBER_CONNECT_STATE   2   /* MemberType */
+#define CS_REASON_NEW_DEVICE      3   /* PutStateReason */
+#define CS_DEVICE_TYPE_COMPUTER   1   /* devices.DeviceType */
+
+static GBytes *
+connect_build_put_state (const gchar *device_id, const gchar *device_name,
+                         const gchar *client_id)
+{
+  g_autoptr(GByteArray) caps = g_byte_array_new ();
+  pb_write_varint_field (caps, CS_CAP_CAN_BE_PLAYER, 1);
+  pb_write_varint_field (caps, CS_CAP_VOLUME_STEPS, 64);
+  /* What this device will accept being handed. Audio only: no video, no
+   * episodes, and nothing claimed that is not implemented. */
+  pb_write_bytes_field (caps, CS_CAP_SUPPORTED_TYPES,
+                        (const guint8 *) "audio/track", strlen ("audio/track"));
+  pb_write_varint_field (caps, CS_CAP_IS_CONTROLLABLE, 1);
+  pb_write_varint_field (caps, CS_CAP_SUPPORTS_TRANSFER, 1);
+  pb_write_varint_field (caps, CS_CAP_SUPPORTS_COMMAND, 1);
+
+  g_autoptr(GByteArray) info = g_byte_array_new ();
+  pb_write_varint_field (info, CS_DEVINFO_CAN_PLAY, 1);
+  pb_write_varint_field (info, CS_DEVINFO_VOLUME, 65535);
+  pb_write_bytes_field (info, CS_DEVINFO_NAME,
+                        (const guint8 *) device_name, strlen (device_name));
+  pb_write_message_field (info, CS_DEVINFO_CAPABILITIES, caps->data, caps->len);
+  pb_write_bytes_field (info, CS_DEVINFO_SW_VERSION,
+                        (const guint8 *) "spotifygtk", strlen ("spotifygtk"));
+  pb_write_varint_field (info, CS_DEVINFO_DEVICE_TYPE, CS_DEVICE_TYPE_COMPUTER);
+  pb_write_bytes_field (info, CS_DEVINFO_DEVICE_ID,
+                        (const guint8 *) device_id, strlen (device_id));
+  if (client_id && *client_id)
+    pb_write_bytes_field (info, CS_DEVINFO_CLIENT_ID,
+                          (const guint8 *) client_id, strlen (client_id));
+
+  g_autoptr(GByteArray) device = g_byte_array_new ();
+  pb_write_message_field (device, CS_DEVICE_DEVICE_INFO, info->data, info->len);
+
+  g_autoptr(GByteArray) put = g_byte_array_new ();
+  pb_write_message_field (put, CS_PUT_DEVICE, device->data, device->len);
+  pb_write_varint_field (put, CS_PUT_MEMBER_TYPE, CS_MEMBER_CONNECT_STATE);
+  /* Not active: this announces the device exists and can be picked. Claiming
+   * active would be telling the server we are already playing. */
+  pb_write_varint_field (put, CS_PUT_IS_ACTIVE, 0);
+  pb_write_varint_field (put, CS_PUT_REASON, CS_REASON_NEW_DEVICE);
+  pb_write_varint_field (put, CS_PUT_MESSAGE_ID, 1);
+  pb_write_varint_field (put, CS_PUT_CLIENT_TIMESTAMP,
+                         (guint64) (g_get_real_time () / 1000));
+
+  return g_bytes_new (put->data, put->len);
+}
+
+static void
+on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  g_autoptr(GError) err = NULL;
+  g_autoptr(GBytes) body =
+    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
+  SoupMessage *msg = user_data;
+  guint status = msg ? soup_message_get_status (msg) : 0;
+  const gchar *dev_id = msg ? g_object_get_data (G_OBJECT (msg), "device-id") : NULL;
+
+  gsize len = 0;
+  const gchar *d = body ? g_bytes_get_data (body, &len) : NULL;
+
+  g_message ("[connect] put_state -> HTTP %u, %" G_GSIZE_FORMAT " byte(s) back%s",
+             status, len, err ? " (transport error)" : "");
+  if (err) {
+    g_warning ("[connect] put_state failed: %s", err->message);
+  } else if (status >= 400 && d) {
+    g_warning ("[connect] body: %.*s", (int) MIN (len, 300), d);
+  } else if (d) {
+    /*
+     * A 200 only says the request parsed. The answer is a Cluster, so the
+     * question worth asking is whether we are in it -- the device name is
+     * plain in the protobuf, so a substring search settles it without
+     * decoding the whole thing.
+     */
+    gboolean by_name = g_strstr_len (d, (gssize) len, "SpotifyGTK") != NULL;
+    gboolean by_id   = dev_id && g_strstr_len (d, (gssize) len, dev_id) != NULL;
+    g_message ("[connect] our device in the returned cluster: by name %s, by id %s",
+               by_name ? "yes" : "no", by_id ? "yes" : "no");
+
+    if (g_getenv ("SPOTIFY_PROBE_CLUSTER")) {
+      GString *run = g_string_new (NULL);
+      guint shown = 0;
+      for (gsize i = 0; i < len && shown < 30; i++) {
+        if (g_ascii_isprint (d[i])) {
+          g_string_append_c (run, d[i]);
+        } else {
+          if (run->len >= 6) { g_message ("[cluster] %s", run->str); shown++; }
+          g_string_truncate (run, 0);
+        }
+      }
+      g_string_free (run, TRUE);
+    }
+  }
+
+  g_clear_object (&msg);
+}
+
+static void
+connect_put_state (const gchar *bearer, const gchar *connection_id)
+{
+  /* 40 hex characters, which is the shape every real device id has -- the
+   * first attempt used a readable string of the right length and the server
+   * took the request but did not put the device in the cluster. */
+  static gchar device_id[41];
+  if (!device_id[0]) {
+    g_autoptr(GChecksum) sum = g_checksum_new (G_CHECKSUM_SHA1);
+    g_checksum_update (sum, (const guchar *) bearer, 32);
+    g_strlcpy (device_id, g_checksum_get_string (sum), sizeof device_id);
+  }
+  g_autofree gchar *url =
+    g_strdup_printf ("https://gae2-spclient.spotify.com/connect-state/v1/devices/%s",
+                     device_id);
+
+  g_autoptr(GBytes) body =
+    connect_build_put_state (device_id, "SpotifyGTK", NULL);
+
+  SoupMessage *msg = soup_message_new (SOUP_METHOD_PUT, url);
+  SoupMessageHeaders *h = soup_message_get_request_headers (msg);
+  g_autofree gchar *auth = g_strdup_printf ("Bearer %s", bearer);
+  soup_message_headers_replace (h, "Authorization", auth);
+  soup_message_headers_replace (h, "X-Spotify-Connection-Id", connection_id);
+  soup_message_headers_replace (h, "Content-Type", "application/protobuf");
+  soup_message_set_request_body_from_bytes (msg, "application/protobuf", body);
+
+  gsize blen = 0;
+  g_bytes_get_data (body, &blen);
+  g_message ("[connect] PUT %s (%" G_GSIZE_FORMAT " byte PutStateRequest)",
+             url, blen);
+
+  SoupSession *s = soup_session_new ();
+  g_object_set_data_full (G_OBJECT (msg), "device-id", g_strdup (device_id), g_free);
+  soup_session_send_and_read_async (s, msg, G_PRIORITY_DEFAULT, NULL,
+                                    on_put_state_done, msg);
+}
+
 /* ── Probe: can a third-party client hold a dealer connection? ──────────────
  *
  * The gate for Spotify Connect. Registration is an HTTPS PUT carrying an
@@ -233,6 +411,8 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
       g_autofree gchar *id = g_strndup (p, (gsize) (end - p));
       g_message ("[dealer] CONNECTION ID (%" G_GSIZE_FORMAT " chars): %s",
                  strlen (id), id);
+      if (g_getenv ("SPOTIFY_PROBE_PUTSTATE"))
+        connect_put_state ((const gchar *) user_data, id);
     }
   }
 }
@@ -260,7 +440,7 @@ on_dealer_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   }
 
   g_message ("[dealer] connected -- the dealer accepted this client");
-  g_signal_connect (ws, "message", G_CALLBACK (on_dealer_message), NULL);
+  g_signal_connect (ws, "message", G_CALLBACK (on_dealer_message), user_data);
   g_signal_connect (ws, "closed",  G_CALLBACK (on_dealer_closed), NULL);
   /* Deliberately leaked for the length of the probe: dropping the last
    * reference closes the socket, and the point is to see what it sends. */
@@ -289,7 +469,7 @@ dealer_probe (const gchar *bearer)
   g_message ("[dealer] connecting to gae2-dealer.spotify.com");
   soup_session_websocket_connect_async (ws_session, msg, NULL, NULL,
                                         G_PRIORITY_DEFAULT, NULL,
-                                        on_dealer_connected, NULL);
+                                        on_dealer_connected, g_strdup (bearer));
 }
 
 static void

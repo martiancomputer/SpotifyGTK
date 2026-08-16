@@ -286,7 +286,14 @@ else is as reported.
       message carried a 200-character `Spotify-Connection-Id`. The bearer alone
       was enough — no client token, no prior registration. So nothing here is
       gated on being the official client, at least this far in.
-      *note:* next is step 3 — encode `DeviceInfo` + `Capabilities` and PUT it
-      to spclient with that id in `X-Spotify-Connection-Id`, then see whether
-      the device appears from another client. Field numbers still have to be
-      read out of the descriptor bytes rather than assumed.
+      **Step 3 half done.** Field numbers parsed out of the embedded
+      descriptors (not assumed — `CONNECT_STATE_EXTENDED` is 5, `name` is 3).
+      A 121-byte `PutStateRequest` with the connection id in the header returns
+      **HTTP 200** and a 35 KB `Cluster`, so the encoding is understood. But
+      **the device is not in that cluster**, by name or id — checked, because a
+      200 only means the request parsed.
+      *note:* next, in order: send a `Device.player_state` (we send device_info
+      only, and the server may not list a device that has never reported one);
+      and check the *right* place — the PUT response may predate the merge, so
+      look for "SpotifyGTK" in the device picker on another client, or wait for
+      a `ClusterUpdate` on the dealer socket, which is already open.
