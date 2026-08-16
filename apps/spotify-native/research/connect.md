@@ -255,10 +255,31 @@ single delayed re-announcement, and nothing after it.
 A real client also puts state on every change, which comes with having state
 worth reporting.
 
-4. Play what was transferred. `command.data` is base64 carrying a
-   `TransferState` with the context and the position to resume from. Decoding
-   that and handing it to `player_service` is the remaining piece -- the
-   acknowledgement claims the device without yet playing anything.
+4. **Play what was transferred. Built.** `command.data` is base64 carrying a
+   `TransferState`:
+
+```
+TransferState  playback=2  current_session=3
+Playback       timestamp=1  position_as_of_timestamp=2  is_paused=4
+               current_track=5 (ContextTrack)
+Session        context=2 (Context)      Context  uri=1
+ContextTrack   uri=1  uid=2  gid=3
+```
+
+**A transfer names the track by gid, not by uri.** `ContextTrack` has a uri
+field and a real transfer left it empty, carrying uid and gid only. Reading
+field 1 alone finds nothing and reports there is nothing to play -- having
+just claimed the device, which is the worst of both. The gid is the same 16
+bytes everything else here base62-encodes, and
+`spotifygtk_gid_to_base62()` already exists.
+
+Checked against the real payload from a phone: position 40689 ms, not paused,
+gid encoding to `6XmLwx2FpuY4k2u77Uai7C` -- which is the track the transfer's
+own context uri names, so the decode agrees with itself from two directions.
+
+`session.c` emits `transfer-requested (uri, position_ms, paused)` and the
+window starts playback, seeks and pauses. The protocol layer owns no player,
+and the transfer arrives on a socket callback nowhere the UI could reach.
 
 Verified without waiting for a phone: `SPOTIFY_CLUSTER_SELFTEST=1` builds a
 ClusterUpdate naming this device, wraps it as the dealer does, and pushes it

@@ -2537,6 +2537,44 @@ on_album_rename (SpotifyGtkAlbumGrid *grid, const gchar *uri, const gchar *name,
 }
 
 /*
+ * Another client handed playback to this device.
+ *
+ * Arrives from the dealer, via the session, because starting playback is this
+ * window's job and not the protocol layer's. Resolving the track for its
+ * title and artwork is deliberately not waited on: the transfer says play,
+ * and the row can catch up.
+ */
+static void
+on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
+                               gint64 position_ms, gboolean paused,
+                               gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  g_autoptr(GError) err = NULL;
+  (void) session;
+
+  if (!uri || !*uri)
+    return;
+
+  g_message ("window: transfer -> %s at %" G_GINT64_FORMAT " ms (%s)",
+             uri, position_ms, paused ? "paused" : "playing");
+
+  if (!spotifygtk_player_service_start_uri (self->player, uri, &err)) {
+    g_warning ("window: could not start the transferred track: %s",
+               err ? err->message : "unknown");
+    return;
+  }
+
+  /* Resume where the other device was. The seek is held until the run exists,
+   * which is the path start_uri already has for a seek that arrives early. */
+  if (position_ms > 0)
+    spotifygtk_player_service_seek (self->player, position_ms);
+
+  if (paused)
+    spotifygtk_player_service_pause (self->player);
+}
+
+/*
  * Tell every list which row is current.
  *
  * One place, because there are three moments it has to happen -- the player
@@ -3543,6 +3581,8 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_now_playing_changed), self);
   g_signal_connect (self->player, "position-changed",
                     G_CALLBACK (on_player_position_changed), self);
+  g_signal_connect (self->session, "transfer-requested",
+                    G_CALLBACK (on_session_transfer_requested), self);
   g_signal_connect (self->session, "state-changed",
                     G_CALLBACK (on_session_state_changed), self);
 

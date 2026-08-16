@@ -15,6 +15,7 @@
 #include "login5.h"
 #include "native_auth.h"
 #include "spclient.h"
+#include "track_meta.h"
 
 #include "protobuf_min.h"
 
@@ -94,7 +95,7 @@ struct _SpotifyNativeSession {
 
 G_DEFINE_FINAL_TYPE (SpotifyNativeSession, spotifygtk_native_session, G_TYPE_OBJECT)
 
-enum { STATE_CHANGED, N_SIGNALS };
+enum { STATE_CHANGED, TRANSFER_REQUESTED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 void
@@ -471,6 +472,7 @@ connect_put_state (const gchar *bearer, const gchar *connection_id)
  * registered, nothing is written, no device is announced.
  */
 static SoupWebsocketConnection *dealer_ws;   /* probe only; see connect.md */
+static SpotifyNativeSession    *dealer_session;
 static gchar *dealer_conn_id;
 static gchar *dealer_bearer;
 
@@ -495,6 +497,96 @@ dealer_ping (gpointer user_data)
 }
 
 
+
+
+/* ── TransferState, from transfer_state.proto (0x8a4700) and friends ────────
+ *
+ *   TransferState  playback=2  current_session=3
+ *   Playback       timestamp=1  position_as_of_timestamp=2  is_paused=4
+ *                  current_track=5 (ContextTrack)
+ *   Session        context=2 (Context)
+ *   Context        uri=1
+ *   ContextTrack   uri=1
+ *
+ * Enough to answer the only three questions playback needs: which track, from
+ * where, and playing or paused.
+ */
+#define TS_PLAYBACK            2
+#define TS_SESSION             3
+#define PB_TIMESTAMP           1
+#define PB_POSITION            2
+#define PB_IS_PAUSED           4
+#define PB_CURRENT_TRACK       5
+#define SESSION_CONTEXT        2
+#define CTX_URI                1
+#define CTXTRACK_URI           1
+#define CTXTRACK_GID           3
+
+static void
+dealer_handle_transfer_state (SpotifyNativeSession *self,
+                              const guint8 *data, gsize len)
+{
+  const guint8 *v = NULL; gsize vlen = 0;
+  g_autofree gchar *track_uri = NULL;
+  g_autofree gchar *context_uri = NULL;
+  gint64 position_ms = 0;
+  gboolean paused = FALSE;
+
+  if (pb_find_bytes_field (data, len, TS_PLAYBACK, &v, &vlen)) {
+    const guint8 *t = NULL; gsize tlen = 0;
+    if (pb_find_bytes_field (v, vlen, PB_CURRENT_TRACK, &t, &tlen)) {
+      const guint8 *u = NULL; gsize ulen = 0;
+
+      /*
+       * A transfer names the track by gid, not by uri.
+       *
+       * ContextTrack has a uri field and it is empty here: a real transfer
+       * carried uid and gid only. Reading field 1 alone finds nothing and
+       * reports there is nothing to play, having just claimed the device --
+       * the worst of both. The gid is the same 16 bytes every other id in
+       * this codebase base62-encodes.
+       */
+      if (pb_find_bytes_field (t, tlen, CTXTRACK_URI, &u, &ulen) && ulen > 0) {
+        track_uri = g_strndup ((const gchar *) u, ulen);
+      } else if (pb_find_bytes_field (t, tlen, CTXTRACK_GID, &u, &ulen)) {
+        g_autofree gchar *b62 = spotifygtk_gid_to_base62 (u, ulen);
+        if (b62)
+          track_uri = g_strdup_printf ("spotify:track:%s", b62);
+      }
+    }
+
+    gsize pos = 0; guint32 fn; PbWireType wt;
+    const guint8 *fd; gsize fl; guint64 fv;
+    while (pb_read_field (v, vlen, &pos, &fn, &wt, &fd, &fl, &fv)) {
+      if (fn == PB_POSITION && wt == PB_WIRE_VARINT)
+        position_ms = (gint64) fv;
+      else if (fn == PB_IS_PAUSED && wt == PB_WIRE_VARINT)
+        paused = (fv != 0);
+    }
+  }
+
+  if (pb_find_bytes_field (data, len, TS_SESSION, &v, &vlen)) {
+    const guint8 *ctx = NULL; gsize clen = 0;
+    if (pb_find_bytes_field (v, vlen, SESSION_CONTEXT, &ctx, &clen)) {
+      const guint8 *u = NULL; gsize ulen = 0;
+      if (pb_find_bytes_field (ctx, clen, CTX_URI, &u, &ulen))
+        context_uri = g_strndup ((const gchar *) u, ulen);
+    }
+  }
+
+  g_message ("[transfer] track=%s position=%" G_GINT64_FORMAT "ms paused=%s "
+             "context=%s",
+             track_uri ? track_uri : "(none)", position_ms,
+             paused ? "yes" : "no", context_uri ? context_uri : "(none)");
+
+  if (!track_uri) {
+    g_warning ("[transfer] no track in the transfer; nothing to play");
+    return;
+  }
+
+  g_signal_emit (self, signals[TRANSFER_REQUESTED], 0,
+                 track_uri, position_ms, paused);
+}
 
 /*
  * A command from a controller.
@@ -551,6 +643,22 @@ dealer_handle_command (JsonObject *root)
 
   g_message ("[command] answering the transfer: put_state with is_active=1");
   connect_put_state (dealer_bearer, dealer_conn_id);
+
+  /* The command carries what to play, base64 in "data". Acknowledging without
+   * this claims the device and then sits silent, which is worse than not
+   * claiming it. */
+  const gchar *b64 = cmd && json_object_has_member (cmd, "data")
+                       ? json_object_get_string_member (cmd, "data") : NULL;
+  if (!b64) {
+    g_warning ("[command] transfer carried no data; claimed the device but "
+               "have nothing to play");
+    return;
+  }
+
+  gsize raw_len = 0;
+  g_autofree guchar *raw = g_base64_decode (b64, &raw_len);
+  if (raw && raw_len)
+    dealer_handle_transfer_state (dealer_session, raw, raw_len);
 }
 
 /* ── Reading what the dealer pushes ─────────────────────────────────────────
@@ -2428,6 +2536,18 @@ spotifygtk_native_session_class_init (SpotifyNativeSessionClass *klass)
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   object_class->dispose  = spotifygtk_native_session_dispose;
   object_class->finalize = spotifygtk_native_session_finalize;
+
+  /*
+   * A controller handed playback to this device. Carries what the transfer
+   * asked for: the track, where to resume, and whether it was paused.
+   *
+   * A signal because starting playback is the window's job -- session.c speaks
+   * the protocol and owns no player -- and because the transfer arrives on a
+   * socket callback rather than anywhere the UI could reach.
+   */
+  signals[TRANSFER_REQUESTED] = g_signal_new ("transfer-requested",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_INT64, G_TYPE_BOOLEAN);
 
   signals[STATE_CHANGED] = g_signal_new ("state-changed",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
