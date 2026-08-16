@@ -181,3 +181,48 @@ the wrong place to look.
 
 Steps 1 and 2 are worth doing before any of the encoding: they answer whether
 this is possible for a third-party client at all, which is not yet known.
+
+## Step 4 is smaller than it looks: the updates already arrive
+
+Measured on the main account, 2026-08-16. While registered and pinging, the
+dealer socket received three messages of ~38 KB each, around the times a phone
+tried to connect to us:
+
+```
+[dealer] message (38392 bytes): {"payloads":["CpTgAQjTt7TegDQa3MkBCKC6..."]}
+```
+
+The payload is base64 inside a JSON envelope, and decoding it gives exactly
+what the field numbers predict:
+
+```
+field 1  ClusterUpdate.cluster            28692 bytes
+  field 1  Cluster.changed_timestamp_ms   1786904386515
+  field 3  Cluster.player_state           25820 bytes -> spotify:track:4ps9w...
+```
+
+So the server pushes full cluster state, including the *other* device's
+`PlayerState`, down the socket we already hold open. `on_dealer_message()`
+logs the first 700 characters and discards the rest.
+
+That means step 4 is not "get the server to talk to us" -- it already does.
+It is:
+
+1. Parse the `ClusterUpdate`: base64 out of the JSON `payloads` array, then
+   the protobuf, using the field numbers above.
+2. Notice when `Cluster.active_device_id` is *ours* -- that is a phone handing
+   playback over.
+3. Take it: PUT `is_active = 1` with `put_state_reason = PLAYER_STATE_CHANGED`
+   (4), and hand the context uri and position to `player_service`.
+
+Only the third step touches anything outside this file.
+
+## Two other things that log showed
+
+- **Playback recovers from CDN stalls.** Twice, `no response for logical offset
+  ... after 25s`, re-resolved, retried, and carried on. That path works under
+  real conditions.
+- **The AP link dropped mid-session and nothing noticed.**
+  `ap.c: receive loop header read failed: Connection reset by peer` at
+  23:54:42, with playback continuing from the CDN regardless. Worth knowing,
+  because a dead AP link is what "songs randomly do not play" looks like later.

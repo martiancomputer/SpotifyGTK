@@ -299,3 +299,16 @@ else is as reported.
       never show this device. Sign both into the same account to see it.
       *note:* next is step 4 — handle `ClusterUpdate` on the dealer, so remote
       control does something.
+
+- [ ] **`set_progress` called on a destroyed window.** At exit:
+      `spotifygtk_native_window_set_progress: assertion
+      'SPOTIFYGTK_IS_NATIVE_WINDOW (self)' failed`. The player service calls
+      into the window after it has gone. Harmless at shutdown by luck rather
+      than design, and the same lifetime family as the crashes.
+
+- [ ] **Connect step 4 — take a transfer.** `ClusterUpdate` messages already
+      arrive on the dealer socket (~38 KB, base64 in a JSON `payloads` array,
+      decoded and confirmed as `Cluster` with the phone's `PlayerState`). We
+      log 700 characters and drop them. See `research/connect.md`: parse it,
+      notice when `active_device_id` is ours, then PUT `is_active=1` with
+      `PLAYER_STATE_CHANGED` and hand the context to `player_service`.
