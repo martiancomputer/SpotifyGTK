@@ -164,12 +164,14 @@ Tried and ruled out: a device id that was 40 characters but not hex. A real
   PUT, the only message ever received is the initial connection id. So the
   device is not being merged and announced a moment later either.
 
-### What is genuinely untested
+- **`client_id`.** Now sent — `NATIVE_AUTH_CLIENT_ID`, Spotify's own keymaster
+  id, the one sign-in already uses. Worth being clear that this is *not* a
+  developer-portal registration: a portal id is scoped to the Web API, which is
+  a different surface from spclient, and requiring one would mean every user
+  registering an app before their speakers appeared. The request grew to 176
+  bytes; the answer is unchanged. Not the cause.
 
-- **`client_id` is not being sent.** `DeviceInfo.client_id` is field 13 and we
-  pass NULL. Every real device sends one, and a device with no client id may
-  simply be dropped. This is the most plausible remaining cause and the
-  cheapest to try — `native_auth.c` already holds the id used for OAuth.
+### What is genuinely untested
 - **`member_type`.** `CONNECT_STATE` (2) is the obvious reading;
   `CONNECT_STATE_EXTENDED` (5) exists and its meaning is unknown.
 - **`put_state_reason`.** `NEW_DEVICE` (3) is what a first announcement looks

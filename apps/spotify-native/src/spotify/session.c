@@ -380,8 +380,15 @@ connect_put_state (const gchar *bearer, const gchar *connection_id)
     g_strdup_printf ("https://gae2-spclient.spotify.com/connect-state/v1/devices/%s",
                      device_id);
 
+  /*
+   * Spotify's own client id, the one sign-in already uses -- not a
+   * developer-portal registration. A portal id is scoped to the Web API, which
+   * is a different surface from spclient, so it would likely be refused here;
+   * and requiring one would mean everybody registering an app before their
+   * speakers showed up, which is not a thing this client should ask for.
+   */
   g_autoptr(GBytes) body =
-    connect_build_put_state (device_id, "SpotifyGTK", NULL);
+    connect_build_put_state (device_id, "SpotifyGTK", NATIVE_AUTH_CLIENT_ID);
 
   SoupMessage *msg = soup_message_new (SOUP_METHOD_PUT, url);
   SoupMessageHeaders *h = soup_message_get_request_headers (msg);
