@@ -143,56 +143,35 @@ dealer's connection id in `X-Spotify-Connection-Id`, returns **HTTP 200** and
 ~35 KB of `Cluster`. So the body parses — a malformed one answers 400 with an
 empty body, which is the failure mode the Windows client-token block had.
 
-**But the device is not in the cluster that comes back**, by name or by id.
-Checked deliberately, because a 200 only says the request was understood. The
-cluster returned is almost entirely the *web player's* `PlayerState` — its
-playlist context and tracks — which is what was actually playing elsewhere.
+**The device registers.** The cluster that comes back contains it:
 
-Tried and ruled out: a device id that was 40 characters but not hex. A real
-40-hex id behaves identically.
+```
+device  name='SpotifyGTK'  id=fab2037c…6add  can_play=1
+```
 
-### Two more hypotheses, both tried and both wrong
+That took five rounds to see, because the check was broken rather than the
+code. The probe asked `g_strstr_len()` whether the device name appeared in the
+response — but the response is 35 KB of protobuf, full of NUL bytes, with the
+device entry near the end. `g_strstr_len` is for strings and stops at the first
+NUL, so it answered "absent" every time while registration was working
+perfectly. `memmem` finds it immediately.
 
-- **A player state.** `Device.player_state` is now sent — an idle one:
-  timestamp, position 0, `is_playing` false, `is_paused` false,
-  `is_buffering` false, `is_system_initiated` true. The request grew from 121
-  to 140 bytes and still answers **200 with the device absent**. So "the server
-  will not list a device that has never reported a state" is not the
-  explanation, at least not for a state this minimal.
-- **A `ClusterUpdate` arriving late.** It does not. The dealer socket stays
-  open and logs everything it receives; across ~50 seconds after a successful
-  PUT, the only message ever received is the initial connection id. So the
-  device is not being merged and announced a moment later either.
+Everything "ruled out" along the way was therefore ruled out against a
+verifier that could not have said yes: the device id format, the missing
+player state, the missing client id, the late merge, the dead connection. Two
+of those turned into real findings anyway — the dealer heartbeat is
+client-driven `{"type":"ping"}` → `{"type": "pong"}`, confirmed on the wire —
+but none of them was ever the problem.
 
-- **`client_id`.** Now sent — `NATIVE_AUTH_CLIENT_ID`, Spotify's own keymaster
-  id, the one sign-in already uses. Worth being clear that this is *not* a
-  developer-portal registration: a portal id is scoped to the Web API, which is
-  a different surface from spclient, and requiring one would mean every user
-  registering an app before their speakers appeared. The request grew to 176
-  bytes; the answer is unchanged. Not the cause.
+Parse the cluster rather than searching it: `Cluster.device` is field 4, a map
+whose value is a `DeviceInfo`, and `name` is field 3 of that.
 
-### What is genuinely untested
-- **`member_type`.** `CONNECT_STATE` (2) is the obvious reading;
-  `CONNECT_STATE_EXTENDED` (5) exists and its meaning is unknown.
-- **`put_state_reason`.** `NEW_DEVICE` (3) is what a first announcement looks
-  like, but `NEW_CONNECTION` (9) exists and may be what pairs with having just
-  opened a dealer socket.
-- **Keeping the socket alive.** Done, and it works — but it is not the cause.
-  The heartbeat is JSON, and the **client** starts it: sending
-  `{"type":"ping"}` gets `{"type": "pong"}` back, confirmed. (Both strings sit
-  beside `heartbeat` in the shipped client.) A re-announcement 35 seconds
-  later, over a socket that had been pinged and answered, still returns 200
-  with the device absent. So the connection being alive and recognised is not
-  what was missing.
+## Why it may still not show on your phone
 
-Five explanations are now gone: the device id format, a missing player state, a
-late merge, a missing client id, and a dead connection. What is left is
-`member_type`, `put_state_reason`, and the possibility that the cluster in a
-PUT response simply does not list a device that has never been *active* — in
-which case nothing observable from here will ever show it.
+The device appears in the cluster **of the account it registered under**. A
+phone signed into a different account has a different cluster and will never
+see it, which is not a bug and cost some confusion here.
 
-The one check not available from here is the only one that is authoritative:
-**does "SpotifyGTK" appear in the Connect device picker on another client?**
 The PUT response and the dealer are both saying nothing, and they may both be
 the wrong place to look.
 

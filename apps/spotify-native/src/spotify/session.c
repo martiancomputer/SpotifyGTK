@@ -341,10 +341,22 @@ on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
      * plain in the protobuf, so a substring search settles it without
      * decoding the whole thing.
      */
-    gboolean by_name = g_strstr_len (d, (gssize) len, "SpotifyGTK") != NULL;
-    gboolean by_id   = dev_id && g_strstr_len (d, (gssize) len, dev_id) != NULL;
+    /*
+     * memmem, not g_strstr_len.
+     *
+     * The body is protobuf: 35 KB of binary with NUL bytes throughout, and the
+     * device entry is near the end of it. g_strstr_len is for strings and does
+     * not find a needle past the first NUL, so it answered "absent" for five
+     * rounds of debugging while the device was registering perfectly. The
+     * cluster was right; the check was not.
+     */
+    gboolean by_name = memmem (d, len, "SpotifyGTK", strlen ("SpotifyGTK")) != NULL;
+    gboolean by_id   = dev_id && memmem (d, len, dev_id, strlen (dev_id)) != NULL;
     g_message ("[connect] our device in the returned cluster: by name %s, by id %s",
                by_name ? "yes" : "no", by_id ? "yes" : "no");
+
+    if (g_getenv ("SPOTIFY_CLUSTER_DUMP"))
+      g_file_set_contents (g_getenv ("SPOTIFY_CLUSTER_DUMP"), d, (gssize) len, NULL);
 
     if (g_getenv ("SPOTIFY_PROBE_CLUSTER")) {
       GString *run = g_string_new (NULL);
