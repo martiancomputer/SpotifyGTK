@@ -81,12 +81,37 @@ the numbers still have to be read out of the descriptor bytes before encoding.)
 - `spclient.c` already does authenticated HTTPS with bearer and client tokens,
   which is the transport `putState` needs.
 
+## The gate is open — measured
+
+**A third-party client can hold a dealer connection.** Run against the
+throwaway on 2026-08-16: the WebSocket to `wss://gae2-dealer.spotify.com/`
+with `?access_token=<bearer>` was accepted, and the dealer's first message
+carried the id:
+
+```json
+{"headers":{"Spotify-Connection-Id":"NzY0ZDJkMGIt…QTNENg=="},
+ "method":"PUT","type":"message",
+ "uri":"hm://pusher/v1/connections/NzY0ZDJkMGIt…QTNENg%3D%3D"}
+```
+
+200 characters, base64. Two things worth knowing before writing the real
+client:
+
+- **Take it from the header, not the uri.** Both carry it, but the uri's copy
+  is URL-encoded — the trailing `==` arrives as `%3D%3D` — so it would have to
+  be decoded back. The header's copy is already what
+  `X-Spotify-Connection-Id` wants.
+- The bearer alone was enough. No client token, no prior registration, no
+  device announcement.
+
+So nothing about Connect is gated on being the official client, at least at
+this step. `SPOTIFY_PROBE_DEALER=1` reruns it.
+
 ## Suggested order, each step provable on its own
 
-1. Extend `apresolve` to return the `dealer` list. Verifiable offline.
-2. Open the dealer WebSocket and log the connection id. **This is the gate** —
-   if the dealer refuses us, nothing after it matters, and it costs one probe
-   to find out.
+1. ~~Extend `apresolve` to return the `dealer` list.~~ Done — the request asks
+   for both types and `spotifygtk_apresolve_parse_type()` reads either.
+2. ~~Open the dealer WebSocket and log the connection id.~~ Done, above.
 3. Encode `DeviceInfo` + `Capabilities` and PUT it, then read the cluster back
    and confirm the device appears from another client.
 4. Handle `ClusterUpdate` so remote control actually works.

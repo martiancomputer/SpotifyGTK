@@ -16,6 +16,13 @@ static gboolean cache_attempted = FALSE;
 gchar **
 spotifygtk_apresolve_parse (const gchar *body, gssize len, GError **error)
 {
+  return spotifygtk_apresolve_parse_type (body, len, "accesspoint", error);
+}
+
+gchar **
+spotifygtk_apresolve_parse_type (const gchar *body, gssize len,
+                                 const gchar *member, GError **error)
+{
   g_return_val_if_fail (body != NULL, NULL);
 
   g_autoptr(JsonParser) parser = json_parser_new ();
@@ -30,16 +37,16 @@ spotifygtk_apresolve_parse (const gchar *body, gssize len, GError **error)
   }
 
   JsonObject *obj = json_node_get_object (root);
-  if (!json_object_has_member (obj, "accesspoint")) {
-    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                         "apresolve response carried no 'accesspoint' member");
+  if (!json_object_has_member (obj, member)) {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "apresolve response carried no '%s' member", member);
     return NULL;
   }
 
-  JsonNode *ap_node = json_object_get_member (obj, "accesspoint");
+  JsonNode *ap_node = json_object_get_member (obj, member);
   if (!JSON_NODE_HOLDS_ARRAY (ap_node)) {
-    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                         "apresolve 'accesspoint' was not an array");
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "apresolve '%s' was not an array", member);
     return NULL;
   }
 
@@ -60,8 +67,8 @@ spotifygtk_apresolve_parse (const gchar *body, gssize len, GError **error)
 
   if (hosts->len == 0) {
     g_ptr_array_free (hosts, TRUE);
-    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                         "apresolve returned no usable access points");
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                 "apresolve returned no usable '%s' hosts", member);
     return NULL;
   }
 

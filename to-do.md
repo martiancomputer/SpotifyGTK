@@ -281,6 +281,12 @@ else is as reported.
       transport is wrong as well as the payload, and there is no dealer at all.
       Measured: apresolve already returns dealer hosts, and libsoup 3.6.6 has
       the WebSocket, so no new dependency.
-      *note:* do steps 1–2 first — extend apresolve, then open the dealer and
-      log the connection id. That is the gate: if the dealer refuses a
-      third-party client, none of the encoding matters, and one probe answers it.
+      **Steps 1–2 done, and the gate is open.** apresolve now returns both
+      lists, and the dealer accepted this client on the throwaway: the first
+      message carried a 200-character `Spotify-Connection-Id`. The bearer alone
+      was enough — no client token, no prior registration. So nothing here is
+      gated on being the official client, at least this far in.
+      *note:* next is step 3 — encode `DeviceInfo` + `Capabilities` and PUT it
+      to spclient with that id in `X-Spotify-Connection-Id`, then see whether
+      the device appears from another client. Field numbers still have to be
+      read out of the descriptor bytes rather than assumed.

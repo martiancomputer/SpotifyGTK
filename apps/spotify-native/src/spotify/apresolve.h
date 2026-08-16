@@ -21,7 +21,12 @@
 
 G_BEGIN_DECLS
 
-#define APRESOLVE_URL "https://apresolve.spotify.com/?type=accesspoint"
+/*
+ * Both lists in one request. The same endpoint answers for several types and
+ * costs no more for asking, and Connect needs a dealer host from exactly the
+ * region the access point came from.
+ */
+#define APRESOLVE_URL "https://apresolve.spotify.com/?type=accesspoint&type=dealer"
 
 /*
  * Parse an apresolve response body into a NULL-terminated array of
@@ -34,6 +39,13 @@ G_BEGIN_DECLS
  * or carries no usable accesspoint entries.
  */
 gchar **spotifygtk_apresolve_parse (const gchar *body, gssize len, GError **error);
+
+/*
+ * The same parse, for a named member of the response -- "accesspoint" or
+ * "dealer". `spotifygtk_apresolve_parse()` is this with "accesspoint".
+ */
+gchar **spotifygtk_apresolve_parse_type (const gchar *body, gssize len,
+                                         const gchar *member, GError **error);
 
 /*
  * Fetch the access point list. The result is cached for the lifetime of the

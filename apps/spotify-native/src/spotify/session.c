@@ -16,6 +16,7 @@
 #include "native_auth.h"
 #include "spclient.h"
 
+#include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
 
 #include <string.h>
@@ -193,6 +194,104 @@ generate_device_id (void)
 
 static void flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok);
 
+
+/* ── Probe: can a third-party client hold a dealer connection? ──────────────
+ *
+ * The gate for Spotify Connect. Registration is an HTTPS PUT carrying an
+ * X-Spotify-Connection-Id header, and that id only exists if the dealer will
+ * talk to us -- so whether any of the rest is worth writing is settled here
+ * and nowhere else. See research/connect.md.
+ *
+ * Read-only: it opens a socket, reads what arrives and says so. Nothing is
+ * registered, nothing is written, no device is announced.
+ */
+static void
+on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
+                   gpointer user_data)
+{
+  gsize len = 0;
+  const gchar *d = g_bytes_get_data (message, &len);
+  g_autofree gchar *text = g_strndup (d, MIN (len, 700));
+  (void) ws; (void) type; (void) user_data;
+
+  g_message ("[dealer] message (%" G_GSIZE_FORMAT " bytes): %s", len, text);
+
+  /*
+   * From the header, not the uri.
+   *
+   * Both carry it, but the uri's copy is URL-encoded -- the trailing "==" of
+   * the base64 arrives as %3D%3D -- so taking it from there means decoding it
+   * back before it can go in a header. The headers copy is already the value
+   * the X-Spotify-Connection-Id request header wants.
+   */
+  const gchar *key = "\"Spotify-Connection-Id\":\"";
+  const gchar *p = g_strstr_len (text, -1, key);
+  if (p) {
+    p += strlen (key);
+    const gchar *end = strchr (p, '"');
+    if (end) {
+      g_autofree gchar *id = g_strndup (p, (gsize) (end - p));
+      g_message ("[dealer] CONNECTION ID (%" G_GSIZE_FORMAT " chars): %s",
+                 strlen (id), id);
+    }
+  }
+}
+
+static void
+on_dealer_closed (SoupWebsocketConnection *ws, gpointer user_data)
+{
+  (void) user_data;
+  g_message ("[dealer] closed: %d %s",
+             soup_websocket_connection_get_close_code (ws),
+             soup_websocket_connection_get_close_data (ws));
+}
+
+static void
+on_dealer_connected (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  g_autoptr(GError) err = NULL;
+  SoupWebsocketConnection *ws =
+    soup_session_websocket_connect_finish (SOUP_SESSION (source), result, &err);
+  (void) user_data;
+
+  if (!ws) {
+    g_warning ("[dealer] connect failed: %s", err ? err->message : "unknown");
+    return;
+  }
+
+  g_message ("[dealer] connected -- the dealer accepted this client");
+  g_signal_connect (ws, "message", G_CALLBACK (on_dealer_message), NULL);
+  g_signal_connect (ws, "closed",  G_CALLBACK (on_dealer_closed), NULL);
+  /* Deliberately leaked for the length of the probe: dropping the last
+   * reference closes the socket, and the point is to see what it sends. */
+}
+
+static void
+dealer_probe (const gchar *bearer)
+{
+  static gboolean done;
+  if (done || !bearer)
+    return;
+  done = TRUE;
+
+  /* One host is enough to answer the question; apresolve returns four and
+   * they are equivalent. */
+  g_autofree gchar *url =
+    g_strdup_printf ("wss://gae2-dealer.spotify.com/?access_token=%s", bearer);
+
+  SoupSession *ws_session = soup_session_new ();
+  g_autoptr(SoupMessage) msg = soup_message_new (SOUP_METHOD_GET, url);
+  if (!msg) {
+    g_warning ("[dealer] could not build the request");
+    return;
+  }
+
+  g_message ("[dealer] connecting to gae2-dealer.spotify.com");
+  soup_session_websocket_connect_async (ws_session, msg, NULL, NULL,
+                                        G_PRIORITY_DEFAULT, NULL,
+                                        on_dealer_connected, NULL);
+}
+
 static void
 on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
                   GError *error, gpointer user_data)
@@ -226,6 +325,9 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
   self->bearer_expires_at = g_get_monotonic_time ()
                           + (gint64) expires_in_seconds * G_USEC_PER_SEC;
   g_mutex_unlock (&self->lock);
+
+  if (g_getenv ("SPOTIFY_PROBE_DEALER"))
+    dealer_probe (access_token);
 
   if (was_refresh) {
     g_message ("session: bearer refreshed (expires in %ds)", expires_in_seconds);
