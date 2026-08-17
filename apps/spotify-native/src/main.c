@@ -1302,6 +1302,12 @@ on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpo
       return;
     }
 
+    if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+      g_message ("[live-test] read-ahead cancelled; the run was superseded");
+      g_main_loop_quit (state->loop);
+      return;
+    }
+
     g_warning ("[live-test] read-ahead fetch failed at logical offset %" G_GOFFSET_FORMAT
                ": %s -- gave up after %d retries.",
                state->next_download_offset, error ? error->message : "unknown error",
@@ -1880,6 +1886,21 @@ on_track_metadata_result (const SpclientAudioFile *files, guint n_files, GError 
     report_progress (state, SPOTIFYGTK_ENGINE_UNAVAILABLE,
                      "This track is not available.");
     state->ok = FALSE;
+  } else if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+    /*
+     * Superseded, not failed.
+     *
+     * Seeking or picking another track cancels the run in flight, and this
+     * request is the one most likely to be outstanding when that happens.
+     * Treating it as an error had two consequences, both bad: the streaming
+     * credentials were thrown away on every seek, and the run was reported as
+     * failed, which made the player retry the track -- from the beginning.
+     * That is the song jumping back to zero seconds after a seek.
+     *
+     * Unwind quietly instead, exactly as on_engine_cancelled does, and leave
+     * state->ok alone so nothing downstream reads this as a failure.
+     */
+    g_message ("[live-test] metadata request cancelled; the run was superseded");
   } else {
     g_warning ("[live-test] get_track_metadata failed: %s", error ? error->message : "unknown error");
     /* This is the first request made with the streaming credentials, so it is
