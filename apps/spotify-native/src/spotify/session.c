@@ -135,6 +135,60 @@ spotifygtk_native_track_copy (const SpotifyNativeTrack *track)
   return copy;
 }
 
+/*
+ * A controller's instruction, on its way to the main thread.
+ *
+ * The dealer socket lives on the worker thread, so everything it decodes
+ * arrives there. Emitting straight from that thread ran the window's handlers
+ * -- and through them GTK widget code -- concurrently with the frame clock,
+ * which is a data race GTK gives no protection against. It surfaced as a SEGV
+ * deep inside gtk_widget_measure with no frame of ours on the stack and
+ * nothing for ASan to attribute, because nothing had been freed: two threads
+ * were simply in the widget tree at once.
+ */
+typedef struct {
+  SpotifyNativeSession *session;
+  gchar                *text;      /* track uri, or command endpoint */
+  gint64                number;    /* position, or seek target */
+  gboolean              flag;      /* paused */
+  gboolean              is_command;
+} RemoteEvent;
+
+static gboolean
+dispatch_remote (gpointer user_data)
+{
+  RemoteEvent *event = user_data;
+
+  if (event->is_command)
+    g_signal_emit (event->session, signals[REMOTE_COMMAND], 0,
+                   event->text, event->number);
+  else
+    g_signal_emit (event->session, signals[TRANSFER_REQUESTED], 0,
+                   event->text, event->number, event->flag);
+
+  g_object_unref (event->session);
+  g_free (event->text);
+  g_free (event);
+  return G_SOURCE_REMOVE;
+}
+
+/* Hand a decoded instruction to the thread that owns the widgets. */
+static void
+emit_remote (SpotifyNativeSession *self, gboolean is_command,
+             const gchar *text, gint64 number, gboolean flag)
+{
+  if (!self || !text)
+    return;
+
+  RemoteEvent *event = g_new0 (RemoteEvent, 1);
+  event->session    = g_object_ref (self);
+  event->text       = g_strdup (text);
+  event->number     = number;
+  event->flag       = flag;
+  event->is_command = is_command;
+  g_main_context_invoke (self->caller_context, dispatch_remote, event);
+}
+
 /* ── State reporting ─────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -638,8 +692,7 @@ dealer_handle_transfer_state (SpotifyNativeSession *self,
     return;
   }
 
-  g_signal_emit (self, signals[TRANSFER_REQUESTED], 0,
-                 track_uri, position_ms, paused);
+  emit_remote (self, FALSE, track_uri, position_ms, paused);
 }
 
 /*
@@ -700,9 +753,7 @@ dealer_handle_command (JsonObject *root)
 
     g_message ("[command] acknowledging %s", endpoint ? endpoint : "(none)");
     connect_put_state (dealer_bearer, dealer_conn_id);
-    if (endpoint && dealer_session)
-      g_signal_emit (dealer_session, signals[REMOTE_COMMAND], 0,
-                     endpoint, seek_to);
+    emit_remote (dealer_session, TRUE, endpoint, seek_to, FALSE);
     return;
   }
 
