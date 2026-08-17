@@ -243,6 +243,9 @@ static gchar connect_device_id[41];
 #define CS_PS_IS_PAUSED           13
 #define CS_PS_IS_BUFFERING        14
 #define CS_PS_IS_SYSTEM_INITIATED 15
+#define CS_PS_CONTEXT_URI          2
+#define CS_PS_TRACK                7   /* ProvidedTrack */
+#define CS_PROVIDEDTRACK_URI       1
 
 #define CS_PUT_DEVICE             2
 #define CS_PUT_MEMBER_TYPE        3
@@ -257,6 +260,17 @@ static gchar connect_device_id[41];
 #define CS_REASON_NEW_DEVICE      3   /* PutStateReason */
 #define CS_REASON_PLAYER_STATE_CHANGED 4
 #define CS_DEVICE_TYPE_COMPUTER   1   /* devices.DeviceType */
+
+/*
+ * What this device is actually doing, as last reported by the window.
+ *
+ * An active device that reports an idle player state is a contradiction, and
+ * the server resolves it by dropping the device -- which looks like connecting
+ * successfully and then disappearing a few seconds later.
+ */
+static gchar   *connect_now_uri;
+static gint64   connect_now_position_ms;
+static gboolean connect_now_playing;
 
 /* Set while acknowledging a transfer: the command being answered, and the
  * intention to become the active device. Cleared after one put_state. */
@@ -305,9 +319,24 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
   g_autoptr(GByteArray) ps = g_byte_array_new ();
   pb_write_varint_field (ps, CS_PS_TIMESTAMP,
                          (guint64) (g_get_real_time () / 1000));
-  pb_write_varint_field (ps, CS_PS_POSITION, 0);
-  pb_write_varint_field (ps, CS_PS_IS_PLAYING, 0);
-  pb_write_varint_field (ps, CS_PS_IS_PAUSED, 0);
+
+  /* Report the track, not silence. Claiming to be active while saying nothing
+   * is playing is what made the device vanish moments after connecting. */
+  if (connect_now_uri && *connect_now_uri) {
+    pb_write_bytes_field (ps, CS_PS_CONTEXT_URI,
+                          (const guint8 *) connect_now_uri,
+                          strlen (connect_now_uri));
+
+    g_autoptr(GByteArray) tr = g_byte_array_new ();
+    pb_write_bytes_field (tr, CS_PROVIDEDTRACK_URI,
+                          (const guint8 *) connect_now_uri,
+                          strlen (connect_now_uri));
+    pb_write_message_field (ps, CS_PS_TRACK, tr->data, tr->len);
+  }
+
+  pb_write_varint_field (ps, CS_PS_POSITION, (guint64) connect_now_position_ms);
+  pb_write_varint_field (ps, CS_PS_IS_PLAYING, connect_now_playing ? 1 : 0);
+  pb_write_varint_field (ps, CS_PS_IS_PAUSED, connect_now_playing ? 0 : 1);
   pb_write_varint_field (ps, CS_PS_IS_BUFFERING, 0);
   pb_write_varint_field (ps, CS_PS_IS_SYSTEM_INITIATED, 1);
 
@@ -332,7 +361,11 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
   pb_write_varint_field (put, CS_PUT_REASON,
                          connect_claim_active ? CS_REASON_PLAYER_STATE_CHANGED
                                               : CS_REASON_NEW_DEVICE);
-  pb_write_varint_field (put, CS_PUT_MESSAGE_ID, 1);
+  /* Increments. A controller and the server both use this to tell a fresh
+   * state from one they have already seen; sending 1 every time says nothing
+   * has changed since the device appeared. */
+  static guint64 message_id;
+  pb_write_varint_field (put, CS_PUT_MESSAGE_ID, ++message_id);
 
   if (connect_claim_active && connect_ack_device) {
     pb_write_bytes_field (put, CS_PUT_LAST_CMD_DEVICE,
@@ -1287,6 +1320,26 @@ spotifygtk_native_session_reconnect (SpotifyNativeSession *self)
 
   if (self->context)
     g_main_context_invoke (self->context, resignin, self);
+}
+
+
+void
+spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
+                                           const gchar *track_uri,
+                                           gint64 position_ms,
+                                           gboolean playing)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+
+  g_free (connect_now_uri);
+  connect_now_uri = g_strdup (track_uri);
+  connect_now_position_ms = position_ms;
+  connect_now_playing = playing;
+
+  /* Tell the server now rather than at the next keepalive: a controller that
+   * just handed playback over is waiting to see it start. */
+  if (dealer_bearer && dealer_conn_id)
+    connect_put_state (dealer_bearer, dealer_conn_id);
 }
 
 void

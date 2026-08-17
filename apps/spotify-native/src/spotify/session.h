@@ -89,6 +89,17 @@ SpotifyNativeSession *spotifygtk_native_session_new (void);
 void spotifygtk_native_session_start (SpotifyNativeSession *self);
 
 /*
+ * Tell Spotify Connect what this device is playing.
+ *
+ * An active device that reports nothing playing is dropped, so this has to be
+ * called when playback starts, stops or moves -- not only on a timer.
+ */
+void spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
+                                                const gchar *track_uri,
+                                                gint64 position_ms,
+                                                gboolean playing);
+
+/*
  * Drop the connection and sign in again.
  *
  * start() returns early once its thread exists, so there was no way back from

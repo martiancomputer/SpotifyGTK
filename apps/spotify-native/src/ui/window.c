@@ -142,6 +142,7 @@ struct _SpotifyGtkNativeWindow {
 
   /* State */
   gchar *current_track_uri;
+  gint64 last_position_ms;   /* last reported position, for Connect */
   gint64 current_track_duration_ms;   /* for the progress bar; engine reports position only */
   gboolean queue_expanded;
 
@@ -2591,6 +2592,13 @@ broadcast_playing_uri (SpotifyGtkNativeWindow *self)
     spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING;
   const gchar *uri = self->current_track_uri;
 
+  /* Spotify Connect needs the same news: a device registered as active while
+   * reporting nothing playing gets dropped. */
+  if (self->session)
+    spotifygtk_native_session_report_playback (self->session, uri,
+                                               self->last_position_ms,
+                                               is_playing);
+
   spotifygtk_search_page_set_playing_uri (self->search_page, uri, is_playing);
   spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, uri, is_playing);
   spotifygtk_context_page_set_playing_uri (self->context_page, uri, is_playing);
@@ -2666,6 +2674,11 @@ on_player_position_changed (SpotifyNativePlayerService *player,
                             gint64 position_ms, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+
+  /* Kept, not reported: put_state is an HTTPS round trip and this fires four
+   * times a second. PlayerState pairs a position with the timestamp it was
+   * true at, so a controller extrapolates between our reports. */
+  self->last_position_ms = position_ms;
 
   /* The position still belongs to the outgoing track; painting it against the
    * new track's duration is what made the old song appear to start playing. */

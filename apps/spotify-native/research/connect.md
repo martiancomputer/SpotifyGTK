@@ -303,3 +303,27 @@ longer used.
   `ap.c: receive loop header read failed: Connection reset by peer` at
   23:54:42, with playback continuing from the CDN regardless. Worth knowing,
   because a dead AP link is what "songs randomly do not play" looks like later.
+
+## Staying connected
+
+A device that registers and goes quiet is dropped. Two ways to be quiet, and
+both were happening:
+
+- **`put_state` ran once.** Fixed by a thirty-second keepalive.
+- **`message_id` was always 1.** It has to increment. Sending the same id every
+  time says nothing has changed since the device first appeared, and both the
+  server and a controller use it to tell fresh state from state they have
+  already seen.
+- **The player state was always idle.** After answering a transfer the device
+  claims `is_active = 1`, and then reported no track, `is_playing = 0`. An
+  active device playing nothing is a contradiction, and the server resolves it
+  by dropping the device -- which reads as connecting successfully and then
+  vanishing seconds later, just before anything can be tested.
+
+So `PlayerState` now carries the real track (`context_uri` and a `ProvidedTrack`
+at field 7, whose `uri` is field 1), the position, and `is_playing`.
+`spotifygtk_native_session_report_playback()` is called when playback starts,
+stops or changes track -- **not** on every position tick, because `put_state`
+is an HTTPS round trip and the position signal fires four times a second.
+`PlayerState` pairs `timestamp` with `position_as_of_timestamp` precisely so a
+controller extrapolates between reports.
