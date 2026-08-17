@@ -1261,6 +1261,23 @@ on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpo
     return;
   }
 
+  if (!decrypted_chunk && spotifygtk_cdn_error_is_past_eof (error)) {
+    /*
+     * The track is simply over.
+     *
+     * Read-ahead walks forward in fixed steps, so the last step always asks
+     * for a range beginning at or past the end of the file. Treating that as a
+     * failed fetch failed the track seconds before it ended, and the player
+     * then fell back to a different one -- which, with a controller attached,
+     * it reported as the track it was playing.
+     */
+    g_message ("[live-test] reached the end of the stream at logical offset %"
+               G_GOFFSET_FORMAT, state->next_download_offset);
+    state->ok = TRUE;
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
   if (!decrypted_chunk) {
     /*
      * One refused range used to end the track outright. That is the wrong

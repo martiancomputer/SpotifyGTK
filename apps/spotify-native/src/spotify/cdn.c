@@ -280,11 +280,21 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
 
   guint status = soup_message_get_status (cl->message);
   if (status != SOUP_STATUS_PARTIAL_CONTENT) {
-    GError *status_error = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+    /* 416 is the file ending, not the fetch failing -- see
+     * spotifygtk_cdn_error_is_past_eof(). Kept as an error so the caller still
+     * decides, but a distinguishable one, and not shouted about. */
+    gboolean past_eof = (status == SOUP_STATUS_REQUESTED_RANGE_NOT_SATISFIABLE);
+    GError *status_error = g_error_new (G_IO_ERROR,
+                                        past_eof ? G_IO_ERROR_NOT_FOUND
+                                                 : G_IO_ERROR_FAILED,
                                         "CDN range request returned HTTP %u (expected 206)", status);
-    g_warning ("cdn: logical offset %" G_GOFFSET_FORMAT ", length %" G_GSIZE_FORMAT
-               " returned HTTP %u instead of 206 Partial Content",
-               cl->offset, cl->length, status);
+    if (past_eof)
+      g_message ("cdn: logical offset %" G_GOFFSET_FORMAT " is past the end of "
+                 "the file (HTTP 416); treating it as end of stream", cl->offset);
+    else
+      g_warning ("cdn: logical offset %" G_GOFFSET_FORMAT ", length %" G_GSIZE_FORMAT
+                 " returned HTTP %u instead of 206 Partial Content",
+                 cl->offset, cl->length, status);
     cl->callback (NULL, cl->offset, status_error, cl->user_data);
     g_error_free (status_error);
     g_bytes_unref (bytes);
@@ -439,4 +449,10 @@ spotifygtk_cdn_fetcher_set_cancellable (SpotifyCdnFetcher *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_CDN_FETCHER (self));
   g_set_object (&self->cancellable, cancellable);
+}
+
+gboolean
+spotifygtk_cdn_error_is_past_eof (const GError *error)
+{
+  return error && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
 }

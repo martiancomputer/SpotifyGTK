@@ -45,4 +45,14 @@ void spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self,
                                  goffset offset, gsize length,
                                  CdnChunkCallback callback, gpointer user_data);
 
+/*
+ * A range that starts at or past the end of the file.
+ *
+ * The CDN answers 416 for it, which is correct and expected: read-ahead walks
+ * forward in fixed steps and the last step always lands past the end. Callers
+ * must treat this as end of stream, not as a failed fetch -- doing otherwise
+ * fails the track a few seconds before it ends.
+ */
+gboolean spotifygtk_cdn_error_is_past_eof (const GError *error);
+
 G_END_DECLS
