@@ -2625,21 +2625,50 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
     return;
   }
 
+  const SpotifyNativeTrack *track = g_ptr_array_index (tracks, 0);
+
   /*
-   * Go in by the same door a click uses.
+   * A transfer is a statement of desired state, not a "play this".
    *
-   * Calling the player directly plays the audio and nothing else: the title,
-   * cover, progress and the uri every list highlights all stay on whatever was
-   * playing before. Worse, that stale uri is what gets reported back to
-   * Spotify, so the device answers a transfer by claiming to play a different
-   * track than the one it was handed -- which is its own reason to be dropped.
+   * Every button on the controller arrives here as a full transfer -- pausing
+   * from a phone sends one naming the track it is already on, with paused set.
+   * Starting playback unconditionally therefore restarted the track from the
+   * beginning on every pause, and reported position 0 back, which the phone
+   * answered with another transfer correcting us: a loop that reads as the
+   * device connecting forever.
+   *
+   * So only start what is not already started, and otherwise just move to the
+   * position and play state being asked for.
    */
-  play_native_track (self, g_ptr_array_index (tracks, 0), FALSE);
+  gboolean already_current =
+    g_strcmp0 (self->current_track_uri, track->uri) == 0 &&
+    spotifygtk_player_service_is_active (self->player);
+
+  if (!already_current) {
+    /*
+     * Go in by the same door a click uses.
+     *
+     * Calling the player directly plays the audio and nothing else: the title,
+     * cover, progress and the uri every list highlights all stay on whatever
+     * was playing before. Worse, that stale uri is what gets reported back to
+     * Spotify, so the device answers a transfer by claiming to play a
+     * different track than the one it was handed.
+     */
+    play_native_track (self, track, FALSE);
+  } else {
+    g_message ("window: already on %s; adopting position and play state only",
+               track->uri);
+  }
 
   if (a->position_ms > 0)
     spotifygtk_player_service_seek (self->player, a->position_ms);
+
+  /* Both directions: a transfer that says playing has to undo an earlier
+   * pause, or the controller sees a device stuck paused and corrects it. */
   if (a->paused)
     spotifygtk_player_service_pause (self->player);
+  else if (spotifygtk_player_service_is_paused (self->player))
+    spotifygtk_player_service_resume (self->player);
 
   self->last_position_ms = a->position_ms;
   broadcast_playing_uri (self);
