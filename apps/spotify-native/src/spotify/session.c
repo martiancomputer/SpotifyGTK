@@ -95,7 +95,7 @@ struct _SpotifyNativeSession {
 
 G_DEFINE_FINAL_TYPE (SpotifyNativeSession, spotifygtk_native_session, G_TYPE_OBJECT)
 
-enum { STATE_CHANGED, TRANSFER_REQUESTED, N_SIGNALS };
+enum { STATE_CHANGED, TRANSFER_REQUESTED, REMOTE_COMMAND, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 void
@@ -505,6 +505,9 @@ connect_put_state (const gchar *bearer, const gchar *connection_id)
  * registered, nothing is written, no device is announced.
  */
 static SoupWebsocketConnection *dealer_ws;   /* probe only; see connect.md */
+/* The session the dealer speaks for, so an incoming command can be turned
+ * into a signal. Weak: it is a borrowed pointer, and a command arriving after
+ * the session is gone must find NULL rather than free'd memory. */
 static SpotifyNativeSession    *dealer_session;
 static gchar *dealer_conn_id;
 static gchar *dealer_bearer;
@@ -612,8 +615,23 @@ dealer_handle_transfer_state (SpotifyNativeSession *self,
              track_uri ? track_uri : "(none)", position_ms,
              paused ? "yes" : "no", context_uri ? context_uri : "(none)");
 
+  /*
+   * An empty transfer is normal, not a failure.
+   *
+   * A phone with nothing playing hands over nothing: 83 bytes, a timestamp, a
+   * position of zero and no current_track at all. The device should become
+   * active and wait, exactly as a speaker does when selected while idle. What
+   * it must not do is treat this as an error and sit silent, because the
+   * controller then has an active device that never reports anything.
+   */
   if (!track_uri) {
-    g_warning ("[transfer] no track in the transfer; nothing to play");
+    g_message ("[transfer] nothing was playing on the other device; taking the "
+               "device idle and waiting for a play command");
+    return;
+  }
+
+  if (!self) {
+    g_warning ("[transfer] no session to hand the track to");
     return;
   }
 
@@ -653,26 +671,37 @@ dealer_handle_command (JsonObject *root)
   g_message ("[command] %s from %s (message_id %" G_GUINT64_FORMAT ")",
              endpoint ? endpoint : "(none)", from ? from : "(unknown)", msg_id);
 
-  if (g_strcmp0 (endpoint, "transfer") != 0) {
-    g_message ("[command] not a transfer; nothing to answer yet");
-    return;
-  }
-
   if (!dealer_bearer || !dealer_conn_id) {
-    g_warning ("[command] transfer arrived with no connection id to answer on");
+    g_warning ("[command] arrived with no connection id to answer on");
     return;
   }
 
   /*
-   * Acknowledge by becoming active. The command's data carries a TransferState
-   * with the context and position to resume from; decoding that and starting
-   * playback is the remaining piece, so this claims the device without yet
-   * playing anything.
+   * Every command is acknowledged, whether or not it is understood.
+   *
+   * A controller that gets no answer treats the device as unresponsive and
+   * takes playback back, which looks from here like connecting and then being
+   * dropped. Answering an endpoint we do nothing with is still better than
+   * silence -- it keeps the device alive while the rest is built.
    */
   g_free (connect_ack_device);
   connect_ack_device   = g_strdup (from);
   connect_ack_msg_id   = msg_id;
   connect_claim_active = TRUE;
+
+  if (g_strcmp0 (endpoint, "transfer") != 0) {
+    gint64 seek_to = 0;
+    if (g_strcmp0 (endpoint, "seek_to") == 0 && cmd &&
+        json_object_has_member (cmd, "value"))
+      seek_to = json_object_get_int_member (cmd, "value");
+
+    g_message ("[command] acknowledging %s", endpoint ? endpoint : "(none)");
+    connect_put_state (dealer_bearer, dealer_conn_id);
+    if (endpoint && dealer_session)
+      g_signal_emit (dealer_session, signals[REMOTE_COMMAND], 0,
+                     endpoint, seek_to);
+    return;
+  }
 
   g_message ("[command] answering the transfer: put_state with is_active=1");
   connect_put_state (dealer_bearer, dealer_conn_id);
@@ -945,12 +974,23 @@ on_dealer_connected (GObject *source, GAsyncResult *result, gpointer user_data)
 }
 
 static void
-dealer_probe (const gchar *bearer)
+dealer_probe (SpotifyNativeSession *self, const gchar *bearer)
 {
   static gboolean done;
   if (done || !bearer)
     return;
   done = TRUE;
+
+  /*
+   * Remember who to emit on.
+   *
+   * Without this the pointer stayed NULL and every transfer was decoded
+   * correctly and then emitted into nothing -- g_signal_emit on NULL warns and
+   * returns, so the track, position and pause state were all read off the wire
+   * and dropped on the floor. The device claimed playback and never played.
+   */
+  dealer_session = self;
+  g_object_add_weak_pointer (G_OBJECT (self), (gpointer *) &dealer_session);
 
   /* One host is enough to answer the question; apresolve returns four and
    * they are equivalent. */
@@ -1005,7 +1045,7 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
   g_mutex_unlock (&self->lock);
 
   if (g_getenv ("SPOTIFY_PROBE_DEALER"))
-    dealer_probe (access_token);
+    dealer_probe (self, access_token);
 
   if (was_refresh) {
     g_message ("session: bearer refreshed (expires in %ds)", expires_in_seconds);
@@ -2601,6 +2641,13 @@ spotifygtk_native_session_class_init (SpotifyNativeSessionClass *klass)
   signals[TRANSFER_REQUESTED] = g_signal_new ("transfer-requested",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_INT64, G_TYPE_BOOLEAN);
+
+  /* A controller pressed something: pause, resume, next, previous, seek. The
+   * string is the endpoint as Spotify names it; the gint64 is the seek target
+   * in milliseconds and is meaningless for the rest. */
+  signals[REMOTE_COMMAND] = g_signal_new ("remote-command",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_INT64);
 
   signals[STATE_CHANGED] = g_signal_new ("state-changed",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,

@@ -717,6 +717,7 @@ subscribe_collection_changes (SpotifyGtkNativeWindow *self)
 static void set_row_liked_for_uri (SpotifyGtkNativeWindow *self,
                                   const gchar *uri, gboolean liked);
 static void note_local_write (SpotifyGtkNativeWindow *self);
+static void broadcast_playing_uri (SpotifyGtkNativeWindow *self);
 static void on_album_rename (SpotifyGtkAlbumGrid *grid, const gchar *uri,
                              const gchar *name, const gchar *cover_id,
                              gpointer user_data);
@@ -2538,6 +2539,42 @@ on_album_rename (SpotifyGtkAlbumGrid *grid, const gchar *uri, const gchar *name,
 }
 
 /*
+ * A controller pressed a transport button.
+ *
+ * The command has already been acknowledged by the protocol layer; this is
+ * only the acting-on-it. Endpoints we cannot honour yet are logged rather than
+ * silently dropped, because "the phone's button did nothing" is otherwise
+ * indistinguishable from a broken connection.
+ */
+static void
+on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
+                           gint64 value, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) session;
+
+  if (!endpoint)
+    return;
+
+  g_message ("window: remote command %s", endpoint);
+
+  if (g_strcmp0 (endpoint, "pause") == 0)
+    spotifygtk_player_service_pause (self->player);
+  else if (g_strcmp0 (endpoint, "resume") == 0)
+    spotifygtk_player_service_resume (self->player);
+  else if (g_strcmp0 (endpoint, "seek_to") == 0)
+    spotifygtk_player_service_seek (self->player, value);
+  else if (g_strcmp0 (endpoint, "skip_next") == 0)
+    advance_next (self, FALSE);
+  else if (g_strcmp0 (endpoint, "skip_prev") == 0)
+    advance_prev (self);
+  else
+    g_message ("window: %s is acknowledged but not acted on yet", endpoint);
+
+  broadcast_playing_uri (self);
+}
+
+/*
  * Another client handed playback to this device.
  *
  * Arrives from the dealer, via the session, because starting playback is this
@@ -3594,6 +3631,8 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_now_playing_changed), self);
   g_signal_connect (self->player, "position-changed",
                     G_CALLBACK (on_player_position_changed), self);
+  g_signal_connect (self->session, "remote-command",
+                    G_CALLBACK (on_session_remote_command), self);
   g_signal_connect (self->session, "transfer-requested",
                     G_CALLBACK (on_session_transfer_requested), self);
   g_signal_connect (self->session, "state-changed",
