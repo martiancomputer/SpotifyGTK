@@ -308,6 +308,8 @@ static gchar connect_device_id[41];
 #define CS_PUT_MESSAGE_ID         6
 #define CS_PUT_LAST_CMD_DEVICE    7
 #define CS_PUT_LAST_CMD_MSG_ID    8
+#define CS_PUT_STARTED_PLAYING_AT  9
+#define CS_PUT_HAS_BEEN_PLAYING_MS 11
 #define CS_PUT_CLIENT_TIMESTAMP  12
 
 #define CS_MEMBER_CONNECT_STATE   2   /* MemberType */
@@ -329,6 +331,8 @@ static gboolean connect_now_playing;
 /* Set while acknowledging a transfer: the command being answered, and the
  * intention to become the active device. Cleared after one put_state. */
 static gboolean  connect_claim_active;
+/* When this device became the active one, in ms. Zero until it claims. */
+static gint64    connect_active_since;
 static gchar    *connect_ack_device;
 static guint64   connect_ack_msg_id;
 
@@ -421,6 +425,26 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
   static guint64 message_id;
   pb_write_varint_field (put, CS_PUT_MESSAGE_ID, ++message_id);
 
+  /*
+   * When this device took over, and how long it has been at it.
+   *
+   * Both are real fields of PutStateRequest (9 and 11, read out of the
+   * shipped client's descriptors) and both were missing. A device that claims
+   * is_active without ever saying when it started is not promoted to
+   * active_device_id: the put succeeds, the device is listed, and the
+   * controller waits on "Connecting..." for an active device that never
+   * arrives.
+   */
+  if (connect_claim_active) {
+    if (connect_active_since == 0)
+      connect_active_since = g_get_real_time () / 1000;
+    pb_write_varint_field (put, CS_PUT_STARTED_PLAYING_AT,
+                           (guint64) connect_active_since);
+    pb_write_varint_field (put, CS_PUT_HAS_BEEN_PLAYING_MS,
+                           (guint64) ((g_get_real_time () / 1000)
+                                      - connect_active_since));
+  }
+
   if (connect_claim_active && connect_ack_device) {
     pb_write_bytes_field (put, CS_PUT_LAST_CMD_DEVICE,
                           (const guint8 *) connect_ack_device,
@@ -432,6 +456,9 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
 
   return g_bytes_new (put->data, put->len);
 }
+
+#define CS_CLUSTERUPDATE_CLUSTER_FWD 1
+static gchar *cluster_active_device (const guint8 *cluster, gsize len);
 
 static void
 on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
@@ -453,6 +480,29 @@ on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
   } else if (status >= 400 && d) {
     g_warning ("[connect] body: %.*s", (int) MIN (len, 300), d);
   } else if (d) {
+    /*
+     * A 200 only says the request parsed, and being listed only says the
+     * device exists. The claim we actually make is is_active, and the only
+     * answer to it is who the returned Cluster names as the active device --
+     * so say that outright rather than inferring it from presence.
+     */
+    /* The reply is a bare Cluster; a ClusterUpdate wrapper is accepted too,
+     * because which one comes back is not worth being wrong about. */
+    const guint8 *cl = NULL; gsize cllen = 0;
+    if (!pb_find_bytes_field ((const guint8 *) d, len,
+                              CS_CLUSTERUPDATE_CLUSTER_FWD, &cl, &cllen)) {
+      cl = (const guint8 *) d;
+      cllen = len;
+    }
+    g_autofree gchar *act = cluster_active_device (cl, cllen);
+    if (!act || !*act) {
+      g_autofree gchar *bare = cluster_active_device ((const guint8 *) d, len);
+      if (bare && *bare) { g_free (act); act = g_steal_pointer (&bare); }
+    }
+    g_message ("[connect] server says active=%s (%s)",
+               act && *act ? act : "(none)",
+               g_strcmp0 (act, dev_id) == 0 ? "US" : "not us");
+
     /*
      * A 200 only says the request parsed. The answer is a Cluster, so the
      * question worth asking is whether we are in it -- the device name is
@@ -792,6 +842,16 @@ dealer_handle_command (JsonObject *root)
 #define CS_CLUSTER_PLAYER_STATE    3
 #define CS_PLAYERSTATE_CONTEXT_URI 2
 #define CS_PLAYERSTATE_IS_PLAYING  12
+
+/* Who the server says is active, read straight out of a Cluster. */
+static gchar *
+cluster_active_device (const guint8 *cluster, gsize len)
+{
+  const guint8 *v = NULL; gsize vlen = 0;
+  if (pb_find_bytes_field (cluster, len, CS_CLUSTER_ACTIVE_DEVICE, &v, &vlen))
+    return g_strndup ((const gchar *) v, vlen);
+  return NULL;
+}
 
 static void
 dealer_handle_cluster (const guint8 *cluster, gsize len)
