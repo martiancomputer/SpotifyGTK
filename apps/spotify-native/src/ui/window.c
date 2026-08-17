@@ -105,6 +105,7 @@ struct _SpotifyGtkNativeWindow {
   GPtrArray *pending_likes;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
+  guint transfer_generation;             /* stale in-flight transfer adoptions */
   guint playlists_resolved;              /* cards that have asked for details */
   gboolean playlists_loading;            /* rootlist read in flight */
   guint collection_change_id;            /* coalesces change events */
@@ -2582,14 +2583,75 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
  * title and artwork is deliberately not waited on: the transfer says play,
  * and the row can catch up.
  */
+/* What a transfer asked for, held while its metadata is fetched. */
+typedef struct {
+  SpotifyGtkNativeWindow *window;   /* weak */
+  gchar                  *uri;
+  gint64                  position_ms;
+  gboolean                paused;
+  guint                   generation;
+} TransferAdopt;
+
+static void
+transfer_adopt_free (TransferAdopt *a)
+{
+  if (a->window)
+    g_object_remove_weak_pointer (G_OBJECT (a->window), (gpointer *) &a->window);
+  g_free (a->uri);
+  g_free (a);
+}
+
+static void
+on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_data)
+{
+  TransferAdopt *a = user_data;
+  g_autoptr(GError) err = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), res, &err);
+
+  /* A window that went away, or a newer transfer that has already been
+   * adopted: either way this answer is stale. */
+  if (!a->window || a->generation != a->window->transfer_generation) {
+    transfer_adopt_free (a);
+    return;
+  }
+
+  SpotifyGtkNativeWindow *self = a->window;
+
+  if (!tracks || tracks->len == 0) {
+    g_warning ("window: could not resolve the transferred track %s: %s",
+               a->uri, err ? err->message : "no tracks came back");
+    transfer_adopt_free (a);
+    return;
+  }
+
+  /*
+   * Go in by the same door a click uses.
+   *
+   * Calling the player directly plays the audio and nothing else: the title,
+   * cover, progress and the uri every list highlights all stay on whatever was
+   * playing before. Worse, that stale uri is what gets reported back to
+   * Spotify, so the device answers a transfer by claiming to play a different
+   * track than the one it was handed -- which is its own reason to be dropped.
+   */
+  play_native_track (self, g_ptr_array_index (tracks, 0), FALSE);
+
+  if (a->position_ms > 0)
+    spotifygtk_player_service_seek (self->player, a->position_ms);
+  if (a->paused)
+    spotifygtk_player_service_pause (self->player);
+
+  self->last_position_ms = a->position_ms;
+  broadcast_playing_uri (self);
+  transfer_adopt_free (a);
+}
+
 static void
 on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
                                gint64 position_ms, gboolean paused,
                                gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
-  g_autoptr(GError) err = NULL;
-  (void) session;
 
   if (!uri || !*uri)
     return;
@@ -2597,19 +2659,19 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
   g_message ("window: transfer -> %s at %" G_GINT64_FORMAT " ms (%s)",
              uri, position_ms, paused ? "paused" : "playing");
 
-  if (!spotifygtk_player_service_start_uri (self->player, uri, &err)) {
-    g_warning ("window: could not start the transferred track: %s",
-               err ? err->message : "unknown");
-    return;
-  }
+  /* A transfer names a track and nothing else, so the metadata every other
+   * play path already has has to be fetched before anything can be rendered.
+   * A bare track uri resolves through context-resolve like any other context. */
+  TransferAdopt *a = g_new0 (TransferAdopt, 1);
+  a->window      = self;
+  a->uri         = g_strdup (uri);
+  a->position_ms = position_ms;
+  a->paused      = paused;
+  a->generation  = ++self->transfer_generation;
+  g_object_add_weak_pointer (G_OBJECT (self), (gpointer *) &a->window);
 
-  /* Resume where the other device was. The seek is held until the run exists,
-   * which is the path start_uri already has for a seek that arrives early. */
-  if (position_ms > 0)
-    spotifygtk_player_service_seek (self->player, position_ms);
-
-  if (paused)
-    spotifygtk_player_service_pause (self->player);
+  spotifygtk_native_session_load_tracks (session, uri, 1, NULL,
+                                         on_transfer_track_resolved, a);
 }
 
 /*
