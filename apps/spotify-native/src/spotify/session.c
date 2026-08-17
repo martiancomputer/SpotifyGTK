@@ -509,6 +509,9 @@ static SoupWebsocketConnection *dealer_ws;   /* probe only; see connect.md */
  * into a signal. Weak: it is a borrowed pointer, and a command arriving after
  * the session is gone must find NULL rather than free'd memory. */
 static SpotifyNativeSession    *dealer_session;
+static void dealer_connect (const gchar *bearer);
+static gchar                   *dealer_redial_bearer;
+static guint                    dealer_redial_delay = 1;
 static gchar *dealer_conn_id;
 static gchar *dealer_bearer;
 
@@ -806,7 +809,12 @@ dealer_handle_payloads (const gchar *body, gsize len)
 
   JsonArray *arr = json_node_get_array (pn);
   for (guint i = 0; i < json_array_get_length (arr); i++) {
-    const gchar *b64 = json_array_get_string_element (arr, i);
+    /* social-connect sends objects in this same array; asking those for a
+     * string is a Json-CRITICAL and, before this check, a real one in the log. */
+    JsonNode *el = json_array_get_element (arr, i);
+    if (!el || !JSON_NODE_HOLDS_VALUE (el))
+      continue;
+    const gchar *b64 = json_node_get_string (el);
     if (!b64)
       continue;
 
@@ -890,6 +898,45 @@ dealer_reput (gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
+/* Reply to a dealer request, if that is what this frame is. */
+static void
+dealer_reply_if_request (SoupWebsocketConnection *ws, const gchar *body,
+                         gsize len)
+{
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  if (!json_parser_load_from_data (parser, body, (gssize) len, NULL))
+    return;
+
+  JsonNode *root = json_parser_get_root (parser);
+  if (!root || !JSON_NODE_HOLDS_OBJECT (root))
+    return;
+
+  JsonObject *obj = json_node_get_object (root);
+  if (!json_object_has_member (obj, "key")) {
+    if (memmem (body, len, "player/command", strlen ("player/command")))
+      g_message ("[dealer] command frame carried no key; nothing to reply to");
+    return;
+  }
+
+  const gchar *type = json_object_has_member (obj, "type")
+                        ? json_object_get_string_member (obj, "type") : NULL;
+  if (g_strcmp0 (type, "request") != 0) {
+    g_message ("[dealer] frame has a key but type is %s; not replying",
+               type ? type : "(absent)");
+    return;
+  }
+
+  const gchar *key = json_object_get_string_member (obj, "key");
+  if (!key)
+    return;
+
+  g_autofree gchar *reply =
+    g_strdup_printf ("{\"type\":\"reply\",\"key\":\"%s\","
+                     "\"payload\":{\"success\":true}}", key);
+  soup_websocket_connection_send_text (ws, reply);
+  g_message ("[dealer] replied success to request key %s", key);
+}
+
 static void
 on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
                    gpointer user_data)
@@ -904,6 +951,19 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
   /* Parsed from the full body; `text` above is only ever a log line. */
   if (memmem (d, len, "\"payload", strlen ("\"payload")))
     dealer_handle_payloads (d, len);
+
+  /*
+   * Answer the request on the socket it came in on.
+   *
+   * A command is not a notification: the dealer sends it as a request with a
+   * key and waits for a reply frame naming that key. Answering only with a
+   * put_state over HTTPS -- which is a different connection, and which the
+   * server has no way to match to this request -- leaves the request
+   * outstanding, and the dealer drops the connection about three seconds
+   * later. Every observed disconnect was 3.1-3.2s after a transfer, and runs
+   * that received no command stayed up indefinitely.
+   */
+  dealer_reply_if_request (ws, d, len);
 
   /* Answer a ping if one ever arrives, whichever way round it turns out to be. */
   if (g_strstr_len (text, -1, "\"ping\"")) {
@@ -943,6 +1003,25 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
   }
 }
 
+static gboolean
+dealer_redial (gpointer user_data)
+{
+  (void) user_data;
+  if (dealer_redial_bearer) {
+    g_message ("[dealer] redialling");
+    dealer_connect (dealer_redial_bearer);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+/*
+ * A closed socket is not the end of the device.
+ *
+ * This used to log and stop, so the first disconnect -- for any reason --
+ * removed the device from every picker until the app was restarted. The
+ * connection id dies with the socket, so a redial has to re-register from
+ * scratch, which on_dealer_connected already does.
+ */
 static void
 on_dealer_closed (SoupWebsocketConnection *ws, gpointer user_data)
 {
@@ -950,6 +1029,12 @@ on_dealer_closed (SoupWebsocketConnection *ws, gpointer user_data)
   g_message ("[dealer] closed: %d %s",
              soup_websocket_connection_get_close_code (ws),
              soup_websocket_connection_get_close_data (ws));
+
+  g_clear_object (&dealer_ws);
+
+  g_message ("[dealer] reconnecting in %us", dealer_redial_delay);
+  g_timeout_add_seconds (dealer_redial_delay, dealer_redial, NULL);
+  dealer_redial_delay = MIN (dealer_redial_delay * 2, 60);
 }
 
 static void
@@ -966,11 +1051,40 @@ on_dealer_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   }
 
   g_message ("[dealer] connected -- the dealer accepted this client");
+  dealer_redial_delay = 1;
+  g_clear_object (&dealer_ws);
   dealer_ws = g_object_ref (ws);
   g_signal_connect (ws, "message", G_CALLBACK (on_dealer_message), user_data);
   g_signal_connect (ws, "closed",  G_CALLBACK (on_dealer_closed), NULL);
   /* Deliberately leaked for the length of the probe: dropping the last
    * reference closes the socket, and the point is to see what it sends. */
+}
+
+/* Dial the dealer. Separate from dealer_probe so a dropped socket can be
+ * redialled without going through the one-shot guard again. */
+static void
+dealer_connect (const gchar *bearer)
+{
+  if (!bearer)
+    return;
+
+  /* One host is enough to answer the question; apresolve returns four and
+   * they are equivalent. */
+  g_autofree gchar *url =
+    g_strdup_printf ("wss://gae2-dealer.spotify.com/?access_token=%s", bearer);
+
+  SoupSession *ws_session = soup_session_new ();
+  g_autoptr(SoupMessage) msg = soup_message_new (SOUP_METHOD_GET, url);
+  if (!msg) {
+    g_warning ("[dealer] could not build the request");
+    return;
+  }
+
+
+  g_message ("[dealer] connecting to gae2-dealer.spotify.com");
+  soup_session_websocket_connect_async (ws_session, msg, NULL, NULL,
+                                        G_PRIORITY_DEFAULT, NULL,
+                                        on_dealer_connected, g_strdup (bearer));
 }
 
 static void
@@ -992,22 +1106,10 @@ dealer_probe (SpotifyNativeSession *self, const gchar *bearer)
   dealer_session = self;
   g_object_add_weak_pointer (G_OBJECT (self), (gpointer *) &dealer_session);
 
-  /* One host is enough to answer the question; apresolve returns four and
-   * they are equivalent. */
-  g_autofree gchar *url =
-    g_strdup_printf ("wss://gae2-dealer.spotify.com/?access_token=%s", bearer);
+  g_free (dealer_redial_bearer);
+  dealer_redial_bearer = g_strdup (bearer);
 
-  SoupSession *ws_session = soup_session_new ();
-  g_autoptr(SoupMessage) msg = soup_message_new (SOUP_METHOD_GET, url);
-  if (!msg) {
-    g_warning ("[dealer] could not build the request");
-    return;
-  }
-
-  g_message ("[dealer] connecting to gae2-dealer.spotify.com");
-  soup_session_websocket_connect_async (ws_session, msg, NULL, NULL,
-                                        G_PRIORITY_DEFAULT, NULL,
-                                        on_dealer_connected, g_strdup (bearer));
+  dealer_connect (bearer);
 }
 
 static void
