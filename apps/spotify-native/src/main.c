@@ -3409,6 +3409,27 @@ run_live_test (const gchar *token, GCancellable *cancellable,
    */
   g_main_context_pop_thread_default (context);
 
+  /*
+   * A run whose cancellable has already fired was superseded, not failed.
+   *
+   * There are two dozen places that end a run by setting ok to FALSE, and any
+   * of them can be reached as a *consequence* of cancellation rather than by
+   * matching G_IO_ERROR_CANCELLED -- login5 reporting the auth chain failed,
+   * an audio key that never came back, a CDN range abandoned mid-flight. All
+   * of them meant the same thing to the caller: the track failed, retry it.
+   *
+   * That retry then ran alongside the run the UI had already started, which is
+   * where two engines at once came from -- two logins, two metadata fetches,
+   * audio keys at seq 0 and seq 1 for the same track. Deciding it here rather
+   * than at each site covers the paths where cancellation arrives wearing some
+   * other error's clothes.
+   */
+  if (cancellable && g_cancellable_is_cancelled (cancellable) && !state.ok) {
+    g_message ("[live-test] the run was cancelled; reporting superseded rather "
+               "than failed");
+    return TRUE;
+  }
+
   return state.ok;
 }
 
