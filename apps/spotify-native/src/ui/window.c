@@ -2660,8 +2660,28 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
                track->uri);
   }
 
-  if (a->position_ms > 0)
+  /*
+   * Only seek if the position being asked for is not the one already playing.
+   *
+   * Every controller button arrives as a transfer carrying the position it
+   * believes we are at, so pausing and resuming from a phone asked for a seek
+   * to where the track already was. That is not free: a seek drops the
+   * buffered audio and refetches a landing window, and when that fetch stalls
+   * the whole track waits on it -- 25 seconds in one observed case, after
+   * which the track was abandoned and the next one started. The delay between
+   * pressing pause and hearing anything was that refetch, not the pause.
+   *
+   * The tolerance is generous because the controller's idea of the position
+   * and ours differ by however long the round trip took.
+   */
+  const gint64 SEEK_TOLERANCE_MS = 3000;
+  gint64 drift = ABS (a->position_ms - self->last_position_ms);
+
+  if (a->position_ms > 0 && (!already_current || drift > SEEK_TOLERANCE_MS))
     spotifygtk_player_service_seek (self->player, a->position_ms);
+  else if (a->position_ms > 0)
+    g_message ("window: already within %" G_GINT64_FORMAT "ms of %"
+               G_GINT64_FORMAT "ms; not seeking", drift, a->position_ms);
 
   /* Both directions: a transfer that says playing has to undo an earlier
    * pause, or the controller sees a device stuck paused and corrects it. */
