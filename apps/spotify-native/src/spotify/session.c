@@ -291,6 +291,10 @@ static gchar connect_device_id[41];
 /* PlayerState, from player.proto's descriptor at 0x87b920. Only the fields an
  * idle device needs: enough to say "here, and playing nothing". */
 #define CS_PS_TIMESTAMP           1
+#define CS_PS_CONTEXT_URL          3
+#define CS_PS_PLAY_ORIGIN          5
+#define CS_PO_FEATURE_IDENTIFIER   1
+#define CS_PO_FEATURE_VERSION      2
 #define CS_PS_PLAYBACK_SPEED      9
 #define CS_PS_POSITION            10
 #define CS_PS_IS_PLAYING          12
@@ -398,6 +402,32 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
                          ? connect_now_context : connect_now_uri;
     pb_write_bytes_field (ps, CS_PS_CONTEXT_URI,
                           (const guint8 *) ctx, strlen (ctx));
+
+    /*
+     * The two other things the controller states about its own context.
+     *
+     * Read off a real PlayerState in the cluster the phone publishes, which
+     * sets fields 1-7; this device was sending 1, 2 and 7 and nothing else.
+     * context_url is the context uri behind a "context://" scheme, and
+     * play_origin says which part of the app started playback -- a playlist
+     * here, because that is what was handed over.
+     */
+    g_autofree gchar *ctx_url = g_strdup_printf ("context://%s", ctx);
+    pb_write_bytes_field (ps, CS_PS_CONTEXT_URL,
+                          (const guint8 *) ctx_url, strlen (ctx_url));
+
+    const gchar *feature = "playlist";
+    if (strstr (ctx, ":album:"))        feature = "album";
+    else if (strstr (ctx, ":artist:"))  feature = "artist";
+    else if (strstr (ctx, ":station:")) feature = "station";
+    else if (strstr (ctx, ":track:"))   feature = "track";
+
+    g_autoptr(GByteArray) po = g_byte_array_new ();
+    pb_write_bytes_field (po, CS_PO_FEATURE_IDENTIFIER,
+                          (const guint8 *) feature, strlen (feature));
+    pb_write_bytes_field (po, CS_PO_FEATURE_VERSION,
+                          (const guint8 *) "spotifygtk", strlen ("spotifygtk"));
+    pb_write_message_field (ps, CS_PS_PLAY_ORIGIN, po->data, po->len);
 
     g_autoptr(GByteArray) tr = g_byte_array_new ();
     pb_write_bytes_field (tr, CS_PROVIDEDTRACK_URI,
