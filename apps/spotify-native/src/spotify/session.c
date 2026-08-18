@@ -325,6 +325,10 @@ static gchar connect_device_id[41];
  * successfully and then disappearing a few seconds later.
  */
 static gchar   *connect_now_uri;
+/* The context the controller handed over -- a playlist, album or station. Not
+ * the track: a device reporting the track as its context is claiming to play
+ * something other than what it was given. */
+static gchar   *connect_now_context;
 static gint64   connect_now_position_ms;
 static gboolean connect_now_playing;
 
@@ -381,9 +385,19 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
   /* Report the track, not silence. Claiming to be active while saying nothing
    * is playing is what made the device vanish moments after connecting. */
   if (connect_now_uri && *connect_now_uri) {
+    /*
+     * The context is the playlist, album or station -- not the track.
+     *
+     * Reporting the track uri here told the controller this device was
+     * playing a context it had never handed over, so the handover never
+     * completed: the phone kept playing, kept showing "Connecting...", and
+     * took the active device back a few seconds later. The real context
+     * arrives with the transfer and is remembered when it is decoded.
+     */
+    const gchar *ctx = (connect_now_context && *connect_now_context)
+                         ? connect_now_context : connect_now_uri;
     pb_write_bytes_field (ps, CS_PS_CONTEXT_URI,
-                          (const guint8 *) connect_now_uri,
-                          strlen (connect_now_uri));
+                          (const guint8 *) ctx, strlen (ctx));
 
     g_autoptr(GByteArray) tr = g_byte_array_new ();
     pb_write_bytes_field (tr, CS_PROVIDEDTRACK_URI,
@@ -715,6 +729,11 @@ dealer_handle_transfer_state (SpotifyNativeSession *self,
       if (pb_find_bytes_field (ctx, clen, CTX_URI, &u, &ulen))
         context_uri = g_strndup ((const gchar *) u, ulen);
     }
+  }
+
+  if (context_uri && *context_uri) {
+    g_free (connect_now_context);
+    connect_now_context = g_strdup (context_uri);
   }
 
   g_message ("[transfer] track=%s position=%" G_GINT64_FORMAT "ms paused=%s "
