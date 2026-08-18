@@ -94,6 +94,10 @@ void spotifygtk_native_session_start (SpotifyNativeSession *self);
  * An active device that reports nothing playing is dropped, so this has to be
  * called when playback starts, stops or moves -- not only on a timer.
  */
+/* Whether the server's last answer named this device the active one. A device
+ * that has been refused should not be taking orders about what to play. */
+gboolean spotifygtk_native_session_connect_is_active (SpotifyNativeSession *self);
+
 void spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
                                                 const gchar *track_uri,
                                                 gint64 position_ms,

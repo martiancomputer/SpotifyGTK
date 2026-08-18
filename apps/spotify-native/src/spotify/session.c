@@ -333,6 +333,8 @@ static gchar   *connect_now_uri;
  * the track: a device reporting the track as its context is claiming to play
  * something other than what it was given. */
 static gchar   *connect_now_context;
+/* Whether the server's last answer named this device as the active one. */
+static gboolean connect_claim_won;
 static gint64   connect_now_position_ms;
 static gboolean connect_now_playing;
 
@@ -543,9 +545,10 @@ on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
       g_autofree gchar *bare = cluster_active_device ((const guint8 *) d, len);
       if (bare && *bare) { g_free (act); act = g_steal_pointer (&bare); }
     }
+    connect_claim_won = (g_strcmp0 (act, dev_id) == 0);
     g_message ("[connect] server says active=%s (%s)",
                act && *act ? act : "(none)",
-               g_strcmp0 (act, dev_id) == 0 ? "US" : "not us");
+               connect_claim_won ? "US" : "not us");
 
     /*
      * A 200 only says the request parsed. The answer is a Cluster, so the
@@ -2931,4 +2934,11 @@ SpotifyNativeSession *
 spotifygtk_native_session_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_NATIVE_SESSION, NULL);
+}
+
+gboolean
+spotifygtk_native_session_connect_is_active (SpotifyNativeSession *self)
+{
+  (void) self;
+  return connect_claim_won;
 }

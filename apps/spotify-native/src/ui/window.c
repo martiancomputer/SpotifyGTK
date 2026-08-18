@@ -2647,6 +2647,27 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
     g_strcmp0 (self->current_track_uri, track->uri) == 0 &&
     spotifygtk_player_service_is_active (self->player);
 
+  /*
+   * A phone that is still playing does not get to drag this device around.
+   *
+   * The background app advances through its own queue and sends a transfer on
+   * every track change. Following those meant local playback was torn down
+   * and replaced at random by whatever the phone had moved on to -- music
+   * stopping for no reason the listener could see.
+   *
+   * The test is whether the server accepted the last claim. Until it has been
+   * refused once, transfers are honoured normally, so genuinely picking this
+   * device from the phone still works; it is only after being told another
+   * device is the active one that unsolicited orders are declined.
+   */
+  if (!already_current && self->session &&
+      !spotifygtk_native_session_connect_is_active (self->session) &&
+      self->current_track_uri && spotifygtk_player_service_is_active (self->player)) {
+    g_message ("window: declining a transfer to %s -- this device is not the "
+               "active one and something is already playing here", track->uri);
+    return;
+  }
+
   if (!already_current) {
     /*
      * Go in by the same door a click uses.
