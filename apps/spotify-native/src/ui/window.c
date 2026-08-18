@@ -144,6 +144,9 @@ struct _SpotifyGtkNativeWindow {
   /* State */
   gchar *current_track_uri;
   gint64 last_position_ms;   /* last reported position, for Connect */
+  /* Play state a transfer asked for, applied once that track is sounding. */
+  gchar   *pending_pause_uri;
+  gboolean pending_paused;
   gint64 current_track_duration_ms;   /* for the progress bar; engine reports position only */
   gboolean queue_expanded;
 
@@ -2683,12 +2686,32 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
     g_message ("window: already within %" G_GINT64_FORMAT "ms of %"
                G_GINT64_FORMAT "ms; not seeking", drift, a->position_ms);
 
-  /* Both directions: a transfer that says playing has to undo an earlier
-   * pause, or the controller sees a device stuck paused and corrects it. */
-  if (a->paused)
-    spotifygtk_player_service_pause (self->player);
-  else if (spotifygtk_player_service_is_paused (self->player))
-    spotifygtk_player_service_resume (self->player);
+  /*
+   * Apply the play state to the engine that ends up sounding, not the one on
+   * its way out.
+   *
+   * Starting a track spins up a new engine, and it comes up playing. Pausing
+   * before that only pauses the engine being replaced, so a transfer handing
+   * over a *paused* track produced a device that was playing -- the phone saw
+   * it ignore the one thing it asked for, reasserted itself, and the handover
+   * never completed. The server had already made us the active device by then;
+   * we lost it again three seconds later.
+   *
+   * When the track is already current there is no new engine coming, so act
+   * now. Otherwise remember it and let the now-playing handler apply it.
+   */
+  if (already_current) {
+    if (a->paused)
+      spotifygtk_player_service_pause (self->player);
+    else if (spotifygtk_player_service_is_paused (self->player))
+      spotifygtk_player_service_resume (self->player);
+  } else {
+    self->pending_paused = a->paused;
+    g_free (self->pending_pause_uri);
+    self->pending_pause_uri = g_strdup (track->uri);
+    g_message ("window: %s should come up %s; holding until it sounds",
+               track->uri, a->paused ? "paused" : "playing");
+  }
 
   self->last_position_ms = a->position_ms;
   broadcast_playing_uri (self);
@@ -3228,6 +3251,19 @@ on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
   self->current_track_duration_ms = track->duration_ms;
   spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
   show_now_playing (self, track);
+
+  /* The transfer that started this track said whether it should be playing.
+   * This is the first moment an engine exists to be told. */
+  if (self->pending_pause_uri && g_strcmp0 (self->pending_pause_uri, uri) == 0) {
+    g_message ("window: %s is sounding; applying the transferred %s state",
+               uri, self->pending_paused ? "paused" : "playing");
+    if (self->pending_paused)
+      spotifygtk_player_service_pause (self->player);
+    else if (spotifygtk_player_service_is_paused (self->player))
+      spotifygtk_player_service_resume (self->player);
+    g_clear_pointer (&self->pending_pause_uri, g_free);
+  }
+
   broadcast_playing_uri (self);
 }
 
@@ -4033,6 +4069,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_object (&self->player);
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_track_uri, g_free);
+  g_clear_pointer (&self->pending_pause_uri, g_free);
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   g_clear_pointer (&self->nav_history, g_ptr_array_unref);
   g_clear_pointer (&self->pending_likes, g_ptr_array_unref);
