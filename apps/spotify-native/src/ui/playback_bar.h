@@ -35,6 +35,8 @@ SpotifyGtkPlaybackBar *spotifygtk_playback_bar_new (void);
 void spotifygtk_playback_bar_set_modes (SpotifyGtkPlaybackBar *self,
                                         gboolean shuffle,
                                         SpotifyGtkRepeatMode repeat);
+void spotifygtk_playback_bar_set_smart_shuffle (SpotifyGtkPlaybackBar *self,
+                                                gboolean smart);
 
 /* Update displayed information */
 void spotifygtk_playback_bar_set_track (SpotifyGtkPlaybackBar *self,

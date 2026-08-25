@@ -90,6 +90,10 @@ guint64 spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,
                                       MercuryCallback callback, gpointer user_data);
 void    spotifygtk_mercury_unsubscribe (SpotifyMercury *self, guint64 sub_id);
 
+/* Prevent callbacks already queued to another context from entering UI state
+ * during session/window teardown. Requests and response cleanup still finish. */
+void spotifygtk_mercury_cancel_callbacks (SpotifyMercury *self);
+
 void mercury_response_free (MercuryResponse *response);
 
 G_END_DECLS

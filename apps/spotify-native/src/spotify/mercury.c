@@ -46,6 +46,24 @@ struct _SpotifyMercury {
   GObject           parent_instance;
   SpotifyApSession *ap_session;
 
+  /*
+   * The AP session, Shannon send cipher, sequence counters and the two hash
+   * tables below are one-thread objects.  Requests used to be issued directly
+   * by GTK callbacks while replies arrived on the session worker, so both
+   * threads modified pending/next_seq and encrypted packets concurrently.
+   * Apart from corrupting Mercury state, response callbacks then ran on the
+   * worker and called GTK there.
+   *
+   * Capture the context on which Mercury is constructed (the session worker)
+   * and marshal every request to it.  Each request separately remembers the
+   * caller's context so its completion returns to GTK, or remains on the
+   * worker for protocol-internal callers.
+   */
+  GMainContext     *owner_context;
+  GMutex            config_lock;
+  gchar            *content_type;
+  gint              callbacks_enabled;
+
   guint64           next_seq;
   GHashTable       *pending;        /* seq (guint64) -> MercuryPending* */
   GHashTable       *subscriptions;  /* uri (gchar*) -> Subscription* */
@@ -57,6 +75,7 @@ typedef struct {
   gchar           *uri;
   MercuryCallback  callback;
   gpointer         user_data;
+  GMainContext    *callback_context;
 } Subscription;
 
 /*
@@ -69,6 +88,7 @@ typedef struct {
   GByteArray      *partial;    /* trailing fragment awaiting continuation */
   MercuryCallback  callback;
   gpointer         user_data;
+  GMainContext    *callback_context;
 } MercuryPending;
 
 static void
@@ -78,7 +98,111 @@ mercury_pending_free (gpointer data)
   if (!p) return;
   g_clear_pointer (&p->parts,   g_ptr_array_unref);
   g_clear_pointer (&p->partial, g_byte_array_unref);
+  g_clear_pointer (&p->callback_context, g_main_context_unref);
   g_free (p);
+}
+
+typedef struct {
+  SpotifyMercury *mercury;
+  MercuryMethod   method;
+  gchar          *method_override;
+  gchar          *uri;
+  GBytes         *payload;
+  gchar         **field_keys;
+  gchar         **field_values;
+  guint           n_fields;
+  GPtrArray      *parts;
+  MercuryCallback callback;
+  gpointer         user_data;
+  GMainContext    *callback_context;
+  gboolean         multipart;
+} MercuryRequestDispatch;
+
+typedef struct {
+  SpotifyMercury  *mercury;
+  MercuryCallback callback;
+  gpointer        user_data;
+  MercuryResponse *response;
+} MercuryCallbackDispatch;
+
+typedef struct {
+  SpotifyMercury *mercury;
+  Subscription   *subscription;
+  guint64         unsubscribe_id;
+} MercurySubscriptionDispatch;
+
+static void
+mercury_response_copy_free (MercuryResponse *response)
+{
+  if (!response)
+    return;
+  g_clear_pointer (&response->parts, g_ptr_array_unref);
+  g_free (response->uri);
+  g_free (response);
+}
+
+static gboolean
+run_callback_dispatch (gpointer user_data)
+{
+  MercuryCallbackDispatch *dispatch = user_data;
+  if (g_atomic_int_get (&dispatch->mercury->callbacks_enabled))
+    dispatch->callback (dispatch->response, dispatch->user_data);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+callback_dispatch_free (gpointer user_data)
+{
+  MercuryCallbackDispatch *dispatch = user_data;
+  g_clear_object (&dispatch->mercury);
+  mercury_response_copy_free (dispatch->response);
+  g_free (dispatch);
+}
+
+static MercuryResponse *
+mercury_response_copy (const MercuryResponse *response)
+{
+  MercuryResponse *copy = g_new0 (MercuryResponse, 1);
+  copy->status_code = response->status_code;
+  copy->uri = g_strdup (response->uri);
+  copy->parts = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+  for (guint i = 0; response->parts && i < response->parts->len; i++)
+    g_ptr_array_add (copy->parts,
+                     g_bytes_ref (g_ptr_array_index (response->parts, i)));
+  return copy;
+}
+
+static void
+dispatch_response (SpotifyMercury *self, GMainContext *context,
+                   MercuryCallback callback,
+                   gpointer user_data, const MercuryResponse *response)
+{
+  if (!callback)
+    return;
+
+  MercuryCallbackDispatch *dispatch = g_new0 (MercuryCallbackDispatch, 1);
+  dispatch->mercury = g_object_ref (self);
+  dispatch->callback = callback;
+  dispatch->user_data = user_data;
+  dispatch->response = mercury_response_copy (response);
+  g_main_context_invoke_full (context, G_PRIORITY_DEFAULT,
+                              run_callback_dispatch, dispatch,
+                              callback_dispatch_free);
+}
+
+static void
+request_dispatch_free (gpointer user_data)
+{
+  MercuryRequestDispatch *request = user_data;
+  g_clear_object (&request->mercury);
+  g_free (request->method_override);
+  g_free (request->uri);
+  g_clear_pointer (&request->payload, g_bytes_unref);
+  g_strfreev (request->field_keys);
+  g_strfreev (request->field_values);
+  g_clear_pointer (&request->parts, g_ptr_array_unref);
+  g_clear_pointer (&request->callback_context, g_main_context_unref);
+  g_free (request);
 }
 
 static void
@@ -87,6 +211,7 @@ subscription_free (gpointer data)
   Subscription *sub = data;
   if (!sub) return;
   g_free (sub->uri);
+  g_clear_pointer (&sub->callback_context, g_main_context_unref);
   g_free (sub);
 }
 
@@ -204,18 +329,17 @@ void
 spotifygtk_mercury_set_content_type (SpotifyMercury *self, const gchar *content_type)
 {
   g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
-  g_object_set_data_full (G_OBJECT (self), "content-type",
-                          g_strdup (content_type), g_free);
+  g_mutex_lock (&self->config_lock);
+  g_free (self->content_type);
+  self->content_type = g_strdup (content_type);
+  g_mutex_unlock (&self->config_lock);
 }
 
-void
-spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
-                                  const gchar *method_override, const gchar *uri,
-                                  GPtrArray *parts, MercuryCallback callback,
-                                  gpointer user_data)
+static void
+send_request_parts_on_owner (MercuryRequestDispatch *request)
 {
-  g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
-  g_return_if_fail (uri != NULL && parts != NULL);
+  SpotifyMercury *self = request->mercury;
+  GPtrArray *parts = request->parts;
 
   guint64 seq = self->next_seq++;
 
@@ -228,10 +352,14 @@ spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
   append_u16_be (buf, (guint16) (1 + parts->len));
 
   g_autoptr(GByteArray) header = g_byte_array_new ();
-  pb_write_bytes_field (header, MERCURY_HDR_URI, (const guint8 *) uri, strlen (uri));
-  const gchar *m = method_override ? method_override : method_string (method);
+  pb_write_bytes_field (header, MERCURY_HDR_URI,
+                        (const guint8 *) request->uri, strlen (request->uri));
+  const gchar *m = request->method_override
+                     ? request->method_override : method_string (request->method);
   pb_write_bytes_field (header, MERCURY_HDR_METHOD, (const guint8 *) m, strlen (m));
-  const gchar *ct = g_object_get_data (G_OBJECT (self), "content-type");
+  g_mutex_lock (&self->config_lock);
+  g_autofree gchar *ct = g_strdup (self->content_type);
+  g_mutex_unlock (&self->config_lock);
   if (ct && *ct)
     pb_write_bytes_field (header, MERCURY_HDR_CONTENT_TYPE,
                           (const guint8 *) ct, strlen (ct));
@@ -248,14 +376,68 @@ spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
 
   MercuryPending *p = g_new0 (MercuryPending, 1);
   p->parts     = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
-  p->callback  = callback;
-  p->user_data = user_data;
+  p->callback  = request->callback;
+  p->user_data = request->user_data;
+  p->callback_context = g_main_context_ref (request->callback_context);
   g_hash_table_insert (self->pending, g_memdup2 (&seq, sizeof (seq)), p);
 
   g_message ("mercury: sending %u payload part(s), %u bytes total",
              parts->len, buf->len);
-  spotifygtk_ap_session_send (self->ap_session, cmd_for_method (method),
+  spotifygtk_ap_session_send (self->ap_session, cmd_for_method (request->method),
                               buf->data, buf->len);
+}
+
+static void send_request_fields_on_owner (MercuryRequestDispatch *request);
+
+static gboolean
+run_request_dispatch (gpointer user_data)
+{
+  MercuryRequestDispatch *request = user_data;
+  if (request->multipart)
+    send_request_parts_on_owner (request);
+  else
+    send_request_fields_on_owner (request);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+queue_request_dispatch (MercuryRequestDispatch *request)
+{
+  SpotifyMercury *self = request->mercury;
+  if (g_main_context_is_owner (self->owner_context)) {
+    run_request_dispatch (request);
+    request_dispatch_free (request);
+    return;
+  }
+
+  g_main_context_invoke_full (self->owner_context, G_PRIORITY_DEFAULT,
+                              run_request_dispatch, request,
+                              request_dispatch_free);
+}
+
+void
+spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
+                                  const gchar *method_override, const gchar *uri,
+                                  GPtrArray *parts, MercuryCallback callback,
+                                  gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
+  g_return_if_fail (uri != NULL && parts != NULL);
+
+  MercuryRequestDispatch *request = g_new0 (MercuryRequestDispatch, 1);
+  request->mercury = g_object_ref (self);
+  request->method = method;
+  request->method_override = g_strdup (method_override);
+  request->uri = g_strdup (uri);
+  request->parts = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+  for (guint i = 0; i < parts->len; i++)
+    g_ptr_array_add (request->parts,
+                     g_bytes_ref (g_ptr_array_index (parts, i)));
+  request->callback = callback;
+  request->user_data = user_data;
+  request->callback_context = g_main_context_ref_thread_default ();
+  request->multipart = TRUE;
+  queue_request_dispatch (request);
 }
 
 void
@@ -282,16 +464,10 @@ spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
                                      NULL, NULL, 0, callback, user_data);
 }
 
-void
-spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
-                                   const gchar *method_override, const gchar *uri,
-                                   GBytes *payload,
-                                   const gchar *const *field_keys,
-                                   const gchar *const *field_values, guint n_fields,
-                                   MercuryCallback callback, gpointer user_data)
+static void
+send_request_fields_on_owner (MercuryRequestDispatch *request)
 {
-  g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
-  g_return_if_fail (uri != NULL);
+  SpotifyMercury *self = request->mercury;
 
   guint64 seq = self->next_seq++;
 
@@ -315,9 +491,9 @@ spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
    * only the payload is ever split.
    */
   gsize payload_len = 0;
-  if (payload) g_bytes_get_data (payload, &payload_len);
+  if (request->payload) g_bytes_get_data (request->payload, &payload_len);
 
-  if (payload_len + strlen (uri) + MERCURY_FRAME_OVERHEAD > MERCURY_MAX_REQUEST) {
+  if (payload_len + strlen (request->uri) + MERCURY_FRAME_OVERHEAD > MERCURY_MAX_REQUEST) {
     /*
      * Refused rather than sent, because the failure mode otherwise is silence:
      * the server drops an oversized request without any reply, the callback
@@ -333,20 +509,28 @@ spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
      */
     g_warning ("mercury: refusing a %" G_GSIZE_FORMAT "-byte request to %s; the "
                "server accepts at most %d bytes per request and does not "
-               "reassemble fragmented ones", payload_len, uri, MERCURY_MAX_REQUEST);
-    if (callback) {
-      MercuryResponse err = { .status_code = 413, .uri = (gchar *) uri,
+               "reassemble fragmented ones", payload_len, request->uri,
+               MERCURY_MAX_REQUEST);
+    if (request->callback) {
+      MercuryResponse err = { .status_code = 413, .uri = request->uri,
                               .parts = g_ptr_array_new () };
-      callback (&err, user_data);
+      dispatch_response (self, request->callback_context, request->callback,
+                         request->user_data, &err);
       g_ptr_array_unref (err.parts);
     }
     return;
   }
 
+  g_mutex_lock (&self->config_lock);
+  g_autofree gchar *content_type = g_strdup (self->content_type);
+  g_mutex_unlock (&self->config_lock);
+
   g_autoptr(GByteArray) packet =
-    encode_mercury_packet (seq, method, method_override, uri,
-                           g_object_get_data (G_OBJECT (self), "content-type"),
-                           payload, field_keys, field_values, n_fields);
+    encode_mercury_packet (seq, request->method, request->method_override,
+                           request->uri, content_type, request->payload,
+                           (const gchar *const *) request->field_keys,
+                           (const gchar *const *) request->field_values,
+                           request->n_fields);
 
   /*
    * The pending entry is filed even with no callback: a reply still arrives
@@ -355,12 +539,45 @@ spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
    */
   MercuryPending *p = g_new0 (MercuryPending, 1);
   p->parts     = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
-  p->callback  = callback;
-  p->user_data = user_data;
+  p->callback  = request->callback;
+  p->user_data = request->user_data;
+  p->callback_context = g_main_context_ref (request->callback_context);
   g_hash_table_insert (self->pending, g_memdup2 (&seq, sizeof (seq)), p);
 
-  spotifygtk_ap_session_send (self->ap_session, cmd_for_method (method),
+  spotifygtk_ap_session_send (self->ap_session, cmd_for_method (request->method),
                               packet->data, packet->len);
+}
+
+void
+spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
+                                   const gchar *method_override, const gchar *uri,
+                                   GBytes *payload,
+                                   const gchar *const *field_keys,
+                                   const gchar *const *field_values, guint n_fields,
+                                   MercuryCallback callback, gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
+  g_return_if_fail (uri != NULL);
+
+  MercuryRequestDispatch *request = g_new0 (MercuryRequestDispatch, 1);
+  request->mercury = g_object_ref (self);
+  request->method = method;
+  request->method_override = g_strdup (method_override);
+  request->uri = g_strdup (uri);
+  request->payload = payload ? g_bytes_ref (payload) : NULL;
+  request->n_fields = n_fields;
+  if (n_fields > 0) {
+    request->field_keys = g_new0 (gchar *, n_fields + 1);
+    request->field_values = g_new0 (gchar *, n_fields + 1);
+    for (guint i = 0; i < n_fields; i++) {
+      request->field_keys[i] = g_strdup (field_keys[i]);
+      request->field_values[i] = g_strdup (field_values[i]);
+    }
+  }
+  request->callback = callback;
+  request->user_data = user_data;
+  request->callback_context = g_main_context_ref_thread_default ();
+  queue_request_dispatch (request);
 }
 
 static void
@@ -373,19 +590,74 @@ on_subscribe_reply (MercuryResponse *response, gpointer user_data)
              response->status_code, response->parts ? response->parts->len : 0);
 }
 
+static gboolean
+run_subscription_dispatch (gpointer user_data)
+{
+  MercurySubscriptionDispatch *dispatch = user_data;
+  SpotifyMercury *self = dispatch->mercury;
+
+  if (dispatch->subscription) {
+    Subscription *sub = g_steal_pointer (&dispatch->subscription);
+    g_hash_table_insert (self->subscriptions, g_strdup (sub->uri), sub);
+    spotifygtk_mercury_request (self, MERCURY_METHOD_SUB, sub->uri, NULL,
+                                on_subscribe_reply, NULL);
+    return G_SOURCE_REMOVE;
+  }
+
+  GHashTableIter iter;
+  gpointer key, value;
+  g_hash_table_iter_init (&iter, self->subscriptions);
+  while (g_hash_table_iter_next (&iter, &key, &value)) {
+    Subscription *sub = value;
+    if (sub->id == dispatch->unsubscribe_id) {
+      spotifygtk_mercury_request (self, MERCURY_METHOD_UNSUB, sub->uri,
+                                  NULL, NULL, NULL);
+      g_hash_table_iter_remove (&iter);
+      break;
+    }
+  }
+  return G_SOURCE_REMOVE;
+}
+
+static void
+subscription_dispatch_free (gpointer user_data)
+{
+  MercurySubscriptionDispatch *dispatch = user_data;
+  g_clear_object (&dispatch->mercury);
+  subscription_free (dispatch->subscription);
+  g_free (dispatch);
+}
+
+static void
+queue_subscription_dispatch (MercurySubscriptionDispatch *dispatch)
+{
+  SpotifyMercury *self = dispatch->mercury;
+  if (g_main_context_is_owner (self->owner_context)) {
+    run_subscription_dispatch (dispatch);
+    subscription_dispatch_free (dispatch);
+    return;
+  }
+
+  g_main_context_invoke_full (self->owner_context, G_PRIORITY_DEFAULT,
+                              run_subscription_dispatch, dispatch,
+                              subscription_dispatch_free);
+}
+
 guint64
 spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,
                               MercuryCallback callback, gpointer user_data)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_MERCURY (self), 0);
+  g_return_val_if_fail (uri != NULL, 0);
 
   Subscription *sub = g_new0 (Subscription, 1);
+  g_mutex_lock (&self->config_lock);
   sub->id        = self->next_sub_id++;
+  g_mutex_unlock (&self->config_lock);
   sub->uri       = g_strdup (uri);
   sub->callback  = callback;
   sub->user_data = user_data;
-
-  g_hash_table_insert (self->subscriptions, g_strdup (uri), sub);
+  sub->callback_context = g_main_context_ref_thread_default ();
 
   /*
    * The SUB reply is logged rather than discarded. For a service whose
@@ -393,25 +665,25 @@ spotifygtk_mercury_subscribe (SpotifyMercury *self, const gchar *uri,
    * itself the finding: a 200 says the URI names something real, and anything
    * else says stop waiting for events that will never come.
    */
-  spotifygtk_mercury_request (self, MERCURY_METHOD_SUB, uri, NULL,
-                              on_subscribe_reply, self);
-  return sub->id;
+  guint64 id = sub->id;
+  MercurySubscriptionDispatch *dispatch =
+    g_new0 (MercurySubscriptionDispatch, 1);
+  dispatch->mercury = g_object_ref (self);
+  dispatch->subscription = sub;
+  queue_subscription_dispatch (dispatch);
+  return id;
 }
 
 void
 spotifygtk_mercury_unsubscribe (SpotifyMercury *self, guint64 sub_id)
 {
-  GHashTableIter iter;
-  gpointer key, value;
-  g_hash_table_iter_init (&iter, self->subscriptions);
-  while (g_hash_table_iter_next (&iter, &key, &value)) {
-    Subscription *sub = value;
-    if (sub->id == sub_id) {
-      spotifygtk_mercury_request (self, MERCURY_METHOD_UNSUB, sub->uri, NULL, NULL, NULL);
-      g_hash_table_iter_remove (&iter);
-      return;
-    }
-  }
+  g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
+
+  MercurySubscriptionDispatch *dispatch =
+    g_new0 (MercurySubscriptionDispatch, 1);
+  dispatch->mercury = g_object_ref (self);
+  dispatch->unsubscribe_id = sub_id;
+  queue_subscription_dispatch (dispatch);
 }
 
 void
@@ -484,7 +756,8 @@ complete_message (SpotifyMercury *self, ApCommandId cmd, MercuryPending *p)
   }
 
   if (p->callback) {
-    p->callback (&response, p->user_data);
+    dispatch_response (self, p->callback_context, p->callback, p->user_data,
+                       &response);
   } else if (cmd == AP_CMD_MERCURY_EVENT) {
     /*
      * An unsolicited event. Exact URI first, then prefix: Spotify publishes
@@ -500,8 +773,9 @@ complete_message (SpotifyMercury *self, ApCommandId cmd, MercuryPending *p)
       }
     }
 
-    if (match)
-      match->callback (&response, match->user_data);
+    if (match && match->callback)
+      dispatch_response (self, match->callback_context, match->callback,
+                         match->user_data, &response);
     else
       /* Worth seeing rather than dropping: the URI of an event nobody asked
        * for is how an undocumented service announces its own name. */
@@ -511,6 +785,7 @@ complete_message (SpotifyMercury *self, ApCommandId cmd, MercuryPending *p)
 
   g_ptr_array_unref (response.parts);
   g_clear_pointer (&p->partial, g_byte_array_unref);
+  g_clear_pointer (&p->callback_context, g_main_context_unref);
   g_free (p);
 }
 
@@ -634,24 +909,44 @@ spotifygtk_mercury_dispose (GObject *object)
   g_clear_object (&self->ap_session);
   g_clear_pointer (&self->pending,        g_hash_table_unref);
   g_clear_pointer (&self->subscriptions,  g_hash_table_unref);
+  g_clear_pointer (&self->owner_context,  g_main_context_unref);
+  g_clear_pointer (&self->content_type,   g_free);
   G_OBJECT_CLASS (spotifygtk_mercury_parent_class)->dispose (object);
+}
+
+static void
+spotifygtk_mercury_finalize (GObject *object)
+{
+  SpotifyMercury *self = SPOTIFYGTK_MERCURY (object);
+  g_mutex_clear (&self->config_lock);
+  G_OBJECT_CLASS (spotifygtk_mercury_parent_class)->finalize (object);
 }
 
 static void
 spotifygtk_mercury_class_init (SpotifyMercuryClass *klass)
 {
   G_OBJECT_CLASS (klass)->dispose = spotifygtk_mercury_dispose;
+  G_OBJECT_CLASS (klass)->finalize = spotifygtk_mercury_finalize;
 }
 
 static void
 spotifygtk_mercury_init (SpotifyMercury *self)
 {
+  g_mutex_init (&self->config_lock);
   self->pending       = g_hash_table_new_full (g_int64_hash, g_int64_equal,
                                                g_free, mercury_pending_free);
   self->subscriptions = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                g_free, subscription_free);
   self->next_seq      = 0;
   self->next_sub_id   = 1;
+  self->callbacks_enabled = TRUE;
+}
+
+void
+spotifygtk_mercury_cancel_callbacks (SpotifyMercury *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_MERCURY (self));
+  g_atomic_int_set (&self->callbacks_enabled, FALSE);
 }
 
 SpotifyMercury *
@@ -659,6 +954,7 @@ spotifygtk_mercury_new (SpotifyApSession *ap_session)
 {
   SpotifyMercury *self = g_object_new (SPOTIFYGTK_TYPE_MERCURY, NULL);
   self->ap_session = g_object_ref (ap_session);
+  self->owner_context = g_main_context_ref_thread_default ();
 
   /*
    * Registered here rather than left to the caller. The previous arrangement

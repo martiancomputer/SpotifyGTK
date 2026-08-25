@@ -100,8 +100,10 @@ gboolean spotifygtk_native_session_connect_is_active (SpotifyNativeSession *self
 
 void spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
                                                 const gchar *track_uri,
+                                                const gchar *context_uri,
                                                 gint64 position_ms,
-                                                gboolean playing);
+                                                gboolean playing,
+                                                guint shuffle_mode);
 
 /*
  * Drop the connection and sign in again.
@@ -111,6 +113,10 @@ void spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
  * the process.
  */
 void spotifygtk_native_session_reconnect (SpotifyNativeSession *self);
+
+/* Stop delivering already-queued request/subscription callbacks to the UI.
+ * Call this before disconnecting a window from the session during teardown. */
+void spotifygtk_native_session_cancel_callbacks (SpotifyNativeSession *self);
 
 SpotifyNativeSessionState spotifygtk_native_session_get_state (SpotifyNativeSession *self);
 
@@ -123,7 +129,7 @@ gchar *spotifygtk_native_session_dup_username (SpotifyNativeSession *self);
 gchar *spotifygtk_native_session_dup_collection_uri (SpotifyNativeSession *self);
 
 /*
- * Mercury on this session's AP connection, created on first use.
+ * Mercury on this session's AP connection, created by the worker at sign-in.
  *
  * The engine builds its own for the duration of a track, which meant anything
  * needing Mercury -- reading Liked Songs, writing one -- could not happen until
@@ -153,6 +159,16 @@ void spotifygtk_native_session_load_tracks (SpotifyNativeSession *self,
                                             GCancellable         *cancellable,
                                             GAsyncReadyCallback   callback,
                                             gpointer              user_data);
+
+/* Resolve display metadata for an already-ordered list of track URIs. Connect
+ * transfers use this path because their order may contain server-injected
+ * Smart Shuffle recommendations that context-resolve would discard. */
+void spotifygtk_native_session_load_track_uris (SpotifyNativeSession *self,
+                                                const gchar *const   *track_uris,
+                                                guint                n_track_uris,
+                                                GCancellable        *cancellable,
+                                                GAsyncReadyCallback  callback,
+                                                gpointer             user_data);
 
 GPtrArray *spotifygtk_native_session_load_tracks_finish (SpotifyNativeSession *self,
                                                          GAsyncResult         *result,

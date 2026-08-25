@@ -109,6 +109,7 @@ struct _SpotifyGtkNativeWindow {
   guint playlists_resolved;              /* cards that have asked for details */
   gboolean playlists_loading;            /* rootlist read in flight */
   guint collection_change_id;            /* coalesces change events */
+  guint dev_nav_probe_id;                 /* optional one-shot development timer */
   gboolean playlists_loaded;             /* the grid holds cards already */
   GtkWidget  *playlists_status;
   /* Tracks we have started, so a handover can render one we no longer hold. */
@@ -171,7 +172,10 @@ struct _SpotifyGtkNativeWindow {
    */
   GArray    *order;             /* guint, indices into play_context */
   gint       order_pos;         /* cursor into order; -1 when none */
+  gchar     *play_context_uri;  /* playlist/album handed to Connect */
   gboolean   shuffle;
+  gboolean   smart_shuffle;
+  gboolean   server_order;      /* Connect supplied an already-enhanced order */
   SpotifyGtkRepeatMode repeat;
 };
 
@@ -447,7 +451,7 @@ rebuild_order (SpotifyGtkNativeWindow *self, gint keep)
   for (guint i = 0; i < n; i++)
     g_array_append_val (self->order, i);
 
-  if (self->shuffle) {
+  if (self->shuffle && !self->server_order) {
     /* Fisher-Yates, so every permutation is equally likely. Picking a random
      * track each time instead would repeat and strand tracks, which is what
      * people mean when they say a shuffle "isn't random". */
@@ -601,6 +605,20 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
 
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   self->play_context = spotifygtk_track_list_snapshot (list);
+  g_clear_pointer (&self->play_context_uri, g_free);
+  const gchar *playlist_uri = spotifygtk_track_list_get_playlist_uri (list);
+  if (playlist_uri) {
+    self->play_context_uri = g_strdup (playlist_uri);
+  } else if (self->nav_history && self->nav_pos >= 0 &&
+             self->nav_pos < (gint) self->nav_history->len) {
+    const NavEntry *entry = g_ptr_array_index (self->nav_history, self->nav_pos);
+    self->play_context_uri = g_strdup (entry->uri);
+  }
+  const gchar *visible_page = gtk_stack_get_visible_child_name (self->page_stack);
+  if (!self->play_context_uri && g_strcmp0 (visible_page, "liked") == 0)
+    self->play_context_uri = spotifygtk_native_session_dup_collection_uri (self->session);
+  self->smart_shuffle = FALSE;
+  self->server_order = FALSE;
   rebuild_order (self, -1);
   self->context_index = -1;
 
@@ -1126,6 +1144,8 @@ on_shuffle_toggled (SpotifyGtkPlaybackBar *bar, gboolean enabled, gpointer user_
   (void) bar;
 
   self->shuffle = enabled;
+  self->smart_shuffle = FALSE;
+  self->server_order = FALSE;
   spotifygtk_settings_set_shuffle (spotifygtk_settings_get_default (), enabled);
   rebuild_order (self, self->context_index);
   refresh_transport_and_queue (self);
@@ -2290,6 +2310,7 @@ static gboolean
 dev_nav_probe (gpointer data)
 {
   SpotifyGtkNativeWindow *self = data;
+  self->dev_nav_probe_id = 0;
   g_message ("NAVPROBE leaving the page");
   navigate_raw (self, "home");
   return G_SOURCE_REMOVE;
@@ -2352,6 +2373,7 @@ on_play_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
    * URI would re-fetch from byte zero and lose the buffered position. */
   if (spotifygtk_player_service_is_paused (self->player)) {
     spotifygtk_player_service_resume (self->player);
+    broadcast_playing_uri (self);
     (void) bar;
     return;
   }
@@ -2403,6 +2425,7 @@ on_pause_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   spotifygtk_player_service_pause (self->player);
+  broadcast_playing_uri (self);
   (void) bar;
 }
 
@@ -2562,6 +2585,15 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
 
   g_message ("window: remote command %s", endpoint);
 
+  /* A cluster naming another active device is the ownership handoff itself;
+   * no separate pause command is guaranteed. Pause without publishing state,
+   * because an ordinary report for the still-loaded track would immediately
+   * try to reclaim ownership and recreate two simultaneous outputs. */
+  if (g_strcmp0 (endpoint, "connect_ownership_lost") == 0) {
+    spotifygtk_player_service_pause (self->player);
+    return;
+  }
+
   if (g_strcmp0 (endpoint, "pause") == 0)
     spotifygtk_player_service_pause (self->player);
   else if (g_strcmp0 (endpoint, "resume") == 0)
@@ -2572,6 +2604,17 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
     advance_next (self, FALSE);
   else if (g_strcmp0 (endpoint, "skip_prev") == 0)
     advance_prev (self);
+  else if (g_strcmp0 (endpoint, "set_options") == 0 ||
+           g_strcmp0 (endpoint, "set_shuffling_context") == 0) {
+    self->shuffle = value != 0;
+    self->smart_shuffle = value == 2;
+    /* The following ClusterUpdate supplies the enhanced next_tracks. Keep the
+     * current order intact until that authoritative sequence arrives. */
+    spotifygtk_playback_bar_set_modes (self->playback_bar, self->shuffle,
+                                       self->repeat);
+    spotifygtk_playback_bar_set_smart_shuffle (self->playback_bar,
+                                               self->smart_shuffle);
+  }
   else
     g_message ("window: %s is acknowledged but not acted on yet", endpoint);
 
@@ -2590,8 +2633,11 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
 typedef struct {
   SpotifyGtkNativeWindow *window;   /* weak */
   gchar                  *uri;
+  gchar                  *context_uri;
   gint64                  position_ms;
   gboolean                paused;
+  guint                   shuffle_mode;
+  gboolean                server_order;
   guint                   generation;
 } TransferAdopt;
 
@@ -2601,6 +2647,7 @@ transfer_adopt_free (TransferAdopt *a)
   if (a->window)
     g_object_remove_weak_pointer (G_OBJECT (a->window), (gpointer *) &a->window);
   g_free (a->uri);
+  g_free (a->context_uri);
   g_free (a);
 }
 
@@ -2628,7 +2675,45 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
     return;
   }
 
-  const SpotifyNativeTrack *track = g_ptr_array_index (tracks, 0);
+  const SpotifyNativeTrack *track = NULL;
+  for (guint i = 0; i < tracks->len; i++) {
+    const SpotifyNativeTrack *candidate = g_ptr_array_index (tracks, i);
+    if (g_strcmp0 (candidate->uri, a->uri) == 0) {
+      track = candidate;
+      break;
+    }
+  }
+  if (!track) {
+    g_warning ("window: transferred track %s was absent from its context",
+               a->uri);
+    transfer_adopt_free (a);
+    return;
+  }
+
+  /* Adopt the sequence from the transfer itself. For Smart Shuffle it is the
+   * only sequence containing the server-injected recommendations; resolving
+   * the playlist again would reduce it to the user's saved tracks. */
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  self->play_context = g_steal_pointer (&tracks);
+  g_clear_pointer (&self->play_context_uri, g_free);
+  self->play_context_uri = g_strdup (a->context_uri);
+  self->shuffle = a->shuffle_mode != 0;
+  self->smart_shuffle = a->shuffle_mode == 2;
+  self->server_order = a->server_order;
+  self->context_index = -1;
+  for (guint i = 0; i < self->play_context->len; i++) {
+    const SpotifyNativeTrack *candidate = g_ptr_array_index (self->play_context, i);
+    if (g_strcmp0 (candidate->uri, a->uri) == 0) {
+      self->context_index = (gint) i;
+      track = candidate;
+      break;
+    }
+  }
+  rebuild_order (self, self->context_index);
+  spotifygtk_playback_bar_set_modes (self->playback_bar, self->shuffle,
+                                     self->repeat);
+  spotifygtk_playback_bar_set_smart_shuffle (self->playback_bar,
+                                             self->smart_shuffle);
 
   /*
    * A transfer is a statement of desired state, not a "play this".
@@ -2665,6 +2750,7 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
       self->current_track_uri && spotifygtk_player_service_is_active (self->player)) {
     g_message ("window: declining a transfer to %s -- this device is not the "
                "active one and something is already playing here", track->uri);
+    transfer_adopt_free (a);
     return;
   }
 
@@ -2741,7 +2827,9 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
 
 static void
 on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
+                               const gchar *context_uri, gchar **track_uris,
                                gint64 position_ms, gboolean paused,
+                               guint shuffle_mode,
                                gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
@@ -2749,8 +2837,12 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
   if (!uri || !*uri)
     return;
 
-  g_message ("window: transfer -> %s at %" G_GINT64_FORMAT " ms (%s)",
-             uri, position_ms, paused ? "paused" : "playing");
+  guint n_uris = track_uris ? g_strv_length (track_uris) : 0;
+  g_message ("window: transfer -> %s at %" G_GINT64_FORMAT
+             " ms (%s), context=%s tracks=%u shuffle=%s",
+             uri, position_ms, paused ? "paused" : "playing",
+             context_uri ? context_uri : "(none)", n_uris,
+             shuffle_mode == 2 ? "smart" : shuffle_mode == 1 ? "on" : "off");
 
   /* A transfer names a track and nothing else, so the metadata every other
    * play path already has has to be fetched before anything can be rendered.
@@ -2758,13 +2850,23 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
   TransferAdopt *a = g_new0 (TransferAdopt, 1);
   a->window      = self;
   a->uri         = g_strdup (uri);
+  a->context_uri = g_strdup (context_uri);
   a->position_ms = position_ms;
   a->paused      = paused;
+  a->shuffle_mode = shuffle_mode;
+  a->server_order = n_uris > 0;
   a->generation  = ++self->transfer_generation;
   g_object_add_weak_pointer (G_OBJECT (self), (gpointer *) &a->window);
 
-  spotifygtk_native_session_load_tracks (session, uri, 1, NULL,
-                                         on_transfer_track_resolved, a);
+  if (n_uris > 0)
+    spotifygtk_native_session_load_track_uris (
+      session, (const gchar *const *) track_uris, n_uris, NULL,
+      on_transfer_track_resolved, a);
+  else
+    spotifygtk_native_session_load_tracks (
+      session, context_uri && *context_uri ? context_uri : uri,
+      context_uri && *context_uri ? 0 : 1, NULL,
+      on_transfer_track_resolved, a);
 }
 
 /*
@@ -2788,8 +2890,11 @@ broadcast_playing_uri (SpotifyGtkNativeWindow *self)
    * reporting nothing playing gets dropped. */
   if (self->session)
     spotifygtk_native_session_report_playback (self->session, uri,
+                                               self->play_context_uri,
                                                self->last_position_ms,
-                                               is_playing);
+                                               is_playing,
+                                               self->smart_shuffle ? 2 :
+                                               self->shuffle ? 1 : 0);
 
   spotifygtk_search_page_set_playing_uri (self->search_page, uri, is_playing);
   spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, uri, is_playing);
@@ -3056,8 +3161,9 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
 
     /* Development aid: open straight onto a page so its load can be watched
      * without driving the UI by hand. */
-    if (g_getenv ("SPOTIFY_NAV_PROBE"))
-      g_timeout_add_seconds (30, dev_nav_probe, self);
+    if (g_getenv ("SPOTIFY_NAV_PROBE") && !self->dev_nav_probe_id)
+      self->dev_nav_probe_id =
+        g_timeout_add_seconds (30, dev_nav_probe, self);
     const gchar *start = g_getenv ("SPOTIFY_DEV_START_PAGE");
     if (start && g_str_has_prefix (start, "spotify:"))
       navigate_to_context (self, start, "Dev", "artist");
@@ -4087,9 +4193,24 @@ spotifygtk_native_window_dispose (GObject *object)
 {
   SpotifyGtkNativeWindow *self = SPOTIFYGTK_NATIVE_WINDOW (object);
 
+  g_clear_handle_id (&self->collection_change_id, g_source_remove);
+  g_clear_handle_id (&self->dev_nav_probe_id, g_source_remove);
+  g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
+  if (self->auth)
+    g_signal_handlers_disconnect_by_data (self->auth, self);
+  if (self->session) {
+    /* StateEvent and Mercury dispatches deliberately retain the session while
+     * queued. Disconnect first so those refs cannot delay session disposal
+     * and then call back into a window whose widgets are already gone. */
+    g_signal_handlers_disconnect_by_data (self->session, self);
+    spotifygtk_native_session_cancel_callbacks (self->session);
+  }
+  if (self->player)
+    g_signal_handlers_disconnect_by_data (self->player, self);
   g_clear_object (&self->player);
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_track_uri, g_free);
+  g_clear_pointer (&self->play_context_uri, g_free);
   g_clear_pointer (&self->pending_pause_uri, g_free);
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   g_clear_pointer (&self->nav_history, g_ptr_array_unref);

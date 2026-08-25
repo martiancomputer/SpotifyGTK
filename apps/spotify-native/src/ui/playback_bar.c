@@ -133,6 +133,8 @@ static void
 on_shuffle_clicked (GtkButton *button, gpointer user_data)
 {
   SpotifyGtkPlaybackBar *self = user_data;
+  gtk_widget_remove_css_class (GTK_WIDGET (self->shuffle_btn), "smart-shuffle");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->shuffle_btn), "Shuffle");
   self->shuffle_on = !self->shuffle_on;
   set_toggle_state (self->shuffle_btn, self->shuffle_on);
   g_signal_emit (self, signals[SHUFFLE_TOGGLED], 0, self->shuffle_on);
@@ -529,6 +531,19 @@ spotifygtk_playback_bar_set_modes (SpotifyGtkPlaybackBar *self,
   self->repeat_mode = repeat;
   set_toggle_state (self->shuffle_btn, shuffle);
   apply_repeat_visual (self);
+}
+
+void
+spotifygtk_playback_bar_set_smart_shuffle (SpotifyGtkPlaybackBar *self,
+                                           gboolean smart)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  if (smart)
+    gtk_widget_add_css_class (GTK_WIDGET (self->shuffle_btn), "smart-shuffle");
+  else
+    gtk_widget_remove_css_class (GTK_WIDGET (self->shuffle_btn), "smart-shuffle");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->shuffle_btn),
+                               smart ? "Smart Shuffle" : "Shuffle");
 }
 
 SpotifyGtkPlaybackBar *
