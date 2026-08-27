@@ -15,6 +15,15 @@ if get_option('tests')
   )
   test('protobuf-wire-format', test_protobuf)
 
+  test_connect_options = executable('test-connect-options',
+    'test_connect_options.c',
+    '../src/spotify/connect_options.c',
+    '../src/spotify/protobuf_min.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep],
+  )
+  test('connect-shuffle-options', test_connect_options)
+
   test_track_meta = executable('test-track-meta',
     'test_track_meta.c',
     '../src/spotify/protobuf_min.c',

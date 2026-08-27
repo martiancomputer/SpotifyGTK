@@ -1135,20 +1135,31 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
  * Shares list_set_liked()'s path so the bar, the rows and the context menus
  * cannot disagree: one write, one set, one fan-out.
  */
-/* Shuffle keeps what is playing and reorders what follows, so toggling it
- * mid-track is not a jump cut. */
+/* Shuffle keeps what is playing and changes only what follows. Smart Shuffle
+ * publishes RECOMMENDATION through Connect, then keeps the current order until
+ * the server returns an enhanced next_tracks sequence. */
 static void
-on_shuffle_toggled (SpotifyGtkPlaybackBar *bar, gboolean enabled, gpointer user_data)
+on_shuffle_mode_changed (SpotifyGtkPlaybackBar *bar, guint mode,
+                         gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   (void) bar;
 
-  self->shuffle = enabled;
-  self->smart_shuffle = FALSE;
-  self->server_order = FALSE;
-  spotifygtk_settings_set_shuffle (spotifygtk_settings_get_default (), enabled);
-  rebuild_order (self, self->context_index);
+  SpotifyGtkShuffleMode shuffle_mode = MIN (mode, SPOTIFYGTK_SHUFFLE_SMART);
+  self->shuffle = shuffle_mode != SPOTIFYGTK_SHUFFLE_OFF;
+  self->smart_shuffle = shuffle_mode == SPOTIFYGTK_SHUFFLE_SMART;
+
+  /* In Smart mode the cluster owns the order. Until it answers, retain the
+   * order already on screen instead of briefly reshuffling it locally. */
+  if (!self->smart_shuffle) {
+    self->server_order = FALSE;
+    rebuild_order (self, self->context_index);
+  }
+
+  spotifygtk_settings_set_shuffle (spotifygtk_settings_get_default (),
+                                    self->shuffle);
   refresh_transport_and_queue (self);
+  broadcast_playing_uri (self);
 }
 
 static void
@@ -2610,10 +2621,18 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
     self->smart_shuffle = value == 2;
     /* The following ClusterUpdate supplies the enhanced next_tracks. Keep the
      * current order intact until that authoritative sequence arrives. */
-    spotifygtk_playback_bar_set_modes (self->playback_bar, self->shuffle,
-                                       self->repeat);
-    spotifygtk_playback_bar_set_smart_shuffle (self->playback_bar,
-                                               self->smart_shuffle);
+    if (!self->smart_shuffle) {
+      self->server_order = FALSE;
+      rebuild_order (self, self->context_index);
+    }
+    spotifygtk_settings_set_shuffle (spotifygtk_settings_get_default (),
+                                      self->shuffle);
+    refresh_transport_and_queue (self);
+    spotifygtk_playback_bar_set_modes (
+      self->playback_bar,
+      self->smart_shuffle ? SPOTIFYGTK_SHUFFLE_SMART :
+      self->shuffle ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF,
+      self->repeat);
   }
   else
     g_message ("window: %s is acknowledged but not acted on yet", endpoint);
@@ -2710,10 +2729,11 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
     }
   }
   rebuild_order (self, self->context_index);
-  spotifygtk_playback_bar_set_modes (self->playback_bar, self->shuffle,
-                                     self->repeat);
-  spotifygtk_playback_bar_set_smart_shuffle (self->playback_bar,
-                                             self->smart_shuffle);
+  spotifygtk_playback_bar_set_modes (
+    self->playback_bar,
+    self->smart_shuffle ? SPOTIFYGTK_SHUFFLE_SMART :
+    self->shuffle ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF,
+    self->repeat);
 
   /*
    * A transfer is a statement of desired state, not a "play this".
@@ -3586,6 +3606,7 @@ static const gchar *theme_body =
   ".transport-button { color: @fg_sidebar; min-width: 32px; min-height: 32px; }"
   ".transport-button:hover { color: @fg_strong; }"
   ".toggle-active { color: @accent; }"
+  ".smart-shuffle-badge { color: @accent; font-size: 8px; font-weight: 800; }"
   ".like-active { color: @accent; }"
   /* The row's liked mark is an indicator inside the duration column, not a
    * control -- no padding, no hover state, nothing to click. */
@@ -4124,10 +4145,13 @@ spotifygtk_native_window_constructed (GObject *object)
     SpotifyGtkSettings *st = spotifygtk_settings_get_default ();
     self->shuffle = spotifygtk_settings_get_shuffle (st);
     self->repeat  = (SpotifyGtkRepeatMode) spotifygtk_settings_get_repeat (st);
-    spotifygtk_playback_bar_set_modes (self->playback_bar, self->shuffle, self->repeat);
+    spotifygtk_playback_bar_set_modes (
+      self->playback_bar,
+      self->shuffle ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF,
+      self->repeat);
   }
-  g_signal_connect (self->playback_bar, "shuffle-toggled",
-                    G_CALLBACK (on_shuffle_toggled), self);
+  g_signal_connect (self->playback_bar, "shuffle-mode-changed",
+                    G_CALLBACK (on_shuffle_mode_changed), self);
   g_signal_connect (self->playback_bar, "repeat-changed",
                     G_CALLBACK (on_repeat_changed), self);
   g_signal_connect (self->playback_bar, "play-clicked",

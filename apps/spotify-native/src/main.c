@@ -1977,6 +1977,18 @@ on_context_probe_result (JsonNode *context, GError *error, gpointer user_data)
 
   g_message ("[probe] context-resolve SUCCEEDED -- dumping response shape");
 
+  const gchar *dump_path = g_getenv ("SPOTIFY_PROBE_CONTEXT_DUMP");
+  if (dump_path && *dump_path) {
+    g_autoptr(JsonGenerator) dump = json_generator_new ();
+    json_generator_set_pretty (dump, TRUE);
+    json_generator_set_root (dump, context);
+    g_autofree gchar *json = json_generator_to_data (dump, NULL);
+    if (g_file_set_contents (dump_path, json, -1, NULL))
+      g_message ("[probe] wrote full context response to %s", dump_path);
+    else
+      g_warning ("[probe] could not write context response to %s", dump_path);
+  }
+
   /* Top-level keys, then the first page's first track, which is the part
    * the UI actually has to consume. */
   if (JSON_NODE_HOLDS_OBJECT (context)) {

@@ -94,25 +94,28 @@ recommendations have to be stable across skips and not repeat.
 ## What this means for this client
 
 Ordinary shuffle is ours to do and is done: a permutation over the resolved
-context, held beside it (`ui/window.c`).
+context, held beside it (`ui/window.c`). Smart Shuffle still cannot be computed
+faithfully from `/context-resolve`; a probe of the complete collection response
+confirmed that it returns only the original context pages.
 
-Smart shuffle is not reachable the same way. We resolve contexts ourselves
-through `/context-resolve` and play locally; we do not run the server-side
-player that owns `modes`, so setting `context_enhancement` has nothing to act
-on. Two things would have to be true to implement it faithfully:
+Connect supplies the missing server-player path. The client now publishes
+`shuffling_context=true` plus `context_enhancement=RECOMMENDATION` in its
+`PlayerState`, and consumes the authoritative enhanced sequence when the
+following cluster snapshot delivers it in `next_tracks`. Until that snapshot
+arrives it retains the current order rather than presenting a locally invented
+approximation.
 
-1. an endpoint that returns the *enhanced* sequence for a context URI, rather
-   than the plain track list `/context-resolve` gives, and
-2. the ledger behaviour above, or the recommendations would reshuffle on every
-   skip.
+There are two protobuf shapes to support:
 
-Neither is exposed in the JS bundle -- the `enhance_context` and
-`unenhance_context` names found there are **telemetry action names**, not
-endpoints, and were a false lead worth recording as one.
+- `ContextPlayerOptions` in transfers and player state uses shuffle field 1
+  and modes field 5.
+- `SetOptionsRequest` in remote commands wraps shuffle in `OptionalBoolean` at
+  field 3 and puts modes at field 7.
 
-A locally-computed approximation is possible (mix the context with
-recommendations from some other endpoint) but it would not be the same feature
-and should not be called Smart Shuffle if it is not.
+The official apps can therefore initiate Smart Shuffle remotely, and the
+native three-state control can initiate it by publishing the same Connect
+state. `enhance_context` and `unenhance_context` in the JS bundle remain
+telemetry names, not endpoints.
 
 ## Ruled out
 

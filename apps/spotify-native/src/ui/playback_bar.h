@@ -25,6 +25,15 @@ typedef enum {
   SPOTIFYGTK_REPEAT_ONE,
 } SpotifyGtkRepeatMode;
 
+/* Spotify's shuffle control has three states. Smart Shuffle still shuffles
+ * the context, but asks Connect for a server-enhanced sequence containing
+ * recommendations, so it cannot be represented by a boolean toggle. */
+typedef enum {
+  SPOTIFYGTK_SHUFFLE_OFF = 0,
+  SPOTIFYGTK_SHUFFLE_NORMAL,
+  SPOTIFYGTK_SHUFFLE_SMART,
+} SpotifyGtkShuffleMode;
+
 #define SPOTIFYGTK_TYPE_PLAYBACK_BAR (spotifygtk_playback_bar_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifyGtkPlaybackBar, spotifygtk_playback_bar,
                       SPOTIFYGTK, PLAYBACK_BAR, GtkBox)
@@ -33,10 +42,8 @@ SpotifyGtkPlaybackBar *spotifygtk_playback_bar_new (void);
 
 /* Set both toggles without emitting, for restoring persisted state. */
 void spotifygtk_playback_bar_set_modes (SpotifyGtkPlaybackBar *self,
-                                        gboolean shuffle,
+                                        SpotifyGtkShuffleMode shuffle,
                                         SpotifyGtkRepeatMode repeat);
-void spotifygtk_playback_bar_set_smart_shuffle (SpotifyGtkPlaybackBar *self,
-                                                gboolean smart);
 
 /* Update displayed information */
 void spotifygtk_playback_bar_set_track (SpotifyGtkPlaybackBar *self,
@@ -71,7 +78,7 @@ void spotifygtk_playback_bar_set_skip_sensitive (SpotifyGtkPlaybackBar *self,
  * - seek (gint64 position_ms)
  * - volume-changed (gint percent)
  * - like-toggled    (gboolean liked)
- * - shuffle-toggled (gboolean enabled)
+ * - shuffle-mode-changed (SpotifyGtkShuffleMode mode)
  * - repeat-changed  (SpotifyGtkRepeatMode mode)
  * - queue-clicked
  */

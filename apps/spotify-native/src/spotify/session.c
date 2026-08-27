@@ -12,6 +12,7 @@
 
 #include "ap.h"
 #include "clienttoken.h"
+#include "connect_options.h"
 #include "login5.h"
 #include "native_auth.h"
 #include "spclient.h"
@@ -869,10 +870,6 @@ dealer_ping (gpointer user_data)
 #define CTXPAGE_TRACKS         4
 #define CTXTRACK_URI           1
 #define CTXTRACK_GID           3
-#define CTXOPT_SHUFFLING       1
-#define CTXOPT_MODES           5
-#define MAP_KEY                1
-#define MAP_VALUE              2
 
 static gchar *
 transfer_track_uri (const guint8 *data, gsize len)
@@ -925,45 +922,6 @@ transfer_context_tracks (const guint8 *context, gsize len)
   return uris;
 }
 
-/* 0=off, 1=ordinary shuffle, 2=Smart Shuffle. ContextPlayerOptions is the
- * legacy Connect shape: shuffling_context=1 and modes=5, a string map whose
- * context_enhancement value is RECOMMENDATION for Smart Shuffle. */
-static guint
-transfer_shuffle_mode (const guint8 *options, gsize len, guint fallback)
-{
-  guint64 shuffling = 0;
-  gboolean has_shuffle = pb_find_varint_field (options, len,
-                                                CTXOPT_SHUFFLING, &shuffling);
-  gboolean recommendation = FALSE;
-
-  gsize pos = 0;
-  guint32 fn;
-  PbWireType wt;
-  const guint8 *field;
-  gsize field_len;
-  guint64 value;
-  while (pb_read_field (options, len, &pos, &fn, &wt,
-                        &field, &field_len, &value)) {
-    if (fn != CTXOPT_MODES || wt != PB_WIRE_LENGTH_DELIMITED)
-      continue;
-    const guint8 *key = NULL, *val = NULL;
-    gsize key_len = 0, val_len = 0;
-    if (pb_find_bytes_field (field, field_len, MAP_KEY, &key, &key_len) &&
-        pb_find_bytes_field (field, field_len, MAP_VALUE, &val, &val_len) &&
-        key_len == strlen ("context_enhancement") &&
-        memcmp (key, "context_enhancement", key_len) == 0 &&
-        val_len == strlen ("RECOMMENDATION") &&
-        memcmp (val, "RECOMMENDATION", val_len) == 0)
-      recommendation = TRUE;
-  }
-
-  if (recommendation)
-    return 2;
-  if (has_shuffle)
-    return shuffling ? 1 : 0;
-  return fallback;
-}
-
 static void
 dealer_handle_transfer_state (SpotifyNativeSession *self,
                               const guint8 *data, gsize len)
@@ -977,7 +935,8 @@ dealer_handle_transfer_state (SpotifyNativeSession *self,
   guint shuffle_mode = 0;
 
   if (pb_find_bytes_field (data, len, TS_OPTIONS, &v, &vlen))
-    shuffle_mode = transfer_shuffle_mode (v, vlen, shuffle_mode);
+    shuffle_mode = spotifygtk_connect_player_shuffle_mode (
+      v, vlen, shuffle_mode);
 
   if (pb_find_bytes_field (data, len, TS_PLAYBACK, &v, &vlen)) {
     const guint8 *t = NULL; gsize tlen = 0;
@@ -1004,7 +963,8 @@ dealer_handle_transfer_state (SpotifyNativeSession *self,
       context_tracks = transfer_context_tracks (ctx, clen);
     }
     if (pb_find_bytes_field (v, vlen, SESSION_OPTIONS, &ctx, &clen))
-      shuffle_mode = transfer_shuffle_mode (ctx, clen, shuffle_mode);
+      shuffle_mode = spotifygtk_connect_player_shuffle_mode (
+        ctx, clen, shuffle_mode);
   }
 
   if (context_uri && *context_uri) {
@@ -1108,11 +1068,8 @@ dealer_handle_command (JsonObject *root)
       g_autofree guchar *options = encoded
         ? g_base64_decode (encoded, &options_len) : NULL;
       if (options && options_len) {
-        guint mode = transfer_shuffle_mode (options, options_len,
-                                             connect_now_shuffle_mode);
-        if (memmem (options, options_len, "RECOMMENDATION",
-                    strlen ("RECOMMENDATION")))
-          mode = 2;
+        guint mode = spotifygtk_connect_command_shuffle_mode (
+          options, options_len, connect_now_shuffle_mode);
         connect_now_shuffle_mode = mode;
         seek_to = mode;
         g_message ("[command] decoded shuffle mode: %s",
@@ -1222,7 +1179,8 @@ dealer_handle_cluster (const guint8 *cluster, gsize len)
   guint shuffle_mode = 0;
   if (pb_find_bytes_field (player_state, player_state_len,
                            CS_PLAYERSTATE_OPTIONS, &options, &options_len))
-    shuffle_mode = transfer_shuffle_mode (options, options_len, 0);
+    shuffle_mode = spotifygtk_connect_player_shuffle_mode (
+      options, options_len, 0);
   if (shuffle_mode != 2)
     return;
 

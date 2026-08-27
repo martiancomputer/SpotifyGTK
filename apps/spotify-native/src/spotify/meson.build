@@ -17,4 +17,5 @@ spotify_proto_sources = files(
   'audio_key.c',
   'cdn.c',
   'connect.c',
+  'connect_options.c',
 )
