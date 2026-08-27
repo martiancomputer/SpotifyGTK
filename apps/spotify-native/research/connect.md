@@ -116,11 +116,14 @@ this step. `SPOTIFY_PROBE_DEALER=1` reruns it.
 
 ## Step 3, as far as it got — measured
 
-Field numbers were read out of the descriptor bytes rather than assumed, which
-mattered: `MemberType.CONNECT_STATE_EXTENDED` is **5**, not the 3 its position
-suggests, `DeviceInfo.name` is **3**, and `brand`/`model` are **14**/**15** on
-`DeviceInfo` itself rather than on `AudioOutputDeviceInfo`. The numbers came
-from parsing the embedded `FileDescriptorProto` at `0x877f10`
+Field numbers were read out of the descriptor bytes rather than assumed.
+`DeviceInfo.name` is **3**, and `brand`/`model` are **14**/**15** on
+`DeviceInfo` itself rather than on `AudioOutputDeviceInfo`. The descriptor
+contains `CONNECT_STATE_EXTENDED=5`, but current working Connect clients
+announce themselves as `CONNECT_STATE=2`. SpotifyGTK was using the extended
+member type while appearing grey and receiving no player commands, so it now
+matches the working clients. The numbers came from parsing the embedded
+`FileDescriptorProto` at `0x877f10`
 (`devices.proto` at `0x87b230`).
 
 ```

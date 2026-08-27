@@ -302,10 +302,11 @@ static SpotifyNativeSession *dealer_session;
  * PutStateRequest. Mercury is not involved, which is what connect.c had wrong.
  *
  * Every field number below was read out of the descriptors embedded in the
- * shipped client rather than remembered -- MemberType.CONNECT_STATE_EXTENDED
- * is 5, not the 3 its position suggests, and DeviceInfo.name is 3 while brand
- * and model are 14 and 15. Guessing any of these gets an opaque HTTP 400 with
- * an empty body, the same failure the Windows client-token block had.
+ * shipped client rather than remembered.  The descriptor contains both
+ * CONNECT_STATE and CONNECT_STATE_EXTENDED, but current Connect players
+ * announce with CONNECT_STATE. DeviceInfo.name is 3 while brand and model are
+ * 14 and 15. Guessing any of these gets an opaque HTTP 400 with an empty body,
+ * the same failure the Windows client-token block had.
  */
 #define CS_DEVINFO_CAN_PLAY        1
 #define CS_DEVINFO_VOLUME          2
@@ -321,6 +322,8 @@ static SpotifyNativeSession *dealer_session;
 #define CS_DEVINFO_DEDUP_ID       18
 
 #define CS_CAP_CAN_BE_PLAYER      2
+#define CS_CAP_GAIA_EQ_CONNECT_ID 5
+#define CS_CAP_IS_OBSERVABLE      7
 #define CS_CAP_VOLUME_STEPS       8
 #define CS_CAP_SUPPORTED_TYPES    9
 #define CS_CAP_COMMAND_ACKS      10
@@ -370,7 +373,7 @@ static SpotifyNativeSession *dealer_session;
 #define CS_PUT_HAS_BEEN_PLAYING_MS 11
 #define CS_PUT_CLIENT_TIMESTAMP  12
 
-#define CS_MEMBER_CONNECT_STATE_EXTENDED 5   /* MemberType */
+#define CS_MEMBER_CONNECT_STATE   2   /* MemberType */
 #define CS_REASON_NEW_DEVICE      3   /* PutStateReason */
 #define CS_REASON_PLAYER_STATE_CHANGED 4
 #define CS_DEVICE_TYPE_COMPUTER   1   /* devices.DeviceType */
@@ -432,6 +435,8 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
 {
   g_autoptr(GByteArray) caps = g_byte_array_new ();
   pb_write_varint_field (caps, CS_CAP_CAN_BE_PLAYER, 1);
+  pb_write_varint_field (caps, CS_CAP_GAIA_EQ_CONNECT_ID, 1);
+  pb_write_varint_field (caps, CS_CAP_IS_OBSERVABLE, 1);
   pb_write_varint_field (caps, CS_CAP_VOLUME_STEPS, 64);
   /* What this device will accept being handed. Audio only: no video, no
    * episodes, and nothing claimed that is not implemented. */
@@ -535,9 +540,15 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
   }
 
   pb_write_varint_field (ps, CS_PS_POSITION, (guint64) connect_now_position_ms);
-  pb_write_varint_field (ps, CS_PS_IS_PLAYING, connect_now_playing ? 1 : 0);
-  pb_write_varint_field (ps, CS_PS_IS_PAUSED, connect_now_playing ? 0 : 1);
-  pb_write_varint_field (ps, CS_PS_IS_BUFFERING, 0);
+  /* Connect models a loaded-but-paused player as playing+paused+buffering.
+   * Reporting playing=false while paused makes desktop/web controllers treat
+   * the device as unhealthy and leave it grey in their device picker. */
+  gboolean has_track = connect_now_uri && *connect_now_uri;
+  pb_write_varint_field (ps, CS_PS_IS_PLAYING, has_track ? 1 : 0);
+  pb_write_varint_field (ps, CS_PS_IS_PAUSED,
+                         has_track && !connect_now_playing ? 1 : 0);
+  pb_write_varint_field (ps, CS_PS_IS_BUFFERING,
+                         has_track && !connect_now_playing ? 1 : 0);
   pb_write_varint_field (ps, CS_PS_IS_SYSTEM_INITIATED, 1);
 
   /* Controllers derive their three-state shuffle button from both values.
@@ -570,7 +581,7 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
   g_autoptr(GByteArray) put = g_byte_array_new ();
   pb_write_message_field (put, CS_PUT_DEVICE, device->data, device->len);
   pb_write_varint_field (put, CS_PUT_MEMBER_TYPE,
-                         CS_MEMBER_CONNECT_STATE_EXTENDED);
+                         CS_MEMBER_CONNECT_STATE);
   /*
    * Announcing existence, or answering a transfer.
    *
