@@ -637,6 +637,7 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
 
 #define CS_CLUSTERUPDATE_CLUSTER_FWD 1
 static gchar *cluster_active_device (const guint8 *cluster, gsize len);
+static void dealer_handle_cluster (const guint8 *cluster, gsize len);
 
 static void
 on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
@@ -702,6 +703,12 @@ on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
     gboolean by_id   = dev_id && memmem (d, len, dev_id, strlen (dev_id)) != NULL;
     g_message ("[connect] our device in the returned cluster: by name %s, by id %s",
                by_name ? "yes" : "no", by_id ? "yes" : "no");
+
+    /* A local option change often comes back only in this PUT response. The
+     * dealer is not required to echo our own Cluster back to us, so dropping
+     * this body also dropped the Smart Shuffle next_tracks it contained. Feed
+     * both paths through the same decoder and queue-adoption logic. */
+    dealer_handle_cluster (cl, cllen);
 
     if (g_getenv ("SPOTIFY_CLUSTER_DUMP"))
       g_file_set_contents (g_getenv ("SPOTIFY_CLUSTER_DUMP"), d, (gssize) len, NULL);

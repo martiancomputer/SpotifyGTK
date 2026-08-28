@@ -106,6 +106,8 @@ struct _SpotifyGtkNativeWindow {
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
   guint transfer_generation;             /* stale in-flight transfer adoptions */
+  guint context_generation;              /* stale search-radio resolutions */
+  guint smart_generation;                /* stale Smart Shuffle resolutions */
   guint playlists_resolved;              /* cards that have asked for details */
   gboolean playlists_loading;            /* rootlist read in flight */
   guint collection_change_id;            /* coalesces change events */
@@ -176,6 +178,16 @@ struct _SpotifyGtkNativeWindow {
   gboolean   shuffle;
   gboolean   smart_shuffle;
   gboolean   server_order;      /* Connect supplied an already-enhanced order */
+
+  /* Smart Shuffle temporarily owns Up Next. Keep an exact copy of the normal
+   * context and explicit queue so leaving Smart restores what it displaced. */
+  gboolean   smart_saved_valid;
+  GPtrArray *smart_saved_context;
+  GArray    *smart_saved_order;
+  GQueue    *smart_saved_user_queue;
+  gchar     *smart_saved_context_uri;
+  gint       smart_saved_context_index;
+  gint       smart_saved_order_pos;
   SpotifyGtkRepeatMode repeat;
 };
 
@@ -189,6 +201,7 @@ static void spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self)
 static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static gint order_pos_of (SpotifyGtkNativeWindow *self, gint ctx_index);
 static void rebuild_order (SpotifyGtkNativeWindow *self, gint keep);
+static void refresh_transport_and_queue (SpotifyGtkNativeWindow *self);
 static void show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track);
 static gboolean dev_nav_probe (gpointer data);
 static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
@@ -285,6 +298,312 @@ on_nav_fwd_clicked (GtkButton *b, gpointer user_data)
 }
 
 /* === Track selection, queue and play-context === */
+
+static GPtrArray *
+copy_track_array (GPtrArray *tracks)
+{
+  if (!tracks)
+    return NULL;
+  GPtrArray *copy = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  for (guint i = 0; i < tracks->len; i++)
+    g_ptr_array_add (copy, spotifygtk_native_track_copy (
+      g_ptr_array_index (tracks, i)));
+  return copy;
+}
+
+static GArray *
+copy_play_order (GArray *order)
+{
+  if (!order)
+    return NULL;
+  GArray *copy = g_array_sized_new (FALSE, FALSE, sizeof (guint), order->len);
+  if (order->len)
+    g_array_append_vals (copy, order->data, order->len);
+  return copy;
+}
+
+static GQueue *
+copy_user_queue (GQueue *queue)
+{
+  GQueue *copy = g_queue_new ();
+  if (queue)
+    for (GList *l = queue->head; l; l = l->next)
+      g_queue_push_tail (copy, spotifygtk_native_track_copy (l->data));
+  return copy;
+}
+
+static void
+smart_saved_queue_clear (SpotifyGtkNativeWindow *self)
+{
+  self->smart_saved_valid = FALSE;
+  g_clear_pointer (&self->smart_saved_context, g_ptr_array_unref);
+  g_clear_pointer (&self->smart_saved_order, g_array_unref);
+  if (self->smart_saved_user_queue) {
+    g_queue_free_full (self->smart_saved_user_queue,
+                       (GDestroyNotify) spotifygtk_native_track_free);
+    self->smart_saved_user_queue = NULL;
+  }
+  g_clear_pointer (&self->smart_saved_context_uri, g_free);
+}
+
+/* Save the complete normal Up Next state, then remove it from the live queue.
+ * The current track remains sounding while the server radio is fetched. */
+static void
+smart_queue_save_and_discard (SpotifyGtkNativeWindow *self)
+{
+  if (self->smart_saved_valid)
+    return;
+
+  guint saved_context_len = self->play_context ? self->play_context->len : 0;
+  guint saved_queue_len = self->user_queue ? self->user_queue->length : 0;
+
+  self->smart_saved_valid = TRUE;
+  self->smart_saved_context = copy_track_array (self->play_context);
+  self->smart_saved_order = copy_play_order (self->order);
+  self->smart_saved_user_queue = copy_user_queue (self->user_queue);
+  self->smart_saved_context_uri = g_strdup (self->play_context_uri);
+  self->smart_saved_context_index = self->context_index;
+  self->smart_saved_order_pos = self->order_pos;
+
+  const SpotifyNativeTrack *current = NULL;
+  if (self->smart_saved_context)
+    for (guint i = 0; i < self->smart_saved_context->len; i++) {
+      const SpotifyNativeTrack *candidate =
+        g_ptr_array_index (self->smart_saved_context, i);
+      if (g_strcmp0 (candidate->uri, self->current_track_uri) == 0) {
+        current = candidate;
+        break;
+      }
+    }
+
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  self->play_context = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  if (current)
+    g_ptr_array_add (self->play_context,
+                     spotifygtk_native_track_copy (current));
+  self->context_index = current ? 0 : -1;
+  self->server_order = TRUE;
+  rebuild_order (self, self->context_index);
+
+  g_queue_free_full (self->user_queue,
+                     (GDestroyNotify) spotifygtk_native_track_free);
+  self->user_queue = g_queue_new ();
+
+  g_message ("Smart Shuffle: displaced %u context tracks and %u explicitly "
+             "queued tracks", saved_context_len, saved_queue_len);
+}
+
+/* Restore exactly what Smart Shuffle displaced. The sounding recommendation
+ * may not belong to that context; in that case Next resumes after the track
+ * that was current when Smart was enabled. */
+static gboolean
+smart_queue_restore (SpotifyGtkNativeWindow *self)
+{
+  if (!self->smart_saved_valid)
+    return FALSE;
+
+  self->smart_generation++;
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  g_clear_pointer (&self->order, g_array_unref);
+  g_queue_free_full (self->user_queue,
+                     (GDestroyNotify) spotifygtk_native_track_free);
+  g_clear_pointer (&self->play_context_uri, g_free);
+
+  self->play_context = g_steal_pointer (&self->smart_saved_context);
+  self->order = g_steal_pointer (&self->smart_saved_order);
+  self->user_queue = self->smart_saved_user_queue;
+  self->smart_saved_user_queue = NULL;
+  self->play_context_uri = g_steal_pointer (&self->smart_saved_context_uri);
+  self->context_index = self->smart_saved_context_index;
+  self->order_pos = self->smart_saved_order_pos;
+  self->server_order = FALSE;
+  self->smart_saved_valid = FALSE;
+
+  if (self->play_context && self->current_track_uri)
+    for (guint i = 0; i < self->play_context->len; i++) {
+      const SpotifyNativeTrack *candidate = g_ptr_array_index (self->play_context, i);
+      if (g_strcmp0 (candidate->uri, self->current_track_uri) == 0) {
+        self->context_index = (gint) i;
+        self->order_pos = order_pos_of (self, self->context_index);
+        break;
+      }
+    }
+
+  g_message ("Smart Shuffle: restored %u context tracks and %u explicitly "
+             "queued tracks",
+             self->play_context ? self->play_context->len : 0,
+             self->user_queue ? self->user_queue->length : 0);
+
+  return TRUE;
+}
+
+static gchar *
+track_station_uri (const gchar *track_uri)
+{
+  const gchar *prefix = "spotify:track:";
+  if (!track_uri || !g_str_has_prefix (track_uri, prefix) ||
+      !track_uri[strlen (prefix)])
+    return NULL;
+  return g_strdup_printf ("spotify:station:track:%s",
+                          track_uri + strlen (prefix));
+}
+
+typedef struct {
+  GWeakRef window;
+  guint generation;
+  gchar *current_uri;
+} SmartQueueLoad;
+
+static void
+smart_queue_load_free (SmartQueueLoad *load)
+{
+  g_weak_ref_clear (&load->window);
+  g_free (load->current_uri);
+  g_free (load);
+}
+
+static gboolean
+add_unique_track_copy (GPtrArray *out, GHashTable *seen,
+                       const SpotifyNativeTrack *track)
+{
+  if (!track || !track->uri || g_hash_table_contains (seen, track->uri))
+    return FALSE;
+  g_hash_table_add (seen, g_strdup (track->uri));
+  g_ptr_array_add (out, spotifygtk_native_track_copy (track));
+  return TRUE;
+}
+
+static void
+on_smart_station_loaded (GObject *source, GAsyncResult *result,
+                         gpointer user_data)
+{
+  SmartQueueLoad *load = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) radio = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
+
+  if (!self || load->generation != self->smart_generation ||
+      !self->smart_shuffle) {
+    smart_queue_load_free (load);
+    return;
+  }
+  if (!radio || radio->len == 0) {
+    g_warning ("Smart Shuffle: station fetch failed: %s",
+               error ? error->message : "no recommendations");
+    smart_queue_load_free (load);
+    return;
+  }
+
+  GPtrArray *enhanced = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  g_autoptr(GHashTable) seen = g_hash_table_new_full (
+    g_str_hash, g_str_equal, g_free, NULL);
+
+  /* Keep the sounding track first. Prefer its normal-context metadata, then
+   * the station's copy (the station always returns its seed as track zero). */
+  if (self->smart_saved_context)
+    for (guint i = 0; i < self->smart_saved_context->len; i++) {
+      const SpotifyNativeTrack *track = g_ptr_array_index (self->smart_saved_context, i);
+      if (g_strcmp0 (track->uri, load->current_uri) == 0) {
+        add_unique_track_copy (enhanced, seen, track);
+        break;
+      }
+    }
+  if (enhanced->len == 0)
+    for (guint i = 0; i < radio->len; i++) {
+      const SpotifyNativeTrack *track = g_ptr_array_index (radio, i);
+      if (g_strcmp0 (track->uri, load->current_uri) == 0) {
+        add_unique_track_copy (enhanced, seen, track);
+        break;
+      }
+    }
+
+  guint radio_pos = 0;
+  gint saved_pos = self->smart_saved_order_pos;
+  if (saved_pos < 0 && self->smart_saved_order &&
+      self->smart_saved_context_index >= 0)
+    for (guint i = 0; i < self->smart_saved_order->len; i++)
+      if ((gint) g_array_index (self->smart_saved_order, guint, i) ==
+          self->smart_saved_context_index) {
+        saved_pos = (gint) i;
+        break;
+      }
+  guint originals_since_recommendation = 0;
+
+  /* Smart Shuffle is a blend, not a local random permutation: preserve the
+   * previous context order and inject one fetched recommendation after every
+   * two context tracks. Explicitly queued tracks stay out until restoration. */
+  if (self->smart_saved_context && self->smart_saved_order) {
+    for (gint p = saved_pos + 1; p < (gint) self->smart_saved_order->len; p++) {
+      guint index = g_array_index (self->smart_saved_order, guint, p);
+      if (index >= self->smart_saved_context->len)
+        continue;
+      if (add_unique_track_copy (enhanced, seen,
+            g_ptr_array_index (self->smart_saved_context, index)))
+        originals_since_recommendation++;
+
+      if (originals_since_recommendation == 2) {
+        while (radio_pos < radio->len &&
+               !add_unique_track_copy (enhanced, seen,
+                 g_ptr_array_index (radio, radio_pos)))
+          radio_pos++;
+        if (radio_pos < radio->len)
+          radio_pos++;
+        originals_since_recommendation = 0;
+      }
+    }
+  } else {
+    for (; radio_pos < radio->len; radio_pos++)
+      add_unique_track_copy (enhanced, seen,
+                             g_ptr_array_index (radio, radio_pos));
+  }
+
+  /* A one-track context still needs a recommendation; the two-original
+   * cadence above has no opportunity to inject one. */
+  if (enhanced->len < 2 || originals_since_recommendation > 0)
+    while (radio_pos < radio->len) {
+      if (add_unique_track_copy (enhanced, seen,
+            g_ptr_array_index (radio, radio_pos++)))
+        break;
+    }
+
+  if (enhanced->len < 2) {
+    g_ptr_array_unref (enhanced);
+    g_warning ("Smart Shuffle: fetched station contained no usable next tracks");
+    smart_queue_load_free (load);
+    return;
+  }
+
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  self->play_context = enhanced;
+  self->context_index = 0;
+  self->server_order = TRUE;
+  rebuild_order (self, self->context_index);
+  refresh_transport_and_queue (self);
+  g_message ("Smart Shuffle: installed %u-track enhanced queue from song radio",
+             enhanced->len);
+  smart_queue_load_free (load);
+}
+
+static void
+smart_queue_fetch (SpotifyGtkNativeWindow *self)
+{
+  if (!self->session || !self->current_track_uri)
+    return;
+  g_autofree gchar *station = track_station_uri (self->current_track_uri);
+  if (!station)
+    return;
+
+  SmartQueueLoad *load = g_new0 (SmartQueueLoad, 1);
+  g_weak_ref_init (&load->window, self);
+  load->generation = ++self->smart_generation;
+  load->current_uri = g_strdup (self->current_track_uri);
+  spotifygtk_native_session_load_tracks (
+    self->session, station, 50, NULL, on_smart_station_loaded, load);
+}
 
 /* Rebuild the "up next" list the panel shows, and update Prev/Next
  * sensitivity, from the current queue and context. Called whenever either
@@ -592,6 +911,101 @@ advance_prev (SpotifyGtkNativeWindow *self)
   return FALSE;
 }
 
+typedef struct {
+  GWeakRef window;
+  guint generation;
+  gchar *current_uri;
+  gchar *station_uri;
+} SearchRadioLoad;
+
+static void
+search_radio_load_free (SearchRadioLoad *load)
+{
+  g_weak_ref_clear (&load->window);
+  g_free (load->current_uri);
+  g_free (load->station_uri);
+  g_free (load);
+}
+
+static void
+on_search_radio_loaded (GObject *source, GAsyncResult *result,
+                        gpointer user_data)
+{
+  SearchRadioLoad *load = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
+
+  if (!self || load->generation != self->context_generation ||
+      g_strcmp0 (self->current_track_uri, load->current_uri) != 0) {
+    search_radio_load_free (load);
+    return;
+  }
+  if (!tracks || tracks->len == 0) {
+    g_warning ("song radio: could not resolve %s: %s", load->station_uri,
+               error ? error->message : "empty station");
+    search_radio_load_free (load);
+    return;
+  }
+
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  self->play_context = g_steal_pointer (&tracks);
+  self->context_index = -1;
+  for (guint i = 0; i < self->play_context->len; i++) {
+    const SpotifyNativeTrack *candidate = g_ptr_array_index (self->play_context, i);
+    if (g_strcmp0 (candidate->uri, load->current_uri) == 0) {
+      self->context_index = (gint) i;
+      break;
+    }
+  }
+  self->server_order = FALSE;
+  rebuild_order (self, self->context_index);
+  refresh_transport_and_queue (self);
+  g_message ("song radio: installed %u-track queue for %s",
+             self->play_context->len, load->current_uri);
+  search_radio_load_free (load);
+}
+
+static void
+play_search_track_radio (SpotifyGtkNativeWindow *self,
+                         const SpotifyNativeTrack *track)
+{
+  g_autofree gchar *station_uri = track_station_uri (track->uri);
+  if (!station_uri) {
+    play_native_track (self, track, FALSE);
+    return;
+  }
+
+  self->context_generation++;
+  self->smart_generation++;
+  smart_saved_queue_clear (self);
+  self->smart_shuffle = FALSE;
+  self->server_order = FALSE;
+
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  self->play_context = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  g_ptr_array_add (self->play_context, spotifygtk_native_track_copy (track));
+  g_clear_pointer (&self->play_context_uri, g_free);
+  self->play_context_uri = g_strdup (station_uri);
+  self->context_index = 0;
+  rebuild_order (self, self->context_index);
+  spotifygtk_playback_bar_set_modes (
+    self->playback_bar,
+    self->shuffle ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF,
+    self->repeat);
+  play_context_at (self, 0, FALSE);
+
+  SearchRadioLoad *load = g_new0 (SearchRadioLoad, 1);
+  g_weak_ref_init (&load->window, self);
+  load->generation = self->context_generation;
+  load->current_uri = g_strdup (track->uri);
+  load->station_uri = g_strdup (station_uri);
+  spotifygtk_native_session_load_tracks (
+    self->session, station_uri, 50, NULL, on_search_radio_loaded, load);
+}
+
 /* A row was activated on `list`: adopt that list's ordering as the new play
  * context and play the chosen track from within it, so Next/Previous walk the
  * same list the user is looking at. */
@@ -602,6 +1016,16 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   const SpotifyNativeTrack *track = track_ptr;
   if (!track || !track->uri)
     return;
+
+  const gchar *visible_page = gtk_stack_get_visible_child_name (self->page_stack);
+  if (g_strcmp0 (visible_page, "search") == 0) {
+    play_search_track_radio (self, track);
+    return;
+  }
+
+  self->context_generation++;
+  self->smart_generation++;
+  smart_saved_queue_clear (self);
 
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
   self->play_context = spotifygtk_track_list_snapshot (list);
@@ -614,7 +1038,6 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
     const NavEntry *entry = g_ptr_array_index (self->nav_history, self->nav_pos);
     self->play_context_uri = g_strdup (entry->uri);
   }
-  const gchar *visible_page = gtk_stack_get_visible_child_name (self->page_stack);
   if (!self->play_context_uri && g_strcmp0 (visible_page, "liked") == 0)
     self->play_context_uri = spotifygtk_native_session_dup_collection_uri (self->session);
   self->smart_shuffle = FALSE;
@@ -634,6 +1057,11 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
     play_context_at (self, self->context_index, FALSE);
   else
     play_native_track (self, track, FALSE);  /* not in the snapshot; play it alone */
+
+  spotifygtk_playback_bar_set_modes (
+    self->playback_bar,
+    self->shuffle ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF,
+    self->repeat);
 }
 
 
@@ -1146,12 +1574,19 @@ on_shuffle_mode_changed (SpotifyGtkPlaybackBar *bar, guint mode,
   (void) bar;
 
   SpotifyGtkShuffleMode shuffle_mode = MIN (mode, SPOTIFYGTK_SHUFFLE_SMART);
+  gboolean was_smart = self->smart_shuffle;
   self->shuffle = shuffle_mode != SPOTIFYGTK_SHUFFLE_OFF;
   self->smart_shuffle = shuffle_mode == SPOTIFYGTK_SHUFFLE_SMART;
 
-  /* In Smart mode the cluster owns the order. Until it answers, retain the
-   * order already on screen instead of briefly reshuffling it locally. */
-  if (!self->smart_shuffle) {
+  gboolean restored = FALSE;
+  if (self->smart_shuffle && !was_smart) {
+    smart_queue_save_and_discard (self);
+    smart_queue_fetch (self);
+  } else if (!self->smart_shuffle && was_smart) {
+    restored = smart_queue_restore (self);
+  }
+
+  if (!self->smart_shuffle && !restored) {
     self->server_order = FALSE;
     rebuild_order (self, self->context_index);
   }
@@ -2617,11 +3052,17 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
     advance_prev (self);
   else if (g_strcmp0 (endpoint, "set_options") == 0 ||
            g_strcmp0 (endpoint, "set_shuffling_context") == 0) {
+    gboolean was_smart = self->smart_shuffle;
     self->shuffle = value != 0;
     self->smart_shuffle = value == 2;
-    /* The following ClusterUpdate supplies the enhanced next_tracks. Keep the
-     * current order intact until that authoritative sequence arrives. */
-    if (!self->smart_shuffle) {
+    gboolean restored = FALSE;
+    if (self->smart_shuffle && !was_smart) {
+      smart_queue_save_and_discard (self);
+      smart_queue_fetch (self);
+    } else if (!self->smart_shuffle && was_smart) {
+      restored = smart_queue_restore (self);
+    }
+    if (!self->smart_shuffle && !restored) {
       self->server_order = FALSE;
       rebuild_order (self, self->context_index);
     }
@@ -2863,6 +3304,15 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
              uri, position_ms, paused ? "paused" : "playing",
              context_uri ? context_uri : "(none)", n_uris,
              shuffle_mode == 2 ? "smart" : shuffle_mode == 1 ? "on" : "off");
+
+  if (shuffle_mode == 2 && n_uris > 0) {
+    /* The server's queue outranks the song-radio fallback. Stop an in-flight
+     * fallback from replacing this authoritative sequence after it resolves. */
+    self->smart_generation++;
+  } else if (shuffle_mode != 2) {
+    self->smart_generation++;
+    smart_saved_queue_clear (self);
+  }
 
   /* A transfer names a track and nothing else, so the metadata every other
    * play path already has has to be fetched before anything can be rendered.
@@ -4237,6 +4687,8 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->play_context_uri, g_free);
   g_clear_pointer (&self->pending_pause_uri, g_free);
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  g_clear_pointer (&self->order, g_array_unref);
+  smart_saved_queue_clear (self);
   g_clear_pointer (&self->nav_history, g_ptr_array_unref);
   g_clear_pointer (&self->pending_likes, g_ptr_array_unref);
   g_clear_pointer (&self->display_tracks, g_hash_table_unref);
