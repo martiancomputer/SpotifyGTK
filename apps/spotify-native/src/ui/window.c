@@ -395,9 +395,12 @@ smart_queue_save_and_discard (SpotifyGtkNativeWindow *self)
              "queued tracks", saved_context_len, saved_queue_len);
 }
 
-/* Restore exactly what Smart Shuffle displaced. The sounding recommendation
- * may not belong to that context; in that case Next resumes after the track
- * that was current when Smart was enabled. */
+/* Restore the context and explicit queue that Smart Shuffle displaced. The
+ * play order itself is rebuilt for the newly selected mode: disabling shuffle
+ * must return to the context's usual top-to-bottom order, not resurrect the
+ * shuffled permutation that preceded Smart Shuffle. The sounding
+ * recommendation may not belong to that context; in that case Next resumes
+ * after the track that was current when Smart was enabled. */
 static gboolean
 smart_queue_restore (SpotifyGtkNativeWindow *self)
 {
@@ -412,12 +415,11 @@ smart_queue_restore (SpotifyGtkNativeWindow *self)
   g_clear_pointer (&self->play_context_uri, g_free);
 
   self->play_context = g_steal_pointer (&self->smart_saved_context);
-  self->order = g_steal_pointer (&self->smart_saved_order);
+  g_clear_pointer (&self->smart_saved_order, g_array_unref);
   self->user_queue = self->smart_saved_user_queue;
   self->smart_saved_user_queue = NULL;
   self->play_context_uri = g_steal_pointer (&self->smart_saved_context_uri);
   self->context_index = self->smart_saved_context_index;
-  self->order_pos = self->smart_saved_order_pos;
   self->server_order = FALSE;
   self->smart_saved_valid = FALSE;
 
@@ -426,10 +428,11 @@ smart_queue_restore (SpotifyGtkNativeWindow *self)
       const SpotifyNativeTrack *candidate = g_ptr_array_index (self->play_context, i);
       if (g_strcmp0 (candidate->uri, self->current_track_uri) == 0) {
         self->context_index = (gint) i;
-        self->order_pos = order_pos_of (self, self->context_index);
         break;
       }
     }
+
+  rebuild_order (self, self->context_index);
 
   g_message ("Smart Shuffle: restored %u context tracks and %u explicitly "
              "queued tracks",
@@ -752,9 +755,10 @@ order_pos_of (SpotifyGtkNativeWindow *self, gint ctx_index)
 /*
  * Rebuild the play order for the current context.
  *
- * `keep` is the context position to treat as current; it is moved to the front
- * so that turning shuffle on does not change what is playing, only what comes
- * after it.
+ * `keep` is the context position to treat as current. In a shuffled order it
+ * is moved to the front so changing modes does not change what is playing. In
+ * an unshuffled order it stays at its natural index, making Up Next continue
+ * top-to-bottom from that point.
  */
 static void
 rebuild_order (SpotifyGtkNativeWindow *self, gint keep)
@@ -784,12 +788,13 @@ rebuild_order (SpotifyGtkNativeWindow *self, gint keep)
 
   if (keep >= 0) {
     gint at = order_pos_of (self, keep);
-    if (at > 0) {
+    if (self->shuffle && !self->server_order && at > 0) {
       guint tmp = g_array_index (self->order, guint, 0);
       g_array_index (self->order, guint, 0) = g_array_index (self->order, guint, at);
       g_array_index (self->order, guint, at) = tmp;
+      at = 0;
     }
-    self->order_pos = 0;
+    self->order_pos = at;
   }
 }
 
