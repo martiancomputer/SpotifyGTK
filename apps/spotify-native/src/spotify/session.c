@@ -394,6 +394,7 @@ static gchar   *connect_now_context;
 /* Whether the server's last answer named this device as the active one. */
 static gint     connect_claim_won;
 static gint64   connect_now_position_ms;
+static gint64   connect_now_position_observed_at_ms;
 static gboolean connect_now_playing;
 static guint    connect_now_shuffle_mode;
 
@@ -540,7 +541,15 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
     pb_write_message_field (ps, CS_PS_TRACK, tr->data, tr->len);
   }
 
-  pb_write_varint_field (ps, CS_PS_POSITION, (guint64) connect_now_position_ms);
+  /* Position reports are event-driven, while this state is also published by
+   * a 30-second keepalive. Pairing the last event's position with the
+   * keepalive's fresh timestamp reset controllers to 0:00 every 30 seconds.
+   * Advance the monotonic anchor whenever playback is running so the position
+   * and timestamp continue to describe the same instant. */
+  gint64 live_position_ms = spotifygtk_connect_live_position (
+    connect_now_position_ms, connect_now_position_observed_at_ms,
+    g_get_monotonic_time () / 1000, connect_now_playing);
+  pb_write_varint_field (ps, CS_PS_POSITION, (guint64) live_position_ms);
   /* Connect models a loaded-but-paused player as playing+paused+buffering.
    * Reporting playing=false while paused makes desktop/web controllers treat
    * the device as unhealthy and leave it grey in their device picker. */
@@ -1669,6 +1678,7 @@ dealer_shutdown (SpotifyNativeSession *self)
   g_clear_pointer (&connect_now_context, g_free);
   g_clear_pointer (&connect_ack_device, g_free);
   connect_now_position_ms = 0;
+  connect_now_position_observed_at_ms = 0;
   connect_now_playing = FALSE;
   connect_now_shuffle_mode = 0;
   connect_claim_active = FALSE;
@@ -2125,6 +2135,7 @@ report_playback_on_worker (gpointer user_data)
       connect_now_context = g_strdup (report->context_uri);
     }
     connect_now_position_ms = report->position_ms;
+    connect_now_position_observed_at_ms = g_get_monotonic_time () / 1000;
     connect_now_playing = report->playing;
     connect_now_shuffle_mode = MIN (report->shuffle_mode, 2);
 

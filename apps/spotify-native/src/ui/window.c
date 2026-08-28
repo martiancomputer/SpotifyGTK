@@ -2884,7 +2884,9 @@ static void
 on_seek_requested (SpotifyGtkPlaybackBar *bar, gint64 position_ms, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  self->last_position_ms = MAX (position_ms, 0);
   spotifygtk_player_service_seek (self->player, position_ms);
+  broadcast_playing_uri (self);
   (void) bar;
 }
 
@@ -3049,8 +3051,10 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
     spotifygtk_player_service_pause (self->player);
   else if (g_strcmp0 (endpoint, "resume") == 0)
     spotifygtk_player_service_resume (self->player);
-  else if (g_strcmp0 (endpoint, "seek_to") == 0)
+  else if (g_strcmp0 (endpoint, "seek_to") == 0) {
+    self->last_position_ms = MAX (value, 0);
     spotifygtk_player_service_seek (self->player, value);
+  }
   else if (g_strcmp0 (endpoint, "skip_next") == 0)
     advance_next (self, FALSE);
   else if (g_strcmp0 (endpoint, "skip_prev") == 0)
@@ -3850,6 +3854,7 @@ on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
 
   g_free (self->current_track_uri);
   self->current_track_uri = g_strdup (uri);
+  self->last_position_ms = 0;
   self->current_track_duration_ms = track->duration_ms;
   spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
   show_now_playing (self, track);

@@ -76,6 +76,26 @@ test_legacy_command (void)
                       options->data, options->len, 0), ==, 1);
 }
 
+static void
+test_live_position (void)
+{
+  /* A keepalive 30 seconds after a track-start report must publish 0:30, not
+   * pair the original 0:00 with a fresh PlayerState timestamp. */
+  g_assert_cmpint (spotifygtk_connect_live_position (0, 1000, 31000, TRUE),
+                   ==, 30000);
+  g_assert_cmpint (spotifygtk_connect_live_position (42000, 1000, 31000, TRUE),
+                   ==, 72000);
+
+  /* Paused clocks stay fixed, and a clock anomaly never moves backwards. */
+  g_assert_cmpint (spotifygtk_connect_live_position (42000, 1000, 31000, FALSE),
+                   ==, 42000);
+  g_assert_cmpint (spotifygtk_connect_live_position (42000, 31000, 1000, TRUE),
+                   ==, 42000);
+
+  g_assert_cmpint (spotifygtk_connect_live_position (
+                     G_MAXINT64 - 10, 1000, 31000, TRUE), ==, G_MAXINT64);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -84,5 +104,6 @@ main (int argc, char **argv)
   g_test_add_func ("/connect-options/set-options-request",
                    test_set_options_request);
   g_test_add_func ("/connect-options/legacy-command", test_legacy_command);
+  g_test_add_func ("/connect-options/live-position", test_live_position);
   return g_test_run ();
 }
