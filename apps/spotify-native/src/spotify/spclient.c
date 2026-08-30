@@ -14,6 +14,14 @@
 #include <json-glib/json-glib.h>
 #include <string.h>
 
+#define PATHFINDER_URL \
+  "https://api-partner.spotify.com/pathfinder/v1/query"
+/* Required: api-partner refuses the same authenticated request when it does
+ * not look like a browser. Kept on a dedicated SoupSession below. */
+#define PATHFINDER_UA \
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " \
+  "Chrome/126.0.0.0 Safari/537.36"
+
 struct _SpotifySpclient {
   GObject      parent_instance;
   SoupSession *session;
@@ -586,6 +594,29 @@ typedef struct {
   gpointer                user_data;
 } ContextRequestClosure;
 
+/* The old context-resolve search form is a 20-track playback context. The
+ * shipped desktop client uses this persisted searchTracks query, which pages
+ * in 50-track slices. Keep the legacy context as a fallback in case Spotify
+ * rotates the hash before this client is updated. */
+#define SEARCH_TRACKS_HASH \
+  "59ee4a659c32e9ad894a71308207594a65ba67bb6b632b183abe97303a51fa55"
+#define SEARCH_PAGE_SIZE 50
+#define SEARCH_RESULT_TARGET 150
+
+typedef struct {
+  SpotifySpclient        *spclient;      /* borrowed; owner keeps requests alive */
+  SpclientContextCallback callback;
+  gpointer                user_data;
+  gchar                   *context_uri;
+  gchar                   *query;
+  gchar                   *bearer_token;
+  gchar                   *client_token;
+  guint                    offset;
+  GPtrArray               *uris;         /* owned strings */
+  GHashTable              *seen;         /* borrowed keys from uris */
+  SoupMessage             *message;      /* current request, owned */
+} SearchContextClosure;
+
 gchar *
 spotifygtk_spclient_build_search_uri (const gchar *query)
 {
@@ -669,6 +700,267 @@ on_context_response (GObject *source, GAsyncResult *result, gpointer user_data)
 
   g_bytes_unref (bytes);
   g_free (cl);
+}
+
+static void
+request_context_resolve (SpotifySpclient *self, const gchar *context_uri,
+                         const gchar *bearer_token, const gchar *client_token,
+                         SpclientContextCallback callback, gpointer user_data)
+{
+  /* The URI is a path segment, so it must be escaped as one. ':' is left
+   * unreserved because the spotify:...:... form depends on it and it is
+   * legal in a path segment per RFC 3986. */
+  g_autofree gchar *escaped_uri = g_uri_escape_string (context_uri, ":", FALSE);
+  g_autofree gchar *url = g_strdup_printf ("https://%s/context-resolve/v1/%s",
+                                           SPCLIENT_FALLBACK_HOST, escaped_uri);
+
+  SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
+  g_autofree gchar *auth_hdr =
+    g_strdup_printf ("Bearer %s", bearer_token ? bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth_hdr);
+  soup_message_headers_replace (headers, "Accept", "application/json");
+  if (client_token && *client_token)
+    soup_message_headers_replace (headers, "Client-Token", client_token);
+
+  ContextRequestClosure *cl = g_new0 (ContextRequestClosure, 1);
+  cl->callback = callback;
+  cl->user_data = user_data;
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
+                                    self->cancellable, on_context_response, cl);
+  g_object_unref (msg);
+}
+
+static void
+search_context_closure_free (SearchContextClosure *cl)
+{
+  g_clear_object (&cl->message);
+  /* `seen` borrows its keys from `uris`, so discard the index first. */
+  g_clear_pointer (&cl->seen, g_hash_table_unref);
+  g_clear_pointer (&cl->uris, g_ptr_array_unref);
+  g_free (cl->context_uri);
+  g_free (cl->query);
+  g_free (cl->bearer_token);
+  g_free (cl->client_token);
+  g_free (cl);
+}
+
+static void search_context_request_page (SearchContextClosure *cl);
+
+static void
+search_context_complete (SearchContextClosure *cl)
+{
+  g_autoptr(JsonBuilder) builder = json_builder_new ();
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "pages");
+  json_builder_begin_array (builder);
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "tracks");
+  json_builder_begin_array (builder);
+  for (guint i = 0; i < cl->uris->len; i++) {
+    json_builder_begin_object (builder);
+    json_builder_set_member_name (builder, "uri");
+    json_builder_add_string_value (builder, g_ptr_array_index (cl->uris, i));
+    json_builder_end_object (builder);
+  }
+  json_builder_end_array (builder);
+  json_builder_end_object (builder);
+  json_builder_end_array (builder);
+  json_builder_set_member_name (builder, "uri");
+  json_builder_add_string_value (builder, cl->context_uri);
+  json_builder_end_object (builder);
+
+  JsonNode *context = json_builder_get_root (builder);
+  g_message ("spclient: desktop search returned %u track URI(s)", cl->uris->len);
+  if (cl->callback)
+    cl->callback (context, NULL, cl->user_data);
+  else
+    json_node_unref (context);
+  search_context_closure_free (cl);
+}
+
+static void
+search_context_fallback (SearchContextClosure *cl, const gchar *reason)
+{
+  g_warning ("spclient: expanded desktop search unavailable (%s); falling "
+             "back to the 20-track search context", reason ? reason : "unknown");
+  request_context_resolve (cl->spclient, cl->context_uri, cl->bearer_token,
+                           cl->client_token, cl->callback, cl->user_data);
+  search_context_closure_free (cl);
+}
+
+static JsonObject *
+json_object_child (JsonObject *parent, const gchar *member)
+{
+  if (!parent || !json_object_has_member (parent, member))
+    return NULL;
+  JsonNode *node = json_object_get_member (parent, member);
+  return node && JSON_NODE_HOLDS_OBJECT (node) ? json_node_get_object (node) : NULL;
+}
+
+static void
+on_search_context_page (GObject *source, GAsyncResult *result,
+                        gpointer user_data)
+{
+  SearchContextClosure *cl = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body =
+    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+  guint status = cl->message ? soup_message_get_status (cl->message) : 0;
+  g_clear_object (&cl->message);
+
+  if (!body || status < 200 || status >= 300) {
+    if (cl->uris->len > 0) {
+      search_context_complete (cl);       /* a later page failed; keep page 1 */
+      return;
+    }
+    g_autofree gchar *why = g_strdup_printf ("HTTP %u%s%s", status,
+      error ? ": " : "", error ? error->message : "");
+    search_context_fallback (cl, why);
+    return;
+  }
+
+  gsize len = 0;
+  const gchar *json = g_bytes_get_data (body, &len);
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  if (!json_parser_load_from_data (parser, json, (gssize) len, &error)) {
+    if (cl->uris->len > 0)
+      search_context_complete (cl);
+    else
+      search_context_fallback (cl, error ? error->message : "invalid JSON");
+    return;
+  }
+
+  JsonNode *root_node = json_parser_get_root (parser);
+  JsonObject *root = root_node && JSON_NODE_HOLDS_OBJECT (root_node)
+    ? json_node_get_object (root_node) : NULL;
+  JsonObject *data = json_object_child (root, "data");
+  JsonObject *search = json_object_child (data, "searchV2");
+  JsonObject *tracks = json_object_child (search, "tracksV2");
+  JsonArray *items = tracks && json_object_has_member (tracks, "items")
+    ? json_object_get_array_member (tracks, "items") : NULL;
+
+  for (guint i = 0; items && i < json_array_get_length (items) &&
+                    cl->uris->len < SEARCH_RESULT_TARGET; i++) {
+    JsonObject *wrapper = json_array_get_object_element (items, i);
+    JsonObject *item = json_object_child (wrapper, "item");
+    JsonObject *track = json_object_child (item, "data");
+    if (!track || !json_object_has_member (track, "uri"))
+      continue;
+    const gchar *uri = json_object_get_string_member (track, "uri");
+    if (!uri || !g_str_has_prefix (uri, "spotify:track:") ||
+        g_hash_table_contains (cl->seen, uri))
+      continue;
+    gchar *owned = g_strdup (uri);
+    g_ptr_array_add (cl->uris, owned);
+    g_hash_table_add (cl->seen, owned);
+  }
+
+  JsonObject *paging = json_object_child (tracks, "pagingInfo");
+  gint64 next = -1;
+  if (paging && json_object_has_member (paging, "nextOffset")) {
+    JsonNode *next_node = json_object_get_member (paging, "nextOffset");
+    if (next_node && !JSON_NODE_HOLDS_NULL (next_node))
+      next = json_node_get_int (next_node);
+  }
+
+  if (cl->uris->len >= SEARCH_RESULT_TARGET || next < 0 ||
+      next <= (gint64) cl->offset) {
+    if (cl->uris->len > 0)
+      search_context_complete (cl);
+    else
+      search_context_fallback (cl, "response contained no track results");
+    return;
+  }
+
+  cl->offset = (guint) next;
+  search_context_request_page (cl);
+}
+
+static void
+search_context_request_page (SearchContextClosure *cl)
+{
+  g_autoptr(JsonBuilder) builder = json_builder_new ();
+  json_builder_begin_object (builder);
+#define ADD_BOOL(name, value) G_STMT_START { \
+  json_builder_set_member_name (builder, name); \
+  json_builder_add_boolean_value (builder, value); \
+} G_STMT_END
+#define ADD_INT(name, value) G_STMT_START { \
+  json_builder_set_member_name (builder, name); \
+  json_builder_add_int_value (builder, value); \
+} G_STMT_END
+  json_builder_set_member_name (builder, "searchTerm");
+  json_builder_add_string_value (builder, cl->query);
+  ADD_INT ("offset", cl->offset);
+  ADD_INT ("limit", SEARCH_PAGE_SIZE);
+  ADD_BOOL ("includeAudiobooks", TRUE);
+  ADD_BOOL ("includePreReleases", FALSE);
+  ADD_BOOL ("includeAlbumPreReleases", FALSE);
+  ADD_BOOL ("includeAuthors", FALSE);
+  ADD_BOOL ("includeEpisodeContentRatingsV2", TRUE);
+  ADD_INT ("numberOfTopResults", 20);
+  json_builder_end_object (builder);
+#undef ADD_BOOL
+#undef ADD_INT
+
+  g_autoptr(JsonGenerator) generator = json_generator_new ();
+  g_autoptr(JsonNode) variables_root = json_builder_get_root (builder);
+  json_generator_set_root (generator, variables_root);
+  g_autofree gchar *variables = json_generator_to_data (generator, NULL);
+  g_autofree gchar *extensions = g_strdup_printf (
+    "{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"%s\"}}",
+    SEARCH_TRACKS_HASH);
+  g_autofree gchar *enc_vars = g_uri_escape_string (variables, NULL, FALSE);
+  g_autofree gchar *enc_ext = g_uri_escape_string (extensions, NULL, FALSE);
+  g_autofree gchar *url = g_strdup_printf (
+    "%s?operationName=searchTracks&variables=%s&extensions=%s",
+    PATHFINDER_URL, enc_vars, enc_ext);
+
+  cl->message = soup_message_new (SOUP_METHOD_GET, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (cl->message);
+  g_autofree gchar *auth_hdr =
+    g_strdup_printf ("Bearer %s", cl->bearer_token ? cl->bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth_hdr);
+  soup_message_headers_replace (headers, "Accept", "application/json");
+  if (cl->client_token && *cl->client_token)
+    soup_message_headers_replace (headers, "Client-Token", cl->client_token);
+
+  if (!cl->spclient->gql_session)
+    cl->spclient->gql_session = soup_session_new_with_options (
+      "user-agent", PATHFINDER_UA, NULL);
+  soup_session_send_and_read_async (
+    cl->spclient->gql_session, cl->message, G_PRIORITY_DEFAULT,
+    cl->spclient->cancellable, on_search_context_page, cl);
+}
+
+static void
+request_expanded_search (SpotifySpclient *self, const gchar *context_uri,
+                         const gchar *bearer_token, const gchar *client_token,
+                         SpclientContextCallback callback, gpointer user_data)
+{
+  const gchar *encoded = context_uri + strlen ("spotify:search:");
+  g_autofree gchar *query = g_uri_unescape_string (encoded, NULL);
+  if (!query) {
+    request_context_resolve (self, context_uri, bearer_token, client_token,
+                             callback, user_data);
+    return;
+  }
+  for (gchar *p = query; *p; p++)
+    if (*p == '+')
+      *p = ' ';
+
+  SearchContextClosure *cl = g_new0 (SearchContextClosure, 1);
+  cl->spclient = self;
+  cl->callback = callback;
+  cl->user_data = user_data;
+  cl->context_uri = g_strdup (context_uri);
+  cl->query = g_strdup (query);
+  cl->bearer_token = g_strdup (bearer_token);
+  cl->client_token = g_strdup (client_token);
+  cl->uris = g_ptr_array_new_with_free_func (g_free);
+  cl->seen = g_hash_table_new (g_str_hash, g_str_equal);
+  search_context_request_page (cl);
 }
 
 
@@ -1157,14 +1449,8 @@ spotifygtk_spclient_get_albums_metadata (SpotifySpclient         *self,
  * "Missing extensions in the request", so this cannot be narrowed to just the
  * one field we want. See research/artist-images.md.
  */
-#define PATHFINDER_URL \
-  "https://api-partner.spotify.com/pathfinder/v1/query"
 #define ARTIST_OVERVIEW_HASH \
   "1ac33ddab5d39a3a9c27802774e6d78b9405cc188c6f75aed007df2a32737c72"
-/* Required. See (1) above -- this is not cosmetic. */
-#define PATHFINDER_UA \
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " \
-  "Chrome/126.0.0.0 Safari/537.36"
 
 /* The trailing path segment of a Spotify image URL is the id. */
 static gchar *
@@ -1353,27 +1639,10 @@ spotifygtk_spclient_get_context (SpotifySpclient        *self,
   g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
   g_return_if_fail (context_uri != NULL);
 
-  /* The URI is a path segment, so it must be escaped as one. ':' is left
-   * unreserved because the spotify:...:... form depends on it and it is
-   * legal in a path segment per RFC 3986. */
-  g_autofree gchar *escaped_uri = g_uri_escape_string (context_uri, ":", FALSE);
-  g_autofree gchar *url = g_strdup_printf ("https://%s/context-resolve/v1/%s",
-                                           SPCLIENT_FALLBACK_HOST, escaped_uri);
-
-  SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, url);
-  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
-
-  g_autofree gchar *auth_hdr = g_strdup_printf ("Bearer %s", bearer_token ? bearer_token : "");
-  soup_message_headers_replace (headers, "Authorization", auth_hdr);
-  soup_message_headers_replace (headers, "Accept", "application/json");
-  if (client_token)
-    soup_message_headers_replace (headers, "Client-Token", client_token);
-
-  ContextRequestClosure *cl = g_new0 (ContextRequestClosure, 1);
-  cl->callback  = callback;
-  cl->user_data = user_data;
-
-  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, self->cancellable,
-                                    on_context_response, cl);
-  g_object_unref (msg);
+  if (g_str_has_prefix (context_uri, "spotify:search:"))
+    request_expanded_search (self, context_uri, bearer_token, client_token,
+                             callback, user_data);
+  else
+    request_context_resolve (self, context_uri, bearer_token, client_token,
+                             callback, user_data);
 }

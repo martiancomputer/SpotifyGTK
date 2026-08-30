@@ -453,6 +453,150 @@ track_station_uri (const gchar *track_uri)
                           track_uri + strlen (prefix));
 }
 
+/* One station context is hard-capped by Spotify at 50 tracks (confirmed by a
+ * live response, regardless of the requested max). Build a longer radio from
+ * several evenly spaced recommendations in that first station. Branching one
+ * level deep keeps the result close to the original seed; recursively walking
+ * the tail would slowly drift into an unrelated genre. */
+#define RADIO_QUEUE_TARGET 200
+#define RADIO_BRANCH_COUNT 4
+
+typedef struct {
+  guint       target;
+  gboolean    branches_queued;
+  GPtrArray  *tracks;       /* SpotifyNativeTrack* */
+  GHashTable *seen;         /* owned track URI strings */
+  GQueue     *seeds;        /* owned track URI strings */
+} ExpandedRadio;
+
+static void
+expanded_radio_free (ExpandedRadio *radio)
+{
+  g_clear_pointer (&radio->tracks, g_ptr_array_unref);
+  g_clear_pointer (&radio->seen, g_hash_table_unref);
+  if (radio->seeds)
+    g_queue_free_full (radio->seeds, g_free);
+  g_free (radio);
+}
+
+static void expanded_radio_request_next (GTask *task);
+
+static void
+expanded_radio_finish (GTask *task)
+{
+  ExpandedRadio *radio = g_task_get_task_data (task);
+  GPtrArray *tracks = g_steal_pointer (&radio->tracks);
+  g_task_return_pointer (task, tracks, (GDestroyNotify) g_ptr_array_unref);
+  g_object_unref (task);
+}
+
+static void
+on_expanded_radio_page (GObject *source, GAsyncResult *result,
+                        gpointer user_data)
+{
+  GTask *task = G_TASK (user_data);
+  ExpandedRadio *radio = g_task_get_task_data (task);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) page = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+
+  if (!page || page->len == 0) {
+    if (radio->tracks->len == 0 && g_queue_is_empty (radio->seeds)) {
+      g_task_return_error (task, error ? g_steal_pointer (&error) :
+        g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                             "song radio returned no tracks"));
+      g_object_unref (task);
+      return;
+    }
+    g_warning ("song radio: one expansion branch failed: %s",
+               error ? error->message : "empty station");
+    expanded_radio_request_next (task);
+    return;
+  }
+
+  /* Choose branches only from the seed station, before merging it. Four
+   * evenly spaced points avoid over-weighting either the first or last few
+   * recommendations. */
+  if (!radio->branches_queued) {
+    radio->branches_queued = TRUE;
+    for (guint branch = 1; branch <= RADIO_BRANCH_COUNT; branch++) {
+      guint index = branch * page->len / (RADIO_BRANCH_COUNT + 1);
+      if (index >= page->len)
+        continue;
+      const SpotifyNativeTrack *track = g_ptr_array_index (page, index);
+      if (track && track->uri)
+        g_queue_push_tail (radio->seeds, g_strdup (track->uri));
+    }
+  }
+
+  for (guint i = 0; i < page->len && radio->tracks->len < radio->target; i++) {
+    const SpotifyNativeTrack *track = g_ptr_array_index (page, i);
+    if (!track || !track->uri || g_hash_table_contains (radio->seen, track->uri))
+      continue;
+    g_hash_table_add (radio->seen, g_strdup (track->uri));
+    g_ptr_array_add (radio->tracks, spotifygtk_native_track_copy (track));
+  }
+
+  if (radio->tracks->len >= radio->target || g_queue_is_empty (radio->seeds)) {
+    g_message ("song radio: expanded queue to %u unique tracks",
+               radio->tracks->len);
+    expanded_radio_finish (task);
+    return;
+  }
+
+  expanded_radio_request_next (task);
+}
+
+static void
+expanded_radio_request_next (GTask *task)
+{
+  ExpandedRadio *radio = g_task_get_task_data (task);
+  if (g_task_return_error_if_cancelled (task)) {
+    g_object_unref (task);
+    return;
+  }
+
+  g_autofree gchar *seed = g_queue_pop_head (radio->seeds);
+  if (!seed) {
+    expanded_radio_finish (task);
+    return;
+  }
+  g_autofree gchar *station = track_station_uri (seed);
+  if (!station) {
+    expanded_radio_request_next (task);
+    return;
+  }
+
+  spotifygtk_native_session_load_tracks (
+    SPOTIFYGTK_NATIVE_SESSION (g_task_get_source_object (task)), station, 50,
+    g_task_get_cancellable (task), on_expanded_radio_page, task);
+}
+
+static void
+load_expanded_radio (SpotifyNativeSession *session, const gchar *seed_uri,
+                     GCancellable *cancellable, GAsyncReadyCallback callback,
+                     gpointer user_data)
+{
+  GTask *task = g_task_new (session, cancellable, callback, user_data);
+  ExpandedRadio *radio = g_new0 (ExpandedRadio, 1);
+  radio->target = RADIO_QUEUE_TARGET;
+  radio->tracks = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  radio->seen = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  radio->seeds = g_queue_new ();
+  g_queue_push_tail (radio->seeds, g_strdup (seed_uri));
+  g_task_set_task_data (task, radio, (GDestroyNotify) expanded_radio_free);
+  expanded_radio_request_next (task);
+}
+
+static GPtrArray *
+load_expanded_radio_finish (SpotifyNativeSession *session, GAsyncResult *result,
+                            GError **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, session), NULL);
+  return g_task_propagate_pointer (G_TASK (result), error);
+}
+
 typedef struct {
   GWeakRef window;
   guint generation;
@@ -484,7 +628,7 @@ on_smart_station_loaded (GObject *source, GAsyncResult *result,
 {
   SmartQueueLoad *load = user_data;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GPtrArray) radio = spotifygtk_native_session_load_tracks_finish (
+  g_autoptr(GPtrArray) radio = load_expanded_radio_finish (
     SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
   g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
 
@@ -564,14 +708,12 @@ on_smart_station_loaded (GObject *source, GAsyncResult *result,
                              g_ptr_array_index (radio, radio_pos));
   }
 
-  /* A one-track context still needs a recommendation; the two-original
-   * cadence above has no opportunity to inject one. */
-  if (enhanced->len < 2 || originals_since_recommendation > 0)
-    while (radio_pos < radio->len) {
-      if (add_unique_track_copy (enhanced, seen,
-            g_ptr_array_index (radio, radio_pos++)))
-        break;
-    }
+  /* Once the saved context is exhausted, keep the fetched radio tail. A
+   * short album or playlist should not collapse Smart Shuffle back to a
+   * 10-20 track queue merely because it ran out of originals to interleave. */
+  for (; radio_pos < radio->len; radio_pos++)
+    add_unique_track_copy (enhanced, seen,
+                           g_ptr_array_index (radio, radio_pos));
 
   if (enhanced->len < 2) {
     g_ptr_array_unref (enhanced);
@@ -604,8 +746,8 @@ smart_queue_fetch (SpotifyGtkNativeWindow *self)
   g_weak_ref_init (&load->window, self);
   load->generation = ++self->smart_generation;
   load->current_uri = g_strdup (self->current_track_uri);
-  spotifygtk_native_session_load_tracks (
-    self->session, station, 50, NULL, on_smart_station_loaded, load);
+  load_expanded_radio (self->session, self->current_track_uri, NULL,
+                       on_smart_station_loaded, load);
 }
 
 /* Rebuild the "up next" list the panel shows, and update Prev/Next
@@ -938,7 +1080,7 @@ on_search_radio_loaded (GObject *source, GAsyncResult *result,
 {
   SearchRadioLoad *load = user_data;
   g_autoptr(GError) error = NULL;
-  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+  g_autoptr(GPtrArray) tracks = load_expanded_radio_finish (
     SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
   g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
 
@@ -1007,8 +1149,8 @@ play_search_track_radio (SpotifyGtkNativeWindow *self,
   load->generation = self->context_generation;
   load->current_uri = g_strdup (track->uri);
   load->station_uri = g_strdup (station_uri);
-  spotifygtk_native_session_load_tracks (
-    self->session, station_uri, 50, NULL, on_search_radio_loaded, load);
+  load_expanded_radio (self->session, track->uri, NULL,
+                       on_search_radio_loaded, load);
 }
 
 /* A row was activated on `list`: adopt that list's ordering as the new play

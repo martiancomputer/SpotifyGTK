@@ -81,8 +81,11 @@ typedef void (*SpclientBatchCallback) (const SpclientTrackInfo *tracks /* NULL o
 /* ── Context resolution ──────────────────────────────────────────────────── */
 
 /*
- * /context-resolve/v1/{uri} — the single endpoint behind search, liked
- * songs, playlist contents, album and artist track listings.
+ * /context-resolve/v1/{uri} — the endpoint behind liked songs, playlist
+ * contents, album and artist track listings. Search URIs are routed through
+ * the desktop client's paged searchTracks query and converted to the same
+ * pages[].tracks[] shape; if that persisted query changes, context-resolve's
+ * smaller 20-track search context remains the compatibility fallback.
  *
  * Unlike everything else in this file the response is JSON, not protobuf:
  * librespot fetches it with request_with_options and then parses the body

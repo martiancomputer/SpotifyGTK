@@ -14,8 +14,6 @@
 
 #include "spotify/spclient.h"   /* build_search_uri */
 
-#include <string.h>
-
 #define SEARCH_DEBOUNCE_MS 350
 #define SEARCH_RESULT_LIMIT SPOTIFYGTK_SESSION_MAX_TRACKS
 
@@ -47,71 +45,6 @@ typedef struct {
   GWeakRef page;
   guint64  serial;
 } SearchClosure;
-
-/*
- * /context-resolve on a search URI does not return search *results* -- it
- * returns a playback context, i.e. what Spotify would queue if you hit play
- * on that search: some genuine matches followed by related popular tracks.
- * "bohemian rhapsody" comes back with Blinding Lights at #1 and the Queen
- * tracks at #2-4, then Hotel California and Billie Jean. librespot describes
- * the same behaviour ("massively influenced by the provided query") and does
- * not implement a real search endpoint.
- *
- * Until the actual search API is identified, keep the rows whose title or
- * artist matches every word of the query. That drops the filler without
- * hurting artist searches, where the query matches the artist rather than
- * the title. If nothing survives, the unfiltered list is shown -- a wrong
- * ordering is more useful than an empty page.
- */
-static gboolean
-track_matches_query (const SpotifyNativeTrack *track, const gchar *const *terms)
-{
-  /* Album included: searching for a record name otherwise matched nothing in
-   * its own track list, since neither the title nor the artist carries it.
-   * That was survivable at 500 results and is not once the limit is maxed --
-   * more rows arrive, and more of them are filler this filter has to drop. */
-  g_autofree gchar *haystack =
-    g_strdup_printf ("%s %s %s", track->name ? track->name : "",
-                                 track->artists ? track->artists : "",
-                                 track->album ? track->album : "");
-  g_autofree gchar *folded = g_utf8_casefold (haystack, -1);
-
-  for (guint i = 0; terms[i]; i++) {
-    if (!strstr (folded, terms[i]))
-      return FALSE;
-  }
-  return TRUE;
-}
-
-static GPtrArray *
-filter_by_relevance (GPtrArray *tracks, const gchar *query)
-{
-  g_autofree gchar *folded_query = g_utf8_casefold (query, -1);
-  g_auto(GStrv) terms = g_strsplit_set (folded_query, " \t", -1);
-
-  /* Drop empty tokens left by runs of whitespace. */
-  GPtrArray *kept_terms = g_ptr_array_new ();
-  for (guint i = 0; terms[i]; i++) {
-    if (*terms[i])
-      g_ptr_array_add (kept_terms, terms[i]);
-  }
-  g_ptr_array_add (kept_terms, NULL);
-
-  GPtrArray *out = g_ptr_array_new ();
-  for (guint i = 0; i < tracks->len; i++) {
-    SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
-    if (track_matches_query (track, (const gchar *const *) kept_terms->pdata))
-      g_ptr_array_add (out, track);
-  }
-
-  g_ptr_array_free (kept_terms, TRUE);
-
-  if (out->len == 0) {
-    g_ptr_array_free (out, TRUE);
-    return g_ptr_array_ref (tracks);
-  }
-  return out;
-}
 
 static void
 on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_data)
@@ -172,10 +105,11 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  const gchar *query = gtk_editable_get_text (GTK_EDITABLE (self->entry));
-  g_autoptr(GPtrArray) shown = (query && *query)
-    ? filter_by_relevance (tracks, query)
-    : g_ptr_array_ref (tracks);
+  /* These are already ranked catalog results from the desktop search query.
+   * The old 20-track context needed a word-match filter because it contained
+   * playback filler; applying that filter here would throw away Spotify's
+   * fuzzy/semantic matches and make the expanded result set look small again. */
+  g_autoptr(GPtrArray) shown = g_ptr_array_ref (tracks);
 
   /* The albums shelf is the distinct albums present in these very results --
    * real matches, grouped, not a second query. */
