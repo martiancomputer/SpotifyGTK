@@ -2,7 +2,8 @@
 
 A native Spotify client for Linux and Windows, written entirely in **C** — no
 Rust, no Electron. It speaks Spotify's own protocol directly: sign-in, catalog,
-audio keys, CDN decrypt and Ogg/Vorbis playback, with a GTK4 interface.
+audio keys, CDN decrypt, Ogg/Vorbis playback and Spotify Connect, with a GTK4
+and libadwaita interface.
 
 ![License](https://img.shields.io/github/license/martiancomputer/SpotifyGTK)
 ![CI](https://github.com/martiancomputer/SpotifyGTK/actions/workflows/build.yml/badge.svg)
@@ -63,18 +64,24 @@ ninja -C build
 ```bash
 # Debian / Ubuntu 24.04+
 sudo apt install meson ninja-build pkg-config libglib2.0-dev libsoup-3.0-dev \
-                 libogg-dev libvorbis-dev libssl-dev libpulse-dev libasound2-dev
+                 libjson-glib-dev libgtk-4-dev libadwaita-1-dev libogg-dev \
+                 libvorbis-dev libssl-dev libpulse-dev libasound2-dev
 
 # Fedora
 sudo dnf install meson ninja-build pkg-config glib2-devel libsoup3-devel \
-                 libogg-devel libvorbis-devel openssl-devel \
-                 pulseaudio-libs-devel alsa-lib-devel
+                 json-glib-devel gtk4-devel libadwaita-devel libogg-devel \
+                 libvorbis-devel openssl-devel pulseaudio-libs-devel \
+                 alsa-lib-devel
 
 # Arch
-sudo pacman -S meson glib2 libsoup3 libogg libvorbis openssl libpulse alsa-lib
+sudo pacman -S meson glib2 libsoup3 json-glib gtk4 libadwaita libogg \
+               libvorbis openssl libpulse alsa-lib
 ```
 
 Add `libpipewire-0.3-dev` / `pipewire-devel` / `pipewire` for the nightly track.
+The interface is laid out against GTK 4.22.4 and libadwaita 1.9.0. Older
+distribution packages, including Ubuntu 24.04's defaults, can still build with
+`-Dallow_old_gtk=true`, but widget sizing and spacing may differ.
 
 First run opens a browser to authorise your account; the token is stored
 locally and reused.
@@ -91,6 +98,23 @@ Songs, playlists, albums and artist pages all load over the native protocol.
 You can like tracks, save albums, follow artists, and create and delete
 playlists. There is a 15-band equaliser, an optional resampler, shuffle and
 repeat.
+
+Spotify Connect is integrated into the native player. SpotifyGTK appears as an
+available device in official Spotify clients, accepts playback transfer and
+remote play, pause, seek, previous and next commands, and yields audio when a
+different device takes ownership. Track, play state and elapsed-position
+updates stay synchronized with other Spotify clients and with Spotify-linked
+Discord activity.
+
+Search returns up to 150 ranked tracks. Starting a search result builds a song
+radio queue instead of walking down the result list; radio expands and
+deduplicates recommendations up to a 200-track target. Playlist, album, Liked
+Songs and artist contexts retain their natural order and ordinary shuffle
+behavior.
+
+Smart Shuffle is Connect-aware: official clients can enable it, SpotifyGTK
+fetches and interleaves song-radio recommendations, and disabling it restores
+the original sequential queue rather than leaving recommendations behind.
 
 Windows is supported and plays through WASAPI — sign-in, streaming and
 playback are all verified on real hardware. Build it with
@@ -123,8 +147,9 @@ what it actually uses.
 Findings ported into `apps/spotify-native/src/spotify/` should note the upstream
 file they came from — see `THIRD_PARTY_LICENSES`.
 
-Run the tests with `ninja -C build test`. Development switches, the roadmap and
-the design principles are in [research/internals.md](research/internals.md).
+Run the tests with `meson test -C build --print-errorlogs`. Development
+switches, the roadmap and the design principles are in
+[research/internals.md](research/internals.md).
 
 ---
 
