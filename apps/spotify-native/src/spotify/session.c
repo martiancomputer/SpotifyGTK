@@ -1436,7 +1436,9 @@ dealer_reply_if_request (SoupWebsocketConnection *ws, const gchar *body,
 
   JsonObject *obj = json_node_get_object (root);
   if (!json_object_has_member (obj, "key")) {
-    if (memmem (body, len, "player/command", strlen ("player/command")))
+    if (bytes_contain ((const guint8 *) body, len,
+                       (const guint8 *) "player/command",
+                       strlen ("player/command")))
       g_message ("[dealer] command frame carried no key; nothing to reply to");
     return;
   }
@@ -1472,7 +1474,9 @@ on_dealer_message (SoupWebsocketConnection *ws, gint type, GBytes *message,
   g_message ("[dealer] message (%" G_GSIZE_FORMAT " bytes): %s", len, text);
 
   /* Parsed from the full body; `text` above is only ever a log line. */
-  if (memmem (d, len, "\"payload", strlen ("\"payload")))
+  if (bytes_contain ((const guint8 *) d, len,
+                     (const guint8 *) "\"payload",
+                     strlen ("\"payload")))
     dealer_handle_payloads (d, len);
 
   /*
