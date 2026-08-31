@@ -648,6 +648,29 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
 static gchar *cluster_active_device (const guint8 *cluster, gsize len);
 static void dealer_handle_cluster (const guint8 *cluster, gsize len);
 
+/* Portable memmem equivalent for protobuf bodies. The C library shipped by
+ * MSYS2 UCRT64 does not provide GNU's memmem(), while string search functions
+ * stop at the first embedded NUL. */
+static gboolean
+bytes_contain (const guint8 *haystack, gsize haystack_len,
+               const guint8 *needle, gsize needle_len)
+{
+  if (!haystack || !needle)
+    return FALSE;
+  if (needle_len == 0)
+    return TRUE;
+  if (haystack_len < needle_len)
+    return FALSE;
+
+  for (gsize i = 0; i <= haystack_len - needle_len; i++) {
+    if (haystack[i] == needle[0] &&
+        memcmp (haystack + i, needle, needle_len) == 0)
+      return TRUE;
+  }
+
+  return FALSE;
+}
+
 static void
 on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -699,17 +722,15 @@ on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
      * plain in the protobuf, so a substring search settles it without
      * decoding the whole thing.
      */
-    /*
-     * memmem, not g_strstr_len.
-     *
-     * The body is protobuf: 35 KB of binary with NUL bytes throughout, and the
-     * device entry is near the end of it. g_strstr_len is for strings and does
-     * not find a needle past the first NUL, so it answered "absent" for five
-     * rounds of debugging while the device was registering perfectly. The
-     * cluster was right; the check was not.
-     */
-    gboolean by_name = memmem (d, len, "SpotifyGTK", strlen ("SpotifyGTK")) != NULL;
-    gboolean by_id   = dev_id && memmem (d, len, dev_id, strlen (dev_id)) != NULL;
+    /* The body is protobuf: 35 KB of binary with NUL bytes throughout, and the
+     * device entry is near the end of it. A string search cannot see through
+     * those NULs, so use the bounded byte search above. */
+    gboolean by_name = bytes_contain ((const guint8 *) d, len,
+                                      (const guint8 *) "SpotifyGTK",
+                                      strlen ("SpotifyGTK"));
+    gboolean by_id = dev_id && *dev_id &&
+      bytes_contain ((const guint8 *) d, len, (const guint8 *) dev_id,
+                     strlen (dev_id));
     g_message ("[connect] our device in the returned cluster: by name %s, by id %s",
                by_name ? "yes" : "no", by_id ? "yes" : "no");
 
