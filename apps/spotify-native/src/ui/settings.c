@@ -15,6 +15,7 @@ struct _SpotifyGtkSettings {
   SpotifyGtkTheme      theme;
   SpotifyGtkMediaMode  media_mode;
   SpotifyGtkSampleRate sample_rate;
+  SpotifyGtkRenderer   renderer;
 
   gboolean eq_enabled;
   gboolean shuffle;
@@ -67,6 +68,8 @@ load (SpotifyGtkSettings *self)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "media-mode", NULL);
   self->sample_rate = (SpotifyGtkSampleRate)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "sample-rate", NULL);
+  self->renderer = (SpotifyGtkRenderer)
+    g_key_file_get_integer (kf, SETTINGS_GROUP, "renderer", NULL);
 
   self->eq_enabled = g_key_file_get_boolean (kf, SETTINGS_GROUP, "eq-enabled", NULL);
   self->shuffle    = g_key_file_get_boolean (kf, SETTINGS_GROUP, "shuffle", NULL);
@@ -114,6 +117,8 @@ load (SpotifyGtkSettings *self)
     self->media_mode = SPOTIFYGTK_MEDIA_FULL;
   if (self->sample_rate > SPOTIFYGTK_SAMPLE_RATE_96000)
     self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
+  if (self->renderer > SPOTIFYGTK_RENDERER_CAIRO)
+    self->renderer = SPOTIFYGTK_RENDERER_AUTOMATIC;
 }
 
 static void
@@ -124,6 +129,7 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_integer (kf, SETTINGS_GROUP, "theme", self->theme);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "media-mode", self->media_mode);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "sample-rate", self->sample_rate);
+  g_key_file_set_integer (kf, SETTINGS_GROUP, "renderer", self->renderer);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "eq-enabled", self->eq_enabled);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "shuffle", self->shuffle);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "repeat", (gint) self->repeat);
@@ -184,6 +190,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->theme       = SPOTIFYGTK_THEME_DARK;
   self->media_mode  = SPOTIFYGTK_MEDIA_FULL;
   self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
+  self->renderer    = SPOTIFYGTK_RENDERER_AUTOMATIC;
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
   self->unavailable = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
@@ -227,6 +234,18 @@ spotifygtk_settings_get_default (void)
 DEFINE_SETTING (theme,       SpotifyGtkTheme,      theme,       SPOTIFYGTK_THEME_MILK)
 DEFINE_SETTING (media_mode,  SpotifyGtkMediaMode,  media_mode,  SPOTIFYGTK_MEDIA_FULL)
 DEFINE_SETTING (sample_rate, SpotifyGtkSampleRate, sample_rate, SPOTIFYGTK_SAMPLE_RATE_96000)
+DEFINE_SETTING (renderer,    SpotifyGtkRenderer,   renderer,    SPOTIFYGTK_RENDERER_CAIRO)
+
+const gchar *
+spotifygtk_renderer_backend (SpotifyGtkRenderer renderer)
+{
+  switch (renderer) {
+    case SPOTIFYGTK_RENDERER_VULKAN: return "vulkan";
+    case SPOTIFYGTK_RENDERER_OPENGL: return "opengl";
+    case SPOTIFYGTK_RENDERER_CAIRO:  return "cairo";
+    default:                         return NULL;
+  }
+}
 
 const gdouble *
 spotifygtk_settings_get_eq_gains (SpotifyGtkSettings *self)

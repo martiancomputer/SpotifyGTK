@@ -24,6 +24,14 @@ if get_option('tests')
   )
   test('connect-shuffle-options', test_connect_options)
 
+  test_settings = executable('test-settings',
+    'test_settings.c',
+    '../src/ui/settings.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep],
+  )
+  test('settings', test_settings)
+
   test_track_meta = executable('test-track-meta',
     'test_track_meta.c',
     '../src/spotify/protobuf_min.c',

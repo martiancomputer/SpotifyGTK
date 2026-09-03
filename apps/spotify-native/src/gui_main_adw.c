@@ -7,6 +7,7 @@
 #include "playback_probe.h"
 #include "log_file.h"
 #include "ui/cover_loader.h"
+#include "ui/settings.h"
 
 static gboolean
 stats_tick (gpointer data)
@@ -14,6 +15,42 @@ stats_tick (gpointer data)
   (void) data;
   spotifygtk_cover_log_stats ("periodic");
   return G_SOURCE_CONTINUE;
+}
+
+static void
+log_active_renderer (GtkWidget *widget, gpointer user_data)
+{
+  GskRenderer *renderer = gtk_native_get_renderer (GTK_NATIVE (widget));
+  g_message ("renderer: active=%s",
+             renderer ? G_OBJECT_TYPE_NAME (renderer) : "unavailable");
+  (void) user_data;
+}
+
+/* GSK chooses its renderer while GTK initializes the display, so a saved
+ * preference must become an environment override before GtkApplication can
+ * get that far. An explicit process environment always wins; this keeps
+ * command-line diagnostics and emergency software fallback available. */
+static void
+apply_renderer_preference (void)
+{
+  const gchar *external = g_getenv ("GSK_RENDERER");
+  if (external && *external) {
+    g_message ("renderer: using external GSK_RENDERER=%s", external);
+    return;
+  }
+
+  SpotifyGtkRenderer preference = spotifygtk_settings_get_renderer (
+    spotifygtk_settings_get_default ());
+  const gchar *backend = spotifygtk_renderer_backend (preference);
+  if (!backend) {
+    g_message ("renderer: Automatic (GTK chooses)");
+    return;
+  }
+
+  if (g_setenv ("GSK_RENDERER", backend, TRUE))
+    g_message ("renderer: requested=%s from settings", backend);
+  else
+    g_warning ("renderer: could not set GSK_RENDERER=%s", backend);
 }
 
 static void
@@ -61,6 +98,7 @@ on_activate (GtkApplication *app, gpointer user_data)
       SPOTIFYGTK_SRC_DATA_DIR);
 
   SpotifyGtkNativeWindow *win = spotifygtk_native_window_new (app);
+  g_signal_connect (win, "realize", G_CALLBACK (log_active_renderer), NULL);
   gtk_window_set_icon_name (GTK_WINDOW (win), APP_ID);
   gtk_window_present (GTK_WINDOW (win));
   (void) user_data;
@@ -72,6 +110,7 @@ main (int argc, char *argv[])
   /* Before anything else that might log, so a bug report covers sign-in and
    * the AP handshake rather than starting halfway through the session. */
   spotifygtk_log_file_init ();
+  apply_renderer_preference ();
 
   /* Single-instance is right for users but blocks running a freshly built
    * copy while another is already open, which makes verifying UI changes

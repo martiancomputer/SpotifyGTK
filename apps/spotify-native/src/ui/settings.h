@@ -42,6 +42,16 @@ typedef enum {
   SPOTIFYGTK_SAMPLE_RATE_96000,
 } SpotifyGtkSampleRate;
 
+/* GSK selects one renderer for the lifetime of the process. AUTOMATIC leaves
+ * that choice to GTK; the other values are applied before GTK initializes and
+ * therefore take effect on the next launch. */
+typedef enum {
+  SPOTIFYGTK_RENDERER_AUTOMATIC,
+  SPOTIFYGTK_RENDERER_VULKAN,
+  SPOTIFYGTK_RENDERER_OPENGL,
+  SPOTIFYGTK_RENDERER_CAIRO,
+} SpotifyGtkRenderer;
+
 #define SPOTIFYGTK_TYPE_SETTINGS (spotifygtk_settings_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifyGtkSettings, spotifygtk_settings,
                       SPOTIFYGTK, SETTINGS, GObject)
@@ -60,6 +70,13 @@ void            spotifygtk_settings_set_theme (SpotifyGtkSettings *self,
 SpotifyGtkSampleRate spotifygtk_settings_get_sample_rate (SpotifyGtkSettings *self);
 void                 spotifygtk_settings_set_sample_rate (SpotifyGtkSettings *self,
                                                           SpotifyGtkSampleRate rate);
+
+SpotifyGtkRenderer spotifygtk_settings_get_renderer (SpotifyGtkSettings *self);
+void               spotifygtk_settings_set_renderer (SpotifyGtkSettings *self,
+                                                      SpotifyGtkRenderer renderer);
+
+/* Value understood by GSK_RENDERER, or NULL for AUTOMATIC/invalid values. */
+const gchar *spotifygtk_renderer_backend (SpotifyGtkRenderer renderer);
 
 #define SPOTIFYGTK_SETTINGS_EQ_BANDS 15
 

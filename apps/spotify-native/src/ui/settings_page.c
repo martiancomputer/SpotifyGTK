@@ -227,6 +227,16 @@ on_theme_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
   (void) pspec;
 }
 
+static void
+on_renderer_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_renderer (
+    self->settings,
+    (SpotifyGtkRenderer) gtk_drop_down_get_selected (dropdown));
+  (void) pspec;
+}
+
 
 /* === Equaliser === */
 
@@ -411,12 +421,19 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   /* ── Performance ───────────────────────────────────────────── */
   GtkWidget *perf_group = build_group ("Performance");
 
-  static const gchar * const renderers[] = { "GTK", "Vulkan (experimental)", NULL };
+  static const gchar * const renderers[] = {
+    "Automatic", "Vulkan (experimental)", "OpenGL", "Cairo (software)", NULL
+  };
+  GtkWidget *renderer_dd = build_dropdown (
+    renderers, spotifygtk_settings_get_renderer (self->settings), TRUE);
+  g_signal_connect (renderer_dd, "notify::selected",
+                    G_CALLBACK (on_renderer_changed), self);
   gtk_box_append (GTK_BOX (perf_group),
                   build_row ("Renderer",
-                             "GTK's own renderer. Vulkan compositing has not "
-                             "been started.",
-                             build_dropdown (renderers, 0, FALSE)));
+                             "Automatic lets GTK choose. A forced backend "
+                             "takes effect after restarting; GSK_RENDERER "
+                             "from the environment always takes precedence.",
+                             renderer_dd));
 
   gtk_box_append (GTK_BOX (content), perf_group);
 
