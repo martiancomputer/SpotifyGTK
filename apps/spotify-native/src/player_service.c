@@ -124,6 +124,12 @@ active_control (SpotifyNativePlayerService *self)
 static void
 abandon_queued_audio (SpotifyNativePlayerService *self)
 {
+  /* Retire the current queue generation before a replacement can append its
+   * slot. Cancelling the individual tokens alone is observed asynchronously
+   * by the writer; a tail seek could append its replacement in that window
+   * and have its first PCM rejected while abandoned slots were still being
+   * reconciled. */
+  spotifygtk_audio_sink_abandon_queued (spotifygtk_audio_sink_get ());
   for (guint i = 0; i < self->inflight->len; i++) {
     InflightTrack *t = g_ptr_array_index (self->inflight, i);
     if (t->cancellable)

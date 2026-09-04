@@ -17,6 +17,7 @@
 #include "native_auth.h"
 #include "spclient.h"
 #include "track_meta.h"
+#include "../log_verbose.h"
 
 #include "protobuf_min.h"
 
@@ -1590,12 +1591,13 @@ on_dealer_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   g_message ("[dealer] connected -- the dealer accepted this client");
   dealer_redial_delay = 1;
   SoupWebsocketConnection *old_ws = dealer_ws;
-  dealer_ws = g_object_ref (ws);
+  /* websocket_connect_finish() transfers a full reference.  Adopt it instead
+   * of taking a second reference and losing the first one: the latter kept an
+   * entire closed websocket alive after every dealer redial. */
+  dealer_ws = ws;
   g_clear_object (&old_ws);
   g_signal_connect (ws, "message", G_CALLBACK (on_dealer_message), NULL);
   g_signal_connect (ws, "closed",  G_CALLBACK (on_dealer_closed), NULL);
-  /* Deliberately leaked for the length of the probe: dropping the last
-   * reference closes the socket, and the point is to see what it sends. */
 }
 
 /* Dial the dealer. Separate from dealer_probe so a dropped socket can be
@@ -1615,6 +1617,7 @@ dealer_connect (const gchar *bearer)
   g_autoptr(SoupMessage) msg = soup_message_new (SOUP_METHOD_GET, url);
   if (!msg) {
     g_warning ("[dealer] could not build the request");
+    g_object_unref (ws_session);
     return;
   }
 
@@ -1761,6 +1764,10 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
 
   /* Created on the worker thread so its SoupSession binds to the worker's
    * context, not GTK's. */
+  /* Reconnect reaches this path too.  Replacing these protocol clients
+   * without dropping the previous instance retained a SoupSession (and its
+   * connection pools) after every AP reconnect. */
+  g_clear_object (&self->spclient);
   self->spclient = spotifygtk_spclient_new ();
   spotifygtk_spclient_set_cancellable (self->spclient, self->cancellable);
 
@@ -1855,6 +1862,7 @@ on_client_token_result (const gchar *token, gpointer user_data)
   self->username = g_strdup (username);
   g_mutex_unlock (&self->lock);
 
+  g_clear_object (&self->login5_client);
   self->login5_client = spotifygtk_login5_new ();
   spotifygtk_login5_set_cancellable (self->login5_client, self->cancellable);
   spotifygtk_login5_auth_token (self->login5_client,
@@ -1881,6 +1889,7 @@ on_ap_login_result (gboolean success, const gchar *username,
                     G_CALLBACK (on_session_ap_disconnected), self);
   set_state (self, SPOTIFYGTK_SESSION_CONNECTING, "Signed in; authorizing streaming session.");
 
+  g_clear_object (&self->client_token_client);
   self->client_token_client = spotifygtk_client_token_new ();
   spotifygtk_client_token_set_cancellable (self->client_token_client, self->cancellable);
   spotifygtk_client_token_request (self->client_token_client,
@@ -2253,6 +2262,8 @@ typedef struct {
   GPtrArray            *uris;      /* gchar*, owned; the full list */
   guint                 next_uri;  /* start index of the request in flight */
   GPtrArray            *out;       /* SpotifyNativeTrack*, owned; accumulated */
+  gint64                started_us;
+  gint64                context_resolved_us;
 } LoadTracksOp;
 
 static void
@@ -2315,6 +2326,16 @@ static void
 load_op_finish (LoadTracksOp *op)
 {
   GPtrArray *out = g_steal_pointer (&op->out);
+
+  SPOTIFYGTK_DEBUG ("catalog %s: complete in %.1f ms (context %.1f ms, metadata %.1f ms, %u tracks)",
+    op->context_uri ? op->context_uri : "<ordered uris>",
+    (g_get_monotonic_time () - op->started_us) / 1000.0,
+    op->context_resolved_us > 0
+      ? (op->context_resolved_us - op->started_us) / 1000.0 : 0.0,
+    op->context_resolved_us > 0
+      ? (g_get_monotonic_time () - op->context_resolved_us) / 1000.0
+      : (g_get_monotonic_time () - op->started_us) / 1000.0,
+    out ? out->len : 0);
 
   /* Keep collection loads for the other pages that will ask for the same URI.
    * Only the collection: everything else is per-view. */
@@ -2471,6 +2492,10 @@ static void
 on_context_resolved (JsonNode *context, GError *error, gpointer user_data)
 {
   LoadTracksOp *op = user_data;
+
+  op->context_resolved_us = g_get_monotonic_time ();
+  SPOTIFYGTK_DEBUG ("catalog %s: context resolved in %.1f ms",
+    op->context_uri, (op->context_resolved_us - op->started_us) / 1000.0);
 
   if (error || !context) {
     g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -2693,6 +2718,9 @@ spotifygtk_native_session_load_tracks (SpotifyNativeSession *self,
   op->task        = task;   /* ref transferred; holds a ref on `self` too */
   op->context_uri = g_strdup (context_uri);
   op->max_tracks  = max_tracks;
+  op->started_us  = g_get_monotonic_time ();
+
+  SPOTIFYGTK_DEBUG ("catalog %s: requested (limit %u)", context_uri, max_tracks);
 
   /* Hop to the worker: every spclient call must run on its context. */
   g_main_context_invoke (self->context, start_load_tracks, op);
@@ -3150,7 +3178,25 @@ typedef struct {
   gchar                       *uri;
   SpotifyNativeArtistImageFunc callback;
   gpointer                     user_data;
+  gboolean                     portrait_only;
+  GMainContext                *callback_context;
 } ArtistImageOp;
+
+typedef struct {
+  SpotifyNativeArtistImageFunc callback;
+  gpointer                     user_data;
+  gchar                       *cover_id;
+} ArtistImageDelivery;
+
+static gboolean
+deliver_artist_image (gpointer user_data)
+{
+  ArtistImageDelivery *delivery = user_data;
+  delivery->callback (delivery->cover_id, delivery->user_data);
+  g_free (delivery->cover_id);
+  g_free (delivery);
+  return G_SOURCE_REMOVE;
+}
 
 /*
  * artist uri -> banner image id, for the life of the session.
@@ -3162,6 +3208,7 @@ typedef struct {
  * avoided is asking twice for an artist already visited.
  */
 static GHashTable *artist_image_cache;   /* owned strings both sides */
+static GHashTable *artist_portrait_cache; /* profile images; never hero ids */
 
 /*
  * ...and on disk, so a restart does not pay for it again.
@@ -3176,21 +3223,21 @@ static GHashTable *artist_image_cache;   /* owned strings both sides */
  * next fetch of the overview corrects it.
  */
 static gchar *
-artist_image_map_path (void)
+artist_image_map_path (gboolean portrait)
 {
   return g_build_filename (g_get_user_cache_dir (), "spotifygtk",
-                           "artist-images", NULL);
+                           portrait ? "artist-portraits" : "artist-images", NULL);
 }
 
 static void
-artist_image_map_load (void)
+artist_image_map_load (gboolean portrait)
 {
-  if (artist_image_cache)
+  GHashTable **cache = portrait ? &artist_portrait_cache : &artist_image_cache;
+  if (*cache)
     return;
-  artist_image_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                              g_free, g_free);
+  *cache = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
 
-  g_autofree gchar *path = artist_image_map_path ();
+  g_autofree gchar *path = artist_image_map_path (portrait);
   g_autofree gchar *data = NULL;
   if (!path || !g_file_get_contents (path, &data, NULL, NULL))
     return;
@@ -3203,18 +3250,19 @@ artist_image_map_load (void)
     if (!sp)
       continue;
     *sp = '\0';
-    g_hash_table_insert (artist_image_cache, g_strdup (lines[i]),
+    g_hash_table_insert (*cache, g_strdup (lines[i]),
                          g_strdup (sp + 1));
   }
 }
 
 static void
-artist_image_map_save (void)
+artist_image_map_save (gboolean portrait)
 {
-  if (!artist_image_cache)
+  GHashTable *cache = portrait ? artist_portrait_cache : artist_image_cache;
+  if (!cache)
     return;
 
-  g_autofree gchar *path = artist_image_map_path ();
+  g_autofree gchar *path = artist_image_map_path (portrait);
   if (!path)
     return;
   g_autofree gchar *dir = g_path_get_dirname (path);
@@ -3223,7 +3271,7 @@ artist_image_map_save (void)
   GString *out = g_string_new (NULL);
   GHashTableIter it;
   gpointer k, v;
-  g_hash_table_iter_init (&it, artist_image_cache);
+  g_hash_table_iter_init (&it, cache);
   while (g_hash_table_iter_next (&it, &k, &v))
     g_string_append_printf (out, "%s %s\n", (const gchar *) k, (const gchar *) v);
 
@@ -3237,16 +3285,25 @@ static void
 artist_image_done (ArtistImageOp *op, const gchar *cover_id)
 {
   if (cover_id && *cover_id && op->uri) {
-    artist_image_map_load ();
-    const gchar *known = g_hash_table_lookup (artist_image_cache, op->uri);
+    artist_image_map_load (op->portrait_only);
+    GHashTable *cache = op->portrait_only ? artist_portrait_cache
+                                          : artist_image_cache;
+    const gchar *known = g_hash_table_lookup (cache, op->uri);
     if (g_strcmp0 (known, cover_id) != 0) {
-      g_hash_table_insert (artist_image_cache, g_strdup (op->uri),
+      g_hash_table_insert (cache, g_strdup (op->uri),
                            g_strdup (cover_id));
-      artist_image_map_save ();
+      artist_image_map_save (op->portrait_only);
     }
   }
-  if (op->callback)
-    op->callback (cover_id, op->user_data);
+  if (op->callback) {
+    ArtistImageDelivery *delivery = g_new0 (ArtistImageDelivery, 1);
+    delivery->callback  = op->callback;
+    delivery->user_data = op->user_data;
+    delivery->cover_id  = g_strdup (cover_id);
+    g_main_context_invoke_full (op->callback_context, G_PRIORITY_DEFAULT,
+                                deliver_artist_image, delivery, NULL);
+  }
+  g_clear_pointer (&op->callback_context, g_main_context_unref);
   g_free (op->uri);
   g_free (op);
 }
@@ -3301,8 +3358,10 @@ start_artist_image (gpointer user_data)
   SpotifyNativeSession *self = op->session;
 
   /* Already known, from this session or an earlier one: no round trip. */
-  artist_image_map_load ();
-  const gchar *known = g_hash_table_lookup (artist_image_cache, op->uri);
+  artist_image_map_load (op->portrait_only);
+  GHashTable *cache = op->portrait_only ? artist_portrait_cache
+                                        : artist_image_cache;
+  const gchar *known = g_hash_table_lookup (cache, op->uri);
   if (known) {
     artist_image_done (op, known);
     return G_SOURCE_REMOVE;
@@ -3314,14 +3373,16 @@ start_artist_image (gpointer user_data)
   g_mutex_unlock (&self->lock);
 
   if (!self->spclient) {
-    if (op->callback) op->callback (NULL, op->user_data);
-    g_free (op->uri);
-    g_free (op);
+    artist_image_done (op, NULL);
     return G_SOURCE_REMOVE;
   }
 
-  spotifygtk_spclient_get_artist_header (self->spclient, op->uri, bearer, ctoken,
-                                         on_artist_header, op);
+  if (op->portrait_only)
+    spotifygtk_spclient_get_artist_portrait (self->spclient, op->uri, bearer,
+                                             ctoken, on_artist_portrait, op);
+  else
+    spotifygtk_spclient_get_artist_header (self->spclient, op->uri, bearer,
+                                           ctoken, on_artist_header, op);
   return G_SOURCE_REMOVE;
 }
 
@@ -3343,8 +3404,37 @@ spotifygtk_native_session_get_artist_image (SpotifyNativeSession *self,
   op->uri       = g_strdup (artist_uri);
   op->callback  = callback;
   op->user_data = user_data;
+  op->callback_context = g_main_context_ref_thread_default ();
+  if (!op->callback_context)
+    op->callback_context = g_main_context_ref (g_main_context_default ());
 
   /* Onto the worker: every spclient call must run on the session's context. */
+  g_main_context_invoke (self->context, start_artist_image, op);
+}
+
+void
+spotifygtk_native_session_get_artist_portrait (SpotifyNativeSession *self,
+                                               const gchar          *artist_uri,
+                                               SpotifyNativeArtistImageFunc callback,
+                                               gpointer              user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+
+  if (!artist_uri || !self->context) {
+    if (callback) callback (NULL, user_data);
+    return;
+  }
+
+  ArtistImageOp *op = g_new0 (ArtistImageOp, 1);
+  op->session       = self;
+  op->uri           = g_strdup (artist_uri);
+  op->callback      = callback;
+  op->user_data     = user_data;
+  op->portrait_only = TRUE;
+  op->callback_context = g_main_context_ref_thread_default ();
+  if (!op->callback_context)
+    op->callback_context = g_main_context_ref (g_main_context_default ());
+
   g_main_context_invoke (self->context, start_artist_image, op);
 }
 

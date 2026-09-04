@@ -80,6 +80,11 @@ void spotifygtk_audio_sink_end_track (SpotifyAudioSink *self, guint64 seq);
  */
 void spotifygtk_audio_sink_flush (SpotifyAudioSink *self, guint64 seq);
 
+/* Atomically mark every slot currently queued as abandoned. New slots added
+ * after this call are unaffected. Used for explicit track changes and tail
+ * seeks, never natural gapless handover. */
+void spotifygtk_audio_sink_abandon_queued (SpotifyAudioSink *self);
+
 /*
  * Reset this track's position counter, in device frames.
  *

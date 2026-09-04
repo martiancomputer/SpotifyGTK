@@ -35,4 +35,8 @@ void spotifygtk_home_page_set_session (SpotifyGtkHomePage   *self,
 /* The shelf, so the window can wire "album-activated" to the context page. */
 SpotifyGtkAlbumGrid *spotifygtk_home_page_get_album_grid (SpotifyGtkHomePage *self);
 
+/* Signals:
+ * - loading-changed (gboolean loading)
+ */
+
 G_END_DECLS

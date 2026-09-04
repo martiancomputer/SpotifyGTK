@@ -33,18 +33,30 @@ struct _SpotifyGtkSearchPage {
 
   GCancellable *in_flight;
   guint         debounce_id;
+  gboolean      searching;
   guint64       serial;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkSearchPage, spotifygtk_search_page, GTK_TYPE_BOX)
 
-enum { TRACK_ACTIVATED, N_SIGNALS };
+enum { TRACK_ACTIVATED, LOADING_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 typedef struct {
   GWeakRef page;
   guint64  serial;
 } SearchClosure;
+
+static void
+set_searching (SpotifyGtkSearchPage *self, gboolean searching)
+{
+  searching = !!searching;
+  if (self->searching == searching)
+    return;
+
+  self->searching = searching;
+  g_signal_emit (self, signals[LOADING_CHANGED], 0, searching);
+}
 
 static void
 on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_data)
@@ -87,6 +99,9 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;                       /* page went away mid-request */
   if (serial != self->serial)
     return;                       /* superseded by a newer query */
+
+  g_clear_object (&self->in_flight);
+  set_searching (self, FALSE);
 
   if (!tracks) {
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
@@ -136,6 +151,7 @@ dispatch_search (gpointer user_data)
   }
 
   if (!query || !*query) {
+    set_searching (self, FALSE);
     set_albums_visible (self, FALSE);
     spotifygtk_track_list_clear (self->results);
     spotifygtk_track_list_set_status (self->results, NULL);
@@ -144,15 +160,22 @@ dispatch_search (gpointer user_data)
 
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
+    set_searching (self, FALSE);
     spotifygtk_track_list_set_status (self->results, "Not signed in yet.");
     return G_SOURCE_REMOVE;
   }
 
   g_autofree gchar *uri = spotifygtk_spclient_build_search_uri (query);
-  if (!uri)
+  if (!uri) {
+    set_searching (self, FALSE);
     return G_SOURCE_REMOVE;
+  }
 
-  spotifygtk_track_list_set_status (self->results, "Searching…");
+  /* Keep any previous results in place while their replacement arrives. The
+   * progress strip floats above the page, so searching neither inserts a row
+   * nor makes the content jump between list and status views. */
+  spotifygtk_track_list_set_status (self->results, NULL);
+  set_searching (self, TRUE);
 
   self->in_flight = g_cancellable_new ();
 
@@ -206,6 +229,9 @@ spotifygtk_search_page_class_init (SpotifyGtkSearchPageClass *klass)
   signals[TRACK_ACTIVATED] = g_signal_new ("track-activated",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_POINTER);
+  signals[LOADING_CHANGED] = g_signal_new ("loading-changed",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 }
 
 static void

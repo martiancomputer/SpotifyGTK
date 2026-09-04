@@ -28,9 +28,24 @@ struct _SpotifyGtkHomePage {
   GtkWidget            *liked_section;
   SpotifyNativeSession *session;      /* not owned; the window outlives us */
   GCancellable         *load_cancel;
+  guint                 generation;
+  gboolean              loading;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkHomePage, spotifygtk_home_page, GTK_TYPE_BOX)
+
+enum { LOADING_CHANGED, N_SIGNALS };
+static guint signals[N_SIGNALS];
+
+static void
+set_loading (SpotifyGtkHomePage *self, gboolean loading)
+{
+  loading = !!loading;
+  if (self->loading == loading)
+    return;
+  self->loading = loading;
+  g_signal_emit (self, signals[LOADING_CHANGED], 0, loading);
+}
 
 static void
 spotifygtk_home_page_dispose (GObject *object)
@@ -48,17 +63,21 @@ static void
 spotifygtk_home_page_class_init (SpotifyGtkHomePageClass *klass)
 {
   G_OBJECT_CLASS (klass)->dispose = spotifygtk_home_page_dispose;
+  signals[LOADING_CHANGED] = g_signal_new ("loading-changed",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 }
 
 /* === Loading the Liked Songs shelf === */
 
-typedef struct { GWeakRef page; } HomeLoad;
+typedef struct { GWeakRef page; guint generation; } HomeLoad;
 
 static void
 on_liked_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   HomeLoad *cl = user_data;
   g_autoptr(SpotifyGtkHomePage) self = g_weak_ref_get (&cl->page);
+  guint generation = cl->generation;
   g_weak_ref_clear (&cl->page);
   g_free (cl);
 
@@ -68,6 +87,10 @@ on_liked_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   if (!self)
     return;
+  if (generation != self->generation)
+    return;
+  g_clear_object (&self->load_cancel);
+  set_loading (self, FALSE);
   if (!tracks) {
     /* Cancelled or failed: leave the section hidden rather than showing an
      * error on the home page. Search and Liked Songs still work. */
@@ -87,11 +110,13 @@ spotifygtk_home_page_set_session (SpotifyGtkHomePage   *self,
   g_return_if_fail (SPOTIFYGTK_IS_HOME_PAGE (self));
 
   self->session = session;
+  self->generation++;
 
   if (self->load_cancel) {
     g_cancellable_cancel (self->load_cancel);
     g_clear_object (&self->load_cancel);
   }
+  set_loading (self, FALSE);
   if (!session ||
       spotifygtk_native_session_get_state (session) != SPOTIFYGTK_SESSION_READY)
     return;
@@ -101,8 +126,10 @@ spotifygtk_home_page_set_session (SpotifyGtkHomePage   *self,
     return;
 
   self->load_cancel = g_cancellable_new ();
+  set_loading (self, TRUE);
   HomeLoad *cl = g_new0 (HomeLoad, 1);
   g_weak_ref_init (&cl->page, self);
+  cl->generation = self->generation;
   spotifygtk_native_session_load_tracks (session, uri, SPOTIFYGTK_SESSION_MAX_TRACKS,
                                          self->load_cancel,
                                          on_liked_loaded, cl);

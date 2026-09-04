@@ -16,11 +16,12 @@ profile         = get_option('profile')
 is_nightly      = (profile == 'nightly')
 enable_pipewire = get_option('enable_pipewire')
 enable_gui      = get_option('enable_gui')
+verbose_logging = get_option('verbose_logging')
 
 # Diagnostics that were previously added to chase a bug and then stripped out
 # again, which meant the next bug started from nothing. They stay in the source
 # and compile away unless asked for.
-if get_option('verbose_logging')
+if verbose_logging
   add_project_arguments('-DSPOTIFYGTK_VERBOSE', language: 'c')
 endif
 
@@ -166,6 +167,7 @@ subdir('tests')
 # ── Summary ───────────────────────────────────────────────────────────────────
 summary({
   'Profile'     : profile,
+  'Diagnostics' : verbose_logging,
 }, section: 'Build')
 
 summary({

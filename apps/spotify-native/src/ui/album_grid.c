@@ -54,25 +54,19 @@
 /*
  * Decode size for a card.
  *
- * Twice the nominal art size, and that headroom is not slack. gtk_image's
- * pixel-size governs icons; a paintable is scaled to the widget's allocation
- * instead, and cards stretch to fill their column, so the art is routinely
- * drawn wider than CARD_ART_PX. Decoding at exactly that size left nothing to
- * downscale from and the covers came out soft.
- *
- * The scale factor is folded in on top, so a HiDPI panel gets real pixels
- * rather than the 1x assumption the old fixed 352 made.
- *
- * This is the expensive choice -- texture memory goes as the square, and
- * covers are the largest thing this process keeps. It is made deliberately:
- * the way to spend less here is a disk cache, so evicting costs a decode
- * rather than a download, not decoding art too small to look right.
+ * At 1x, retain the existing 2x source headroom so cards remain sharp when a
+ * shelf stretches them beyond their nominal width. At HiDPI, the scale factor
+ * already supplies that density: multiplying by both 2 and scale made a
+ * 176-logical-pixel card decode at 704px on a 2x display. Each ordinary RGB
+ * cover then occupied about 1.5 MB and every scroll decoded four times as many
+ * pixels as it displayed. Use whichever is larger -- 2x headroom or native
+ * display density -- rather than stacking the two multipliers.
  */
 static gint
 card_decode_px (GtkWidget *widget)
 {
   gint scale = widget ? gtk_widget_get_scale_factor (widget) : 1;
-  return CARD_ART_PX * 2 * MAX (1, scale);
+  return CARD_ART_PX * MAX (2, scale);
 }
 #define CARD_WIDTH      (CARD_ART_PX + 24)
 
@@ -146,6 +140,8 @@ struct _SpotifyGtkAlbumGrid {
   GtkBox parent_instance;
 
   GListStore *store;
+  GtkCustomFilter *filter;
+  gchar       *filter_text;
   gboolean    wrap;
 
   GtkWidget  *scroller;   /* borrowed: owned by the box */
@@ -158,6 +154,8 @@ struct _SpotifyGtkAlbumGrid {
    * covers took seconds to appear after scrolling far. */
   GtkAdjustment *vadj;      /* borrowed */
   guint          settle_id;
+  gint64         last_scroll_us;
+  gboolean       scrolling;
   GPtrArray     *bound_cards;   /* borrowed GtkWidget*, live bindings */
 
   SpotifyGtkAlbumPinQuery pin_query;
@@ -176,15 +174,45 @@ static guint signals[N_SIGNALS];
 static void cancel_and_unref (gpointer data);
 static void on_card_cover_loaded (GdkTexture *texture, gpointer user_data);
 
+static gboolean
+album_item_matches_filter (gpointer item, gpointer user_data)
+{
+  SpotifyGtkAlbumGrid *self = user_data;
+  SpotifyGtkAlbumItem *album = item;
+  if (!self->filter_text || !*self->filter_text)
+    return TRUE;
+
+  /* A genuinely unresolved artist has no searchable metadata yet, so leave
+   * it visible long enough for the lazy resolver to run. Cached artist names
+   * can be filtered immediately even though their portrait callback is still
+   * pending. */
+  if (album->pending && g_strcmp0 (album->name, "Artist") == 0)
+    return TRUE;
+
+  g_autofree gchar *name = g_utf8_casefold (album->name ? album->name : "", -1);
+  g_autofree gchar *artist = g_utf8_casefold (album->artist ? album->artist : "", -1);
+  return strstr (name, self->filter_text) != NULL ||
+         strstr (artist, self->filter_text) != NULL;
+}
+
 /* Re-request the cover for one card if its load was skipped while scrolling. */
 static void
 card_retry_cover (GtkWidget *card)
 {
+  SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
+    gtk_widget_get_ancestor (card, SPOTIFYGTK_TYPE_ALBUM_GRID);
   const gchar *cover_id = g_object_get_data (G_OBJECT (card), "cover-id");
   GtkWidget   *art      = g_object_get_data (G_OBJECT (card), "art");
   if (!cover_id || !art)
     return;
   if (g_object_get_data (G_OBJECT (card), "cover-shown"))
+    return;
+
+  /* GridView recycles several cards per animation frame. Starting a decode
+   * from each bind keeps the worker pool and Vulkan texture uploads busy for
+   * cards that have already left the viewport. The settle pass below retries
+   * the small visible set once motion stops. */
+  if (grid && grid->scrolling)
     return;
 
   GCancellable *cancel = g_cancellable_new ();
@@ -230,6 +258,13 @@ static void
 on_card_mapped (GtkWidget *card, gpointer user_data)
 {
   (void) user_data;
+  SpotifyGtkAlbumItem *item = g_object_get_data (G_OBJECT (card), "bound-album-item");
+  SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
+    gtk_widget_get_ancestor (card, SPOTIFYGTK_TYPE_ALBUM_GRID);
+  if (grid && item && item->pending && !item->resolving) {
+    item->resolving = TRUE;
+    g_signal_emit (grid, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
+  }
   card_retry_cover (card);
 }
 
@@ -258,7 +293,13 @@ static gboolean
 on_grid_settled (gpointer user_data)
 {
   SpotifyGtkAlbumGrid *self = user_data;
+
+  if (g_get_monotonic_time () - self->last_scroll_us <
+      (gint64) GRID_SETTLE_MS * 1000)
+    return G_SOURCE_CONTINUE;
+
   self->settle_id = 0;
+  self->scrolling = FALSE;
 
   spotifygtk_cover_set_deferred (FALSE);
   for (guint i = 0; i < self->bound_cards->len; i++) {
@@ -278,9 +319,14 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
   (void) adj;
 
   spotifygtk_cover_set_deferred (TRUE);
-  if (self->settle_id)
-    g_source_remove (self->settle_id);
-  self->settle_id = g_timeout_add (GRID_SETTLE_MS, on_grid_settled, self);
+  self->scrolling = TRUE;
+  self->last_scroll_us = g_get_monotonic_time ();
+
+  /* Keep one inexpensive poll alive through the gesture. Removing and
+   * allocating a new GSource for every smooth-scroll frame caused hundreds of
+   * main-context mutations on a single Library fling. */
+  if (!self->settle_id)
+    self->settle_id = g_timeout_add (50, on_grid_settled, self);
 }
 
 /* A pending cover load is cancelled when its card is recycled or destroyed, so
@@ -458,6 +504,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_widget_set_size_request (card, CARD_WIDTH, -1);
   gtk_widget_set_valign (card, GTK_ALIGN_START);
   g_signal_connect (card, "clicked", G_CALLBACK (on_card_clicked), self);
+  g_signal_connect (card, "map", G_CALLBACK (on_card_mapped), NULL);
 
   /* Added once per pooled card; the handler reads whichever album is bound at
    * click time, so it follows the card through recycling. */
@@ -514,6 +561,8 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     return;
 
   card_apply_item (self, card, item);
+  g_object_set_data_full (G_OBJECT (card), "bound-album-item",
+                          g_object_ref (item), g_object_unref);
 
   if (!g_ptr_array_find (self->bound_cards, card, NULL))
     g_ptr_array_add (self->bound_cards, card);
@@ -525,7 +574,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
    * cards the user may never scroll to. Only a dozen or so are visible at a
    * time, so this turns a fan-out over the whole listing into a handful.
    */
-  if (item->pending && !item->resolving) {
+  if (gtk_widget_get_mapped (card) && item->pending && !item->resolving) {
     item->resolving = TRUE;
     g_signal_emit (self, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
   }
@@ -578,10 +627,6 @@ card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem
   if (item->cover_id && *item->cover_id) {
     if (gtk_widget_get_mapped (card))
       card_retry_cover (card);
-    else if (!g_object_get_data (G_OBJECT (card), "map-armed")) {
-      g_object_set_data (G_OBJECT (card), "map-armed", GINT_TO_POINTER (1));
-      g_signal_connect (card, "map", G_CALLBACK (on_card_mapped), NULL);
-    }
   }
   (void) self;
 }
@@ -595,6 +640,8 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
     g_ptr_array_remove_fast (self->bound_cards, card);
   if (!card)
     return;
+
+  g_object_set_data (G_OBJECT (card), "bound-album-item", NULL);
 
   /* Clearing the data fires cancel_and_unref, stopping an in-flight decode. */
   g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);
@@ -660,6 +707,11 @@ spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
     g_free (item->cover_id); item->cover_id = g_strdup (cover_id);
     item->pending   = FALSE;
     item->resolving = FALSE;
+
+    /* A pending artist is deliberately visible so its metadata can resolve.
+     * Re-evaluate now that its real searchable name is available. */
+    if (self->filter)
+      gtk_filter_changed (GTK_FILTER (self->filter), GTK_FILTER_CHANGE_DIFFERENT);
 
     for (guint c = 0; c < self->bound_cards->len; c++) {
       GtkWidget *card = g_ptr_array_index (self->bound_cards, c);
@@ -786,10 +838,11 @@ spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self)
  * In-flight art is cancelled first: nothing should be holding a pointer into
  * a card that is about to be rebound.
  */
-void
-spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid       *self,
-                                 const SpotifyGtkCardSpec  *cards,
-                                 guint                      n_cards)
+static void
+set_card_specs (SpotifyGtkAlbumGrid       *self,
+                const SpotifyGtkCardSpec  *cards,
+                guint                      n_cards,
+                gboolean                   pending)
 {
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
 
@@ -800,10 +853,13 @@ spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid       *self,
   for (guint i = 0; i < n_cards; i++) {
     if (!cards[i].uri)
       continue;
-    items[n++] = album_item_new (cards[i].uri,
-                                 cards[i].title    ? cards[i].title    : cards[i].uri,
-                                 cards[i].subtitle ? cards[i].subtitle : "",
-                                 cards[i].cover_id);
+    SpotifyGtkAlbumItem *item = album_item_new (
+      cards[i].uri,
+      cards[i].title ? cards[i].title : cards[i].uri,
+      cards[i].subtitle ? cards[i].subtitle : "",
+      cards[i].cover_id);
+    item->pending = pending;
+    items[n++] = item;
   }
 
   g_list_store_splice (self->store, 0,
@@ -812,6 +868,24 @@ spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid       *self,
 
   for (guint i = 0; i < n; i++)
     g_object_unref (items[i]);
+}
+
+void
+spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid       *self,
+                                 const SpotifyGtkCardSpec  *cards,
+                                 guint                      n_cards)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  set_card_specs (self, cards, n_cards, FALSE);
+}
+
+void
+spotifygtk_album_grid_set_pending_cards (SpotifyGtkAlbumGrid       *self,
+                                         const SpotifyGtkCardSpec  *cards,
+                                         guint                      n_cards)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  set_card_specs (self, cards, n_cards, TRUE);
 }
 
 void
@@ -897,6 +971,8 @@ spotifygtk_album_grid_dispose (GObject *object)
   }
   spotifygtk_cover_set_deferred (FALSE);
   g_clear_pointer (&self->bound_cards, g_ptr_array_unref);
+  g_clear_pointer (&self->filter_text, g_free);
+  g_clear_object (&self->filter);
 
   g_clear_object (&self->store);
   G_OBJECT_CLASS (spotifygtk_album_grid_parent_class)->dispose (object);
@@ -958,6 +1034,7 @@ album_grid_new (gboolean wrap)
   SpotifyGtkAlbumGrid *self = g_object_new (SPOTIFYGTK_TYPE_ALBUM_GRID, NULL);
   self->wrap  = wrap;
   self->store = g_list_store_new (SPOTIFYGTK_TYPE_ALBUM_ITEM);
+  self->filter = gtk_custom_filter_new (album_item_matches_filter, self, NULL);
 
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
   g_signal_connect (factory, "setup",  G_CALLBACK (factory_setup),  self);
@@ -966,8 +1043,10 @@ album_grid_new (gboolean wrap)
 
   /* No-selection: cards are buttons, not a picker, so there is no selection
    * highlight to manage. */
-  GtkNoSelection *model =
-    gtk_no_selection_new (G_LIST_MODEL (g_object_ref (self->store)));
+  GtkFilterListModel *filtered = gtk_filter_list_model_new (
+    G_LIST_MODEL (g_object_ref (self->store)),
+    GTK_FILTER (g_object_ref (self->filter)));
+  GtkNoSelection *model = gtk_no_selection_new (G_LIST_MODEL (filtered));
 
   GtkWidget *scroller = gtk_scrolled_window_new ();
   GtkWidget *view;
@@ -1060,6 +1139,20 @@ album_grid_new (gboolean wrap)
   return self;
 }
 
+void
+spotifygtk_album_grid_set_filter_text (SpotifyGtkAlbumGrid *self,
+                                       const gchar         *text)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+
+  g_autofree gchar *folded = g_utf8_casefold (text ? text : "", -1);
+  if (g_strcmp0 (self->filter_text, folded) == 0)
+    return;
+  g_free (self->filter_text);
+  self->filter_text = g_steal_pointer (&folded);
+  gtk_filter_changed (GTK_FILTER (self->filter), GTK_FILTER_CHANGE_DIFFERENT);
+}
+
 /* The scrolling adjustment, so a page can react to scroll position -- the
  * Library uses it to fold its header away. NULL before the view is built. */
 GtkAdjustment *
@@ -1069,6 +1162,27 @@ spotifygtk_album_grid_get_vadjustment (SpotifyGtkAlbumGrid *self)
   if (!self->scroller)
     return NULL;
   return gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->scroller));
+}
+
+void
+spotifygtk_album_grid_log_stats (SpotifyGtkAlbumGrid *self, const gchar *context)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+
+  guint mapped = 0;
+  guint painted = 0;
+  for (guint i = 0; self->bound_cards && i < self->bound_cards->len; i++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+    if (gtk_widget_get_mapped (card))
+      mapped++;
+    if (g_object_get_data (G_OBJECT (card), "cover-shown"))
+      painted++;
+  }
+  g_message ("grid stats (%s): %u model items, %u bound cards, %u mapped, %u holding covers",
+             context ? context : "",
+             self->store ? g_list_model_get_n_items (G_LIST_MODEL (self->store)) : 0,
+             self->bound_cards ? self->bound_cards->len : 0,
+             mapped, painted);
 }
 
 /*

@@ -136,12 +136,41 @@ struct _SpotifyGtkArtistPage {
   SpotifyNativeSession *session;
   GCancellable         *in_flight;
   gchar                *current_uri;
+  guint                 generation;
+  guint                 pending_loads;
+  gboolean              loading;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkArtistPage, spotifygtk_artist_page, GTK_TYPE_BOX)
 
-enum { TRACK_ACTIVATED, N_SIGNALS };
+enum { TRACK_ACTIVATED, LOADING_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+typedef struct {
+  GWeakRef page;
+  guint    generation;
+} ArtistLoad;
+
+static void
+set_loading (SpotifyGtkArtistPage *self, gboolean loading)
+{
+  loading = !!loading;
+  if (self->loading == loading)
+    return;
+  self->loading = loading;
+  g_signal_emit (self, signals[LOADING_CHANGED], 0, loading);
+}
+
+static void
+finish_load_part (SpotifyGtkArtistPage *self)
+{
+  if (self->pending_loads > 0)
+    self->pending_loads--;
+  if (self->pending_loads == 0) {
+    g_clear_object (&self->in_flight);
+    set_loading (self, FALSE);
+  }
+}
 
 /*
  * Written out rather than casting gtk_image_set_from_paintable to the callback
@@ -426,22 +455,29 @@ static void
 on_discography_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   SpotifyNativeSession *session = SPOTIFYGTK_NATIVE_SESSION (source);
-  GWeakRef             *ref     = user_data;
+  ArtistLoad           *cl      = user_data;
   g_autoptr(GError)     err     = NULL;
 
-  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (ref);
-  g_weak_ref_clear (ref);
-  g_free (ref);
+  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (&cl->page);
+  guint generation = cl->generation;
+  g_weak_ref_clear (&cl->page);
+  g_free (cl);
 
   g_autoptr(GPtrArray) releases =
     spotifygtk_native_session_load_discography_finish (session, result, &err);
 
   if (!self)
     return;
+  if (generation != self->generation)
+    return;
+
+  finish_load_part (self);
 
   if (!releases) {
-    if (!g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    if (!g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
       gtk_label_set_text (self->releases_status, "Couldn't load the releases.");
+      gtk_widget_set_visible (GTK_WIDGET (self->releases_status), TRUE);
+    }
     return;
   }
 
@@ -480,20 +516,23 @@ static void
 on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   SpotifyNativeSession *session = SPOTIFYGTK_NATIVE_SESSION (source);
-  GWeakRef             *ref     = user_data;
+  ArtistLoad           *cl      = user_data;
   g_autoptr(GError)     err     = NULL;
 
-  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (ref);
-  g_weak_ref_clear (ref);
-  g_free (ref);
+  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (&cl->page);
+  guint generation = cl->generation;
+  g_weak_ref_clear (&cl->page);
+  g_free (cl);
 
   g_autoptr(GPtrArray) tracks =
     spotifygtk_native_session_load_tracks_finish (session, result, &err);
 
   if (!self)
     return;
+  if (generation != self->generation)
+    return;
 
-  g_clear_object (&self->in_flight);
+  finish_load_part (self);
 
   if (!tracks) {
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
@@ -546,6 +585,12 @@ spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
   if (g_strcmp0 (self->current_uri, artist_uri) == 0)
     return;
 
+  self->generation++;
+  self->pending_loads = 0;
+  if (self->in_flight)
+    g_cancellable_cancel (self->in_flight);
+  g_clear_object (&self->in_flight);
+
   g_free (self->current_uri);
   self->current_uri = g_strdup (artist_uri);
 
@@ -561,15 +606,17 @@ spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
     spotifygtk_track_list_set_status (self->list, "Not signed in yet.");
+    set_loading (self, FALSE);
     return;
   }
 
-  if (self->in_flight)
-    g_cancellable_cancel (self->in_flight);
-  g_clear_object (&self->in_flight);
   self->in_flight = g_cancellable_new ();
 
-  spotifygtk_track_list_set_status (self->list, "Loading…");
+  spotifygtk_track_list_set_status (self->list, NULL);
+  gtk_label_set_text (self->releases_status, "");
+  gtk_widget_set_visible (GTK_WIDGET (self->releases_status), FALSE);
+  self->pending_loads = 2;
+  set_loading (self, TRUE);
 
   /* The portrait is its own request -- a different entity kind on the same
    * batch endpoint -- so it is asked for in parallel with the resolve rather
@@ -579,19 +626,20 @@ spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
   spotifygtk_native_session_get_artist_image (self->session, artist_uri,
                                               on_artist_image, img_ref);
 
-  GWeakRef *ref = g_new0 (GWeakRef, 1);
-  g_weak_ref_init (ref, self);
+  ArtistLoad *tracks_load = g_new0 (ArtistLoad, 1);
+  g_weak_ref_init (&tracks_load->page, self);
+  tracks_load->generation = self->generation;
   spotifygtk_native_session_load_tracks (self->session, artist_uri,
                                          ARTIST_PAGE_LIMIT, self->in_flight,
-                                         on_tracks_loaded, ref);
+                                         on_tracks_loaded, tracks_load);
 
   /* Also in parallel: three requests of its own, and much the larger job. */
-  gtk_label_set_text (self->releases_status, "Loading releases…");
-  GWeakRef *disco_ref = g_new0 (GWeakRef, 1);
-  g_weak_ref_init (disco_ref, self);
+  ArtistLoad *disco_load = g_new0 (ArtistLoad, 1);
+  g_weak_ref_init (&disco_load->page, self);
+  disco_load->generation = self->generation;
   spotifygtk_native_session_load_discography (self->session, artist_uri,
                                               self->in_flight,
-                                              on_discography_loaded, disco_ref);
+                                              on_discography_loaded, disco_load);
 }
 
 void
@@ -609,6 +657,12 @@ spotifygtk_artist_page_set_session (SpotifyGtkArtistPage *self,
                                     SpotifyNativeSession *session)
 {
   g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
+  self->generation++;
+  self->pending_loads = 0;
+  if (self->in_flight)
+    g_cancellable_cancel (self->in_flight);
+  g_clear_object (&self->in_flight);
+  set_loading (self, FALSE);
   g_set_object (&self->session, session);
 }
 
@@ -650,6 +704,9 @@ spotifygtk_artist_page_class_init (SpotifyGtkArtistPageClass *klass)
   signals[TRACK_ACTIVATED] = g_signal_new (
     "track-activated", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
     NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_POINTER);
+  signals[LOADING_CHANGED] = g_signal_new (
+    "loading-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+    NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 }
 
 /* A section heading, matching the weight the other pages give theirs. */

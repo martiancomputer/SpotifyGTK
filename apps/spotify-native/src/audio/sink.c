@@ -401,6 +401,11 @@ spotifygtk_audio_sink_push (SpotifyAudioSink *self, guint64 seq, PcmFrame *frame
 
   gboolean rejected = !t || t->cancelled || self->failed ||
                       (t->cancellable && g_cancellable_is_cancelled (t->cancellable));
+  gboolean rejected_missing = t == NULL;
+  gboolean rejected_cancelled = t && t->cancelled;
+  gboolean rejected_sink = self->failed;
+  gboolean rejected_token = t && t->cancellable &&
+                            g_cancellable_is_cancelled (t->cancellable);
   if (!rejected) {
     g_queue_push_tail (t->frames, frame);
     t->queued += frame->n_frames;
@@ -409,10 +414,40 @@ spotifygtk_audio_sink_push (SpotifyAudioSink *self, guint64 seq, PcmFrame *frame
   g_mutex_unlock (&self->lock);
 
   if (rejected) {
+    g_message ("sink: rejected PCM for track %" G_GUINT64_FORMAT
+               " (slot=%s cancelled=%s sink-failed=%s cancellable=%s)",
+               seq, rejected_missing ? "missing" : "present",
+               rejected_cancelled ? "yes" : "no",
+               rejected_sink ? "yes" : "no",
+               rejected_token ? "cancelled" : "live");
     pcm_frame_free (frame);
     return FALSE;
   }
   return TRUE;
+}
+
+void
+spotifygtk_audio_sink_abandon_queued (SpotifyAudioSink *self)
+{
+  g_return_if_fail (self != NULL);
+
+  g_mutex_lock (&self->lock);
+  guint abandoned = 0;
+  for (GList *l = self->tracks->head; l; l = l->next) {
+    SinkTrack *t = l->data;
+    if (!t->cancelled) {
+      t->cancelled = TRUE;
+      abandoned++;
+    }
+  }
+  /* The writer owns removal and device flushing, so it cannot race a frame
+   * already being written. Marking happens under the queue lock; therefore a
+   * replacement slot appended after this function returns cannot accidentally
+   * inherit the abandonment. */
+  g_cond_broadcast (&self->cond);
+  g_mutex_unlock (&self->lock);
+
+  g_message ("sink: atomically abandoned %u queued track(s)", abandoned);
 }
 
 void

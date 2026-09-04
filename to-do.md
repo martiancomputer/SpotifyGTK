@@ -90,6 +90,13 @@ else is as reported.
       now goes to the running engine, or is held for the track that is coming.
       Whether the **restart** itself fails is still open; the path now logs
       which branch it took, so one reproduction will say.
+      *note (2026-09-04):* reproduced in the file log. A seek to 239.5s landed
+      at 245.2s; negative shortfall was clamped away, the decoder produced no
+      PCM, and the next range hit EOF. A second reproduction exposed the CDN
+      answering a request made exactly at EOF with HTTP 200. Landing now
+      refines backward on overshoot, uses a larger lead-in after detecting a
+      short final range, and drains that final range without requesting EOF.
+      Awaiting live confirmation before marking fixed.
 
 - [x] **Remove cover art from pinned sidebar items; text only.** Done. Name and
       type remain; `cover_id` is still stored, so this is presentation only and
@@ -101,6 +108,13 @@ else is as reported.
 ---
 
 ## Features
+
+- [ ] **Replace the cold-start login screen.** A returning user with valid
+      credentials currently sees the same sign-in surface as somebody who has
+      never authenticated while the native session reconnects. Design a
+      distinct startup/loading state that does not imply they were signed out.
+      Deferred deliberately until the current memory and latency regressions
+      are measured and fixed.
 
 - [!] **Discord activity.** Blocked on a decision, and the answer to "how does
       the official client do it" is that **it does not**. Discord's "Listening

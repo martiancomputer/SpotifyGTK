@@ -38,6 +38,7 @@ void spotifygtk_search_page_set_playing_uri (SpotifyGtkSearchPage *self,
 
 /* Signals:
  * - track-activated (SpotifyNativeTrack *track)
+ * - loading-changed (gboolean loading)
  */
 
 G_END_DECLS

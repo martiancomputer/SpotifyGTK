@@ -50,6 +50,8 @@ struct _SpotifyGtkTrackList {
   GtkAdjustment *vadj;         /* borrowed */
   GtkWidget     *scroller;     /* borrowed; NULL-safe */
   guint          settle_id;
+  gint64         last_scroll_us;
+  gboolean       scrolling;
   GPtrArray     *bound_rows;   /* borrowed SpotifyGtkTrackRow*, live bindings */
 };
 
@@ -116,7 +118,13 @@ static gboolean
 on_scroll_settled (gpointer user_data)
 {
   SpotifyGtkTrackList *self = user_data;
+
+  if (self->scrolling &&
+      g_get_monotonic_time () - self->last_scroll_us < SETTLE_MS * 1000)
+    return G_SOURCE_CONTINUE;
+
   self->settle_id = 0;
+  self->scrolling = FALSE;
 
   /* Loading first, prefetch second: what is on screen must not queue behind
    * speculative work. */
@@ -177,12 +185,19 @@ on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
   SpotifyGtkTrackList *self = user_data;
   (void) adj;
 
-  /* Any movement re-arms the timer, so a continuous scroll never settles until
-   * it actually stops. */
+  /* Keep one cheap polling source for the whole gesture. Removing and creating
+   * a timeout on every animation frame was allocator/main-loop churn in every
+   * page that contains tracks. More importantly, hold already-bound rows as
+   * well as newly recycled ones: cover requests are real worker jobs now, so a
+   * global "deferred" hint alone cannot stop mid-fling decoding and uploads. */
+  self->last_scroll_us = g_get_monotonic_time ();
+  self->scrolling = TRUE;
   spotifygtk_cover_set_deferred (TRUE);
-  if (self->settle_id)
-    g_source_remove (self->settle_id);
-  self->settle_id = g_timeout_add (SETTLE_MS, on_scroll_settled, self);
+  for (guint i = 0; i < self->bound_rows->len; i++)
+    spotifygtk_track_row_set_cover_hold (
+      SPOTIFYGTK_TRACK_ROW (g_ptr_array_index (self->bound_rows, i)), TRUE);
+  if (!self->settle_id)
+    self->settle_id = g_timeout_add (50, on_scroll_settled, self);
 }
 
 enum { TRACK_ACTIVATED, ADD_TO_QUEUE, GO_TO_ALBUM, GO_TO_ARTIST,
@@ -385,7 +400,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
    */
   /* settle_id is live only while the view is moving, so this is exactly "the
    * user is scrolling right now". */
-  spotifygtk_track_row_set_cover_hold (row, self->settle_id != 0);
+  spotifygtk_track_row_set_cover_hold (row, self->scrolling);
 
   spotifygtk_track_row_set_native_track (row,
     spotifygtk_track_item_get_track (item), 0);

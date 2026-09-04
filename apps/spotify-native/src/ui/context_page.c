@@ -35,28 +35,52 @@ struct _SpotifyGtkContextPage {
   SpotifyNativeSession *session;
   GCancellable         *in_flight;
   gchar                *current_uri;
+  guint                 generation;
+  gboolean              loading;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkContextPage, spotifygtk_context_page, GTK_TYPE_BOX)
+
+enum { LOADING_CHANGED, N_SIGNALS };
+static guint signals[N_SIGNALS];
+
+typedef struct {
+  GWeakRef page;
+  guint    generation;
+} ContextLoad;
+
+static void
+set_loading (SpotifyGtkContextPage *self, gboolean loading)
+{
+  loading = !!loading;
+  if (self->loading == loading)
+    return;
+  self->loading = loading;
+  g_signal_emit (self, signals[LOADING_CHANGED], 0, loading);
+}
 
 static void
 on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   SpotifyNativeSession *session = SPOTIFYGTK_NATIVE_SESSION (source);
-  GWeakRef             *ref     = user_data;
+  ContextLoad          *cl      = user_data;
   g_autoptr(GError)     err     = NULL;
 
-  g_autoptr(SpotifyGtkContextPage) self = g_weak_ref_get (ref);
-  g_weak_ref_clear (ref);
-  g_free (ref);
+  g_autoptr(SpotifyGtkContextPage) self = g_weak_ref_get (&cl->page);
+  guint generation = cl->generation;
+  g_weak_ref_clear (&cl->page);
+  g_free (cl);
 
   g_autoptr(GPtrArray) tracks =
     spotifygtk_native_session_load_tracks_finish (session, result, &err);
 
   if (!self)
     return;
+  if (generation != self->generation)
+    return;
 
   g_clear_object (&self->in_flight);
+  set_loading (self, FALSE);
 
   if (!tracks) {
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
@@ -111,6 +135,9 @@ static void
 spotifygtk_context_page_class_init (SpotifyGtkContextPageClass *klass)
 {
   G_OBJECT_CLASS (klass)->dispose = spotifygtk_context_page_dispose;
+  signals[LOADING_CHANGED] = g_signal_new ("loading-changed",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 }
 
 static void
@@ -310,6 +337,11 @@ spotifygtk_context_page_set_session (SpotifyGtkContextPage *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
 
+  self->generation++;
+  if (self->in_flight)
+    g_cancellable_cancel (self->in_flight);
+  g_clear_object (&self->in_flight);
+  set_loading (self, FALSE);
   g_set_object (&self->session, session);
 }
 
@@ -342,6 +374,7 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
     return;
 
   if (self->in_flight) {
+    self->generation++;
     g_cancellable_cancel (self->in_flight);
     g_clear_object (&self->in_flight);
   }
@@ -354,19 +387,22 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
     spotifygtk_track_list_clear (self->list);
     spotifygtk_track_list_set_status (self->list, "Not signed in yet.");
     g_clear_pointer (&self->current_uri, g_free);
+    set_loading (self, FALSE);
     return;
   }
 
   spotifygtk_track_list_clear (self->list);
-  spotifygtk_track_list_set_status (self->list, "Loading…");
+  spotifygtk_track_list_set_status (self->list, NULL);
+  set_loading (self, TRUE);
 
   self->in_flight = g_cancellable_new ();
 
-  GWeakRef *ref = g_new0 (GWeakRef, 1);
-  g_weak_ref_init (ref, self);
+  ContextLoad *cl = g_new0 (ContextLoad, 1);
+  g_weak_ref_init (&cl->page, self);
+  cl->generation = self->generation;
 
   spotifygtk_native_session_load_tracks (self->session, uri, CONTEXT_PAGE_LIMIT,
-                                         self->in_flight, on_tracks_loaded, ref);
+                                         self->in_flight, on_tracks_loaded, cl);
 }
 
 SpotifyGtkTrackList *

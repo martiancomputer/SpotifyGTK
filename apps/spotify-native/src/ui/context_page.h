@@ -70,4 +70,8 @@ void spotifygtk_context_page_set_playing_uri (SpotifyGtkContextPage *self,
                                               const gchar *uri,
                                               gboolean playing);
 
+/* Signals:
+ * - loading-changed (gboolean loading)
+ */
+
 G_END_DECLS

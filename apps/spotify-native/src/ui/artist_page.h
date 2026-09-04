@@ -88,6 +88,10 @@ void spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
  * spotifygtk_context_page_get_list(). */
 SpotifyGtkTrackList *spotifygtk_artist_page_get_list (SpotifyGtkArtistPage *self);
 
+/* Signals:
+ * - loading-changed (gboolean loading)
+ */
+
 void spotifygtk_artist_page_set_playing_uri (SpotifyGtkArtistPage *self,
                                              const gchar *uri,
                                              gboolean playing);

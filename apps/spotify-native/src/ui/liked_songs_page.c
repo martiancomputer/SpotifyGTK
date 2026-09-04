@@ -25,6 +25,8 @@ struct _SpotifyGtkLikedSongsPage {
   GtkSearchEntry       *filter_entry;
   SpotifyNativeSession *session;
   GCancellable         *in_flight;
+  gboolean              loading;
+  guint                 generation;
 
   /* The full loaded collection, kept so the filter can rebuild the visible
    * list from it without re-fetching. Owned (a ref on the loaded array). */
@@ -87,8 +89,23 @@ static const gchar *const SORT_LABELS[N_SORT_KEYS] = {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkLikedSongsPage, spotifygtk_liked_songs_page, GTK_TYPE_BOX)
 
-enum { TRACK_ACTIVATED, N_SIGNALS };
+enum { TRACK_ACTIVATED, LOADING_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+typedef struct {
+  GWeakRef page;
+  guint    generation;
+} LikedLoad;
+
+static void
+set_loading (SpotifyGtkLikedSongsPage *self, gboolean loading)
+{
+  loading = !!loading;
+  if (self->loading == loading)
+    return;
+  self->loading = loading;
+  g_signal_emit (self, signals[LOADING_CHANGED], 0, loading);
+}
 
 static void
 on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_data)
@@ -293,20 +310,24 @@ static void
 on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   SpotifyNativeSession *session = SPOTIFYGTK_NATIVE_SESSION (source);
-  GWeakRef             *ref     = user_data;
+  LikedLoad            *cl      = user_data;
   g_autoptr(GError)     err     = NULL;
 
-  g_autoptr(SpotifyGtkLikedSongsPage) self = g_weak_ref_get (ref);
-  g_weak_ref_clear (ref);
-  g_free (ref);
+  g_autoptr(SpotifyGtkLikedSongsPage) self = g_weak_ref_get (&cl->page);
+  guint generation = cl->generation;
+  g_weak_ref_clear (&cl->page);
+  g_free (cl);
 
   g_autoptr(GPtrArray) tracks =
     spotifygtk_native_session_load_tracks_finish (session, result, &err);
 
   if (!self)
     return;
+  if (generation != self->generation)
+    return;
 
   g_clear_object (&self->in_flight);
+  set_loading (self, FALSE);
 
   if (!tracks) {
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
@@ -420,6 +441,9 @@ spotifygtk_liked_songs_page_class_init (SpotifyGtkLikedSongsPageClass *klass)
   signals[TRACK_ACTIVATED] = g_signal_new ("track-activated",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_POINTER);
+  signals[LOADING_CHANGED] = g_signal_new ("loading-changed",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 }
 
 static void
@@ -518,6 +542,11 @@ spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
 
+  self->generation++;
+  if (self->in_flight)
+    g_cancellable_cancel (self->in_flight);
+  g_clear_object (&self->in_flight);
+  set_loading (self, FALSE);
   g_clear_object (&self->session);
   self->session = session ? g_object_ref (session) : NULL;
 
@@ -755,15 +784,17 @@ spotifygtk_liked_songs_page_refresh (SpotifyGtkLikedSongsPage *self)
     return;
   }
 
-  spotifygtk_track_list_set_status (self->list, "Loading…");
+  spotifygtk_track_list_set_status (self->list, NULL);
+  set_loading (self, TRUE);
 
   self->in_flight = g_cancellable_new ();
 
-  GWeakRef *ref = g_new0 (GWeakRef, 1);
-  g_weak_ref_init (ref, self);
+  LikedLoad *cl = g_new0 (LikedLoad, 1);
+  g_weak_ref_init (&cl->page, self);
+  cl->generation = self->generation;
 
   spotifygtk_native_session_load_tracks (self->session, uri, LIKED_SONGS_LIMIT,
-                                         self->in_flight, on_tracks_loaded, ref);
+                                         self->in_flight, on_tracks_loaded, cl);
 }
 
 void

@@ -60,6 +60,7 @@ void spotifygtk_liked_songs_page_set_playing_uri (SpotifyGtkLikedSongsPage *self
 
 /* Signals:
  * - track-activated (SpotifyNativeTrack *track)
+ * - loading-changed (gboolean loading)
  */
 
 G_END_DECLS

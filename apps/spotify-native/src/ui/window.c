@@ -45,7 +45,14 @@
 #include "../spotify/protobuf_min.h"
 #include "../spotify/session.h"
 
+#include <math.h>
 #include <string.h>
+
+#define LOADING_PROGRESS_CEILING 0.94
+#define LOADING_PROGRESS_TAU_US 1600000.0
+#define LOADING_PROGRESS_FINISH_US 240000.0
+#define LOADING_PROGRESS_HOLD_US 100000.0
+#define LOADING_PROGRESS_FADE_US 260000.0
 
 struct _SpotifyGtkNativeWindow {
   GtkApplicationWindow parent_instance;
@@ -54,6 +61,15 @@ struct _SpotifyGtkNativeWindow {
   GtkPaned *main_paned;       /* Sidebar | Content+Queue */
   GtkPaned *content_paned;    /* Main content | Queue panel */
   GtkBox *root_box;
+  GtkProgressBar *loading_bar; /* shell overlay, outside layout measurement */
+  GHashTable     *loading_sources; /* direct pointers; aggregate concurrent work */
+  guint           loading_tick_id;
+  gint64          loading_phase_started_us;
+  gdouble         loading_phase_from;
+  gdouble         loading_phase_target;
+  gboolean        loading_active;
+  gboolean        loading_finishing;
+  gboolean        loading_fading;
 
   /* Sidebar */
   SpotifyGtkSidebar *sidebar;
@@ -114,7 +130,9 @@ struct _SpotifyGtkNativeWindow {
   guint dev_nav_probe_id;                 /* optional one-shot development timer */
   gboolean playlists_loaded;             /* the grid holds cards already */
   GtkWidget  *playlists_status;
-  /* Tracks we have started, so a handover can render one we no longer hold. */
+  /* Recently-started tracks, so a handover can render one we no longer hold.
+   * This is deliberately bounded; a player left open for days must not retain
+   * metadata for every song it has ever played. */
   GHashTable *display_tracks;
   /*
    * Set when the user picks a track, cleared when the sink reaches it.
@@ -207,6 +225,142 @@ static gboolean dev_nav_probe (gpointer data);
 static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
                                  const gchar *title, const gchar *kind);
 static void spotifygtk_native_window_collapse_queue (SpotifyGtkNativeWindow *self);
+
+static gboolean
+advance_loading_bar (GtkWidget *widget, GdkFrameClock *clock,
+                     gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  gint64 elapsed_us = MAX (g_get_monotonic_time () -
+                           self->loading_phase_started_us, 0);
+
+  if (self->loading_finishing) {
+    /* Finish decisively once the answer lands. Cubic ease-out preserves the
+     * bar's momentum without snapping the last visible section into place. */
+    gdouble t = CLAMP ((gdouble) elapsed_us / LOADING_PROGRESS_FINISH_US,
+                       0.0, 1.0);
+    gdouble remaining = 1.0 - t;
+    gdouble eased = 1.0 - remaining * remaining * remaining;
+    gdouble fraction = self->loading_phase_from +
+                       (1.0 - self->loading_phase_from) * eased;
+    gtk_progress_bar_set_fraction (self->loading_bar, fraction);
+
+    if (t >= 1.0) {
+      self->loading_finishing = FALSE;
+      self->loading_fading = TRUE;
+      self->loading_phase_started_us = g_get_monotonic_time ();
+      gtk_progress_bar_set_fraction (self->loading_bar, 1.0);
+    }
+  } else if (self->loading_fading) {
+    /* Let the completed line register, then dissolve it instead of making it
+     * blink out on the frame that reaches the right edge. */
+    gdouble fade_elapsed = MAX ((gdouble) elapsed_us -
+                                LOADING_PROGRESS_HOLD_US, 0.0);
+    gdouble t = CLAMP (fade_elapsed / LOADING_PROGRESS_FADE_US, 0.0, 1.0);
+    gdouble smooth = t * t * (3.0 - 2.0 * t);
+    gtk_widget_set_opacity (GTK_WIDGET (self->loading_bar), 1.0 - smooth);
+
+    if (fade_elapsed >= LOADING_PROGRESS_FADE_US) {
+      self->loading_fading = FALSE;
+      self->loading_tick_id = 0;
+      gtk_widget_set_visible (GTK_WIDGET (self->loading_bar), FALSE);
+      gtk_widget_set_opacity (GTK_WIDGET (self->loading_bar), 1.0);
+      gtk_progress_bar_set_fraction (self->loading_bar, 0.0);
+      return G_SOURCE_REMOVE;
+    }
+  } else if (self->loading_active) {
+    /* One-way, asymptotic progress: it moves quickly at first, then loses
+     * speed continuously as it approaches the ceiling. It can wait there for
+     * an arbitrarily slow request without ever reversing or claiming success. */
+    gdouble eased = 1.0 - exp (-((gdouble) elapsed_us /
+                                 LOADING_PROGRESS_TAU_US));
+    gdouble fraction = self->loading_phase_from +
+                       (self->loading_phase_target - self->loading_phase_from) *
+                       eased;
+    gtk_progress_bar_set_fraction (self->loading_bar, fraction);
+
+    /* Once the exponential advances by less than a visible pixel, leave the
+     * bar parked without asking GTK/Vulkan for another full frame. Completion
+     * restarts this callback for the finish and fade phases. */
+    if (self->loading_phase_target - fraction < 0.001) {
+      gtk_progress_bar_set_fraction (self->loading_bar,
+                                     self->loading_phase_target);
+      self->loading_tick_id = 0;
+      return G_SOURCE_REMOVE;
+    }
+  } else {
+    self->loading_tick_id = 0;
+    return G_SOURCE_REMOVE;
+  }
+
+  (void) widget;
+  (void) clock;
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+set_loading (SpotifyGtkNativeWindow *self, gboolean loading)
+{
+  if (loading) {
+    gdouble current = (gtk_widget_get_visible (GTK_WIDGET (self->loading_bar)) &&
+                       !self->loading_fading)
+                    ? gtk_progress_bar_get_fraction (self->loading_bar) : 0.0;
+
+    self->loading_active = TRUE;
+    self->loading_finishing = FALSE;
+    self->loading_fading = FALSE;
+    self->loading_phase_started_us = g_get_monotonic_time ();
+    self->loading_phase_from = current;
+    /* A request arriving during the tiny completion animation still moves
+     * rightwards. Give it some headroom instead of jumping back to zero. */
+    self->loading_phase_target = current < LOADING_PROGRESS_CEILING
+                               ? LOADING_PROGRESS_CEILING
+                               : current + (1.0 - current) * 0.75;
+    gtk_progress_bar_set_fraction (self->loading_bar, current);
+    gtk_widget_set_opacity (GTK_WIDGET (self->loading_bar), 1.0);
+    gtk_widget_set_visible (GTK_WIDGET (self->loading_bar), TRUE);
+    if (!self->loading_tick_id)
+      self->loading_tick_id = gtk_widget_add_tick_callback (
+        GTK_WIDGET (self->loading_bar), advance_loading_bar, self, NULL);
+    return;
+  }
+
+  if (!self->loading_active || self->loading_finishing)
+    return;
+
+  self->loading_active = FALSE;
+  self->loading_finishing = TRUE;
+  self->loading_phase_started_us = g_get_monotonic_time ();
+  self->loading_phase_from =
+    gtk_progress_bar_get_fraction (self->loading_bar);
+  if (!self->loading_tick_id)
+    self->loading_tick_id = gtk_widget_add_tick_callback (
+      GTK_WIDGET (self->loading_bar), advance_loading_bar, self, NULL);
+}
+
+static void
+set_loading_source (SpotifyGtkNativeWindow *self, gpointer source,
+                    gboolean loading)
+{
+  if (!source || !self->loading_sources)
+    return;
+
+  gboolean was_loading = g_hash_table_size (self->loading_sources) > 0;
+  if (loading)
+    g_hash_table_add (self->loading_sources, source);
+  else
+    g_hash_table_remove (self->loading_sources, source);
+
+  gboolean is_loading = g_hash_table_size (self->loading_sources) > 0;
+  if (was_loading != is_loading)
+    set_loading (self, is_loading);
+}
+
+static void
+on_page_loading_changed (GObject *page, gboolean loading, gpointer user_data)
+{
+  set_loading_source (SPOTIFYGTK_NATIVE_WINDOW (user_data), page, loading);
+}
 
 /* === Header navigation history === */
 
@@ -795,6 +949,45 @@ refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
  * drift from what's on screen. It does not touch the queue or context —
  * callers own that decision. */
 static void
+remember_display_track (SpotifyGtkNativeWindow *self,
+                        const SpotifyNativeTrack *track)
+{
+  enum { MAX_DISPLAY_TRACKS = 64 };
+
+  if (!self->display_tracks)
+    self->display_tracks = g_hash_table_new_full (
+      g_str_hash, g_str_equal, g_free,
+      (GDestroyNotify) spotifygtk_native_track_free);
+
+  g_hash_table_replace (self->display_tracks, g_strdup (track->uri),
+                        spotifygtk_native_track_copy (track));
+
+  while (g_hash_table_size (self->display_tracks) > MAX_DISPLAY_TRACKS) {
+    GHashTableIter iter;
+    gpointer key;
+    gboolean removed = FALSE;
+
+    g_hash_table_iter_init (&iter, self->display_tracks);
+    while (g_hash_table_iter_next (&iter, &key, NULL)) {
+      const gchar *uri = key;
+
+      /* These two entries can still be needed by the progress/like UI or by
+       * the sink's next now-playing handover. */
+      if (g_strcmp0 (uri, self->current_track_uri) == 0 ||
+          g_strcmp0 (uri, self->awaiting_uri) == 0)
+        continue;
+
+      g_hash_table_iter_remove (&iter);
+      removed = TRUE;
+      break;
+    }
+
+    if (!removed)
+      break;
+  }
+}
+
+static void
 play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track,
                    gboolean handover)
 {
@@ -814,12 +1007,7 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
    * case the render waits for now-playing-changed, which the player service
    * emits when the sink actually reaches it.
    */
-  if (!self->display_tracks)
-    self->display_tracks = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
-                                                  (GDestroyNotify) spotifygtk_native_track_free);
-  if (track->uri)
-    g_hash_table_insert (self->display_tracks, g_strdup (track->uri),
-                         spotifygtk_native_track_copy (track));
+  remember_display_track (self, track);
 
   /*
    * Render now unless this is a handover.
@@ -1509,6 +1697,9 @@ on_followed_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
     if (m && user)
       spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_ARTISTS,
                                           next_token, 500, on_followed_page, self);
+  } else if (self->library_page) {
+    spotifygtk_library_page_set_followed_artists (self->library_page,
+                                                  self->followed_uris);
   }
 }
 
@@ -1519,6 +1710,7 @@ spotifygtk_native_window_reload_followed (SpotifyGtkNativeWindow *self)
   g_autofree gchar *user = spotifygtk_native_session_dup_username (self->session);
   if (!m || !user)
     return;
+  g_clear_pointer (&self->followed_uris, g_hash_table_unref);
   spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_ARTISTS,
                                       NULL, 500, on_followed_page, self);
 }
@@ -1925,6 +2117,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
 {
   SpotifyGtkNativeWindow *self = user_data;
   self->playlists_loading = FALSE;
+  set_loading_source (self, self->playlists_grid, FALSE);
   if (!self->playlists_grid)
     return;
 
@@ -2027,6 +2220,8 @@ reload_playlists (SpotifyGtkNativeWindow *self)
     return;
 
   self->playlists_loading = TRUE;
+  set_playlists_status (self, NULL);
+  set_loading_source (self, self->playlists_grid, TRUE);
   spotifygtk_playlist_list (m, user, on_page_playlists_listed, self);
 }
 
@@ -2139,6 +2334,8 @@ static void
 playlist_pick_free (gpointer data)
 {
   PlaylistPick *p = data;
+  if (p->window)
+    set_loading_source (p->window, p, FALSE);
   g_free (p->track_uri);
   g_free (p);
 }
@@ -2274,6 +2471,7 @@ on_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entries,
                      guint n_entries, gpointer user_data)
 {
   PlaylistPick *p = user_data;
+  set_loading_source (p->window, p, FALSE);
 
   if (!ok)
     g_warning ("playlist: could not read the rootlist (status %d)", status);
@@ -2292,7 +2490,7 @@ on_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entries,
      * escaped, which is most of why this dialog did not look like the rest of
      * the app. The row is clickable either way.
      */
-    GtkWidget *row = gtk_button_new_with_label ("Loading…");
+    GtkWidget *row = gtk_button_new_with_label ("…");
     gtk_button_set_has_frame (GTK_BUTTON (row), FALSE);
     gtk_widget_add_css_class (row, "flat");
     gtk_widget_add_css_class (row, "pick-row");
@@ -2455,6 +2653,7 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   adw_window_set_content (ADW_WINDOW (dialog), dialog_box);
   g_object_set_data_full (G_OBJECT (dialog), "pick", p, playlist_pick_free);
 
+  set_loading_source (self, p, TRUE);
   spotifygtk_playlist_list (m, user, on_playlists_listed, p);
   gtk_window_present (GTK_WINDOW (dialog));
 }
@@ -2516,6 +2715,16 @@ on_album_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
   if (!uri || !*uri)
     return;
   navigate_to_context (self, uri, name && *name ? name : "Album", "Album");
+  (void) grid;
+}
+
+static void
+on_artist_card_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
+                          const gchar *name, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  if (uri && *uri)
+    navigate_to_context (self, uri, name && *name ? name : "Artist", "Artist");
   (void) grid;
 }
 
@@ -2894,6 +3103,10 @@ on_artist_follow_toggled (const gchar *artist_uri, gpointer user_data)
                                                                     : "follow artist"));
   if (following) g_hash_table_remove (self->followed_uris, artist_uri);
   else           g_hash_table_add (self->followed_uris, g_strdup (artist_uri));
+
+  if (self->library_page)
+    spotifygtk_library_page_set_followed_artists (self->library_page,
+                                                  self->followed_uris);
 
   spotifygtk_artist_page_set_following (self->artist_page,
                                         !following);
@@ -3640,6 +3853,7 @@ on_auth_completed (NativeAuth *auth, gboolean success, gpointer user_data)
   /* The token is stored; the session picks it up on start. The gate stays up
    * until state-changed reports READY. */
   gtk_label_set_text (self->login_status, "Signing in…");
+  set_loading_source (self, self->session, TRUE);
   spotifygtk_native_session_start (self->session);
   (void) auth;
 }
@@ -3731,6 +3945,7 @@ spotifygtk_native_window_log_out (SpotifyGtkNativeWindow *self)
     spotifygtk_player_service_stop (self->player);
 
   native_auth_log_out (self->auth);
+  set_loading_source (self, self->session, FALSE);
 
   spotifygtk_native_window_show_login_gate (self, "Signed out.");
 }
@@ -3796,6 +4011,10 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     if (visible)
       navigate_raw (self, visible);   /* refresh in place; not a history move */
 
+    /* Page loads started above remain in the aggregate on their own. The
+     * connection itself is no longer pending once READY is reached. */
+    set_loading_source (self, session, FALSE);
+
     /* Only now is the sign-in real, so this is the one place the gate lifts. */
     if (self->login_gate)
       gtk_widget_set_visible (self->login_gate, FALSE);
@@ -3808,6 +4027,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
      * other than restarting. */
     spotifygtk_native_window_show_login_gate (
       self, message && *message ? message : "Could not sign in.");
+    set_loading_source (self, session, FALSE);
   }
 }
 
@@ -3888,6 +4108,8 @@ set_page_covers_loaded (SpotifyGtkNativeWindow *self, const gchar *page_name,
   if (g_strcmp0 (page_name, "playlists") == 0 && self->playlists_grid) {
     if (loaded) spotifygtk_album_grid_reload_covers (self->playlists_grid);
     else        spotifygtk_album_grid_release_covers (self->playlists_grid);
+  } else if (g_strcmp0 (page_name, "library") == 0 && self->library_page) {
+    spotifygtk_library_page_set_covers_loaded (self->library_page, loaded);
   }
 }
 
@@ -3913,6 +4135,16 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
    * does.
    */
   const gchar *leaving = gtk_stack_get_visible_child_name (self->page_stack);
+#ifdef SPOTIFYGTK_VERBOSE
+  SPOTIFYGTK_DEBUG ("navigation: %s -> %s", leaving ? leaving : "<none>", page_name);
+  spotifygtk_cover_log_stats ("before page navigation");
+  if (g_strcmp0 (leaving, "library") == 0) {
+    spotifygtk_album_grid_log_stats (
+      spotifygtk_library_page_get_album_grid (self->library_page), "library albums before leave");
+    spotifygtk_album_grid_log_stats (
+      spotifygtk_library_page_get_artist_grid (self->library_page), "library artists before leave");
+  }
+#endif
   if (leaving && g_strcmp0 (leaving, page_name) != 0)
     set_page_covers_loaded (self, leaving, FALSE);
 
@@ -3921,10 +4153,12 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
   /* And ask the arriving page for its artwork back. */
   set_page_covers_loaded (self, page_name, TRUE);
 
-  /* Load on first visit rather than at startup; the page no-ops the
-   * refresh once it holds data. Home and Library are static for now. */
+  /* Load substantial collections on first visit rather than behind Home at
+   * startup; each page no-ops refresh once it holds data. */
   if (g_strcmp0 (page_name, "liked") == 0)
     spotifygtk_liked_songs_page_refresh (self->liked_page);
+  if (g_strcmp0 (page_name, "library") == 0)
+    spotifygtk_library_page_refresh (self->library_page);
   /*
    * Only if it has nothing yet. Reloading on every visit cleared the grid and
    * rebuilt it from two requests per playlist, so the page visibly emptied and
@@ -4115,6 +4349,15 @@ static const gchar *theme_body =
   ".search-glass { background-image: linear-gradient(to bottom,"
   "  @bg_content 0%, @bg_content 60%,"
   "  alpha(@bg_content, 0.75) 82%, alpha(@bg_content, 0.0) 100%); }"
+  /* Network activity lives in the window's GtkOverlay, so this two-pixel strip
+   * never claims vertical space. @fg_strong is the same inverse-theme colour
+   * used by the seek/volume fill: light on Dark, ink on White and Milk. */
+  "progressbar.loading-progress { min-height: 2px; padding: 0;"
+  "  background-color: transparent; }"
+  "progressbar.loading-progress trough { min-height: 2px; border-radius: 0;"
+  "  background-color: transparent; }"
+  "progressbar.loading-progress progress { min-height: 2px;"
+  "  border-radius: 0 2px 2px 0; background-color: @fg_strong; }"
   /* libadwaita paints list, row, viewport and .view with a lighter "view"
    * fill. That is the grey slab that showed through wherever a list was
    * empty. Nothing in this UI wants a filled list surface. */
@@ -4517,6 +4760,7 @@ spotifygtk_native_window_constructed (GObject *object)
   /* Create core services */
   self->player = spotifygtk_player_service_new ();
   self->session = spotifygtk_native_session_new ();
+  self->loading_sources = g_hash_table_new (g_direct_hash, g_direct_equal);
 
   /* Seed the equaliser from the persisted settings now that the player
    * exists; later changes arrive via the settings "changed" handler. */
@@ -4619,14 +4863,26 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_set_vexpand (GTK_WIDGET (self->page_stack), TRUE);
 
   self->home_page = spotifygtk_home_page_new ();
+  g_signal_connect (self->home_page, "loading-changed",
+                    G_CALLBACK (on_page_loading_changed), self);
   self->search_page = spotifygtk_search_page_new ();
+  g_signal_connect (self->search_page, "loading-changed",
+                    G_CALLBACK (on_page_loading_changed), self);
   self->liked_page = spotifygtk_liked_songs_page_new ();
+  g_signal_connect (self->liked_page, "loading-changed",
+                    G_CALLBACK (on_page_loading_changed), self);
   self->library_page = spotifygtk_library_page_new ();
+  g_signal_connect (self->library_page, "loading-changed",
+                    G_CALLBACK (on_page_loading_changed), self);
   self->settings_page = spotifygtk_settings_page_new ();
   g_signal_connect_swapped (self->settings_page, "log-out",
                             G_CALLBACK (spotifygtk_native_window_log_out), self);
   self->context_page = spotifygtk_context_page_new ();
+  g_signal_connect (self->context_page, "loading-changed",
+                    G_CALLBACK (on_page_loading_changed), self);
   self->artist_page  = spotifygtk_artist_page_new ();
+  g_signal_connect (self->artist_page, "loading-changed",
+                    G_CALLBACK (on_page_loading_changed), self);
 
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->home_page), "home");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->search_page), "search");
@@ -4698,6 +4954,13 @@ spotifygtk_native_window_constructed (GObject *object)
   wire_album_grid (self, spotifygtk_search_page_get_album_grid (self->search_page));
   wire_album_grid (self, spotifygtk_home_page_get_album_grid (self->home_page));
   wire_album_grid (self, spotifygtk_library_page_get_album_grid (self->library_page));
+  {
+    SpotifyGtkAlbumGrid *artists =
+      spotifygtk_library_page_get_artist_grid (self->library_page);
+    g_signal_connect (artists, "album-activated",
+                      G_CALLBACK (on_artist_card_activated), self);
+    wire_album_grid_common (self, artists);
+  }
 
   gtk_box_append (GTK_BOX (content_box), GTK_WIDGET (self->page_stack));
   gtk_paned_set_start_child (self->content_paned, content_box);
@@ -4781,6 +5044,18 @@ spotifygtk_native_window_constructed (GObject *object)
   GtkWidget *shell = gtk_overlay_new ();
   gtk_overlay_set_child (GTK_OVERLAY (shell), GTK_WIDGET (self->root_box));
 
+  /* One window-wide activity line immediately below the title bar. It is an
+   * overlay rather than another root-box child, so its two pixels never push
+   * the sidebar, pages, Now Playing panel, or playback bar out of place. */
+  self->loading_bar = GTK_PROGRESS_BAR (gtk_progress_bar_new ());
+  gtk_widget_add_css_class (GTK_WIDGET (self->loading_bar), "loading-progress");
+  gtk_widget_set_halign (GTK_WIDGET (self->loading_bar), GTK_ALIGN_FILL);
+  gtk_widget_set_valign (GTK_WIDGET (self->loading_bar), GTK_ALIGN_START);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->loading_bar), TRUE);
+  gtk_widget_set_can_target (GTK_WIDGET (self->loading_bar), FALSE);
+  gtk_widget_set_visible (GTK_WIDGET (self->loading_bar), FALSE);
+  gtk_overlay_add_overlay (GTK_OVERLAY (shell), GTK_WIDGET (self->loading_bar));
+
   self->login_gate = build_login_gate (self);
   gtk_overlay_add_overlay (GTK_OVERLAY (shell), self->login_gate);
 
@@ -4801,7 +5076,12 @@ spotifygtk_native_window_constructed (GObject *object)
    * the way every time one expired. If the refresh genuinely fails the session
    * reports FAILED and the gate comes back up. */
   if (native_auth_has_credentials (self->auth)) {
-    gtk_widget_set_visible (self->login_gate, FALSE);
+    /* Keep the opaque gate over pages until READY.  Hiding it here exposed
+     * the pages during the AP/login5 handshake, so they briefly rendered
+     * "Not signed in yet" even though the stored credentials were valid. */
+    spotifygtk_native_window_show_login_gate (self, "Signing in…");
+    gtk_widget_set_sensitive (self->login_button, FALSE);
+    set_loading_source (self, self->session, TRUE);
     spotifygtk_native_session_start (self->session);
   } else {
     spotifygtk_native_window_show_login_gate (self, NULL);
@@ -4821,6 +5101,12 @@ spotifygtk_native_window_dispose (GObject *object)
 
   g_clear_handle_id (&self->collection_change_id, g_source_remove);
   g_clear_handle_id (&self->dev_nav_probe_id, g_source_remove);
+  if (self->loading_tick_id && self->loading_bar) {
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self->loading_bar),
+                                     self->loading_tick_id);
+    self->loading_tick_id = 0;
+  }
+  g_clear_pointer (&self->loading_sources, g_hash_table_unref);
   g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
   if (self->auth)
     g_signal_handlers_disconnect_by_data (self->auth, self);

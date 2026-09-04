@@ -60,6 +60,7 @@ struct _SpotifyGtkPlaybackBar {
    * grace window after, so the engine can catch up — position reports are
    * ignored so they don't yank the slider back. */
   gboolean user_seeking;
+  gint64   seek_target_ms;
   guint    seek_commit_id;
   guint    seek_release_id;
 };
@@ -231,9 +232,13 @@ commit_seek (gpointer user_data)
   self->seek_commit_id = 0;
 
   if (self->duration_ms > 0) {
-    gint64 pos = (gint64) (gtk_range_get_value (GTK_RANGE (self->progress_scale))
-                           * (gdouble) self->duration_ms);
-    g_signal_emit (self, signals[SEEK], 0, pos);
+    /* Commit the value captured by the user's last movement. Reading the
+     * widget here is racy with end-of-track UI updates, which can put the
+     * scale back at 1.0 during this debounce window and turn a drag to zero
+     * into a seek to the old duration. */
+    g_message ("playback-bar: committing user seek to %" G_GINT64_FORMAT " ms",
+               self->seek_target_ms);
+    g_signal_emit (self, signals[SEEK], 0, self->seek_target_ms);
   }
 
   /* Keep ignoring position reports briefly so the engine can reach the new
@@ -257,6 +262,9 @@ on_seek_changed (GtkRange *range, gpointer user_data)
   /* Show where the drag is pointing immediately, even though the seek itself
    * is only committed once movement settles. */
   gint64 dragged = (gint64) (gtk_range_get_value (range) * (gdouble) self->duration_ms);
+  self->seek_target_ms = CLAMP (dragged, (gint64) 0, self->duration_ms);
+  g_message ("playback-bar: captured user seek target %" G_GINT64_FORMAT " ms",
+             self->seek_target_ms);
   g_autofree gchar *elapsed = format_time (dragged);
   gtk_label_set_text (self->elapsed_label, elapsed);
 

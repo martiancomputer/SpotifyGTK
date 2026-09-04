@@ -233,7 +233,8 @@ GPtrArray *spotifygtk_native_session_load_discography_finish (SpotifyNativeSessi
                                                               GError              **error);
 
 /*
- * The artist's portrait image id, for the artist page's banner.
+ * The artist page's wide banner image id, falling back to the portrait when
+ * the artist has not published a banner.
  *
  * A track carries its album's cover and nothing else, so this is the only way
  * to show the artist rather than one of their releases. Runs on the session's
@@ -247,6 +248,13 @@ void spotifygtk_native_session_get_artist_image (SpotifyNativeSession *self,
                                                  const gchar          *artist_uri,
                                                  SpotifyNativeArtistImageFunc callback,
                                                  gpointer              user_data);
+
+/* The artist's profile/avatar image id. Unlike get_artist_image(), this never
+ * substitutes the wide headerImage used by the artist-page hero. */
+void spotifygtk_native_session_get_artist_portrait (SpotifyNativeSession *self,
+                                                    const gchar          *artist_uri,
+                                                    SpotifyNativeArtistImageFunc callback,
+                                                    gpointer              user_data);
 
 /*
  * Drop the cached resolution of a context, so the next load of it goes to the

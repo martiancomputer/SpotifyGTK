@@ -66,6 +66,12 @@ void spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid      *self,
                                       const SpotifyGtkCardSpec *cards,
                                       guint                     n_cards);
 
+/* Batch counterpart to add_pending_card(), so a followed-artist collection can
+ * enter the virtualised model in one change and resolve only mapped cards. */
+void spotifygtk_album_grid_set_pending_cards (SpotifyGtkAlbumGrid      *self,
+                                              const SpotifyGtkCardSpec *cards,
+                                              guint                     n_cards);
+
 void spotifygtk_album_grid_add_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
                                      const gchar *title, const gchar *subtitle,
                                      const gchar *cover_id);
@@ -118,8 +124,17 @@ void spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self);
 void spotifygtk_album_grid_set_content_margins (SpotifyGtkAlbumGrid *self,
                                                 int start, int end);
 
+/* Filter cards locally by title/subtitle. Passing NULL or an empty string
+ * restores the complete model without reloading it or its artwork. */
+void spotifygtk_album_grid_set_filter_text (SpotifyGtkAlbumGrid *self,
+                                            const gchar         *text);
+
 /* Scrolling adjustment of the grid, for pages that react to scroll position. */
 GtkAdjustment *spotifygtk_album_grid_get_vadjustment (SpotifyGtkAlbumGrid *self);
+
+/* Compact ownership snapshot for -Dverbose_logging=true diagnostics. */
+void spotifygtk_album_grid_log_stats (SpotifyGtkAlbumGrid *self,
+                                      const gchar         *context);
 
 /* Signal: album-activated (const gchar *uri, const gchar *name) */
 

@@ -617,7 +617,8 @@ typedef struct {
  * request that is stuck rather than cancellable never completes to be drained
  * -- which is precisely what the CDN deadline work found earlier today.
  *
- * So callbacks compare their state pointer against this before touching it.
+ * So callbacks check that their state pointer is still registered before
+ * touching it.
  * Comparing a dangling pointer is well defined; dereferencing one is not, and
  * this check happens before any dereference.
  *
@@ -632,16 +633,43 @@ typedef struct {
  * The one exception is audio_output_thread, which the run creates and joins,
  * so it cannot outlive the state it was handed. It is not an oversight.
  *
- * Publishing order makes this safe: engine_active_state is assigned before any
- * connect or fetch is kicked off, so a callback belonging to the live run
- * always passes and only a stale one is dropped.
+ * More than one run may legitimately be alive during gapless read-ahead and
+ * replacement. This therefore cannot be a singleton "current run" pointer:
+ * publishing one run would make callbacks for another live run look stale.
+ * Keep a pointer-only registry instead; checking a dangling pointer for
+ * membership is safe because the check never dereferences it.
  */
-static LiveTestState *engine_active_state = NULL;
+static GMutex engine_active_states_lock;
+static GSList *engine_active_states = NULL;
+
+static void
+register_active_run (LiveTestState *state)
+{
+  g_mutex_lock (&engine_active_states_lock);
+  engine_active_states = g_slist_prepend (engine_active_states, state);
+  g_mutex_unlock (&engine_active_states_lock);
+}
+
+static void
+unregister_active_run (LiveTestState *state)
+{
+  g_mutex_lock (&engine_active_states_lock);
+  engine_active_states = g_slist_remove (engine_active_states, state);
+  g_mutex_unlock (&engine_active_states_lock);
+}
 
 static inline gboolean
 run_is_current (LiveTestState *state)
 {
-  return state != NULL && state == engine_active_state;
+  gboolean active = FALSE;
+
+  if (!state)
+    return FALSE;
+
+  g_mutex_lock (&engine_active_states_lock);
+  active = g_slist_find (engine_active_states, state) != NULL;
+  g_mutex_unlock (&engine_active_states_lock);
+  return active;
 }
 
 
@@ -652,6 +680,7 @@ run_is_current (LiveTestState *state)
  * by decoding and throwing away. Beyond that the byte estimate was wrong
  * enough that trimming would mean discarding real seconds of audio. */
 #define SEEK_UNDERSHOOT_MS   1500
+#define SEEK_TAIL_MARGIN_MS  6000
 /* Past this, the byte estimate was wrong enough that trimming would mean
  * decoding away real seconds of audio -- so re-aim using the ratio we just
  * measured instead, once, and trim the remainder of that. */
@@ -659,6 +688,7 @@ run_is_current (LiveTestState *state)
 /* Absolute ceiling on trimming, purely so a pathological granule cannot make
  * the engine sit there discarding forever. */
 #define SEEK_MAX_TRIM_SEC    60
+#define SEEK_MAX_REFINES     2
 
 #define CDN_SEEK_PROBE_OFFSET 4093
 #define CDN_SEEK_PROBE_LENGTH 8192
@@ -999,7 +1029,7 @@ typedef struct {
   guint          generation;
   gint64         target_ms;
   goffset        request_offset;
-  gboolean       refined;      /* TRUE once the estimate has been re-aimed */
+  guint          refinements;  /* bounded: a bad VBR estimate must not loop */
 } SeekLanding;
 
 static void do_seek (LiveTestState *state);
@@ -1015,7 +1045,7 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
   guint    gen        = land->generation;
   gint64   target_ms  = land->target_ms;
   goffset  req_off    = land->request_offset;
-  gboolean refined    = land->refined;
+  guint    refinements = land->refinements;
   g_free (land);
 
   if (!run_is_current (state))
@@ -1027,6 +1057,33 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
     return;
 
   if (!decrypted_chunk) {
+    /* The nominal bitrate can put the very first estimate beyond EOF on a
+     * VBR file, especially for a seek in its final seconds. HTTP 416 does not
+     * mean the requested playback position is past the track duration; it
+     * only means this byte estimate was too large. Back off far enough to get
+     * one real Ogg granule, then the normal refinement below can derive the
+     * stream's actual bytes-per-frame ratio and re-aim accurately. */
+    if (spotifygtk_cdn_error_is_past_eof (error) &&
+        refinements < SEEK_MAX_REFINES && req_off > 0) {
+      goffset new_off = req_off / 2;
+      g_message ("[seek] byte estimate was past EOF; re-aiming backward "
+                 "(attempt %u/%u): byte %" G_GOFFSET_FORMAT " -> %"
+                 G_GOFFSET_FORMAT,
+                 refinements + 1, SEEK_MAX_REFINES, req_off, new_off);
+
+      SeekLanding *again    = g_new0 (SeekLanding, 1);
+      again->state          = state;
+      again->generation     = state->playback_generation;
+      again->target_ms      = target_ms;
+      again->request_offset = new_off;
+      again->refinements    = refinements + 1;
+      spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url,
+                                  state->audio_key, new_off,
+                                  CDN_FULL_DOWNLOAD_CHUNK,
+                                  on_seek_landing_chunk, again);
+      return;
+    }
+
     g_warning ("[seek] landing fetch failed: %s", error ? error->message : "unknown error");
     state->ok = TRUE;                       /* treat as end-of-track */
     g_main_loop_quit (state->loop);
@@ -1056,37 +1113,72 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
 
   g_message ("[seek] target %.1fs, landed %.1fs, shortfall %.1fs%s",
              (double) target_ms / 1000.0, (double) landed_frames / rate,
-             (double) shortfall / rate, refined ? " (refined)" : "");
+             (double) shortfall / rate, refinements ? " (refined)" : "");
 
-  if (shortfall < 0)
-    shortfall = 0;                       /* overshot: nothing to trim */
-
-  /* A large shortfall means nominal bitrate lied -- which it does on VBR. We
-   * now know one true (byte, sample) pair, so re-aim with the measured ratio
-   * rather than discarding many seconds of decoded audio. Once only: the
-   * second attempt trims whatever is left, so a bad ratio cannot loop. */
-  if (!refined && landed_frames > 0 && req_off > 0 &&
-      shortfall > (gint64) rate * SEEK_REFINE_SEC) {
+  /* Re-aim in either direction when nominal bitrate lied.
+   *
+   * The old path only refined a large positive shortfall. A negative one was
+   * immediately clamped to zero, even though it means the first Ogg page is
+   * already AFTER the requested sample and cannot be repaired by trimming.
+   * That exact case near EOF decoded zero frames, declared the track finished,
+   * and advanced to the next song.
+   *
+   * A short range is also an EOF warning. Even a nominally good landing can
+   * begin so close to the final page that there is no complete audio packet
+   * left in the window. Give tail seeks a wider lead-in so the fresh decoder
+   * has complete pages to consume. Two refinements are enough: one to correct
+   * the VBR estimate, and one to add the tail margin after discovering EOF. */
+  gboolean overshot = shortfall < 0;
+  gboolean far_short = shortfall > (gint64) rate * SEEK_REFINE_SEC;
+  gboolean near_eof = clen < CDN_FULL_DOWNLOAD_CHUNK;
+  if (refinements < SEEK_MAX_REFINES && landed_frames > 0 && req_off > 0 &&
+      (overshot || far_short || near_eof)) {
     gdouble bytes_per_frame = (gdouble) req_off / (gdouble) landed_frames;
-    gint64  aim_frames      = target_frames - (gint64) (rate * SEEK_UNDERSHOOT_MS / 1000);
+    gint64 margin_ms = near_eof ? SEEK_TAIL_MARGIN_MS : SEEK_UNDERSHOOT_MS;
+    gint64 aim_frames = target_frames - (gint64) (rate * margin_ms / 1000);
     if (aim_frames < 0)
       aim_frames = 0;
     goffset new_off = (goffset) (bytes_per_frame * (gdouble) aim_frames);
 
-    g_message ("[seek] re-aiming: %.1f bytes/frame measured, byte %" G_GOFFSET_FORMAT
-               " -> %" G_GOFFSET_FORMAT, bytes_per_frame, req_off, new_off);
+    gboolean move_backward = overshot || near_eof;
+    /* Rounding or a pathological granule must make progress in the correct
+     * direction. A positive shortfall means the page is before the target and
+     * must move forward; only overshoot/EOF correction moves backward. The
+     * first version of this branch forced both cases backward, and the runtime
+     * log showed it worsening a 47-second shortfall by one 256 KiB chunk on
+     * each attempt. */
+    if (move_backward && new_off >= req_off)
+      new_off = MAX ((goffset) 0, req_off - (goffset) CDN_FULL_DOWNLOAD_CHUNK);
+    else if (!move_backward && new_off <= req_off)
+      new_off = req_off + (goffset) CDN_FULL_DOWNLOAD_CHUNK;
+
+    g_message ("[seek] re-aiming %s (%s, attempt %u/%u): %.1f bytes/frame, "
+               "byte %" G_GOFFSET_FORMAT " -> %" G_GOFFSET_FORMAT,
+               move_backward ? "backward" : "forward",
+               near_eof ? "near EOF" : (overshot ? "overshot" : "large shortfall"),
+               refinements + 1, SEEK_MAX_REFINES,
+               bytes_per_frame, req_off, new_off);
 
     SeekLanding *again    = g_new0 (SeekLanding, 1);
     again->state          = state;
     again->generation     = state->playback_generation;
     again->target_ms      = target_ms;
     again->request_offset = new_off;
-    again->refined        = TRUE;
+    again->refinements    = refinements + 1;
 
     spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
                                 new_off, CDN_FULL_DOWNLOAD_CHUNK,
                                 on_seek_landing_chunk, again);
     return;
+  }
+
+  if (shortfall < 0) {
+    /* Both bounded corrections failed to land before the target. Reporting the
+     * later granule as the target would make the UI lie, but decoding from it
+     * is still preferable to treating the track as complete. */
+    g_warning ("[seek] still overshot after %u refinement(s); continuing from the earliest usable page",
+               refinements);
+    shortfall = 0;
   }
 
   if (shortfall > (gint64) rate * SEEK_MAX_TRIM_SEC)
@@ -1125,9 +1217,15 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
   gboolean ok = stream_decode_chunk (state, hdr, FALSE);
   g_bytes_unref (hdr);
 
+  gboolean final_landing = clen < CDN_FULL_DOWNLOAD_CHUNK;
   if (ok) {
     GBytes *tail = g_bytes_new (cdata + page_off, clen - page_off);
-    ok = stream_decode_chunk (state, tail, FALSE);
+    /* A short 206 response is the final range. Mark it final here instead of
+     * issuing one more request exactly at EOF; some Spotify CDN hosts answer
+     * that request with a full-file HTTP 200 rather than a 416, which the
+     * range reader correctly rejects and used to turn a successful seek into
+     * a playback failure. */
+    ok = stream_decode_chunk (state, tail, final_landing);
     g_bytes_unref (tail);
   }
 
@@ -1143,7 +1241,13 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
   }
 
   state->next_download_offset = req_off + (goffset) clen;
-  start_read_ahead (state);
+  if (final_landing) {
+    g_message ("[seek] final CDN range decoded; no read-ahead request at EOF");
+    state->ok = TRUE;
+    g_main_loop_quit (state->loop);
+  } else {
+    start_read_ahead (state);
+  }
 }
 
 /*
@@ -3206,7 +3310,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   /* Claim the engine for this run. Callbacks compare against this before
    * touching their state pointer, so anything left over from a previous track
    * is dropped instead of writing into a stack frame that has returned. */
-  engine_active_state = &state;
+  register_active_run (&state);
 
   report_progress (&state, SPOTIFYGTK_ENGINE_CONNECTING,
                    "Starting the native Spotify playback engine.");
@@ -3344,10 +3448,9 @@ run_live_test (const gchar *token, GCancellable *cancellable,
    * while still closing the window.
    */
   /* Released before the drain, not after: anything still in flight is by
-   * definition no longer this run's concern, and clearing it first means a
-   * callback that lands mid-drain takes the early return rather than acting on
-   * a state that is about to go away. */
-  engine_active_state = NULL;
+   * definition no longer this run's concern. Other gapless runs remain
+   * registered and continue receiving their own callbacks. */
+  unregister_active_run (&state);
 
   /*
    * The caller's cancellable is deliberately NOT cancelled here.
