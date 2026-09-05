@@ -162,11 +162,17 @@ sync_audible_track (SpotifyNativePlayerService *self)
   }
 
   InflightTrack *audible = NULL;
-  for (guint i = 0; i < self->inflight->len; i++) {
-    InflightTrack *t = g_ptr_array_index (self->inflight, i);
-    if (spotifygtk_native_engine_control_get_sink_seq (t->control) == seq) {
-      audible = t;
-      break;
+  /* Sequence zero means that the sink is between tracks or has not received
+   * PCM yet. Every newly-created control also starts with sequence zero, so
+   * attempting a lookup here would falsely announce whichever preparing run
+   * happened to appear first as audible. */
+  if (seq != 0) {
+    for (guint i = 0; i < self->inflight->len; i++) {
+      InflightTrack *t = g_ptr_array_index (self->inflight, i);
+      if (spotifygtk_native_engine_control_get_sink_seq (t->control) == seq) {
+        audible = t;
+        break;
+      }
     }
   }
 

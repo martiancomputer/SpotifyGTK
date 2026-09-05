@@ -31,6 +31,7 @@ struct _SpotifyCdnFetcher {
   GObject      parent_instance;
   SoupSession *session;
   GCancellable *cancellable;
+  GSList       *active_requests; /* FetchClosure*, engine-context confined */
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, G_TYPE_OBJECT)
@@ -77,6 +78,7 @@ typedef struct {
   SpotifyCdnFetcher *self;
   SoupMessage       *message;
   CdnChunkCallback   callback;
+  gpointer           owner;
   gpointer           user_data;
   guint8             key[AUDIO_KEY_LEN];
   goffset            offset;
@@ -93,6 +95,7 @@ typedef struct {
 static void
 fetch_closure_disarm (FetchClosure *cl)
 {
+  cl->self->active_requests = g_slist_remove (cl->self->active_requests, cl);
   if (cl->deadline) {
     g_source_destroy (cl->deadline);
     g_source_unref (cl->deadline);
@@ -129,6 +132,12 @@ on_request_deadline (gpointer user_data)
   cl->deadline = NULL;
   if (fired)
     g_source_unref (fired);
+
+  /* A seek already reported this request as superseded. The underlying soup
+   * operation may remain wedged despite cancellation, but its deadline must
+   * not deliver a second callback 25 seconds later. */
+  if (cl->reported)
+    return G_SOURCE_REMOVE;
 
   cl->timed_out = TRUE;
   g_warning ("cdn: no response for logical offset %" G_GOFFSET_FORMAT " after %ds "
@@ -328,6 +337,7 @@ on_range_response (GObject *source, GAsyncResult *result, gpointer user_data)
 void
 spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
                             const guint8 key[AUDIO_KEY_LEN], goffset offset, gsize length,
+                            gpointer owner,
                             CdnChunkCallback callback, gpointer user_data)
 {
   g_return_if_fail (SPOTIFYGTK_IS_CDN_FETCHER (self));
@@ -362,6 +372,7 @@ spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
   cl->self      = self;
   cl->message   = g_object_ref (msg);
   cl->callback  = callback;
+  cl->owner     = owner;
   cl->user_data = user_data;
   cl->offset    = offset;
   cl->length    = length;
@@ -386,10 +397,43 @@ spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
   g_source_set_callback (cl->deadline, on_request_deadline, cl, NULL);
   g_source_attach (cl->deadline, g_main_context_get_thread_default ());
 
+  self->active_requests = g_slist_prepend (self->active_requests, cl);
+
   soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
                                     cl->cancel,
                                     on_range_response, cl);
   g_object_unref (msg);
+}
+
+gboolean
+spotifygtk_cdn_fetcher_cancel_request (SpotifyCdnFetcher *self,
+                                       gpointer owner,
+                                       CdnChunkCallback callback,
+                                       gpointer user_data)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_CDN_FETCHER (self), FALSE);
+
+  for (GSList *it = self->active_requests; it; it = it->next) {
+    FetchClosure *cl = it->data;
+    if (cl->reported || cl->owner != owner || cl->callback != callback ||
+        (user_data && cl->user_data != user_data))
+      continue;
+
+    /* A cancelled libsoup operation is not guaranteed to complete when its
+     * pooled connection is wedged (the deadline path documents the observed
+     * case), so report cancellation synchronously as well as cancelling it.
+     * `reported` prevents a late response from notifying the caller twice. */
+    cl->reported = TRUE;
+    g_cancellable_cancel (cl->cancel);
+
+    g_autoptr(GError) err = g_error_new_literal (G_IO_ERROR,
+                                                  G_IO_ERROR_CANCELLED,
+                                                  "request superseded");
+    callback (NULL, cl->offset, err, user_data);
+    return TRUE;
+  }
+
+  return FALSE;
 }
 
 static void

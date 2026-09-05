@@ -42,6 +42,11 @@
 #define MERCURY_FLAG_FINAL   1
 #define MERCURY_FLAG_PARTIAL 2
 
+/* A lost AP response must not leave its caller (and usually a loading bar)
+ * waiting forever. This is deliberately longer than normal Mercury latency,
+ * but short enough that a bounded caller retry remains useful. */
+#define MERCURY_REQUEST_TIMEOUT_SECONDS 20
+
 struct _SpotifyMercury {
   GObject           parent_instance;
   SpotifyApSession *ap_session;
@@ -89,6 +94,8 @@ typedef struct {
   MercuryCallback  callback;
   gpointer         user_data;
   GMainContext    *callback_context;
+  GSource         *timeout_source;
+  gchar           *request_uri;
 } MercuryPending;
 
 static void
@@ -99,7 +106,73 @@ mercury_pending_free (gpointer data)
   g_clear_pointer (&p->parts,   g_ptr_array_unref);
   g_clear_pointer (&p->partial, g_byte_array_unref);
   g_clear_pointer (&p->callback_context, g_main_context_unref);
+  if (p->timeout_source) {
+    g_source_destroy (p->timeout_source);
+    g_source_unref (p->timeout_source);
+  }
+  g_free (p->request_uri);
   g_free (p);
+}
+
+typedef struct {
+  SpotifyMercury *mercury;
+  guint64         seq;
+} MercuryTimeout;
+
+static void dispatch_response (SpotifyMercury *self, GMainContext *context,
+                               MercuryCallback callback, gpointer user_data,
+                               const MercuryResponse *response);
+
+static void
+mercury_timeout_free (gpointer data)
+{
+  MercuryTimeout *timeout = data;
+  g_clear_object (&timeout->mercury);
+  g_free (timeout);
+}
+
+static gboolean
+on_request_timeout (gpointer user_data)
+{
+  MercuryTimeout *timeout = user_data;
+  SpotifyMercury *self = timeout->mercury;
+  MercuryPending *p = g_hash_table_lookup (self->pending, &timeout->seq);
+  if (!p)
+    return G_SOURCE_REMOVE;
+
+  /* Detach the source before removing p: the source currently owns this
+   * callback and must be allowed to finish naturally. */
+  g_source_unref (p->timeout_source);
+  p->timeout_source = NULL;
+  g_warning ("mercury: request to %s timed out after %u seconds",
+             p->request_uri ? p->request_uri : "(unknown)",
+             MERCURY_REQUEST_TIMEOUT_SECONDS);
+  if (p->callback) {
+    MercuryResponse response = {
+      .status_code = 408,
+      .uri = p->request_uri,
+      .parts = g_ptr_array_new (),
+    };
+    dispatch_response (self, p->callback_context, p->callback, p->user_data,
+                       &response);
+    g_ptr_array_unref (response.parts);
+  }
+  g_hash_table_remove (self->pending, &timeout->seq);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+arm_pending_timeout (SpotifyMercury *self, guint64 seq, MercuryPending *p,
+                     const gchar *uri)
+{
+  MercuryTimeout *timeout = g_new0 (MercuryTimeout, 1);
+  timeout->mercury = g_object_ref (self);
+  timeout->seq = seq;
+  p->request_uri = g_strdup (uri);
+  p->timeout_source = g_timeout_source_new_seconds (MERCURY_REQUEST_TIMEOUT_SECONDS);
+  g_source_set_callback (p->timeout_source, on_request_timeout, timeout,
+                         mercury_timeout_free);
+  g_source_attach (p->timeout_source, self->owner_context);
 }
 
 typedef struct {
@@ -379,6 +452,7 @@ send_request_parts_on_owner (MercuryRequestDispatch *request)
   p->callback  = request->callback;
   p->user_data = request->user_data;
   p->callback_context = g_main_context_ref (request->callback_context);
+  arm_pending_timeout (self, seq, p, request->uri);
   g_hash_table_insert (self->pending, g_memdup2 (&seq, sizeof (seq)), p);
 
   g_message ("mercury: sending %u payload part(s), %u bytes total",
@@ -542,6 +616,7 @@ send_request_fields_on_owner (MercuryRequestDispatch *request)
   p->callback  = request->callback;
   p->user_data = request->user_data;
   p->callback_context = g_main_context_ref (request->callback_context);
+  arm_pending_timeout (self, seq, p, request->uri);
   g_hash_table_insert (self->pending, g_memdup2 (&seq, sizeof (seq)), p);
 
   spotifygtk_ap_session_send (self->ap_session, cmd_for_method (request->method),

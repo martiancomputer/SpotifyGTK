@@ -601,7 +601,7 @@ typedef struct {
 #define SEARCH_TRACKS_HASH \
   "59ee4a659c32e9ad894a71308207594a65ba67bb6b632b183abe97303a51fa55"
 #define SEARCH_PAGE_SIZE 50
-#define SEARCH_RESULT_TARGET 150
+#define SEARCH_RESULT_TARGET 300
 
 typedef struct {
   SpotifySpclient        *spclient;      /* borrowed; owner keeps requests alive */
@@ -975,6 +975,7 @@ request_expanded_search (SpotifySpclient *self, const gchar *context_uri,
  * album path.
  */
 #define EXTENSION_KIND_ARTIST_V4   8
+#define ARTIST_FIELD_NAME            2
 #define ARTIST_FIELD_PORTRAIT_GROUP 17
 #define ARTIST_FIELD_PORTRAIT       11   /* repeated Image, older shape */
 
@@ -1033,7 +1034,7 @@ on_artist_response (GObject *source, GAsyncResult *result, gpointer user_data)
     soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
 
   if (!body) {
-    if (cl->callback) cl->callback (NULL, error, cl->user_data);
+    if (cl->callback) cl->callback (NULL, NULL, error, cl->user_data);
     g_free (cl);
     return;
   }
@@ -1048,6 +1049,7 @@ on_artist_response (GObject *source, GAsyncResult *result, gpointer user_data)
   gsize         flen;
   guint64       fvarint;
   g_autofree gchar *cover = NULL;
+  g_autofree gchar *name = NULL;
 
   /* Same envelope as the track batch: extended_metadata -> extension_data ->
    * Any.value, with an Artist inside instead of a Track. */
@@ -1074,6 +1076,11 @@ on_artist_response (GObject *source, GAsyncResult *result, gpointer user_data)
       if (!pb_find_bytes_field (any, any_len, ANY_VALUE, &artist, &artist_len))
         continue;
 
+      const guint8 *name_data = NULL; gsize name_len = 0;
+      if (pb_find_bytes_field (artist, artist_len, ARTIST_FIELD_NAME,
+                               &name_data, &name_len))
+        name = g_strndup ((const gchar *) name_data, name_len);
+
       const guint8 *grp = NULL; gsize grp_len = 0;
       if (pb_find_bytes_field (artist, artist_len, ARTIST_FIELD_PORTRAIT_GROUP,
                                &grp, &grp_len))
@@ -1094,7 +1101,7 @@ on_artist_response (GObject *source, GAsyncResult *result, gpointer user_data)
   }
 
   if (cl->callback)
-    cl->callback (cover, NULL, cl->user_data);
+    cl->callback (name, cover, NULL, cl->user_data);
   g_free (cl);
 }
 
@@ -1475,7 +1482,7 @@ on_artist_header_response (GObject *source, GAsyncResult *result, gpointer user_
     soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
 
   if (!body) {
-    if (cl->callback) cl->callback (NULL, error, cl->user_data);
+    if (cl->callback) cl->callback (NULL, NULL, error, cl->user_data);
     g_free (cl);
     return;
   }
@@ -1521,7 +1528,7 @@ on_artist_header_response (GObject *source, GAsyncResult *result, gpointer user_
     }
   }
 
-  if (cl->callback) cl->callback (cover, NULL, cl->user_data);
+  if (cl->callback) cl->callback (NULL, cover, NULL, cl->user_data);
   g_free (cl);
 }
 
@@ -1536,7 +1543,7 @@ spotifygtk_spclient_get_artist_header (SpotifySpclient        *self,
   g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
 
   if (!artist_uri || !*artist_uri) {
-    if (callback) callback (NULL, NULL, user_data);
+    if (callback) callback (NULL, NULL, NULL, user_data);
     return;
   }
 
@@ -1585,7 +1592,7 @@ spotifygtk_spclient_get_artist_portrait (SpotifySpclient        *self,
   g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
 
   if (!artist_uri || !*artist_uri) {
-    if (callback) callback (NULL, NULL, user_data);
+    if (callback) callback (NULL, NULL, NULL, user_data);
     return;
   }
 

@@ -43,7 +43,17 @@ void spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self,
                                  const gchar *cdn_url,
                                  const guint8 key[AUDIO_KEY_LEN],
                                  goffset offset, gsize length,
+                                 gpointer owner,
                                  CdnChunkCallback callback, gpointer user_data);
+
+/* Cancel and immediately report one outstanding request owned by the given
+ * callback/user-data pair.  This is intentionally narrower than cancelling
+ * the fetcher: gapless playback can have requests for several tracks sharing
+ * its persistent HTTP session. */
+gboolean spotifygtk_cdn_fetcher_cancel_request (SpotifyCdnFetcher *self,
+                                                gpointer owner,
+                                                CdnChunkCallback callback,
+                                                gpointer user_data);
 
 /*
  * A range that starts at or past the end of the file.

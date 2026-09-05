@@ -383,9 +383,14 @@ spotifygtk_playlist_add_tracks (SpotifyMercury *mercury, const gchar *playlist_u
 /* ── List ────────────────────────────────────────────────────────────────── */
 
 typedef struct {
+  SpotifyMercury             *mercury;
+  gchar                      *username;
+  guint                       attempt;
   SpotifyPlaylistListCallback callback;
   gpointer                    user_data;
 } ListCtx;
+
+static void request_rootlist (ListCtx *ctx);
 
 void
 spotifygtk_playlist_entries_free (SpotifyPlaylistEntry *entries, guint n)
@@ -402,6 +407,14 @@ static void
 on_rootlist_read (MercuryResponse *response, gpointer user_data)
 {
   ListCtx *ctx = user_data;
+
+  if (response && response->status_code == 408 && ctx->attempt == 0) {
+    ctx->attempt++;
+    g_warning ("playlist: rootlist request timed out; retrying once");
+    request_rootlist (ctx);
+    return;
+  }
+
   GArray *out = g_array_new (FALSE, TRUE, sizeof (SpotifyPlaylistEntry));
 
   if (status_ok (response) && response->parts && response->parts->len > 0) {
@@ -433,7 +446,18 @@ on_rootlist_read (MercuryResponse *response, gpointer user_data)
   for (guint i = 0; i < out->len; i++)
     g_free (g_array_index (out, SpotifyPlaylistEntry, i).uri);
   g_array_free (out, TRUE);
+  g_clear_object (&ctx->mercury);
+  g_free (ctx->username);
   g_free (ctx);
+}
+
+static void
+request_rootlist (ListCtx *ctx)
+{
+  g_autofree gchar *uri =
+    g_strdup_printf ("hm://playlist/v2/user/%s/rootlist", ctx->username);
+  spotifygtk_mercury_request_full (ctx->mercury, MERCURY_METHOD_GET, "GET",
+                                   uri, NULL, on_rootlist_read, ctx);
 }
 
 /* ── Removing (unfollowing) a playlist ─────────────────────────────────── */
@@ -825,11 +849,9 @@ spotifygtk_playlist_list (SpotifyMercury *mercury, const gchar *username,
   g_return_if_fail (mercury != NULL && username != NULL);
 
   ListCtx *ctx = g_new0 (ListCtx, 1);
+  ctx->mercury = g_object_ref (mercury);
+  ctx->username = g_strdup (username);
   ctx->callback  = callback;
   ctx->user_data = user_data;
-
-  g_autofree gchar *uri = g_strdup_printf ("hm://playlist/v2/user/%s/rootlist",
-                                           username);
-  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_GET, "GET",
-                                   uri, NULL, on_rootlist_read, ctx);
+  request_rootlist (ctx);
 }

@@ -18,7 +18,7 @@ and libadwaita interface.
 | | |
 |:---:|:---:|
 | ![Artist page, dark theme](media/01-artist-dark.png) | ![Artist page, light theme](media/02-artist-light.png) |
-| **Artist** — banner, top tracks and the full discography | **Artist, light theme** — one of three palettes |
+| **Artist** — banner, top tracks and the full discography | **Artist, light theme** — one of four palettes |
 | ![Album page, dark theme](media/03-album-dark.png) | ![Album page, light theme](media/04-album-light.png) |
 | **Album** — save it to your library from the header | **Album, light theme** |
 | ![Search results](media/05-search.png) | ![Liked Songs](media/08-liked-dark.png) |
@@ -58,6 +58,10 @@ ninja -C build
 
 `--native-file build-profiles/nightly.ini` swaps in the newer audio backend
 (PipeWire). `-Denable_gui=false` builds the engine and CLI harness without GTK.
+For performance investigations, `-Dverbose_logging=true` compiles in catalog
+timings, cover-cache ownership snapshots, page diagnostics, and a five-second
+process-memory sample tagged with the visible page; normal builds omit that
+timer and logging overhead.
 
 **Dependencies**
 
@@ -99,6 +103,12 @@ You can like tracks, save albums, follow artists, and create and delete
 playlists. There is a 15-band equaliser, an optional resampler, shuffle and
 repeat.
 
+The Library separates saved Albums, EPs and Singles from followed Artists, with
+local filtering across every view. Release artwork and artist portraits use the
+shared bounded disk cache, while artist names and portrait mappings persist as
+small metadata indexes. The card grids are virtualised so off-screen artwork is
+not retained merely because it exists in the library.
+
 Spotify Connect is integrated into the native player. SpotifyGTK appears as an
 available device in official Spotify clients, accepts playback transfer and
 remote play, pause, seek, previous and next commands, and yields audio when a
@@ -115,6 +125,11 @@ behavior.
 Smart Shuffle is Connect-aware: official clients can enable it, SpotifyGTK
 fetches and interleaves song-radio recommendations, and disabling it restores
 the original sequential queue rather than leaving recommendations behind.
+
+The interface includes a slim app-wide loading indicator and selectable GTK
+renderers—Automatic, Vulkan, OpenGL and Cairo—from Settings. Renderer changes
+take effect after restarting the app; an explicit `GSK_RENDERER` environment
+value still takes precedence for debugging.
 
 Windows is supported and plays through WASAPI — sign-in, streaming and
 playback are all verified on real hardware. Build it with

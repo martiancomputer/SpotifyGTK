@@ -28,7 +28,7 @@ option('verbose_logging',
   type: 'boolean',
   value: false,
   description: 'Compile in per-operation diagnostics (catalog stage timing, ' +
-               'cover/cache ownership, page navigation, collection writes). Off by default because ' +
+               'cover/cache ownership, page navigation, five-second memory/page sampling, collection writes). Off by default because ' +
                'they are noisy; -Dverbose_logging=true keeps them in the ' +
                'binary rather than deleting them from the source every time ' +
                'a bug is closed.')

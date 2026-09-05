@@ -210,7 +210,12 @@ spotifygtk_home_page_init (SpotifyGtkHomePage *self)
 
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 28);
   gtk_widget_set_margin_start (content, 34);
-  gtk_widget_set_margin_end (content, 24);
+  /* Keep the horizontal shelf's clipping edge flush with the content pane.
+   * An outer end margin clips a partially visible card first and then paints a
+   * separate page-coloured strip beside it, which becomes an obvious rectangle
+   * in light themes. Individual text sections need no right inset of their
+   * own, and the scroller already reserves its scrollbar gutter. */
+  gtk_widget_set_margin_end (content, 0);
   gtk_widget_set_margin_top (content, 22);
   gtk_widget_set_margin_bottom (content, 24);
 

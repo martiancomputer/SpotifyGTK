@@ -24,7 +24,7 @@ static gchar *
 artist_name_map_path (void)
 {
   return g_build_filename (g_get_user_cache_dir (), "spotifygtk",
-                           "artist-names", NULL);
+                           "artist-names-v2", NULL);
 }
 
 static void
@@ -109,6 +109,7 @@ struct _SpotifyGtkLibraryPage {
   LibraryView           active_view;
   GPtrArray            *saved_releases; /* SpotifyNativeRelease*, owned */
   GPtrArray            *saved_album_uris; /* gchar*, gathered across pages */
+  GHashTable           *saved_album_dates; /* album URI -> added_at */
   GPtrArray            *followed_artist_uris; /* gchar*, copied from window */
   gboolean              artists_populated;
   /* Invalidates callbacks from a previous load. Without it a second load
@@ -147,6 +148,7 @@ spotifygtk_library_page_dispose (GObject *object)
     g_clear_object (&self->load_cancel);
   }
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
+  g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
   g_clear_pointer (&self->followed_artist_uris, g_ptr_array_unref);
   self->session = NULL;
@@ -193,6 +195,29 @@ release_in_view (const SpotifyNativeRelease *release, LibraryView view)
     default:
       return FALSE;
   }
+}
+
+static gint
+release_date_compare (gconstpointer a, gconstpointer b, gpointer user_data)
+{
+  const SpotifyNativeRelease *ra = *(SpotifyNativeRelease * const *) a;
+  const SpotifyNativeRelease *rb = *(SpotifyNativeRelease * const *) b;
+  GHashTable *dates = user_data;
+  gint64 da = GPOINTER_TO_INT (g_hash_table_lookup (dates, ra->uri));
+  gint64 db = GPOINTER_TO_INT (g_hash_table_lookup (dates, rb->uri));
+  if (da != db)
+    return da > db ? -1 : 1;
+  return g_strcmp0 (ra->name, rb->name);
+}
+
+static void
+sort_releases_by_date_added (SpotifyGtkLibraryPage *self)
+{
+  if (!self->saved_releases || !self->saved_album_dates)
+    return;
+
+  g_ptr_array_sort_with_data (self->saved_releases, release_date_compare,
+                              self->saved_album_dates);
 }
 
 static void
@@ -264,6 +289,7 @@ on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
   self->saved_releases = g_steal_pointer (&albums);
+  sort_releases_by_date_added (self);
   show_release_view (self);
 }
 
@@ -294,12 +320,18 @@ on_saved_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
 
   if (!self->saved_album_uris)
     self->saved_album_uris = g_ptr_array_new_with_free_func (g_free);
+  if (!self->saved_album_dates)
+    self->saved_album_dates = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                     g_free, NULL);
 
   for (guint i = 0; i < n_items; i++) {
     if (!items[i].uri || items[i].is_removed)
       continue;
-    if (g_str_has_prefix (items[i].uri, "spotify:album:"))
+    if (g_str_has_prefix (items[i].uri, "spotify:album:")) {
       g_ptr_array_add (self->saved_album_uris, g_strdup (items[i].uri));
+      g_hash_table_replace (self->saved_album_dates, g_strdup (items[i].uri),
+                            GINT_TO_POINTER (items[i].added_at));
+    }
   }
 
   SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
@@ -335,6 +367,8 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
   set_loading (self, FALSE);
   self->loaded = FALSE;
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
+  g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
+  g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
 }
 
 void
@@ -362,6 +396,7 @@ spotifygtk_library_page_refresh (SpotifyGtkLibraryPage *self)
   self->load_cancel = g_cancellable_new ();
   self->generation++;
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
+  g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
   spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
                                       NULL, 500, on_saved_page, self);
 }
@@ -451,29 +486,16 @@ artist_card_load_complete (ArtistCardLoad *load)
 }
 
 static void
-on_artist_card_image (const gchar *cover_id, gpointer user_data)
+on_artist_card_identity (const gchar *name, const gchar *cover_id,
+                         gpointer user_data)
 {
   ArtistCardLoad *load = user_data;
-  load->cover_id = g_strdup (cover_id);
-  artist_card_load_complete (load);
-}
-
-static void
-on_artist_card_tracks (GObject *source, GAsyncResult *result, gpointer user_data)
-{
-  ArtistCardLoad *load = user_data;
-  g_autoptr(GError) error = NULL;
-  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
-    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
-  if (tracks && tracks->len > 0) {
-    const SpotifyNativeTrack *track = g_ptr_array_index (tracks, 0);
-    if (track && track->artists && *track->artists) {
-      const gchar *comma = strstr (track->artists, ", ");
-      load->name = comma ? g_strndup (track->artists, comma - track->artists)
-                         : g_strdup (track->artists);
-      artist_name_cache_store (load->uri, load->name);
-    }
+  if (name && *name) {
+    g_free (load->name);
+    load->name = g_strdup (name);
+    artist_name_cache_store (load->uri, name);
   }
+  load->cover_id = g_strdup (cover_id);
   artist_card_load_complete (load);
 }
 
@@ -493,12 +515,9 @@ on_artist_card_needs_resolve (SpotifyGtkAlbumGrid *grid,
   const gchar *known_name = g_hash_table_lookup (artist_name_cache, uri);
   if (known_name)
     load->name = g_strdup (known_name);
-  load->remaining = known_name ? 1 : 2;
-  spotifygtk_native_session_get_artist_portrait (self->session, uri,
-                                                  on_artist_card_image, load);
-  if (!known_name)
-    spotifygtk_native_session_load_tracks (self->session, uri, 1, NULL,
-                                           on_artist_card_tracks, load);
+  load->remaining = 1;
+  spotifygtk_native_session_get_artist_identity (
+    self->session, uri, on_artist_card_identity, load);
   (void) grid;
 }
 
@@ -649,7 +668,7 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
                                  GTK_STACK_TRANSITION_TYPE_CROSSFADE);
   /* Match the small breathing room between controls and results on Liked
    * Songs; without it the first card row touches the loading-rule edge. */
-  gtk_widget_set_margin_top (GTK_WIDGET (self->content_stack), 4);
+  gtk_widget_set_margin_top (GTK_WIDGET (self->content_stack), 10);
   gtk_widget_set_vexpand (GTK_WIDGET (self->content_stack), TRUE);
 
   GtkWidget *albums_page = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
@@ -668,7 +687,7 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
    * little smaller than the start because the bar itself occupies the
    * difference, which is what makes the two sides read as equal.
    */
-  spotifygtk_album_grid_set_content_margins (self->albums, 35, 22);
+  spotifygtk_album_grid_set_content_margins (self->albums, 35, 2);
   gtk_widget_set_vexpand (GTK_WIDGET (self->albums), TRUE);
   gtk_box_append (GTK_BOX (albums_page), GTK_WIDGET (self->albums));
   gtk_stack_add_named (self->content_stack, albums_page, "releases");
@@ -681,7 +700,7 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_widget_set_visible (self->artists_status, FALSE);
   gtk_box_append (GTK_BOX (artists_page), self->artists_status);
   self->artists = spotifygtk_album_grid_new_grid ();
-  spotifygtk_album_grid_set_content_margins (self->artists, 35, 22);
+  spotifygtk_album_grid_set_content_margins (self->artists, 35, 2);
   gtk_widget_set_vexpand (GTK_WIDGET (self->artists), TRUE);
   g_signal_connect (self->artists, "card-needs-resolve",
                     G_CALLBACK (on_artist_card_needs_resolve), self);

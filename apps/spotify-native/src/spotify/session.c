@@ -2967,12 +2967,17 @@ typedef struct {
   SpotifyNativeSession *session;
   GTask                *task;
   GPtrArray            *uris;      /* gchar* */
+  GPtrArray            *releases;  /* SpotifyNativeRelease*, accumulated */
+  guint                 next_uri;
 } AlbumsOp;
+
+static void albums_request_next (AlbumsOp *op);
 
 static void
 albums_op_free (AlbumsOp *op)
 {
   g_clear_pointer (&op->uris, g_ptr_array_unref);
+  g_clear_pointer (&op->releases, g_ptr_array_unref);
   g_free (op);
 }
 
@@ -2989,9 +2994,6 @@ on_albums_meta (GPtrArray *albums, GError *error, gpointer user_data)
     return;
   }
 
-  GPtrArray *out = g_ptr_array_new_with_free_func (
-    (GDestroyNotify) spotifygtk_native_release_free);
-
   for (guint i = 0; albums && i < albums->len; i++) {
     const SpotifyRelease *a = g_ptr_array_index (albums, i);
     if (!a->uri)
@@ -3004,12 +3006,36 @@ on_albums_meta (GPtrArray *albums, GError *error, gpointer user_data)
     r->cover_id = g_strdup (a->cover_id);
     r->tracks   = g_ptr_array_new_with_free_func (
       (GDestroyNotify) spotifygtk_native_track_free);
-    g_ptr_array_add (out, r);
+    g_ptr_array_add (op->releases, r);
   }
 
-  g_task_return_pointer (op->task, out, (GDestroyNotify) g_ptr_array_unref);
-  g_object_unref (op->task);
-  albums_op_free (op);
+  op->next_uri += MIN (op->uris->len - op->next_uri,
+                       SPOTIFYGTK_SESSION_MAX_BATCH);
+  albums_request_next (op);
+}
+
+static void
+albums_request_next (AlbumsOp *op)
+{
+  if (op->next_uri >= op->uris->len) {
+    g_task_return_pointer (op->task, g_steal_pointer (&op->releases),
+                           (GDestroyNotify) g_ptr_array_unref);
+    g_object_unref (op->task);
+    albums_op_free (op);
+    return;
+  }
+
+  guint n = MIN (op->uris->len - op->next_uri,
+                 SPOTIFYGTK_SESSION_MAX_BATCH);
+  g_mutex_lock (&op->session->lock);
+  g_autofree gchar *bearer = g_strdup (op->session->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (op->session->client_token);
+  g_mutex_unlock (&op->session->lock);
+
+  spotifygtk_spclient_get_albums_metadata (
+    op->session->spclient,
+    (const gchar *const *) &op->uris->pdata[op->next_uri], n,
+    bearer, ctoken, on_albums_meta, op);
 }
 
 static gboolean
@@ -3017,25 +3043,15 @@ start_load_albums (gpointer user_data)
 {
   AlbumsOp *op = user_data;
 
-  g_mutex_lock (&op->session->lock);
-  g_autofree gchar *bearer = g_strdup (op->session->bearer_token);
-  g_autofree gchar *ctoken = g_strdup (op->session->client_token);
-  g_mutex_unlock (&op->session->lock);
-
   if (!op->session->spclient || op->uris->len == 0) {
-    g_task_return_pointer (op->task,
-                           g_ptr_array_new_with_free_func (
-                             (GDestroyNotify) spotifygtk_native_release_free),
+    g_task_return_pointer (op->task, g_steal_pointer (&op->releases),
                            (GDestroyNotify) g_ptr_array_unref);
     g_object_unref (op->task);
     albums_op_free (op);
     return G_SOURCE_REMOVE;
   }
 
-  spotifygtk_spclient_get_albums_metadata (op->session->spclient,
-                                           (const gchar *const *) op->uris->pdata,
-                                           op->uris->len, bearer, ctoken,
-                                           on_albums_meta, op);
+  albums_request_next (op);
   return G_SOURCE_REMOVE;
 }
 
@@ -3063,6 +3079,8 @@ spotifygtk_native_session_load_albums (SpotifyNativeSession *self,
   op->session = self;
   op->task    = task;
   op->uris    = g_ptr_array_new_with_free_func (g_free);
+  op->releases = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_release_free);
   for (guint i = 0; i < n_uris; i++)
     if (uris[i]) g_ptr_array_add (op->uris, g_strdup (uris[i]));
 
@@ -3177,6 +3195,7 @@ typedef struct {
   SpotifyNativeSession        *session;
   gchar                       *uri;
   SpotifyNativeArtistImageFunc callback;
+  SpotifyNativeArtistIdentityFunc identity_callback;
   gpointer                     user_data;
   gboolean                     portrait_only;
   GMainContext                *callback_context;
@@ -3184,7 +3203,9 @@ typedef struct {
 
 typedef struct {
   SpotifyNativeArtistImageFunc callback;
+  SpotifyNativeArtistIdentityFunc identity_callback;
   gpointer                     user_data;
+  gchar                       *name;
   gchar                       *cover_id;
 } ArtistImageDelivery;
 
@@ -3192,7 +3213,12 @@ static gboolean
 deliver_artist_image (gpointer user_data)
 {
   ArtistImageDelivery *delivery = user_data;
-  delivery->callback (delivery->cover_id, delivery->user_data);
+  if (delivery->identity_callback)
+    delivery->identity_callback (delivery->name, delivery->cover_id,
+                                 delivery->user_data);
+  else if (delivery->callback)
+    delivery->callback (delivery->cover_id, delivery->user_data);
+  g_free (delivery->name);
   g_free (delivery->cover_id);
   g_free (delivery);
   return G_SOURCE_REMOVE;
@@ -3282,7 +3308,7 @@ artist_image_map_save (gboolean portrait)
 }
 
 static void
-artist_image_done (ArtistImageOp *op, const gchar *cover_id)
+artist_image_done (ArtistImageOp *op, const gchar *name, const gchar *cover_id)
 {
   if (cover_id && *cover_id && op->uri) {
     artist_image_map_load (op->portrait_only);
@@ -3295,10 +3321,12 @@ artist_image_done (ArtistImageOp *op, const gchar *cover_id)
       artist_image_map_save (op->portrait_only);
     }
   }
-  if (op->callback) {
+  if (op->callback || op->identity_callback) {
     ArtistImageDelivery *delivery = g_new0 (ArtistImageDelivery, 1);
     delivery->callback  = op->callback;
+    delivery->identity_callback = op->identity_callback;
     delivery->user_data = op->user_data;
+    delivery->name      = g_strdup (name);
     delivery->cover_id  = g_strdup (cover_id);
     g_main_context_invoke_full (op->callback_context, G_PRIORITY_DEFAULT,
                                 deliver_artist_image, delivery, NULL);
@@ -3310,12 +3338,13 @@ artist_image_done (ArtistImageOp *op, const gchar *cover_id)
 
 /* The avatar, asked for only when there is no header to show. */
 static void
-on_artist_portrait (const gchar *cover_id, GError *error, gpointer user_data)
+on_artist_portrait (const gchar *name, const gchar *cover_id,
+                    GError *error, gpointer user_data)
 {
   ArtistImageOp *op = user_data;
   if (error)
     g_message ("session: no artist portrait for %s (%s)", op->uri, error->message);
-  artist_image_done (op, cover_id);
+  artist_image_done (op, name, cover_id);
 }
 
 /*
@@ -3329,12 +3358,13 @@ on_artist_portrait (const gchar *cover_id, GError *error, gpointer user_data)
  * a silent fallback here is exactly what hid a broken request for so long.
  */
 static void
-on_artist_header (const gchar *cover_id, GError *error, gpointer user_data)
+on_artist_header (const gchar *name, const gchar *cover_id,
+                  GError *error, gpointer user_data)
 {
   ArtistImageOp *op = user_data;
 
   if (cover_id && *cover_id) {
-    artist_image_done (op, cover_id);
+    artist_image_done (op, name, cover_id);
     return;
   }
 
@@ -3362,8 +3392,8 @@ start_artist_image (gpointer user_data)
   GHashTable *cache = op->portrait_only ? artist_portrait_cache
                                         : artist_image_cache;
   const gchar *known = g_hash_table_lookup (cache, op->uri);
-  if (known) {
-    artist_image_done (op, known);
+  if (known && !op->identity_callback) {
+    artist_image_done (op, NULL, known);
     return G_SOURCE_REMOVE;
   }
 
@@ -3373,7 +3403,7 @@ start_artist_image (gpointer user_data)
   g_mutex_unlock (&self->lock);
 
   if (!self->spclient) {
-    artist_image_done (op, NULL);
+    artist_image_done (op, NULL, NULL);
     return G_SOURCE_REMOVE;
   }
 
@@ -3432,6 +3462,31 @@ spotifygtk_native_session_get_artist_portrait (SpotifyNativeSession *self,
   op->user_data     = user_data;
   op->portrait_only = TRUE;
   op->callback_context = g_main_context_ref_thread_default ();
+  if (!op->callback_context)
+    op->callback_context = g_main_context_ref (g_main_context_default ());
+
+  g_main_context_invoke (self->context, start_artist_image, op);
+}
+
+void
+spotifygtk_native_session_get_artist_identity (
+  SpotifyNativeSession *self, const gchar *artist_uri,
+  SpotifyNativeArtistIdentityFunc callback, gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+
+  if (!artist_uri || !self->context) {
+    if (callback) callback (NULL, NULL, user_data);
+    return;
+  }
+
+  ArtistImageOp *op = g_new0 (ArtistImageOp, 1);
+  op->session           = self;
+  op->uri               = g_strdup (artist_uri);
+  op->identity_callback = callback;
+  op->user_data         = user_data;
+  op->portrait_only     = TRUE;
+  op->callback_context  = g_main_context_ref_thread_default ();
   if (!op->callback_context)
     op->callback_context = g_main_context_ref (g_main_context_default ());
 

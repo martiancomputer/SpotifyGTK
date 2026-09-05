@@ -597,6 +597,7 @@ typedef struct {
   gboolean            sink_started;   /* first frame accepted; watchdog disarmed */
   GSource            *timeout_source;
   GSource            *cancel_source;   /* quits the loop when the UI cancellable trips */
+  GSource            *seek_source;     /* interrupts a stalled CDN read for a seek */
   GMainContext       *context;         /* borrowed: the engine's private context */
   SpotifyNativeEngineControl *control;
   SpotifyNativeEngineProgressFunc progress;
@@ -812,6 +813,25 @@ decode_and_play (GBytes *ogg_bytes, gboolean complete_source,
 
 static void start_read_ahead (LiveTestState *state);
 static void disable_startup_watchdog (LiveTestState *state);
+static void on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset,
+                                 GError *error, gpointer user_data);
+static void on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset,
+                                   GError *error, gpointer user_data);
+
+static gboolean
+on_seek_poll (gpointer user_data)
+{
+  LiveTestState *state = user_data;
+  if (!run_is_current (state))
+    return G_SOURCE_REMOVE;
+
+  if (spotifygtk_native_engine_control_seek_pending (state->control))
+    if (!spotifygtk_cdn_fetcher_cancel_request (state->cdn_fetcher, state,
+                                                on_read_ahead_chunk, state))
+      spotifygtk_cdn_fetcher_cancel_request (state->cdn_fetcher, state,
+                                             on_seek_landing_chunk, NULL);
+  return G_SOURCE_CONTINUE;
+}
 
 static void
 disable_startup_watchdog (LiveTestState *state)
@@ -1057,6 +1077,15 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
     return;
 
   if (!decrypted_chunk) {
+    /* A seek deliberately cancels the obsolete range. Do not spend two CDN
+     * retries on it: rebuild at the newest requested position immediately. */
+    if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) &&
+        spotifygtk_native_engine_control_seek_pending (state->control)) {
+      g_message ("[live-test] read-ahead superseded by seek");
+      do_seek (state);
+      return;
+    }
+
     /* The nominal bitrate can put the very first estimate beyond EOF on a
      * VBR file, especially for a seek in its final seconds. HTTP 416 does not
      * mean the requested playback position is past the track duration; it
@@ -1080,6 +1109,7 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
       spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url,
                                   state->audio_key, new_off,
                                   CDN_FULL_DOWNLOAD_CHUNK,
+                                  state,
                                   on_seek_landing_chunk, again);
       return;
     }
@@ -1168,6 +1198,7 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
 
     spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
                                 new_off, CDN_FULL_DOWNLOAD_CHUNK,
+                                state,
                                 on_seek_landing_chunk, again);
     return;
   }
@@ -1332,6 +1363,7 @@ do_seek (LiveTestState *state)
              " (bitrate %ld bps)", offset, bitrate);
   spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
                               offset, CDN_FULL_DOWNLOAD_CHUNK,
+                              state,
                               on_seek_landing_chunk, land);
 }
 
@@ -1362,6 +1394,19 @@ on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpo
                "; the read-ahead has moved on to %" G_GOFFSET_FORMAT ".",
                decrypted_chunk ? "late range" : "stale failure",
                offset, state->next_download_offset);
+    return;
+  }
+
+  /* The seek poll cancels the outstanding read-ahead request so repositioning
+   * does not wait behind a wedged or merely slow CDN range. That cancellation
+   * is intentional, not evidence that the signed URL expired: retrying it via
+   * storage resolution consumed both network retries, then failed/restarted
+   * the track without ever reaching do_seek(). A successful old-position
+   * response arriving at the same moment is obsolete too, so handle either
+   * result by moving directly to the newest requested position. */
+  if (spotifygtk_native_engine_control_seek_pending (state->control)) {
+    g_message ("[live-test] read-ahead range superseded by seek; repositioning now");
+    do_seek (state);
     return;
   }
 
@@ -1506,6 +1551,7 @@ start_read_ahead (LiveTestState *state)
              state->next_download_offset);
   spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
                                state->next_download_offset, CDN_FULL_DOWNLOAD_CHUNK,
+                               state,
                                on_read_ahead_chunk, state);
 }
 
@@ -1636,6 +1682,7 @@ on_cdn_initial_chunk_result (GBytes *decrypted_chunk, goffset offset, GError *er
   state->initial_cdn_chunk = g_bytes_ref (decrypted_chunk);
   spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
                                CDN_SEEK_PROBE_OFFSET, CDN_SEEK_PROBE_LENGTH,
+                               state,
                                on_cdn_seek_probe_result, state);
 }
 
@@ -1768,6 +1815,7 @@ maybe_fetch_initial_chunk (LiveTestState *state)
                    "Audio key received; buffering the first audio range.");
   spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
                               0, CDN_DECODE_PROBE_LENGTH,
+                              state,
                               on_cdn_initial_chunk_result, state);
 }
 
@@ -3301,6 +3349,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     .stream_decoder = NULL, .stream_frames = 0, .output_frames = 0,
     .sink = NULL, .sink_seq = 0, .sink_started = FALSE,
     .timeout_source = NULL,
+    .seek_source = NULL,
     .key_timeout_source = NULL,
     .context = context,
     .control = control,
@@ -3402,6 +3451,16 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     g_source_attach (state.cancel_source, context);
   }
 
+
+  /* The decoder and CDN callbacks normally notice a pending seek naturally.
+   * A range request whose connection has wedged produces no callback, though,
+   * so poll the thread-safe control flag and cancel precisely this run's
+   * read-ahead. Twenty milliseconds keeps scrubbing responsive without doing
+   * meaningful work between requests. */
+  state.seek_source = g_timeout_source_new (20);
+  g_source_set_callback (state.seek_source, on_seek_poll, &state, NULL);
+  g_source_attach (state.seek_source, context);
+
   g_main_loop_run (loop);
 
   /* on_live_test_timeout() returns G_SOURCE_REMOVE, which destroys the
@@ -3423,6 +3482,13 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     g_source_destroy (state.cancel_source);
     g_source_unref (state.cancel_source);
     state.cancel_source = NULL;
+  }
+
+
+  if (state.seek_source) {
+    g_source_destroy (state.seek_source);
+    g_source_unref (state.seek_source);
+    state.seek_source = NULL;
   }
 
   /*

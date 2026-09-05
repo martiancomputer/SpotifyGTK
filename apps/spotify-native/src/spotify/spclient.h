@@ -276,7 +276,8 @@ void spotifygtk_spclient_get_albums_metadata (SpotifySpclient         *self,
  * `cover_id` is a hex Image.file_id ready for the cover loader, or NULL when
  * the artist has no portrait. Owned by the callee.
  */
-typedef void (*SpclientArtistCallback) (const gchar *cover_id /* NULL if none */,
+typedef void (*SpclientArtistCallback) (const gchar *name     /* NULL if absent */,
+                                        const gchar *cover_id /* NULL if none */,
                                         GError      *error    /* NULL on success */,
                                         gpointer     user_data);
 

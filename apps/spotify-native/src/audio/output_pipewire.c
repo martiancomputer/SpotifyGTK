@@ -111,7 +111,13 @@ pipewire_flush (SpotifyAudioOutput *self)
   PipewireData *data = self->backend_data;
   pw_thread_loop_lock (data->loop);
   data->ring_head = data->ring_tail = data->ring_fill = 0;
+  /* Resetting only our ring leaves buffers already queued in PipeWire's
+   * graph audible after a seek/switch. Flush the stream as well so the first
+   * replacement write is the next audio the graph consumes. */
+  int res = pw_stream_flush (data->stream, false);
   pw_thread_loop_unlock (data->loop);
+  if (res < 0)
+    g_warning ("PipeWire flush failed: %s", spa_strerror (res));
 }
 
 static void

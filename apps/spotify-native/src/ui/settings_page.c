@@ -203,9 +203,13 @@ on_media_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_d
   SpotifyGtkSettingsPage *self = user_data;
   guint selected = gtk_drop_down_get_selected (dropdown);
 
-  /* Order matches the strings below: 0 = Media, 1 = Text only. */
-  spotifygtk_settings_set_media_mode (self->settings,
-    selected == 0 ? SPOTIFYGTK_MEDIA_FULL : SPOTIFYGTK_MEDIA_TEXT_ONLY);
+  /* UI order is friendly; persisted enum order preserves older settings. */
+  SpotifyGtkMediaMode mode = SPOTIFYGTK_MEDIA_NONE;
+  if (selected == 0)
+    mode = SPOTIFYGTK_MEDIA_FULL;
+  else if (selected == 1)
+    mode = SPOTIFYGTK_MEDIA_PLAYBACK_ONLY;
+  spotifygtk_settings_set_media_mode (self->settings, mode);
   (void) pspec;
 }
 
@@ -234,6 +238,16 @@ on_renderer_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_dat
   spotifygtk_settings_set_renderer (
     self->settings,
     (SpotifyGtkRenderer) gtk_drop_down_get_selected (dropdown));
+  (void) pspec;
+}
+
+static void
+on_aggressive_filtering_toggled (GtkSwitch *sw, GParamSpec *pspec,
+                                 gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_aggressive_filtering (self->settings,
+                                                 gtk_switch_get_active (sw));
   (void) pspec;
 }
 
@@ -354,31 +368,52 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   /* ── Interface ─────────────────────────────────────────────── */
   GtkWidget *interface_group = build_group ("Interface");
 
-  static const gchar * const themes[] = { "Dark", "White", "Milk", NULL };
+  static const gchar * const themes[] = { "Dark", "White", "Milk", "Dark+", NULL };
   GtkWidget *theme_dd = build_dropdown (themes,
                                         spotifygtk_settings_get_theme (self->settings),
                                         TRUE);
   g_signal_connect (theme_dd, "notify::selected", G_CALLBACK (on_theme_changed), self);
   gtk_box_append (GTK_BOX (interface_group),
                   build_row ("Theme",
-                             "Dark (default), White, or the warmer Milk. "
+                             "Dark (default), White, the warmer Milk, or near-black Dark+. "
                              "Applies immediately and is remembered.",
                              theme_dd));
 
   /* The one setting on this page that is fully wired. */
-  static const gchar * const media_modes[] = { "Media", "Text only", NULL };
+  static const gchar * const media_modes[] = {
+    "Media", "Now playing only", "None", NULL
+  };
+  SpotifyGtkMediaMode media_mode =
+    spotifygtk_settings_get_media_mode (self->settings);
+  guint media_selected = media_mode == SPOTIFYGTK_MEDIA_FULL ? 0
+                       : media_mode == SPOTIFYGTK_MEDIA_PLAYBACK_ONLY ? 1 : 2;
   GtkWidget *media_dd = build_dropdown (
-    media_modes,
-    spotifygtk_settings_get_media_mode (self->settings) == SPOTIFYGTK_MEDIA_FULL ? 0 : 1,
-    TRUE);
+    media_modes, media_selected, TRUE);
   g_signal_connect (media_dd, "notify::selected", G_CALLBACK (on_media_mode_changed), self);
   gtk_box_append (GTK_BOX (interface_group),
                   build_row ("Previews",
-                             "Media shows album artwork. Text only hides it "
-                             "everywhere and skips downloading it at all.",
+                             "Media shows artwork everywhere. Now playing only "
+                             "loads it for the Now Playing panel and control "
+                             "bar. None disables media loading completely.",
                              media_dd));
 
   gtk_box_append (GTK_BOX (content), interface_group);
+
+  /* ── Search Settings ──────────────────────────────────────── */
+  GtkWidget *search_group = build_group ("Search Settings");
+  GtkWidget *aggressive = gtk_switch_new ();
+  gtk_switch_set_active (
+    GTK_SWITCH (aggressive),
+    spotifygtk_settings_get_aggressive_filtering (self->settings));
+  g_signal_connect (aggressive, "notify::active",
+                    G_CALLBACK (on_aggressive_filtering_toggled), self);
+  gtk_box_append (GTK_BOX (search_group),
+                  build_row ("Aggressive Filtering",
+                             "Matches and ranks results aggressively. Exact "
+                             "artist matches appear first; weaker matches are "
+                             "kept at the bottom.",
+                             aggressive));
+  gtk_box_append (GTK_BOX (content), search_group);
 
   /* ── Audio ─────────────────────────────────────────────────── */
   GtkWidget *audio_group = build_group ("Audio");

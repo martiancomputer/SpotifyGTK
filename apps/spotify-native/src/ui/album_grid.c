@@ -173,6 +173,17 @@ static guint signals[N_SIGNALS];
 
 static void cancel_and_unref (gpointer data);
 static void on_card_cover_loaded (GdkTexture *texture, gpointer user_data);
+static gboolean card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card);
+static gboolean on_grid_settled (gpointer user_data);
+
+static void
+schedule_grid_settle (SpotifyGtkAlbumGrid *self)
+{
+  if (!self->settle_id) {
+    self->last_scroll_us = g_get_monotonic_time ();
+    self->settle_id = g_timeout_add (GRID_SETTLE_MS, on_grid_settled, self);
+  }
+}
 
 static gboolean
 album_item_matches_filter (gpointer item, gpointer user_data)
@@ -207,6 +218,14 @@ card_retry_cover (GtkWidget *card)
     return;
   if (g_object_get_data (G_OBJECT (card), "cover-shown"))
     return;
+
+  /* GtkGridView maps its realised overscan, not merely pixels inside the
+   * viewport. Mapping alone decoded several screens of 352px art on first
+   * open. Cached JPEGs are cheap to revisit; live RGBA textures are not. */
+  if (grid && !card_near_viewport (grid, card)) {
+    schedule_grid_settle (grid); /* bounds may not exist at the first map */
+    return;
+  }
 
   /* GridView recycles several cards per animation frame. Starting a decode
    * from each bind keeps the worker pool and Vulkan texture uploads busy for
@@ -261,6 +280,10 @@ on_card_mapped (GtkWidget *card, gpointer user_data)
   SpotifyGtkAlbumItem *item = g_object_get_data (G_OBJECT (card), "bound-album-item");
   SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
     gtk_widget_get_ancestor (card, SPOTIFYGTK_TYPE_ALBUM_GRID);
+  if (grid && !card_near_viewport (grid, card)) {
+    schedule_grid_settle (grid);
+    return;
+  }
   if (grid && item && item->pending && !item->resolving) {
     item->resolving = TRUE;
     g_signal_emit (grid, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
@@ -278,12 +301,15 @@ card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 
   graphene_rect_t b;
   if (!gtk_widget_compute_bounds (card, self->scroller, &b))
-    return TRUE;
+    return FALSE;
 
   gdouble vw = gtk_widget_get_width (self->scroller);
   gdouble vh = gtk_widget_get_height (self->scroller);
-  gdouble mx = vw > 0 ? vw : 600.0;
-  gdouble my = vh > 0 ? vh : 600.0;
+  /* One row/column of look-ahead is enough with the disk cache. A whole
+   * viewport on every side tripled the live grid and produced the observed
+   * ~100 MB jump once widget and renderer references were counted. */
+  gdouble mx = self->wrap ? 0.0 : CARD_WIDTH;
+  gdouble my = self->wrap ? CARD_ART_PX + SHELF_TEXT_ALLOWANCE : 0.0;
 
   return (b.origin.x + b.size.width)  > -mx && b.origin.x < (vw + mx)
       && (b.origin.y + b.size.height) > -my && b.origin.y < (vh + my);
@@ -304,8 +330,15 @@ on_grid_settled (gpointer user_data)
   spotifygtk_cover_set_deferred (FALSE);
   for (guint i = 0; i < self->bound_cards->len; i++) {
     GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
-    if (card_near_viewport (self, card))
+    if (card_near_viewport (self, card)) {
+      SpotifyGtkAlbumItem *item = g_object_get_data (G_OBJECT (card),
+                                                      "bound-album-item");
+      if (item && item->pending && !item->resolving) {
+        item->resolving = TRUE;
+        g_signal_emit (self, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
+      }
       card_retry_cover (card);
+    }
   }
 
   return G_SOURCE_REMOVE;
@@ -574,9 +607,12 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
    * cards the user may never scroll to. Only a dozen or so are visible at a
    * time, so this turns a fan-out over the whole listing into a handful.
    */
-  if (gtk_widget_get_mapped (card) && item->pending && !item->resolving) {
+  if (gtk_widget_get_mapped (card) && card_near_viewport (self, card) &&
+      item->pending && !item->resolving) {
     item->resolving = TRUE;
     g_signal_emit (self, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
+  } else if (gtk_widget_get_mapped (card) && item->pending) {
+    schedule_grid_settle (self);
   }
   (void) factory;
 }

@@ -22,17 +22,19 @@ typedef enum {
   SPOTIFYGTK_THEME_DARK,
   SPOTIFYGTK_THEME_LIGHT,
   SPOTIFYGTK_THEME_MILK,
+  /* Appended to preserve the persisted numeric values of existing themes. */
+  SPOTIFYGTK_THEME_DARK_PLUS,
 } SpotifyGtkTheme;
 
 /*
- * TEXT_ONLY suppresses artwork everywhere — rows, playback bar, Now Playing
- * panel — leaving the placeholder icons. Enforced centrally in
- * cover_loader.c rather than at each display site, so a new artwork
- * consumer cannot forget to honour it.
+ * Persisted values 0 and 1 predate the third mode, so their numeric order is
+ * intentionally preserved. PLAYBACK_ONLY keeps art solely in the Now Playing
+ * panel and playback bar; NONE prevents even those images from loading.
  */
 typedef enum {
-  SPOTIFYGTK_MEDIA_TEXT_ONLY,
+  SPOTIFYGTK_MEDIA_PLAYBACK_ONLY,
   SPOTIFYGTK_MEDIA_FULL,
+  SPOTIFYGTK_MEDIA_NONE,
 } SpotifyGtkMediaMode;
 
 typedef enum {
@@ -74,6 +76,10 @@ void                 spotifygtk_settings_set_sample_rate (SpotifyGtkSettings *se
 SpotifyGtkRenderer spotifygtk_settings_get_renderer (SpotifyGtkSettings *self);
 void               spotifygtk_settings_set_renderer (SpotifyGtkSettings *self,
                                                       SpotifyGtkRenderer renderer);
+
+gboolean spotifygtk_settings_get_aggressive_filtering (SpotifyGtkSettings *self);
+void     spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
+                                                       gboolean enabled);
 
 /* Value understood by GSK_RENDERER, or NULL for AUTOMATIC/invalid values. */
 const gchar *spotifygtk_renderer_backend (SpotifyGtkRenderer renderer);

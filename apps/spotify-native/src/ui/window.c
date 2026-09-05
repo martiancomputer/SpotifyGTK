@@ -48,6 +48,11 @@
 #include <math.h>
 #include <string.h>
 
+#if defined(SPOTIFYGTK_VERBOSE) && defined(G_OS_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#endif
+
 #define LOADING_PROGRESS_CEILING 0.94
 #define LOADING_PROGRESS_TAU_US 1600000.0
 #define LOADING_PROGRESS_FINISH_US 240000.0
@@ -128,6 +133,9 @@ struct _SpotifyGtkNativeWindow {
   gboolean playlists_loading;            /* rootlist read in flight */
   guint collection_change_id;            /* coalesces change events */
   guint dev_nav_probe_id;                 /* optional one-shot development timer */
+#ifdef SPOTIFYGTK_VERBOSE
+  guint memory_sample_id;                 /* five-second process/page sampler */
+#endif
   gboolean playlists_loaded;             /* the grid holds cards already */
   GtkWidget  *playlists_status;
   /* Recently-started tracks, so a handover can render one we no longer hold.
@@ -217,6 +225,67 @@ static void spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *se
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static void spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self);
 static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
+
+#ifdef SPOTIFYGTK_VERBOSE
+#ifdef __linux__
+static guint64
+proc_status_kib (const gchar *status, const gchar *field)
+{
+  const gchar *line = g_strstr_len (status, -1, field);
+  if (!line)
+    return 0;
+  line += strlen (field);
+  while (*line == ' ' || *line == '\t' || *line == ':')
+    line++;
+  return g_ascii_strtoull (line, NULL, 10);
+}
+#endif
+
+static gboolean
+sample_process_memory (gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  const gchar *page = self->page_stack
+    ? gtk_stack_get_visible_child_name (self->page_stack) : NULL;
+  gboolean gated = self->login_gate && gtk_widget_get_visible (self->login_gate);
+
+#ifdef __linux__
+  g_autofree gchar *status = NULL;
+  if (g_file_get_contents ("/proc/self/status", &status, NULL, NULL)) {
+    guint64 rss  = proc_status_kib (status, "VmRSS");
+    guint64 anon = proc_status_kib (status, "RssAnon");
+    guint64 file = proc_status_kib (status, "RssFile");
+    guint64 swap = proc_status_kib (status, "VmSwap");
+    SPOTIFYGTK_DEBUG ("memory: page=%s gate=%s rss=%.1f MB anon=%.1f MB "
+                      "file=%.1f MB swap=%.1f MB",
+                      page ? page : "<none>", gated ? "visible" : "hidden",
+                      rss / 1024.0, anon / 1024.0, file / 1024.0, swap / 1024.0);
+  } else {
+    SPOTIFYGTK_DEBUG ("memory: page=%s gate=%s unavailable",
+                      page ? page : "<none>", gated ? "visible" : "hidden");
+  }
+#elif defined(G_OS_WIN32)
+  PROCESS_MEMORY_COUNTERS_EX counters = {0};
+  counters.cb = sizeof counters;
+  if (GetProcessMemoryInfo (GetCurrentProcess (),
+                            (PROCESS_MEMORY_COUNTERS *) &counters,
+                            sizeof counters)) {
+    SPOTIFYGTK_DEBUG ("memory: page=%s gate=%s rss=%.1f MB private=%.1f MB",
+                      page ? page : "<none>", gated ? "visible" : "hidden",
+                      counters.WorkingSetSize / 1048576.0,
+                      counters.PrivateUsage / 1048576.0);
+  } else {
+    SPOTIFYGTK_DEBUG ("memory: page=%s gate=%s unavailable (win32 error %lu)",
+                      page ? page : "<none>", gated ? "visible" : "hidden",
+                      (gulong) GetLastError ());
+  }
+#else
+  SPOTIFYGTK_DEBUG ("memory: page=%s gate=%s unavailable on this platform",
+                    page ? page : "<none>", gated ? "visible" : "hidden");
+#endif
+  return G_SOURCE_CONTINUE;
+}
+#endif
 static gint order_pos_of (SpotifyGtkNativeWindow *self, gint ctx_index);
 static void rebuild_order (SpotifyGtkNativeWindow *self, gint keep);
 static void refresh_transport_and_queue (SpotifyGtkNativeWindow *self);
@@ -929,6 +998,20 @@ refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
    * past a few dozen entries has no need to show the whole tail. */
   #define UP_NEXT_MAX 40
   GPtrArray *up_next = g_ptr_array_new ();   /* borrowed pointers, no free func */
+
+  /* A natural handover advances the scheduling cursor while the outgoing
+   * track is still audible. The newly scheduled track is therefore already
+   * at `opos`, not after it, but it is still genuinely Up Next from the
+   * listener's perspective. Keep it at the head until the sink announces the
+   * handover; otherwise the panel appears to skip exactly one song. */
+  if (self->awaiting_uri && self->display_tracks &&
+      g_strcmp0 (self->awaiting_uri, self->current_track_uri) != 0) {
+    SpotifyNativeTrack *awaiting =
+      g_hash_table_lookup (self->display_tracks, self->awaiting_uri);
+    if (awaiting)
+      g_ptr_array_add (up_next, awaiting);
+  }
+
   for (GList *l = self->user_queue->head; l && up_next->len < UP_NEXT_MAX; l = l->next)
     g_ptr_array_add (up_next, l->data);
   if (self->play_context && self->order && opos >= 0) {
@@ -4589,6 +4672,29 @@ static const gchar *palette_white =
   "@define-color scroll_hover #b8b8b8;@define-color pill_hover #dcdcdc;"
   "@define-color art_bg #e6e6e6;     @define-color art_glyph #bcbcbc;";
 
+/* Dark+ keeps the main canvas AMOLED black, then uses a restrained charcoal
+ * hierarchy so cards, hover states and popovers remain distinct instead of
+ * disappearing into one flat surface. The original Dark palette above stays
+ * exactly as shipped. */
+static const gchar *palette_dark_plus =
+  "@define-color bg_chrome #000000;  @define-color bg_panel #080808;"
+  "@define-color bg_content #000000; @define-color bg_card #121212;"
+  "@define-color bg_hover #1a1a1a;   @define-color bg_hover_row #161616;"
+  "@define-color bg_selected #202020;@define-color bg_selected_row #202020;"
+  "@define-color border #242424;"
+  "@define-color fg #e4e4e4;         @define-color fg_strong #f2f2f2;"
+  "@define-color fg_dim #a8a8a8;     @define-color fg_dimmer #737373;"
+  "@define-color fg_sidebar #b6b6b6;"
+  "@define-color accent #1db954;     @define-color selection #60A5FA;"
+  "@define-color destructive #e5484d;"
+  "@define-color on_accent #000000;"
+  "@define-color ctrl_fill #f2f2f2;  @define-color ctrl_fill_hover #d8d8d8;"
+  "@define-color ctrl_on_fill #000000;"
+  "@define-color knob #f2f2f2;       @define-color knob_muted #606060;"
+  "@define-color trough #303030;     @define-color trough_muted #242424;"
+  "@define-color scroll_hover #505050;@define-color pill_hover #292929;"
+  "@define-color art_bg #121212;     @define-color art_glyph #444444;";
+
 /* Milk: a warm off-white. Same structure as White, cream-shifted, with warm
  * near-black ink so it reads softer than the crisp White theme. */
 static const gchar *palette_milk =
@@ -4616,6 +4722,7 @@ palette_for (SpotifyGtkTheme theme)
   switch (theme) {
     case SPOTIFYGTK_THEME_LIGHT: return palette_white;
     case SPOTIFYGTK_THEME_MILK:  return palette_milk;
+    case SPOTIFYGTK_THEME_DARK_PLUS: return palette_dark_plus;
     case SPOTIFYGTK_THEME_DARK:
     default:                     return palette_dark;
   }
@@ -4650,8 +4757,9 @@ apply_theme (SpotifyGtkTheme theme)
 
   adw_style_manager_set_color_scheme (
     adw_style_manager_get_default (),
-    theme == SPOTIFYGTK_THEME_DARK ? ADW_COLOR_SCHEME_FORCE_DARK
-                                   : ADW_COLOR_SCHEME_FORCE_LIGHT);
+    (theme == SPOTIFYGTK_THEME_DARK || theme == SPOTIFYGTK_THEME_DARK_PLUS)
+      ? ADW_COLOR_SCHEME_FORCE_DARK
+      : ADW_COLOR_SCHEME_FORCE_LIGHT);
 }
 
 
@@ -4901,7 +5009,7 @@ spotifygtk_native_window_constructed (GObject *object)
   {
     GtkWidget *pl = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_margin_start (pl, 35);
-    gtk_widget_set_margin_end (pl, 35);
+    gtk_widget_set_margin_end (pl, 12);
     gtk_widget_set_margin_top (pl, 24);
 
     GtkWidget *pl_title = gtk_label_new ("Playlists");
@@ -4919,7 +5027,7 @@ spotifygtk_native_window_constructed (GObject *object)
      */
     self->playlists_grid = spotifygtk_album_grid_new_grid ();
     gtk_widget_set_vexpand (GTK_WIDGET (self->playlists_grid), TRUE);
-    spotifygtk_album_grid_set_content_margins (self->playlists_grid, 0, 0);
+    spotifygtk_album_grid_set_content_margins (self->playlists_grid, 0, 2);
     g_signal_connect (self->playlists_grid, "album-activated",
                       G_CALLBACK (on_playlist_card_activated), self);
     g_signal_connect (self->playlists_grid, "card-needs-resolve",
@@ -5092,6 +5200,14 @@ spotifygtk_native_window_constructed (GObject *object)
    * back to Home via navigate_to_page's own guard. */
   const gchar *start_page = g_getenv ("SPOTIFY_START_PAGE");
   navigate_to_page (self, (start_page && *start_page) ? start_page : "home");
+
+#ifdef SPOTIFYGTK_VERBOSE
+  /* Capture a baseline once construction has selected its first page, then
+   * keep sampling. This source and all /proc/Win32 work compile out of normal
+   * builds with the rest of the verbose diagnostics. */
+  sample_process_memory (self);
+  self->memory_sample_id = g_timeout_add_seconds (5, sample_process_memory, self);
+#endif
 }
 
 static void
@@ -5101,6 +5217,9 @@ spotifygtk_native_window_dispose (GObject *object)
 
   g_clear_handle_id (&self->collection_change_id, g_source_remove);
   g_clear_handle_id (&self->dev_nav_probe_id, g_source_remove);
+#ifdef SPOTIFYGTK_VERBOSE
+  g_clear_handle_id (&self->memory_sample_id, g_source_remove);
+#endif
   if (self->loading_tick_id && self->loading_bar) {
     gtk_widget_remove_tick_callback (GTK_WIDGET (self->loading_bar),
                                      self->loading_tick_id);

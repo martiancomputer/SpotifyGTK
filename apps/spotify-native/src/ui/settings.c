@@ -18,6 +18,7 @@ struct _SpotifyGtkSettings {
   SpotifyGtkRenderer   renderer;
 
   gboolean eq_enabled;
+  gboolean aggressive_filtering;
   gboolean shuffle;
   guint    repeat;
   gdouble  eq_gains[SPOTIFYGTK_SETTINGS_EQ_BANDS];  /* dB per band */
@@ -72,6 +73,8 @@ load (SpotifyGtkSettings *self)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "renderer", NULL);
 
   self->eq_enabled = g_key_file_get_boolean (kf, SETTINGS_GROUP, "eq-enabled", NULL);
+  self->aggressive_filtering =
+    g_key_file_get_boolean (kf, SETTINGS_GROUP, "aggressive-filtering", NULL);
   self->shuffle    = g_key_file_get_boolean (kf, SETTINGS_GROUP, "shuffle", NULL);
   self->repeat     = (guint) g_key_file_get_integer (kf, SETTINGS_GROUP, "repeat", NULL);
   gsize n = 0;
@@ -111,9 +114,9 @@ load (SpotifyGtkSettings *self)
 
   /* A hand-edited or truncated file must not put the UI into a state its
    * own controls cannot represent, so anything out of range falls back. */
-  if (self->theme > SPOTIFYGTK_THEME_MILK)
+  if (self->theme > SPOTIFYGTK_THEME_DARK_PLUS)
     self->theme = SPOTIFYGTK_THEME_DARK;
-  if (self->media_mode > SPOTIFYGTK_MEDIA_FULL)
+  if (self->media_mode > SPOTIFYGTK_MEDIA_NONE)
     self->media_mode = SPOTIFYGTK_MEDIA_FULL;
   if (self->sample_rate > SPOTIFYGTK_SAMPLE_RATE_96000)
     self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
@@ -131,6 +134,8 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_integer (kf, SETTINGS_GROUP, "sample-rate", self->sample_rate);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "renderer", self->renderer);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "eq-enabled", self->eq_enabled);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "aggressive-filtering",
+                          self->aggressive_filtering);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "shuffle", self->shuffle);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "repeat", (gint) self->repeat);
   g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains,
@@ -231,10 +236,30 @@ spotifygtk_settings_get_default (void)
     g_signal_emit (self, signals[CHANGED], 0);                                \
   }
 
-DEFINE_SETTING (theme,       SpotifyGtkTheme,      theme,       SPOTIFYGTK_THEME_MILK)
-DEFINE_SETTING (media_mode,  SpotifyGtkMediaMode,  media_mode,  SPOTIFYGTK_MEDIA_FULL)
+DEFINE_SETTING (theme,       SpotifyGtkTheme,      theme,       SPOTIFYGTK_THEME_DARK_PLUS)
+DEFINE_SETTING (media_mode,  SpotifyGtkMediaMode,  media_mode,  SPOTIFYGTK_MEDIA_NONE)
 DEFINE_SETTING (sample_rate, SpotifyGtkSampleRate, sample_rate, SPOTIFYGTK_SAMPLE_RATE_96000)
 DEFINE_SETTING (renderer,    SpotifyGtkRenderer,   renderer,    SPOTIFYGTK_RENDERER_CAIRO)
+
+gboolean
+spotifygtk_settings_get_aggressive_filtering (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  return self->aggressive_filtering;
+}
+
+void
+spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
+                                               gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->aggressive_filtering == enabled)
+    return;
+  self->aggressive_filtering = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
 
 const gchar *
 spotifygtk_renderer_backend (SpotifyGtkRenderer renderer)

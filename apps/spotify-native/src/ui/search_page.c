@@ -11,6 +11,7 @@
 #include "search_page.h"
 #include "track_list.h"
 #include "album_grid.h"
+#include "settings.h"
 
 #include "spotify/spclient.h"   /* build_search_uri */
 
@@ -45,7 +46,51 @@ static guint signals[N_SIGNALS];
 typedef struct {
   GWeakRef page;
   guint64  serial;
+  gchar   *query;
 } SearchClosure;
+
+/* Case, spaces and punctuation should not prevent an artist query such as
+ * "badcomputer" from matching the catalog spelling "Bad Computer". */
+static gchar *
+search_key (const gchar *text)
+{
+  g_autofree gchar *folded = g_utf8_casefold (text ? text : "", -1);
+  GString *key = g_string_sized_new (strlen (folded));
+  for (const gchar *p = folded; *p;) {
+    gunichar ch = g_utf8_get_char (p);
+    if (g_unichar_isalnum (ch))
+      g_string_append_unichar (key, ch);
+    p = g_utf8_next_char (p);
+  }
+  return g_string_free (key, FALSE);
+}
+
+static guint
+search_rank (const SpotifyNativeTrack *track, const gchar *query_key)
+{
+  g_autofree gchar *artist = search_key (track ? track->artists : NULL);
+  g_autofree gchar *name = search_key (track ? track->name : NULL);
+  g_autofree gchar *album = search_key (track ? track->album : NULL);
+
+  if (*query_key && g_strcmp0 (artist, query_key) == 0) return 0;
+  if (*query_key && strstr (artist, query_key))         return 1;
+  if (*query_key && g_strcmp0 (name, query_key) == 0)  return 2;
+  if (*query_key && strstr (name, query_key))           return 3;
+  if (*query_key && g_strcmp0 (album, query_key) == 0) return 4;
+  if (*query_key && strstr (album, query_key))          return 5;
+  return 6;
+}
+
+static gint
+compare_search_tracks (gconstpointer a, gconstpointer b, gpointer user_data)
+{
+  const SpotifyNativeTrack *ta = *(SpotifyNativeTrack * const *) a;
+  const SpotifyNativeTrack *tb = *(SpotifyNativeTrack * const *) b;
+  const gchar *query_key = user_data;
+  guint ra = search_rank (ta, query_key);
+  guint rb = search_rank (tb, query_key);
+  return (ra > rb) - (ra < rb);
+}
 
 static void
 set_searching (SpotifyGtkSearchPage *self, gboolean searching)
@@ -89,6 +134,7 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   g_autoptr(SpotifyGtkSearchPage) self = g_weak_ref_get (&cl->page);
   guint64 serial = cl->serial;
+  g_autofree gchar *query = g_steal_pointer (&cl->query);
   g_weak_ref_clear (&cl->page);
   g_free (cl);
 
@@ -125,6 +171,11 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
    * playback filler; applying that filter here would throw away Spotify's
    * fuzzy/semantic matches and make the expanded result set look small again. */
   g_autoptr(GPtrArray) shown = g_ptr_array_ref (tracks);
+  if (spotifygtk_settings_get_aggressive_filtering (
+        spotifygtk_settings_get_default ())) {
+    g_autofree gchar *query_key = search_key (query);
+    g_ptr_array_sort_with_data (shown, compare_search_tracks, query_key);
+  }
 
   /* The albums shelf is the distinct albums present in these very results --
    * real matches, grouped, not a second query. */
@@ -182,6 +233,7 @@ dispatch_search (gpointer user_data)
   SearchClosure *cl = g_new0 (SearchClosure, 1);
   g_weak_ref_init (&cl->page, self);
   cl->serial = self->serial;
+  cl->query = g_strdup (query);
 
   spotifygtk_native_session_load_tracks (self->session, uri, SEARCH_RESULT_LIMIT,
                                          self->in_flight, on_tracks_loaded, cl);
@@ -255,7 +307,10 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
    * list below it then needs no inset of its own. */
   self->albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   gtk_widget_set_margin_start (self->albums_section, 35);
-  gtk_widget_set_margin_end (self->albums_section, 12);
+  /* A horizontal shelf must clip at the pane edge. An outer end margin first
+   * clips the next card and then leaves a page-coloured strip beside it—the
+   * same light-theme rectangle Home used to show. */
+  gtk_widget_set_margin_end (self->albums_section, 0);
   gtk_widget_set_margin_top (self->albums_section, SEARCH_HEADER_INSET);
   gtk_widget_set_visible (self->albums_section, FALSE);
 

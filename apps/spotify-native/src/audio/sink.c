@@ -38,6 +38,7 @@ typedef struct {
   gboolean     ended;          /* producer has pushed its last frame */
   gboolean     started;        /* at least one frame has reached the device */
   gboolean     cancelled;      /* flushed away or abandoned */
+  guint        generation;     /* incremented when a seek invalidates queued PCM */
 
   SpotifyNativeEngineControl *control;   /* referenced */
   GCancellable *cancellable;             /* referenced, may be NULL */
@@ -61,6 +62,13 @@ struct _SpotifyAudioSink {
   SpotifyAudioOutput *output;
   gint     device_rate;
   gint     device_channels;
+
+  /* An explicit track change or seek has retired PCM already submitted to
+   * the backend.  Keep that small backend buffer sounding while replacement
+   * audio is prepared, then flush it immediately before the first valid new
+   * frame.  This avoids both the disconnected old fragment and a guaranteed
+   * hole caused by flushing before replacement PCM exists. */
+  gboolean flush_before_next_write;
 };
 
 static SpotifyAudioSink *the_sink = NULL;
@@ -265,6 +273,7 @@ sink_writer (gpointer user_data)
 
     frame = g_queue_pop_head (t->frames);
     t->queued -= frame->n_frames;
+    guint frame_generation = t->generation;
     g_cond_broadcast (&self->cond);          /* a producer may be waiting on space */
 
     /*
@@ -288,33 +297,53 @@ sink_writer (gpointer user_data)
       continue;
     }
 
-    t->started = TRUE;
-    t->written += n_frames;
-    guint64 written_total = t->written;
-
     g_mutex_unlock (&self->lock);
 
     /* The pause gate and the device write happen unlocked: both can block for
      * a long time, and holding the lock through them would stop producers from
      * queueing the next track. */
     gboolean go = spotifygtk_native_engine_control_wait (control, cancel);
+
+    /* A seek or explicit replacement can happen while wait() is parked, or
+     * while the previous blocking device write is returning.  Revalidate the
+     * frame under the queue lock before it can reach the backend. */
+    g_mutex_lock (&self->lock);
+    gboolean stale = t->cancelled || t->generation != frame_generation;
+    gboolean flush_before_write = go && !stale && self->flush_before_next_write;
+    if (flush_before_write)
+      self->flush_before_next_write = FALSE;
+    g_mutex_unlock (&self->lock);
+
     gsize wrote = 0;
-    if (go) {
+    if (go && !stale) {
       spotifygtk_native_engine_control_apply_volume (control, (gint16 *) pcm,
                                                         n_frames, frame->channels);
       spotifygtk_native_engine_control_apply_eq (control, (gint16 *) pcm,
                                                     n_frames, frame->channels,
                                                     device_rate);
+
+      /* The writer is the sole owner of backend operations. If an older
+       * blocking write was in flight when the cutover was requested, it has
+       * returned by definition before we reach this point; flushing here
+       * cannot race it, and the new PCM follows immediately. */
+      if (flush_before_write && self->output) {
+        g_message ("sink: replacement PCM ready; flushing the retired device buffer");
+        spotifygtk_output_flush (self->output);
+      }
       wrote = spotifygtk_output_write (self->output, pcm, n_frames);
-      if (wrote == n_frames)
-        spotifygtk_native_engine_control_report_position (control, written_total,
-                                                          device_rate);
     }
 
     pcm_frame_free (frame);
 
     g_mutex_lock (&self->lock);
-    if (go && wrote != n_frames) {
+    gboolean current_after_write = !t->cancelled &&
+                                   t->generation == frame_generation;
+    if (go && !stale && current_after_write && wrote == n_frames) {
+      t->started = TRUE;
+      t->written += wrote;
+      spotifygtk_native_engine_control_report_position (control, t->written,
+                                                        device_rate);
+    } else if (go && !stale && current_after_write) {
       g_warning ("sink: device took %" G_GSIZE_FORMAT " of %" G_GSIZE_FORMAT
                  " frames on track %" G_GUINT64_FORMAT, wrote, n_frames, seq);
       self->failed = TRUE;
@@ -436,10 +465,20 @@ spotifygtk_audio_sink_abandon_queued (SpotifyAudioSink *self)
   for (GList *l = self->tracks->head; l; l = l->next) {
     SinkTrack *t = l->data;
     if (!t->cancelled) {
+      PcmFrame *f;
+      while ((f = g_queue_pop_head (t->frames)) != NULL)
+        pcm_frame_free (f);
+      t->queued = 0;
+      t->generation++;
       t->cancelled = TRUE;
       abandoned++;
     }
   }
+  /* Do not flush yet. The device buffer is a short bridge while the selected
+   * track resolves and decodes. The writer consumes this flag just before it
+   * submits the first frame that survived this retirement. */
+  if (self->output)
+    self->flush_before_next_write = TRUE;
   /* The writer owns removal and device flushing, so it cannot race a frame
    * already being written. Marking happens under the queue lock; therefore a
    * replacement slot appended after this function returns cannot accidentally
@@ -475,6 +514,9 @@ spotifygtk_audio_sink_flush (SpotifyAudioSink *self, guint64 seq)
     while ((f = g_queue_pop_head (t->frames)) != NULL)
       pcm_frame_free (f);
     t->queued = 0;
+    t->generation++;
+    if (t->started && self->output)
+      self->flush_before_next_write = TRUE;
   }
   g_cond_broadcast (&self->cond);
   g_mutex_unlock (&self->lock);

@@ -121,6 +121,9 @@ m_dep = cc.find_library('m', required: false)
 # never evaluated on Linux.
 if is_windows
   all_deps += cc.find_library('ole32', required: true)
+  if verbose_logging
+    all_deps += cc.find_library('psapi', required: true)
+  endif
 endif
 if m_dep.found()
   all_deps += m_dep

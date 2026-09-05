@@ -57,6 +57,15 @@ void spotifygtk_cover_load (const gchar          *cover_id,
                             SpotifyCoverCallback  callback,
                             gpointer              user_data);
 
+/* Playback surfaces are the sole artwork exception in PLAYBACK_ONLY mode.
+ * Keep that privilege explicit instead of inferring it from image size or
+ * whether a request happens to be deferrable. */
+void spotifygtk_cover_load_playback (const gchar          *cover_id,
+                                     gint                  target_px,
+                                     GCancellable         *cancellable,
+                                     SpotifyCoverCallback  callback,
+                                     gpointer              user_data);
+
 /* Build the CDN URL for an image id. Exposed for testing. */
 gchar *spotifygtk_cover_build_url (const gchar *cover_id);
 

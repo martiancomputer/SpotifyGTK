@@ -74,15 +74,19 @@ void spotifygtk_audio_sink_end_track (SpotifyAudioSink *self, guint64 seq);
 /*
  * Drop whatever is queued for this track and let its producer through.
  *
- * For a seek, where everything buffered is audio from the old position, and
- * for a skip. Does not end the track: the producer may keep pushing from the
- * new position.
+ * For a seek, where everything buffered is audio from the old position. The
+ * small backend buffer is retained as a bridge until the first frame from the
+ * new position is ready, then replaced immediately before that frame is
+ * written. Does not end the track: the producer may keep pushing from the new
+ * position.
  */
 void spotifygtk_audio_sink_flush (SpotifyAudioSink *self, guint64 seq);
 
-/* Atomically mark every slot currently queued as abandoned. New slots added
- * after this call are unaffected. Used for explicit track changes and tail
- * seeks, never natural gapless handover. */
+/* Atomically discard and mark every slot currently queued as abandoned. New
+ * slots added after this call are unaffected. The backend buffer bridges the
+ * replacement startup and is flushed by the writer immediately before valid
+ * replacement PCM. Used for explicit track changes and tail seeks, never a
+ * natural gapless handover. */
 void spotifygtk_audio_sink_abandon_queued (SpotifyAudioSink *self);
 
 /*

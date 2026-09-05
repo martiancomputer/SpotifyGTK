@@ -546,7 +546,7 @@ static void cover_load_internal (const gchar *cover_id, gint target_px,
                                  GCancellable *cancellable,
                                  SpotifyCoverCallback callback,
                                  gpointer user_data, gboolean deferrable,
-                                 gboolean speculative);
+                                 gboolean speculative, gboolean playback_surface);
 
 static void
 prefetch_discard (GdkTexture *texture, gpointer user_data)
@@ -559,7 +559,8 @@ spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px)
 {
   if (!cover_id || !*cover_id || cover_deferred)
     return;
-  cover_load_internal (cover_id, target_px, NULL, prefetch_discard, NULL, TRUE, TRUE);
+  cover_load_internal (cover_id, target_px, NULL, prefetch_discard, NULL,
+                       TRUE, TRUE, FALSE);
 }
 
 void
@@ -955,7 +956,19 @@ spotifygtk_cover_load (const gchar          *cover_id,
                        SpotifyCoverCallback  callback,
                        gpointer              user_data)
 {
-  cover_load_internal (cover_id, target_px, cancellable, callback, user_data, FALSE, FALSE);
+  cover_load_internal (cover_id, target_px, cancellable, callback, user_data,
+                       FALSE, FALSE, FALSE);
+}
+
+void
+spotifygtk_cover_load_playback (const gchar          *cover_id,
+                                gint                  target_px,
+                                GCancellable         *cancellable,
+                                SpotifyCoverCallback  callback,
+                                gpointer              user_data)
+{
+  cover_load_internal (cover_id, target_px, cancellable, callback, user_data,
+                       FALSE, FALSE, TRUE);
 }
 
 void
@@ -965,7 +978,8 @@ spotifygtk_cover_load_deferrable (const gchar          *cover_id,
                                   SpotifyCoverCallback  callback,
                                   gpointer              user_data)
 {
-  cover_load_internal (cover_id, target_px, cancellable, callback, user_data, TRUE, FALSE);
+  cover_load_internal (cover_id, target_px, cancellable, callback, user_data,
+                       TRUE, FALSE, FALSE);
 }
 
 static void
@@ -975,15 +989,15 @@ cover_load_internal (const gchar          *cover_id,
                      SpotifyCoverCallback  callback,
                      gpointer              user_data,
                      gboolean              deferrable,
-                     gboolean              speculative)
+                     gboolean              speculative,
+                     gboolean              playback_surface)
 {
   g_return_if_fail (callback != NULL);
 
-  /* Text-only mode is enforced here rather than at each display site, so a
-   * new artwork consumer cannot forget to honour it -- and so the image is
-   * never fetched at all, which is the point of the setting. */
-  if (spotifygtk_settings_get_media_mode (spotifygtk_settings_get_default ())
-      == SPOTIFYGTK_MEDIA_TEXT_ONLY) {
+  SpotifyGtkMediaMode media_mode =
+    spotifygtk_settings_get_media_mode (spotifygtk_settings_get_default ());
+  if (media_mode == SPOTIFYGTK_MEDIA_NONE ||
+      (media_mode == SPOTIFYGTK_MEDIA_PLAYBACK_ONLY && !playback_surface)) {
     callback (NULL, user_data);
     return;
   }

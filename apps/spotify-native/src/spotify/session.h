@@ -243,6 +243,9 @@ GPtrArray *spotifygtk_native_session_load_discography_finish (SpotifyNativeSessi
  */
 typedef void (*SpotifyNativeArtistImageFunc) (const gchar *cover_id,
                                               gpointer     user_data);
+typedef void (*SpotifyNativeArtistIdentityFunc) (const gchar *name,
+                                                 const gchar *cover_id,
+                                                 gpointer     user_data);
 
 void spotifygtk_native_session_get_artist_image (SpotifyNativeSession *self,
                                                  const gchar          *artist_uri,
@@ -255,6 +258,13 @@ void spotifygtk_native_session_get_artist_portrait (SpotifyNativeSession *self,
                                                     const gchar          *artist_uri,
                                                     SpotifyNativeArtistImageFunc callback,
                                                     gpointer              user_data);
+
+/* Authoritative Artist.name and profile image from the same ARTIST_V4
+ * entity. This deliberately refreshes metadata instead of trusting a name
+ * inferred from one of the artist's collaborative tracks. */
+void spotifygtk_native_session_get_artist_identity (
+  SpotifyNativeSession *self, const gchar *artist_uri,
+  SpotifyNativeArtistIdentityFunc callback, gpointer user_data);
 
 /*
  * Drop the cached resolution of a context, so the next load of it goes to the
