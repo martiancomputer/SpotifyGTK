@@ -19,6 +19,8 @@ struct _SpotifyGtkSettings {
 
   gboolean eq_enabled;
   gboolean aggressive_filtering;
+  gboolean caching_enabled;
+  gboolean aggressive_media;
   gboolean shuffle;
   guint    repeat;
   gdouble  eq_gains[SPOTIFYGTK_SETTINGS_EQ_BANDS];  /* dB per band */
@@ -75,6 +77,11 @@ load (SpotifyGtkSettings *self)
   self->eq_enabled = g_key_file_get_boolean (kf, SETTINGS_GROUP, "eq-enabled", NULL);
   self->aggressive_filtering =
     g_key_file_get_boolean (kf, SETTINGS_GROUP, "aggressive-filtering", NULL);
+  if (g_key_file_has_key (kf, SETTINGS_GROUP, "caching-enabled", NULL))
+    self->caching_enabled =
+      g_key_file_get_boolean (kf, SETTINGS_GROUP, "caching-enabled", NULL);
+  self->aggressive_media =
+    g_key_file_get_boolean (kf, SETTINGS_GROUP, "aggressive-media", NULL);
   self->shuffle    = g_key_file_get_boolean (kf, SETTINGS_GROUP, "shuffle", NULL);
   self->repeat     = (guint) g_key_file_get_integer (kf, SETTINGS_GROUP, "repeat", NULL);
   gsize n = 0;
@@ -136,6 +143,10 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "eq-enabled", self->eq_enabled);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "aggressive-filtering",
                           self->aggressive_filtering);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "caching-enabled",
+                          self->caching_enabled);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "aggressive-media",
+                          self->aggressive_media);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "shuffle", self->shuffle);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "repeat", (gint) self->repeat);
   g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains,
@@ -196,6 +207,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->media_mode  = SPOTIFYGTK_MEDIA_FULL;
   self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
   self->renderer    = SPOTIFYGTK_RENDERER_AUTOMATIC;
+  self->caching_enabled = TRUE;
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
   self->unavailable = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
@@ -257,6 +269,46 @@ spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
   if (self->aggressive_filtering == enabled)
     return;
   self->aggressive_filtering = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+gboolean
+spotifygtk_settings_get_caching_enabled (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), TRUE);
+  return self->caching_enabled;
+}
+
+void
+spotifygtk_settings_set_caching_enabled (SpotifyGtkSettings *self,
+                                         gboolean            enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->caching_enabled == enabled)
+    return;
+  self->caching_enabled = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+gboolean
+spotifygtk_settings_get_aggressive_media (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  return self->aggressive_media;
+}
+
+void
+spotifygtk_settings_set_aggressive_media (SpotifyGtkSettings *self,
+                                          gboolean            enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->aggressive_media == enabled)
+    return;
+  self->aggressive_media = enabled;
   save (self);
   g_signal_emit (self, signals[CHANGED], 0);
 }

@@ -3468,6 +3468,97 @@ spotifygtk_native_session_get_artist_portrait (SpotifyNativeSession *self,
   g_main_context_invoke (self->context, start_artist_image, op);
 }
 
+typedef struct {
+  SpotifyNativeSession         *session;
+  SpotifyNativeUserProfileFunc  callback;
+  gpointer                      user_data;
+  GMainContext                 *callback_context;
+} UserProfileOp;
+
+typedef struct {
+  SpotifyNativeUserProfileFunc callback;
+  gpointer user_data;
+  gchar *display_name;
+  gchar *canonical_id;
+  gchar *product;
+  gchar *avatar_id;
+} UserProfileDelivery;
+
+static gboolean
+deliver_user_profile (gpointer user_data)
+{
+  UserProfileDelivery *d = user_data;
+  d->callback (d->display_name, d->canonical_id, d->product, d->avatar_id,
+               d->user_data);
+  g_free (d->display_name);
+  g_free (d->canonical_id);
+  g_free (d->product);
+  g_free (d->avatar_id);
+  g_free (d);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_user_profile (const SpclientUserProfile *profile, GError *error,
+                 gpointer user_data)
+{
+  UserProfileOp *op = user_data;
+  if (error)
+    g_message ("session: user profile unavailable (%s)", error->message);
+  if (op->callback) {
+    UserProfileDelivery *d = g_new0 (UserProfileDelivery, 1);
+    d->callback = op->callback;
+    d->user_data = op->user_data;
+    d->display_name = g_strdup (profile ? profile->display_name : NULL);
+    g_mutex_lock (&op->session->lock);
+    d->canonical_id = g_strdup (
+      profile && profile->canonical_id ? profile->canonical_id
+                                       : op->session->username);
+    g_mutex_unlock (&op->session->lock);
+    d->product = g_strdup (profile ? profile->product : NULL);
+    d->avatar_id = g_strdup (profile ? profile->avatar_id : NULL);
+    g_main_context_invoke_full (op->callback_context, G_PRIORITY_DEFAULT,
+                                deliver_user_profile, d, NULL);
+  }
+  g_main_context_unref (op->callback_context);
+  g_free (op);
+}
+
+static gboolean
+start_user_profile (gpointer user_data)
+{
+  UserProfileOp *op = user_data;
+  SpotifyNativeSession *self = op->session;
+  g_mutex_lock (&self->lock);
+  g_autofree gchar *bearer = g_strdup (self->bearer_token);
+  g_autofree gchar *ctoken = g_strdup (self->client_token);
+  g_autofree gchar *username = g_strdup (self->username);
+  g_mutex_unlock (&self->lock);
+  if (!self->spclient) {
+    on_user_profile (NULL, NULL, op);
+    return G_SOURCE_REMOVE;
+  }
+  spotifygtk_spclient_get_user_profile (self->spclient, username, bearer, ctoken,
+                                        on_user_profile, op);
+  return G_SOURCE_REMOVE;
+}
+
+void
+spotifygtk_native_session_get_user_profile (
+  SpotifyNativeSession *self, SpotifyNativeUserProfileFunc callback,
+  gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+  UserProfileOp *op = g_new0 (UserProfileOp, 1);
+  op->session = self;
+  op->callback = callback;
+  op->user_data = user_data;
+  op->callback_context = g_main_context_ref_thread_default ();
+  if (!op->callback_context)
+    op->callback_context = g_main_context_ref (g_main_context_default ());
+  g_main_context_invoke (self->context, start_user_profile, op);
+}
+
 void
 spotifygtk_native_session_get_artist_identity (
   SpotifyNativeSession *self, const gchar *artist_uri,

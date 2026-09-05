@@ -59,6 +59,109 @@ bytes_to_hex (const guint8 *data, gsize len)
   return g_string_free (s, FALSE);
 }
 
+typedef struct {
+  SoupMessage                 *message;
+  SpclientUserProfileCallback  callback;
+  gpointer                     user_data;
+} UserProfileClosure;
+
+static gchar *
+profile_image_id (const gchar *url)
+{
+  static const gchar marker[] = "i.scdn.co/image/";
+  const gchar *id = url ? strstr (url, marker) : NULL;
+  if (!id)
+    return NULL;
+  id += strlen (marker);
+  if (!*id)
+    return NULL;
+  for (const gchar *p = id; *p; p++)
+    if (!g_ascii_isxdigit (*p))
+      return NULL;
+  return g_strdup (id);
+}
+
+static void
+on_user_profile_response (GObject *source, GAsyncResult *result,
+                          gpointer user_data)
+{
+  UserProfileClosure *cl = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body =
+    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+  guint status = soup_message_get_status (cl->message);
+  SpclientUserProfile profile = { 0 };
+
+  if (body && status >= 200 && status < 300) {
+    gsize len = 0;
+    const gchar *json = g_bytes_get_data (body, &len);
+    g_autoptr(JsonParser) parser = json_parser_new ();
+    if (json_parser_load_from_data (parser, json, (gssize) len, &error)) {
+      JsonNode *root = json_parser_get_root (parser);
+      JsonObject *obj = root && JSON_NODE_HOLDS_OBJECT (root)
+        ? json_node_get_object (root) : NULL;
+      if (obj) {
+        profile.display_name = g_strdup (
+          json_object_get_string_member_with_default (obj, "name", NULL));
+        const gchar *uri =
+          json_object_get_string_member_with_default (obj, "uri", NULL);
+        profile.canonical_id = uri && g_str_has_prefix (uri, "spotify:user:")
+          ? g_strdup (uri + strlen ("spotify:user:")) : NULL;
+        profile.product = g_strdup (
+          json_object_get_string_member_with_default (obj, "product", NULL));
+        profile.avatar_id = profile_image_id (
+          json_object_get_string_member_with_default (obj, "image_url", NULL));
+      }
+    }
+  } else if (!error) {
+    error = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                         "current-user profile returned HTTP %u", status);
+  }
+
+  if (cl->callback)
+    cl->callback ((profile.canonical_id || profile.display_name) ? &profile : NULL,
+                  error, cl->user_data);
+  g_free (profile.display_name);
+  g_free (profile.canonical_id);
+  g_free (profile.product);
+  g_free (profile.avatar_id);
+  g_clear_object (&cl->message);
+  g_free (cl);
+}
+
+void
+spotifygtk_spclient_get_user_profile (SpotifySpclient *self,
+                                      const gchar *username,
+                                      const gchar *bearer_token,
+                                      const gchar *client_token,
+                                      SpclientUserProfileCallback callback,
+                                      gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
+
+  g_autofree gchar *escaped = g_uri_escape_string (username ? username : "",
+                                                    NULL, FALSE);
+  g_autofree gchar *url = g_strdup_printf (
+    "https://%s/user-profile-view/v3/profile/%s?playlist_limit=0&artist_limit=0",
+    SPCLIENT_FALLBACK_HOST, escaped);
+  SoupMessage *message = soup_message_new (SOUP_METHOD_GET, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (message);
+  g_autofree gchar *auth = g_strdup_printf ("Bearer %s",
+                                             bearer_token ? bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth);
+  soup_message_headers_replace (headers, "Accept", "application/json");
+  if (client_token && *client_token)
+    soup_message_headers_replace (headers, "Client-Token", client_token);
+
+  UserProfileClosure *cl = g_new0 (UserProfileClosure, 1);
+  cl->message = g_object_ref (message);
+  cl->callback = callback;
+  cl->user_data = user_data;
+  soup_session_send_and_read_async (self->session, message, G_PRIORITY_DEFAULT,
+                                    self->cancellable, on_user_profile_response, cl);
+  g_object_unref (message);
+}
+
 void
 spclient_cdn_urls_free (SpclientCdnUrls *urls)
 {

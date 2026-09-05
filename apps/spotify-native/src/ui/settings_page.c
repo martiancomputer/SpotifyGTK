@@ -14,12 +14,17 @@
 #include "../audio/dsp.h"
 #include "eq_graph.h"
 #include "smooth_scroll.h"
+#include "cover_loader.h"
 
 struct _SpotifyGtkSettingsPage {
   GtkBox parent_instance;
   SpotifyGtkSettings *settings;
   SpotifyGtkEqGraph  *eq_graph;
-  GtkWidget          *account_name;   /* filled once the session knows who */
+  AdwAvatar          *account_avatar;
+  GtkWidget          *account_name;
+  GtkWidget          *account_id;
+  GtkWidget          *account_plan;
+  GtkWidget          *aggressive_media_switch;
 };
 
 /* The stored array and the filter must agree on how many bands there are. */
@@ -45,6 +50,17 @@ on_log_out_clicked (GtkButton *button, gpointer user_data)
 {
   g_signal_emit (SPOTIFYGTK_SETTINGS_PAGE (user_data), signals[LOG_OUT], 0);
   (void) button;
+}
+
+static void
+on_account_avatar_loaded (GdkTexture *texture, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  if (self->account_avatar) {
+    adw_avatar_set_custom_image (self->account_avatar,
+                                 texture ? GDK_PAINTABLE (texture) : NULL);
+    gtk_widget_set_visible (GTK_WIDGET (self->account_avatar), texture != NULL);
+  }
 }
 
 /* === About === */
@@ -249,6 +265,56 @@ on_aggressive_filtering_toggled (GtkSwitch *sw, GParamSpec *pspec,
   spotifygtk_settings_set_aggressive_filtering (self->settings,
                                                  gtk_switch_get_active (sw));
   (void) pspec;
+}
+
+static void
+on_caching_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  gboolean enabled = gtk_switch_get_active (sw);
+  spotifygtk_settings_set_caching_enabled (self->settings, enabled);
+  if (self->aggressive_media_switch)
+    gtk_widget_set_sensitive (self->aggressive_media_switch, enabled);
+  spotifygtk_cover_set_aggressive_mode (
+    spotifygtk_settings_get_aggressive_media (self->settings));
+  if (!enabled)
+    spotifygtk_cover_trim_to (0);
+  (void) pspec;
+}
+
+static void
+on_aggressive_media_toggled (GtkSwitch *sw, GParamSpec *pspec,
+                             gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  gboolean enabled = gtk_switch_get_active (sw);
+  spotifygtk_settings_set_aggressive_media (self->settings, enabled);
+  spotifygtk_cover_set_aggressive_mode (enabled);
+  (void) pspec;
+}
+
+static void
+on_cache_cleared (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  GtkButton *button = GTK_BUTTON (user_data);
+  g_autoptr(GError) error = NULL;
+  gboolean ok = spotifygtk_cache_clear_finish (result, &error);
+  gtk_button_set_label (button, ok ? "Cache cleared" : "Clear failed");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (button),
+                               error ? error->message : NULL);
+  gtk_widget_set_sensitive (GTK_WIDGET (button), TRUE);
+  g_object_unref (button);
+  (void) source;
+}
+
+static void
+on_clear_cache_clicked (GtkButton *button, gpointer user_data)
+{
+  gtk_widget_set_sensitive (GTK_WIDGET (button), FALSE);
+  gtk_button_set_label (button, "Clearing…");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (button), NULL);
+  spotifygtk_cache_clear_async (NULL, on_cache_cleared, g_object_ref (button));
+  (void) user_data;
 }
 
 
@@ -470,6 +536,45 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "from the environment always takes precedence.",
                              renderer_dd));
 
+  GtkWidget *cache_switch = gtk_switch_new ();
+  gtk_switch_set_active (
+    GTK_SWITCH (cache_switch),
+    spotifygtk_settings_get_caching_enabled (self->settings));
+  g_signal_connect (cache_switch, "notify::active",
+                    G_CALLBACK (on_caching_toggled), self);
+  gtk_box_append (GTK_BOX (perf_group),
+                  build_row ("Caching",
+                             "Caches artwork and resolved media information on "
+                             "disk for faster loading. Changes take effect "
+                             "immediately.",
+                             cache_switch));
+
+  self->aggressive_media_switch = gtk_switch_new ();
+  gtk_switch_set_active (
+    GTK_SWITCH (self->aggressive_media_switch),
+    spotifygtk_settings_get_aggressive_media (self->settings));
+  gtk_widget_set_sensitive (
+    self->aggressive_media_switch,
+    spotifygtk_settings_get_caching_enabled (self->settings));
+  g_signal_connect (self->aggressive_media_switch, "notify::active",
+                    G_CALLBACK (on_aggressive_media_toggled), self);
+  gtk_box_append (GTK_BOX (perf_group),
+                  build_row ("Aggressive media loading",
+                             "Loads cached artwork with higher bounded "
+                             "concurrency and releases decoded textures as "
+                             "soon as their widgets do. Requires caching.",
+                             self->aggressive_media_switch));
+
+  GtkWidget *clear_cache = gtk_button_new_with_label ("Clear cache");
+  gtk_widget_add_css_class (clear_cache, "pill-button");
+  g_signal_connect (clear_cache, "clicked",
+                    G_CALLBACK (on_clear_cache_clicked), self);
+  gtk_box_append (GTK_BOX (perf_group),
+                  build_row ("Cached data",
+                             "Removes cached names and media, and releases "
+                             "decoded artwork held by the app.",
+                             clear_cache));
+
   gtk_box_append (GTK_BOX (content), perf_group);
 
   /* ── User ──────────────────────────────────────────────────── */
@@ -484,16 +589,34 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
    * display name and a picture live behind the Web API, which nothing here
    * speaks; that is its own piece of work rather than something to fake.
    */
-  self->account_name = gtk_label_new ("Not signed in");
-  gtk_widget_add_css_class (self->account_name, "normal-text");
-  gtk_label_set_xalign (GTK_LABEL (self->account_name), 1.0);
-  gtk_label_set_ellipsize (GTK_LABEL (self->account_name), PANGO_ELLIPSIZE_END);
-  gtk_widget_set_valign (self->account_name, GTK_ALIGN_CENTER);
+  GtkWidget *account_card = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 18);
+  gtk_widget_add_css_class (account_card, "card");
+  gtk_widget_set_margin_top (account_card, 2);
+  self->account_avatar = ADW_AVATAR (adw_avatar_new (112, "", FALSE));
+  gtk_widget_set_visible (GTK_WIDGET (self->account_avatar), FALSE);
+  gtk_widget_set_margin_start (GTK_WIDGET (self->account_avatar), 16);
+  gtk_widget_set_margin_top (GTK_WIDGET (self->account_avatar), 16);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (self->account_avatar), 16);
+  gtk_box_append (GTK_BOX (account_card), GTK_WIDGET (self->account_avatar));
 
-  gtk_box_append (GTK_BOX (user_group),
-                  build_row ("Account",
-                             "The Spotify account this client is signed in as.",
-                             self->account_name));
+  GtkWidget *identity = gtk_box_new (GTK_ORIENTATION_VERTICAL, 5);
+  gtk_widget_set_valign (identity, GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand (identity, TRUE);
+  gtk_widget_set_margin_end (identity, 18);
+  self->account_name = gtk_label_new ("Not signed in");
+  gtk_widget_add_css_class (self->account_name, "section-heading");
+  gtk_label_set_xalign (GTK_LABEL (self->account_name), 0.0);
+  self->account_plan = gtk_label_new ("");
+  gtk_widget_add_css_class (self->account_plan, "normal-text");
+  gtk_label_set_xalign (GTK_LABEL (self->account_plan), 0.0);
+  self->account_id = gtk_label_new ("");
+  gtk_widget_add_css_class (self->account_id, "dim-text");
+  gtk_label_set_xalign (GTK_LABEL (self->account_id), 0.0);
+  gtk_box_append (GTK_BOX (identity), self->account_name);
+  gtk_box_append (GTK_BOX (identity), self->account_plan);
+  gtk_box_append (GTK_BOX (identity), self->account_id);
+  gtk_box_append (GTK_BOX (account_card), identity);
+  gtk_box_append (GTK_BOX (user_group), account_card);
   gtk_box_append (GTK_BOX (content), user_group);
 
   /* --- Account --- */
@@ -554,6 +677,30 @@ spotifygtk_settings_page_set_account (SpotifyGtkSettingsPage *self,
     return;
   gtk_label_set_text (GTK_LABEL (self->account_name),
                       (username && *username) ? username : "Not signed in");
+  if (self->account_id)
+    gtk_label_set_text (GTK_LABEL (self->account_id),
+                        (username && *username) ? username : "");
+}
+
+void
+spotifygtk_settings_page_set_account_profile (
+  SpotifyGtkSettingsPage *self, const gchar *display_name,
+  const gchar *canonical_id, const gchar *product, const gchar *avatar_id)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS_PAGE (self));
+  const gchar *name = display_name && *display_name ? display_name : canonical_id;
+  gtk_label_set_text (GTK_LABEL (self->account_name), name ? name : "Not signed in");
+  gtk_label_set_text (GTK_LABEL (self->account_id), canonical_id ? canonical_id : "");
+  g_autofree gchar *plan = product && *product
+    ? g_strdup_printf ("%c%s plan", g_ascii_toupper (*product), product + 1) : NULL;
+  gtk_label_set_text (GTK_LABEL (self->account_plan), plan ? plan : "");
+  gtk_widget_set_visible (self->account_plan, plan != NULL);
+  gtk_widget_set_visible (self->account_id,
+                          canonical_id && *canonical_id &&
+                          g_strcmp0 (canonical_id, name) != 0);
+  adw_avatar_set_custom_image (self->account_avatar, NULL);
+  gtk_widget_set_visible (GTK_WIDGET (self->account_avatar), FALSE);
+  spotifygtk_cover_load (avatar_id, 224, NULL, on_account_avatar_loaded, self);
 }
 
 SpotifyGtkSettingsPage *

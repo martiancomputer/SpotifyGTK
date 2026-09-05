@@ -4034,6 +4034,22 @@ spotifygtk_native_window_log_out (SpotifyGtkNativeWindow *self)
 }
 
 /* === Session === */
+typedef struct { GWeakRef window; } AccountProfileLoad;
+
+static void
+on_account_profile (const gchar *display_name, const gchar *canonical_id,
+                    const gchar *product, const gchar *avatar_id,
+                    gpointer user_data)
+{
+  AccountProfileLoad *load = user_data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
+  if (self)
+    spotifygtk_settings_page_set_account_profile (
+      self->settings_page, display_name, canonical_id, product, avatar_id);
+  g_weak_ref_clear (&load->window);
+  g_free (load);
+}
+
 static void
 on_session_state_changed (SpotifyNativeSession *session, gint state,
                           const gchar *message, gpointer user_data)
@@ -4060,6 +4076,10 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
       g_autofree gchar *who = spotifygtk_native_session_dup_username (self->session);
       spotifygtk_settings_page_set_account (self->settings_page, who);
     }
+    AccountProfileLoad *profile = g_new0 (AccountProfileLoad, 1);
+    g_weak_ref_init (&profile->window, self);
+    spotifygtk_native_session_get_user_profile (self->session,
+                                                on_account_profile, profile);
 
     subscribe_collection_changes (self);
 

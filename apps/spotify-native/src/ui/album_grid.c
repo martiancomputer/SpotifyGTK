@@ -273,6 +273,28 @@ on_card_destroy (GtkWidget *card, gpointer user_data)
     g_cancellable_cancel (c);
 }
 
+/* GtkGridView keeps overscan cards bound and mapped after they leave the
+ * viewport, so unbind is too late to release their textures. The compressed
+ * image remains on disk and can be decoded again if the card returns. */
+static void
+card_release_cover (GtkWidget *card)
+{
+  GCancellable *c = g_object_get_data (G_OBJECT (card), "cover-cancel");
+  if (c)
+    g_cancellable_cancel (c);
+  g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);
+
+  if (!g_object_get_data (G_OBJECT (card), "cover-shown"))
+    return;
+
+  GtkWidget *art = g_object_get_data (G_OBJECT (card), "art");
+  if (art) {
+    gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
+    gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
+  }
+  g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
+}
+
 static void
 on_card_mapped (GtkWidget *card, gpointer user_data)
 {
@@ -330,7 +352,9 @@ on_grid_settled (gpointer user_data)
   spotifygtk_cover_set_deferred (FALSE);
   for (guint i = 0; i < self->bound_cards->len; i++) {
     GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
-    if (card_near_viewport (self, card)) {
+    if (!card_near_viewport (self, card)) {
+      card_release_cover (card);
+    } else {
       SpotifyGtkAlbumItem *item = g_object_get_data (G_OBJECT (card),
                                                       "bound-album-item");
       if (item && item->pending && !item->resolving) {

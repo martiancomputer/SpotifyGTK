@@ -105,6 +105,13 @@ void spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean num
  */
 void spotifygtk_track_list_set_top_inset (SpotifyGtkTrackList *self, gint px);
 
+/* Indent the actual rows and status text without shrinking the full-height
+ * list container. Useful beneath overlay headers, where an outer margin would
+ * otherwise appear as a page-height background strip. */
+void spotifygtk_track_list_set_content_margins (SpotifyGtkTrackList *self,
+                                                gint                 start,
+                                                gint                 end);
+
 /* Mark whichever row matches `uri` as the current track. Pass NULL to clear.
  * `playing` false with a non-NULL uri means paused: the row keeps its
  * indicator but stops animating. */

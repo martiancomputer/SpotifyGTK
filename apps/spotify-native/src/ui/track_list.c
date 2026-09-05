@@ -598,6 +598,19 @@ spotifygtk_track_list_set_top_inset (SpotifyGtkTrackList *self, gint px)
   gtk_widget_set_margin_top (GTK_WIDGET (self->status), px);
 }
 
+void
+spotifygtk_track_list_set_content_margins (SpotifyGtkTrackList *self,
+                                           gint                 start,
+                                           gint                 end)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+
+  gtk_widget_set_margin_start (GTK_WIDGET (self->list), start);
+  gtk_widget_set_margin_end (GTK_WIDGET (self->list), end);
+  gtk_widget_set_margin_start (GTK_WIDGET (self->status), start);
+  gtk_widget_set_margin_end (GTK_WIDGET (self->status), end);
+}
+
 /*
  * Hearts are hidden on the Liked Songs page: every row there is liked by
  * definition, so a column of identical filled hearts carries no information

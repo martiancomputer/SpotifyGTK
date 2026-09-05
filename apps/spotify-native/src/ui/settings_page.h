@@ -21,6 +21,9 @@ SpotifyGtkSettingsPage *spotifygtk_settings_page_new (void);
 /* Show who is signed in, above the button that signs them out. */
 void spotifygtk_settings_page_set_account (SpotifyGtkSettingsPage *self,
                                            const gchar            *username);
+void spotifygtk_settings_page_set_account_profile (
+  SpotifyGtkSettingsPage *self, const gchar *display_name,
+  const gchar *canonical_id, const gchar *product, const gchar *avatar_id);
 
 /* Signal: "log-out" -- the user asked to sign out; the window performs it. */
 

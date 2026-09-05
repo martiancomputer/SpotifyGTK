@@ -118,6 +118,17 @@ void spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px);
  * insert and holds its ceiling forever. */
 void spotifygtk_cover_trim_to (gsize max_bytes);
 
+/* Evict decoded textures immediately and remove the complete persistent
+ * SpotifyGTK cache directory on a worker thread. */
+void     spotifygtk_cache_clear_async  (GCancellable        *cancellable,
+                                        GAsyncReadyCallback  callback,
+                                        gpointer             user_data);
+gboolean spotifygtk_cache_clear_finish (GAsyncResult        *result,
+                                        GError             **error);
+
+/* Apply a changed performance preference to the already-live loader. */
+void spotifygtk_cover_set_aggressive_mode (gboolean enabled);
+
 void spotifygtk_cover_log_stats (const gchar *context);
 
 G_END_DECLS

@@ -76,6 +76,17 @@ typedef void (*SpclientBatchCallback) (const SpclientTrackInfo *tracks /* NULL o
                                        GError                  *error,
                                        gpointer                 user_data);
 
+typedef struct {
+  gchar *display_name;
+  gchar *canonical_id;
+  gchar *product;
+  gchar *avatar_id;    /* i.scdn.co image id, suitable for cover_loader */
+} SpclientUserProfile;
+
+typedef void (*SpclientUserProfileCallback) (const SpclientUserProfile *profile,
+                                              GError *error,
+                                              gpointer user_data);
+
 /* Prototype lives with the rest of the API, below the GObject declaration. */
 
 /* ── Context resolution ──────────────────────────────────────────────────── */
@@ -113,6 +124,13 @@ typedef void (*SpclientContextCallback) (JsonNode *context /* NULL on failure, o
 
 #define SPOTIFYGTK_TYPE_SPCLIENT (spotifygtk_spclient_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifySpclient, spotifygtk_spclient, SPOTIFYGTK, SPCLIENT, GObject)
+
+void spotifygtk_spclient_get_user_profile (SpotifySpclient *self,
+                                           const gchar *username,
+                                           const gchar *bearer_token,
+                                           const gchar *client_token,
+                                           SpclientUserProfileCallback callback,
+                                           gpointer user_data);
 
 SpotifySpclient *spotifygtk_spclient_new (void);
 void spotifygtk_spclient_set_cancellable (SpotifySpclient *, GCancellable *);

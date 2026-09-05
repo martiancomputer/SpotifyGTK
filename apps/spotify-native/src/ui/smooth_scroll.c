@@ -3,6 +3,7 @@
  */
 
 #include "smooth_scroll.h"
+#include "../log_verbose.h"
 
 #include <math.h>
 
@@ -19,7 +20,35 @@ typedef struct {
   gdouble            target;
   gdouble            last_set;      /* what we last wrote, to spot outside changes */
   gint64             last_frame_us; /* to ease by elapsed time, not by frame count */
+#ifdef SPOTIFYGTK_VERBOSE
+  guint64            gesture;
+  guint              events;
+  guint              frames;
+  gint64             started_us;
+  gint64             max_frame_gap_us;
+#endif
 } SmoothScroll;
+
+#ifdef SPOTIFYGTK_VERBOSE
+static const gchar *
+orientation_name (GtkOrientation orientation)
+{
+  return orientation == GTK_ORIENTATION_HORIZONTAL ? "horizontal" : "vertical";
+}
+
+static void
+log_scroll_end (SmoothScroll *ss, const gchar *reason, gdouble value)
+{
+  gint64 elapsed = ss->started_us > 0
+    ? g_get_monotonic_time () - ss->started_us : 0;
+  SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
+                    " axis=%s end=%s events=%u frames=%u elapsed=%.1fms"
+                    " max-frame-gap=%.1fms value=%.2f target=%.2f",
+                    ss->gesture, orientation_name (ss->orientation), reason,
+                    ss->events, ss->frames, elapsed / 1000.0,
+                    ss->max_frame_gap_us / 1000.0, value, ss->target);
+}
+#endif
 
 static GtkAdjustment *
 adjustment_for (SmoothScroll *ss)
@@ -37,6 +66,9 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   (void) widget;
 
   if (!adj) {
+#ifdef SPOTIFYGTK_VERBOSE
+    log_scroll_end (ss, "no-adjustment", 0.0);
+#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -47,6 +79,9 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
    * while this was still animating. Their position wins -- drop the animation
    * rather than dragging the view back out from under them. */
   if (ABS (value - ss->last_set) > 1.0) {
+#ifdef SPOTIFYGTK_VERBOSE
+    log_scroll_end (ss, "external-change", value);
+#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -73,13 +108,24 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
      * actually go and stop, rather than animating into a wall. */
     ss->target = clamped;
     gtk_adjustment_set_value (adj, clamped);
+#ifdef SPOTIFYGTK_VERBOSE
+    log_scroll_end (ss, "bounds-changed", clamped);
+#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
 
   gdouble remaining = ss->target - value;
-  if (ABS (remaining) < 0.5) {
+  /* GtkAdjustment may quantise a list/grid position to whole pixels. At one
+   * pixel remaining the eased step is smaller than that, gets rounded back to
+   * the same value, and the callback otherwise runs forever: value=9181,
+   * target=9182 was captured continuously for several seconds in telemetry.
+   * One pixel is visually exact, so land on the target and retire the tick. */
+  if (ABS (remaining) <= 1.0) {
     gtk_adjustment_set_value (adj, ss->target);
+#ifdef SPOTIFYGTK_VERBOSE
+    log_scroll_end (ss, "complete", ss->target);
+#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -101,15 +147,40 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
    * smoothness rather than changing the character of the motion.
    */
   gint64  now_us  = gdk_frame_clock_get_frame_time (clock);
+  gint64  frame_gap_us = ss->last_frame_us > 0 ? now_us - ss->last_frame_us : 0;
   gdouble frames  = (ss->last_frame_us > 0)
     ? (gdouble) (now_us - ss->last_frame_us) / SMOOTH_SCROLL_FRAME_US : 1.0;
   frames = CLAMP (frames, 0.1, SMOOTH_SCROLL_MAX_FRAMES);
   ss->last_frame_us = now_us;
 
+#ifdef SPOTIFYGTK_VERBOSE
+  ss->frames++;
+  if (frame_gap_us > ss->max_frame_gap_us)
+    ss->max_frame_gap_us = frame_gap_us;
+  if (frame_gap_us > 25000)
+    SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
+                      " frame-gap=%.1fms frame=%u value=%.2f target=%.2f remaining=%.2f",
+                      ss->gesture, frame_gap_us / 1000.0, ss->frames,
+                      value, ss->target, remaining);
+#endif
+
   gdouble factor = 1.0 - pow (1.0 - SMOOTH_SCROLL_EASE, frames);
 
   gtk_adjustment_set_value (adj, value + remaining * factor);
   ss->last_set = gtk_adjustment_get_value (adj);
+
+  /* Be defensive about other quantisation steps too. If GTK accepted no
+   * movement at all, another eased frame cannot improve the situation; snap
+   * once rather than leaving a permanent frame-clock callback behind. */
+  if (ss->last_set == value) {
+    gtk_adjustment_set_value (adj, ss->target);
+    ss->last_set = gtk_adjustment_get_value (adj);
+#ifdef SPOTIFYGTK_VERBOSE
+    log_scroll_end (ss, "quantized", ss->last_set);
+#endif
+    ss->tick = 0;
+    return G_SOURCE_REMOVE;
+  }
   return G_SOURCE_CONTINUE;
 }
 
@@ -153,8 +224,27 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
    * the whole distance instead of each notch cancelling the last. */
   gdouble base = (ss->tick != 0) ? ss->target : value;
 
+#ifdef SPOTIFYGTK_VERBOSE
+  if (ss->tick == 0) {
+    ss->gesture++;
+    ss->events = 0;
+    ss->frames = 0;
+    ss->started_us = g_get_monotonic_time ();
+    ss->max_frame_gap_us = 0;
+  }
+  ss->events++;
+#endif
+
   ss->target   = CLAMP (base + delta * SMOOTH_SCROLL_STEP, lower, upper);
   ss->last_set = value;
+#ifdef SPOTIFYGTK_VERBOSE
+  SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
+                    " event=%u axis=%s unit=%d dx=%.3f dy=%.3f delta=%.3f"
+                    " value=%.2f base=%.2f target=%.2f bounds=%.2f..%.2f",
+                    ss->gesture, ss->events, orientation_name (ss->orientation),
+                    (gint) gtk_event_controller_scroll_get_unit (ctrl),
+                    dx, dy, delta, value, base, ss->target, lower, upper);
+#endif
   if (ss->tick == 0) {
     ss->last_frame_us = 0;   /* first frame of a new flick eases by one frame */
     ss->tick = gtk_widget_add_tick_callback (GTK_WIDGET (ss->scroller),

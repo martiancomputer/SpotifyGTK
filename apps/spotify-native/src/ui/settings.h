@@ -81,6 +81,13 @@ gboolean spotifygtk_settings_get_aggressive_filtering (SpotifyGtkSettings *self)
 void     spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
                                                        gboolean enabled);
 
+gboolean spotifygtk_settings_get_caching_enabled (SpotifyGtkSettings *self);
+void     spotifygtk_settings_set_caching_enabled (SpotifyGtkSettings *self,
+                                                  gboolean enabled);
+gboolean spotifygtk_settings_get_aggressive_media (SpotifyGtkSettings *self);
+void     spotifygtk_settings_set_aggressive_media (SpotifyGtkSettings *self,
+                                                   gboolean enabled);
+
 /* Value understood by GSK_RENDERER, or NULL for AUTOMATIC/invalid values. */
 const gchar *spotifygtk_renderer_backend (SpotifyGtkRenderer renderer);
 

@@ -306,7 +306,6 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
    * carries the header inset so its cards slide under the frosted header; the
    * list below it then needs no inset of its own. */
   self->albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
-  gtk_widget_set_margin_start (self->albums_section, 35);
   /* A horizontal shelf must clip at the pane edge. An outer end margin first
    * clips the next card and then leaves a page-coloured strip beside it—the
    * same light-theme rectangle Home used to show. */
@@ -324,8 +323,7 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   gtk_box_append (GTK_BOX (base), self->albums_section);
 
   self->results = spotifygtk_track_list_new ();
-  gtk_widget_set_margin_start (GTK_WIDGET (self->results), 35);
-  gtk_widget_set_margin_end (GTK_WIDGET (self->results), 12);
+  spotifygtk_track_list_set_content_margins (self->results, 35, 14);
   /* No bottom margin; see the note in liked_songs_page.c. */
   gtk_widget_set_vexpand (GTK_WIDGET (self->results), TRUE);
   spotifygtk_track_list_set_top_inset (self->results, SEARCH_HEADER_INSET);

@@ -124,6 +124,15 @@ SpotifyNativeSessionState spotifygtk_native_session_get_state (SpotifyNativeSess
  * Returns a copy — the worker thread owns the original. */
 gchar *spotifygtk_native_session_dup_username (SpotifyNativeSession *self);
 
+typedef void (*SpotifyNativeUserProfileFunc) (const gchar *display_name,
+                                              const gchar *canonical_id,
+                                              const gchar *product,
+                                              const gchar *avatar_id,
+                                              gpointer user_data);
+void spotifygtk_native_session_get_user_profile (
+  SpotifyNativeSession *self, SpotifyNativeUserProfileFunc callback,
+  gpointer user_data);
+
 /* Build the liked-songs context URI for the signed-in user, or NULL if
  * the session is not READY yet. */
 gchar *spotifygtk_native_session_dup_collection_uri (SpotifyNativeSession *self);

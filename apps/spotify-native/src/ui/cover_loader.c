@@ -15,6 +15,7 @@
 #include <libsoup/soup.h>
 
 #include "settings.h"
+#include "../log_verbose.h"
 
 #define COVER_CDN_BASE "https://i.scdn.co/image/"
 
@@ -81,6 +82,21 @@ static GHashTable *cover_cache = NULL;
 /* Insertion order of the ids in cover_cache, oldest at the head. Kept in
  * step with the table so eviction is O(1) at the front. */
 static GQueue cover_order = G_QUEUE_INIT;
+
+static gboolean
+caching_enabled (void)
+{
+  return spotifygtk_settings_get_caching_enabled (
+    spotifygtk_settings_get_default ());
+}
+
+static gboolean
+aggressive_media_enabled (void)
+{
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  return spotifygtk_settings_get_caching_enabled (settings) &&
+         spotifygtk_settings_get_aggressive_media (settings);
+}
 
 /* Pixel buffers are mapped one at a time so that freeing one returns it to
  * the kernel; see the decode path for why the heap does not. */
@@ -182,6 +198,8 @@ disk_cache_path (const gchar *cover_id)
 static void
 disk_cache_write (const gchar *cover_id, GBytes *bytes)
 {
+  if (!caching_enabled ())
+    return;
   g_autofree gchar *path = disk_cache_path (cover_id);
   if (!path || !bytes)
     return;
@@ -340,7 +358,8 @@ static struct {
  * is exactly the "still loading what I already scrolled past" effect. A stack
  * fixes that ordering without predicting anything.
  */
-#define COVER_MAX_INFLIGHT 8
+#define COVER_MAX_INFLIGHT_NORMAL 8
+#define COVER_MAX_INFLIGHT_AGGRESSIVE 16
 
 /* Ceiling on queued-but-not-issued fetches. Read-ahead is the only thing that
  * can outrun the drain, and a backlog older than this is for rows long gone. */
@@ -349,12 +368,14 @@ static struct {
 typedef struct {
   gchar *cache_key;
   gint   target_px;
+  gboolean playback;
 } QueuedFetch;
 
 static GQueue cover_queue = G_QUEUE_INIT;   /* QueuedFetch*, newest at the tail */
 static guint  cover_active = 0;
 
-static void issue_fetch (const gchar *cache_key, gint target_px);
+static void issue_fetch (const gchar *cache_key, gint target_px,
+                         gboolean playback);
 static void on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data);
 
 static void
@@ -411,7 +432,16 @@ cover_pump (void)
     return;
   pumping = TRUE;
 
-  while (cover_active < COVER_MAX_INFLIGHT) {
+  guint cap = aggressive_media_enabled ()
+    ? COVER_MAX_INFLIGHT_AGGRESSIVE : COVER_MAX_INFLIGHT_NORMAL;
+  while (!g_queue_is_empty (&cover_queue)) {
+    QueuedFetch *next = g_queue_peek_tail (&cover_queue);
+    /* Current-track artwork must not wait behind a full batch of speculative
+     * or grid work. Two reserve slots cover the panel and playback bar. */
+    if (cover_active >= cap &&
+        (!next->playback || cover_active >= cap + 2))
+      break;
+
     QueuedFetch *q = g_queue_pop_tail (&cover_queue);
     if (!q)
       break;
@@ -431,7 +461,7 @@ cover_pump (void)
     }
 
     cover_active++;
-    issue_fetch (q->cache_key, q->target_px);
+    issue_fetch (q->cache_key, q->target_px, q->playback);
     queued_fetch_free (q);
   }
 
@@ -507,7 +537,8 @@ spotifygtk_cover_log_stats (const gchar *context)
              "peak queue %u, %u in flight (cap %d)",
              context ? context : "", cover_stats.dropped,
              g_queue_get_length (&cover_queue), cover_stats.peak_queue,
-             cover_active, COVER_MAX_INFLIGHT);
+             cover_active, aggressive_media_enabled ()
+               ? COVER_MAX_INFLIGHT_AGGRESSIVE : COVER_MAX_INFLIGHT_NORMAL);
 
   /* The number that answers "is artwork where the memory goes": decoded
    * pixels still mapped, against the process's own dirty pages. */
@@ -607,11 +638,12 @@ ensure_initialised (void)
    * a 103 KB image appeared to take 1.6 seconds.
    */
   const gchar *conns_env = g_getenv ("SPOTIFY_COVER_CONNS");
-  guint conns = conns_env ? (guint) MAX (1, atoi (conns_env)) : 6;
+  guint default_conns = aggressive_media_enabled () ? 16 : 6;
+  guint conns = conns_env ? (guint) MAX (1, atoi (conns_env)) : default_conns;
 
   /* Bring the on-disk cache back under budget once per run, off the main
    * thread -- it stats every file. */
-  {
+  if (caching_enabled ()) {
     GTask *prune = g_task_new (NULL, NULL, NULL, NULL);
     g_task_run_in_thread (prune, disk_cache_prune);
     g_object_unref (prune);
@@ -690,6 +722,7 @@ typedef struct {
   gint64 started_us;    /* request issued; split into network and decode below */
   gint64 fetched_us;    /* bytes in hand, decode about to begin */
   SoupMessage *message; /* owned, for its metrics */
+  gboolean playback;
 } FetchClosure;
 
 /* Runs on a worker thread: decode the JPEG at the target size and build a
@@ -780,33 +813,48 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError) error = NULL;
   g_autoptr(GdkTexture) texture = g_task_propagate_pointer (G_TASK (result), &error);
 
-  gint start_ms = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (result), "decode-start"));
-  if (start_ms > 0)
-    cover_stats.decode_us += (g_get_monotonic_time () - (gint64) start_ms * 1000);
+  gint64 *started_us = g_object_get_data (G_OBJECT (result), "decode-start-us");
+  gint64 decode_us = started_us ? g_get_monotonic_time () - *started_us : 0;
+  cover_stats.decode_us += decode_us;
+  if (decode_us >= G_USEC_PER_SEC)
+    SPOTIFYGTK_DEBUG ("cover: slow %s decode/dispatch %.0f ms key=%s active=%u queued=%u",
+                      g_object_get_data (G_OBJECT (result), "disk-source")
+                        ? "disk" : "network",
+                      decode_us / 1000.0, cache_key, cover_active,
+                      g_queue_get_length (&cover_queue));
 
   if (!texture) {
     cover_stats.failures++;
     g_debug ("cover %s: decode failed: %s", cache_key,
              error ? error->message : "unknown");
     complete_waiters (cache_key, NULL);
+    cover_active--;
+    cover_pump ();
     return;
   }
 
-  gsize incoming = texture_bytes (texture);
+  /* Aggressive mode deliberately retains only the widget's reference. The
+   * compressed file remains on disk, but decoded pixels disappear as soon as
+   * the row/card releases them. */
+  if (caching_enabled () && !aggressive_media_enabled ()) {
+    gsize incoming = texture_bytes (texture);
 
-  cover_evict_to (COVER_CACHE_MAX_BYTES > incoming
-                    ? COVER_CACHE_MAX_BYTES - incoming : 0);
+    cover_evict_to (COVER_CACHE_MAX_BYTES > incoming
+                      ? COVER_CACHE_MAX_BYTES - incoming : 0);
 
-  g_hash_table_insert (cover_cache, g_strdup (cache_key), g_object_ref (texture));
-  g_queue_push_tail (&cover_order, g_strdup (cache_key));
-  cover_cache_bytes += incoming;
+    g_hash_table_insert (cover_cache, g_strdup (cache_key), g_object_ref (texture));
+    g_queue_push_tail (&cover_order, g_strdup (cache_key));
+    cover_cache_bytes += incoming;
+  }
 
   complete_waiters (cache_key, texture);
+  cover_active--;
+  cover_pump ();
   (void) source;
 }
 
 static void
-issue_fetch (const gchar *cache_key, gint target_px)
+issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
 {
   g_autofree gchar *cover_id = g_strdup (cache_key);
   gchar *at = strrchr (cover_id, '@');
@@ -818,19 +866,21 @@ issue_fetch (const gchar *cache_key, gint target_px)
    * both faster than the CDN and one less entry in a queue whose filling is
    * what stalls artwork later in a session.
    */
-  g_autofree gchar *disk = disk_cache_path (cover_id);
+  g_autofree gchar *disk = caching_enabled () ? disk_cache_path (cover_id) : NULL;
   if (disk && g_file_test (disk, G_FILE_TEST_EXISTS)) {
     cover_stats.disk_hits++;
     GTask *task = g_task_new (NULL, NULL, on_cover_decoded, g_strdup (cache_key));
-    g_object_set_data (G_OBJECT (task), "decode-start",
-                       GINT_TO_POINTER ((gint) (g_get_monotonic_time () / 1000)));
+    g_task_set_priority (task, playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW);
+    gint64 *decode_start = g_new (gint64, 1);
+    *decode_start = g_get_monotonic_time ();
+    g_object_set_data_full (G_OBJECT (task), "decode-start-us",
+                            decode_start, g_free);
+    g_object_set_data (G_OBJECT (task), "disk-source", GINT_TO_POINTER (1));
     g_object_set_data (G_OBJECT (task), "target-px", GINT_TO_POINTER (target_px));
     g_object_set_data_full (G_OBJECT (task), "disk-path", g_steal_pointer (&disk), g_free);
     g_task_run_in_thread (task, decode_in_thread);
     g_object_unref (task);
 
-    cover_active--;
-    cover_pump ();
     return;
   }
 
@@ -845,6 +895,7 @@ issue_fetch (const gchar *cache_key, gint target_px)
   fetch->cache_key = g_strdup (cache_key);
   fetch->target_px = target_px;
   fetch->started_us = g_get_monotonic_time ();
+  fetch->playback = playback;
 
   SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, url);
   /* Metrics are what let queue wait be told apart from transfer time. Without
@@ -852,7 +903,9 @@ issue_fetch (const gchar *cache_key, gint target_px)
    * the two. */
   soup_message_add_flags (msg, SOUP_MESSAGE_COLLECT_METRICS);
   fetch->message = g_object_ref (msg);
-  soup_session_send_and_read_async (cover_session, msg, G_PRIORITY_LOW, NULL,
+  soup_session_send_and_read_async (cover_session, msg,
+                                    playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW,
+                                    NULL,
                                     on_cover_fetched, fetch);
   g_object_unref (msg);
 }
@@ -926,14 +979,17 @@ on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
   /* Decode off the main thread. The bytes and target size ride along; the
    * key is the callback's user_data. */
   GTask *task = g_task_new (NULL, NULL, on_cover_decoded, cache_key);
+  g_task_set_priority (task, fetch->playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW);
   /* Carried on the task rather than accumulated in decode_in_thread: that runs
    * on a worker and every other counter here is written from the main thread,
    * so timing it from both ends of the hop keeps the whole struct single
    * threaded and needs no atomics. It measures dispatch plus decode, which is
    * the figure that matters anyway -- a decode that waits on a busy pool costs
    * the user the same as a slow one. */
-  g_object_set_data (G_OBJECT (task), "decode-start",
-                     GINT_TO_POINTER ((gint) (g_get_monotonic_time () / 1000)));
+  gint64 *decode_start = g_new (gint64, 1);
+  *decode_start = g_get_monotonic_time ();
+  g_object_set_data_full (G_OBJECT (task), "decode-start-us",
+                          decode_start, g_free);
   g_object_set_data (G_OBJECT (task), "target-px", GINT_TO_POINTER (target_px));
   g_task_set_task_data (task, bytes, (GDestroyNotify) g_bytes_unref);
   g_task_run_in_thread (task, decode_in_thread);
@@ -942,11 +998,9 @@ on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
   g_clear_object (&fetch->message);
   g_free (fetch);
 
-  /* Released once the bytes are in hand rather than after the decode: the
-   * decode is off-thread and 20ms, so holding the slot across it would idle
-   * the network for no reason. */
-  cover_active--;
-  cover_pump ();
+  /* The slot remains occupied through decoding. Releasing it here allowed a
+   * warm disk cache to dispatch hundreds of decode jobs into GLib's worker
+   * pool at once; on_cover_decoded() releases it after the complete job. */
 }
 
 void
@@ -1018,7 +1072,8 @@ cover_load_internal (const gchar          *cover_id,
    * row's 96px decode would satisfy the panel's request and show blurry. */
   g_autofree gchar *cache_key = g_strdup_printf ("%s@%d", cover_id, target_px);
 
-  GdkTexture *cached = g_hash_table_lookup (cover_cache, cache_key);
+  GdkTexture *cached = caching_enabled ()
+    ? g_hash_table_lookup (cover_cache, cache_key) : NULL;
   if (cached) {
     cover_stats.hits++;
     callback (cached, user_data);
@@ -1085,6 +1140,7 @@ cover_load_internal (const gchar          *cover_id,
   QueuedFetch *q = g_new0 (QueuedFetch, 1);
   q->cache_key = g_strdup (cache_key);
   q->target_px = target_px;
+  q->playback = playback_surface;
 
   /*
    * The queue is drained from the tail, newest first -- right for a scroll,
@@ -1149,4 +1205,88 @@ spotifygtk_cover_trim_to (gsize max_bytes)
   if (before != cover_cache_bytes)
     g_message ("cover: trimmed cache %.1f MB -> %.1f MB",
                before / 1048576.0, cover_cache_bytes / 1048576.0);
+}
+
+void
+spotifygtk_cover_set_aggressive_mode (gboolean enabled)
+{
+  ensure_initialised ();
+  gboolean active = enabled && caching_enabled ();
+  g_object_set (cover_session,
+                "max-conns-per-host", active ? 16u : 6u,
+                "max-conns", active ? 32u : 24u,
+                NULL);
+  if (active)
+    cover_evict_to (0);
+  cover_pump ();
+}
+
+static gboolean
+delete_cache_tree (GFile *file, GCancellable *cancellable, GError **error)
+{
+  GFileType type = g_file_query_file_type (file, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+                                           cancellable);
+  if (type == G_FILE_TYPE_UNKNOWN)
+    return TRUE;
+
+  if (type == G_FILE_TYPE_DIRECTORY) {
+    g_autoptr(GFileEnumerator) children = g_file_enumerate_children (
+      file, G_FILE_ATTRIBUTE_STANDARD_NAME, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+      cancellable, error);
+    if (!children)
+      return FALSE;
+
+    for (;;) {
+      g_autoptr(GFileInfo) info = g_file_enumerator_next_file (
+        children, cancellable, error);
+      if (!info)
+        break;
+      g_autoptr(GFile) child = g_file_get_child (
+        file, g_file_info_get_name (info));
+      if (!delete_cache_tree (child, cancellable, error))
+        return FALSE;
+    }
+    if (error && *error)
+      return FALSE;
+  }
+
+  return g_file_delete (file, cancellable, error) ||
+         (error && *error &&
+          g_error_matches (*error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND) &&
+          (g_clear_error (error), TRUE));
+}
+
+static void
+clear_cache_thread (GTask *task, gpointer source, gpointer task_data,
+                    GCancellable *cancellable)
+{
+  g_autoptr(GFile) root = g_file_new_for_path (task_data);
+  g_autoptr(GError) error = NULL;
+  if (!delete_cache_tree (root, cancellable, &error))
+    g_task_return_error (task, g_steal_pointer (&error));
+  else
+    g_task_return_boolean (task, TRUE);
+  (void) source;
+}
+
+void
+spotifygtk_cache_clear_async (GCancellable *cancellable,
+                              GAsyncReadyCallback callback,
+                              gpointer user_data)
+{
+  ensure_initialised ();
+  cover_evict_to (0);
+
+  GTask *task = g_task_new (NULL, cancellable, callback, user_data);
+  gchar *root = g_build_filename (g_get_user_cache_dir (), "spotifygtk", NULL);
+  g_task_set_task_data (task, root, g_free);
+  g_task_run_in_thread (task, clear_cache_thread);
+  g_object_unref (task);
+}
+
+gboolean
+spotifygtk_cache_clear_finish (GAsyncResult *result, GError **error)
+{
+  g_return_val_if_fail (G_IS_TASK (result), FALSE);
+  return g_task_propagate_boolean (G_TASK (result), error);
 }
