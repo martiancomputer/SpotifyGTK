@@ -268,6 +268,14 @@ on_aggressive_filtering_toggled (GtkSwitch *sw, GParamSpec *pspec,
 }
 
 static void
+on_scroll_smoothness_changed (GtkRange *range, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_scroll_smoothness (
+    self->settings, (guint) (gtk_range_get_value (range) + 0.5));
+}
+
+static void
 on_caching_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
 {
   SpotifyGtkSettingsPage *self = user_data;
@@ -462,6 +470,25 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "loads it for the Now Playing panel and control "
                              "bar. None disables media loading completely.",
                              media_dd));
+
+  GtkWidget *scroll_scale = gtk_scale_new_with_range (
+    GTK_ORIENTATION_HORIZONTAL, 0.0, 100.0, 1.0);
+  gtk_range_set_value (
+    GTK_RANGE (scroll_scale),
+    spotifygtk_settings_get_scroll_smoothness (self->settings));
+  gtk_scale_set_draw_value (GTK_SCALE (scroll_scale), FALSE);
+  gtk_widget_set_size_request (scroll_scale, 220, -1);
+  gtk_scale_add_mark (GTK_SCALE (scroll_scale), 0.0, GTK_POS_BOTTOM, "Responsive");
+  gtk_scale_add_mark (GTK_SCALE (scroll_scale), 100.0, GTK_POS_BOTTOM, "Glide");
+  g_signal_connect (scroll_scale, "value-changed",
+                    G_CALLBACK (on_scroll_smoothness_changed), self);
+  gtk_box_append (GTK_BOX (interface_group),
+                  build_row ("Scroll smoothness",
+                             "Adjusts mouse-wheel easing and gravity together. "
+                             "Responsive stops sooner; Glide carries farther "
+                             "and settles more gradually. Touchpad motion is "
+                             "left unchanged.",
+                             scroll_scale));
 
   gtk_box_append (GTK_BOX (content), interface_group);
 

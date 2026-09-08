@@ -88,6 +88,12 @@ gboolean spotifygtk_settings_get_aggressive_media (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_aggressive_media (SpotifyGtkSettings *self,
                                                    gboolean enabled);
 
+/* Mouse-wheel animation character, 0 (short and responsive) through 100
+ * (longer, softer glide). Touchpad scrolling remains native. */
+guint spotifygtk_settings_get_scroll_smoothness (SpotifyGtkSettings *self);
+void  spotifygtk_settings_set_scroll_smoothness (SpotifyGtkSettings *self,
+                                                 guint value);
+
 /* Value understood by GSK_RENDERER, or NULL for AUTOMATIC/invalid values. */
 const gchar *spotifygtk_renderer_backend (SpotifyGtkRenderer renderer);
 

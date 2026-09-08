@@ -3,12 +3,11 @@
  */
 
 #include "smooth_scroll.h"
+#include "settings.h"
 #include "../log_verbose.h"
 
 #include <math.h>
 
-#define SMOOTH_SCROLL_STEP  118.0   /* px travelled per wheel notch */
-#define SMOOTH_SCROLL_EASE  0.30    /* fraction of the remaining gap, per 60Hz frame */
 #define SMOOTH_SCROLL_FRAME_US 16666.0  /* what that fraction is calibrated against */
 /* A long stall should catch up, not teleport: past this the easing saturates. */
 #define SMOOTH_SCROLL_MAX_FRAMES 6.0
@@ -42,6 +41,20 @@ typedef struct {
   gint64             max_frame_gap_us;
 #endif
 } SmoothScroll;
+
+/* The centre reproduces the tuned 118px/0.30 behaviour. Moving toward Glide
+ * increases the accumulated travel (wheel gravity) while lowering the easing
+ * fraction, so motion carries farther and sheds momentum more gradually. */
+static void
+scroll_character (gdouble *step, gdouble *ease)
+{
+  gdouble amount = spotifygtk_settings_get_scroll_smoothness (
+    spotifygtk_settings_get_default ()) / 100.0;
+  if (step)
+    *step = 88.0 + amount * 60.0;
+  if (ease)
+    *ease = 0.44 - amount * 0.28;
+}
 
 static void
 smooth_scroll_free (gpointer data)
@@ -255,7 +268,9 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
                       value, ss->target, remaining);
 #endif
 
-  gdouble factor = 1.0 - pow (1.0 - SMOOTH_SCROLL_EASE, frames);
+  gdouble ease = 0.30;
+  scroll_character (NULL, &ease);
+  gdouble factor = 1.0 - pow (1.0 - ease, frames);
 
   set_adjustment_value (ss, adj, value + remaining * factor);
   ss->last_set = gtk_adjustment_get_value (adj);
@@ -342,7 +357,9 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
   ss->events++;
 #endif
 
-  ss->target   = CLAMP (base + delta * SMOOTH_SCROLL_STEP, lower, upper);
+  gdouble step = 118.0;
+  scroll_character (&step, NULL);
+  ss->target   = CLAMP (base + delta * step, lower, upper);
   ss->last_set = value;
 #ifdef SPOTIFYGTK_VERBOSE
   SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
