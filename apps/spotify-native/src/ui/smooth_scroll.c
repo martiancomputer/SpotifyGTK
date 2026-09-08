@@ -11,6 +11,12 @@
 #define SMOOTH_SCROLL_FRAME_US 16666.0  /* what that fraction is calibrated against */
 /* A long stall should catch up, not teleport: past this the easing saturates. */
 #define SMOOTH_SCROLL_MAX_FRAMES 6.0
+/* List/grid adjustments may re-anchor to integral row pixels after every
+ * write. Easing asymptotically toward a fractional target can consequently
+ * hover a handful of pixels away forever. Eight pixels is below one tenth of
+ * a wheel step and visually indistinguishable from the exact landing point. */
+#define SMOOTH_SCROLL_STOP_EPSILON 8.0
+#define SMOOTH_SCROLL_STALL_FRAMES 3
 /* GtkListView adjusts its value by a few pixels while recycled rows above the
  * viewport are remeasured.  That is viewport anchoring, not another input
  * device taking ownership.  A wheel notch is 118px, so corrections below half
@@ -29,6 +35,8 @@ typedef struct {
   gdouble            observed_value;
   gint64             observed_us;
   gint               observed_direction;
+  gdouble            progress_value;
+  guint              stalled_frames;
   GtkAdjustment      *observed_adjustment; /* owned while handlers are live */
   gulong              value_handler;
   gulong              upper_handler;
@@ -220,12 +228,9 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   }
 
   gdouble remaining = ss->target - value;
-  /* GtkAdjustment may quantise a list/grid position to whole pixels. At one
-   * pixel remaining the eased step is smaller than that, gets rounded back to
-   * the same value, and the callback otherwise runs forever: value=9181,
-   * target=9182 was captured continuously for several seconds in telemetry.
-   * One pixel is visually exact, so land on the target and retire the tick. */
-  if (ABS (remaining) <= 1.0) {
+  /* GtkAdjustment and the virtualized view can quantise/re-anchor separately.
+   * Do not wait for an exact floating-point target that the view cannot hold. */
+  if (ABS (remaining) <= SMOOTH_SCROLL_STOP_EPSILON) {
     set_adjustment_value (ss, adj, ss->target);
 #ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "complete", ss->target);
@@ -261,7 +266,10 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   ss->frames++;
   if (frame_gap_us > ss->max_frame_gap_us)
     ss->max_frame_gap_us = frame_gap_us;
-  if (frame_gap_us > 25000)
+  /* 33-67ms gaps are already visible in the aggregate end record. Logging
+   * every such frame performs synchronous terminal/file work in the GTK loop
+   * and makes an overloaded gesture worse. Only record a true long stall. */
+  if (frame_gap_us > 100000)
     SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
                       " frame-gap=%.1fms frame=%u value=%.2f target=%.2f remaining=%.2f",
                       ss->gesture, frame_gap_us / 1000.0, ss->frames,
@@ -274,6 +282,25 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 
   set_adjustment_value (ss, adj, value + remaining * factor);
   ss->last_set = gtk_adjustment_get_value (adj);
+
+  /* A view can accept our fractional value and snap it back before the next
+   * tick, evading the immediate equality check below. Detect lack of progress
+   * across ticks as well and finish the gesture deterministically. */
+  if (ABS (value - ss->progress_value) < 0.5)
+    ss->stalled_frames++;
+  else
+    ss->stalled_frames = 0;
+  ss->progress_value = value;
+
+  if (ss->stalled_frames >= SMOOTH_SCROLL_STALL_FRAMES) {
+    set_adjustment_value (ss, adj, ss->target);
+    ss->last_set = gtk_adjustment_get_value (adj);
+#ifdef SPOTIFYGTK_VERBOSE
+    log_scroll_end (ss, "stalled", ss->last_set);
+#endif
+    ss->tick = 0;
+    return G_SOURCE_REMOVE;
+  }
 
   /* Be defensive about other quantisation steps too. If GTK accepted no
    * movement at all, another eased frame cannot improve the situation; snap
@@ -353,6 +380,8 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
     ss->frames = 0;
     ss->started_us = g_get_monotonic_time ();
     ss->max_frame_gap_us = 0;
+    ss->progress_value = value;
+    ss->stalled_frames = 0;
   }
   ss->events++;
 #endif

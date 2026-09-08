@@ -84,9 +84,6 @@ void     spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
 gboolean spotifygtk_settings_get_caching_enabled (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_caching_enabled (SpotifyGtkSettings *self,
                                                   gboolean enabled);
-gboolean spotifygtk_settings_get_aggressive_media (SpotifyGtkSettings *self);
-void     spotifygtk_settings_set_aggressive_media (SpotifyGtkSettings *self,
-                                                   gboolean enabled);
 
 /* Mouse-wheel animation character, 0 (short and responsive) through 100
  * (longer, softer glide). Touchpad scrolling remains native. */

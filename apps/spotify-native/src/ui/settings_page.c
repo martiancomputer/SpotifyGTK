@@ -24,7 +24,8 @@ struct _SpotifyGtkSettingsPage {
   GtkWidget          *account_name;
   GtkWidget          *account_id;
   GtkWidget          *account_plan;
-  GtkWidget          *aggressive_media_switch;
+  guint               scroll_commit_source;
+  guint               pending_scroll_smoothness;
 };
 
 /* The stored array and the filter must agree on how many bands there are. */
@@ -36,8 +37,25 @@ enum { LOG_OUT, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 static void
+spotifygtk_settings_page_dispose (GObject *object)
+{
+  SpotifyGtkSettingsPage *self = SPOTIFYGTK_SETTINGS_PAGE (object);
+
+  if (self->scroll_commit_source) {
+    g_source_remove (self->scroll_commit_source);
+    self->scroll_commit_source = 0;
+    spotifygtk_settings_set_scroll_smoothness (
+      self->settings, self->pending_scroll_smoothness);
+  }
+
+  G_OBJECT_CLASS (spotifygtk_settings_page_parent_class)->dispose (object);
+}
+
+static void
 spotifygtk_settings_page_class_init (SpotifyGtkSettingsPageClass *klass)
 {
+  G_OBJECT_CLASS (klass)->dispose = spotifygtk_settings_page_dispose;
+
   /* The page does not own the session or the credentials, so it asks rather
    * than acts -- the window owns both and does the actual sign-out. */
   signals[LOG_OUT] = g_signal_new ("log-out", G_TYPE_FROM_CLASS (klass),
@@ -267,12 +285,31 @@ on_aggressive_filtering_toggled (GtkSwitch *sw, GParamSpec *pspec,
   (void) pspec;
 }
 
+static gboolean
+commit_scroll_smoothness_cb (gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = SPOTIFYGTK_SETTINGS_PAGE (user_data);
+  self->scroll_commit_source = 0;
+  spotifygtk_settings_set_scroll_smoothness (
+    self->settings, self->pending_scroll_smoothness);
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_scroll_smoothness_changed (GtkRange *range, gpointer user_data)
 {
   SpotifyGtkSettingsPage *self = user_data;
-  spotifygtk_settings_set_scroll_smoothness (
-    self->settings, (guint) (gtk_range_get_value (range) + 0.5));
+  self->pending_scroll_smoothness =
+    (guint) (gtk_range_get_value (range) + 0.5);
+
+  /* value-changed fires for every pixel of a drag. Persisting there writes
+   * the complete settings file and broadcasts a global change on GTK's main
+   * thread, which makes the scale itself fall behind the pointer. Keep the
+   * visual interaction local and commit once the drag pauses. */
+  if (self->scroll_commit_source)
+    g_source_remove (self->scroll_commit_source);
+  self->scroll_commit_source = g_timeout_add_full (
+    G_PRIORITY_DEFAULT_IDLE, 120, commit_scroll_smoothness_cb, self, NULL);
 }
 
 static void
@@ -281,23 +318,8 @@ on_caching_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
   SpotifyGtkSettingsPage *self = user_data;
   gboolean enabled = gtk_switch_get_active (sw);
   spotifygtk_settings_set_caching_enabled (self->settings, enabled);
-  if (self->aggressive_media_switch)
-    gtk_widget_set_sensitive (self->aggressive_media_switch, enabled);
-  spotifygtk_cover_set_aggressive_mode (
-    spotifygtk_settings_get_aggressive_media (self->settings));
   if (!enabled)
     spotifygtk_cover_trim_to (0);
-  (void) pspec;
-}
-
-static void
-on_aggressive_media_toggled (GtkSwitch *sw, GParamSpec *pspec,
-                             gpointer user_data)
-{
-  SpotifyGtkSettingsPage *self = user_data;
-  gboolean enabled = gtk_switch_get_active (sw);
-  spotifygtk_settings_set_aggressive_media (self->settings, enabled);
-  spotifygtk_cover_set_aggressive_mode (enabled);
   (void) pspec;
 }
 
@@ -576,22 +598,6 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "disk for faster loading. Changes take effect "
                              "immediately.",
                              cache_switch));
-
-  self->aggressive_media_switch = gtk_switch_new ();
-  gtk_switch_set_active (
-    GTK_SWITCH (self->aggressive_media_switch),
-    spotifygtk_settings_get_aggressive_media (self->settings));
-  gtk_widget_set_sensitive (
-    self->aggressive_media_switch,
-    spotifygtk_settings_get_caching_enabled (self->settings));
-  g_signal_connect (self->aggressive_media_switch, "notify::active",
-                    G_CALLBACK (on_aggressive_media_toggled), self);
-  gtk_box_append (GTK_BOX (perf_group),
-                  build_row ("Aggressive media loading",
-                             "Loads cached artwork with higher bounded "
-                             "concurrency and releases decoded textures as "
-                             "soon as their widgets do. Requires caching.",
-                             self->aggressive_media_switch));
 
   GtkWidget *clear_cache = gtk_button_new_with_label ("Clear cache");
   gtk_widget_add_css_class (clear_cache, "pill-button");

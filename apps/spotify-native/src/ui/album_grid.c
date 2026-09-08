@@ -157,6 +157,9 @@ struct _SpotifyGtkAlbumGrid {
   gint64         last_scroll_us;
   gboolean       scrolling;
   GPtrArray     *bound_cards;   /* borrowed GtkWidget*, live bindings */
+  gboolean       window_valid;
+  guint          window_first;  /* inclusive model positions */
+  guint          window_last;   /* exclusive model positions */
 
   SpotifyGtkAlbumPinQuery pin_query;
   gpointer                pin_query_data;
@@ -175,6 +178,70 @@ static void cancel_and_unref (gpointer data);
 static void on_card_cover_loaded (GdkTexture *texture, gpointer user_data);
 static gboolean card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card);
 static gboolean on_grid_settled (gpointer user_data);
+
+static gboolean
+grid_model_window (SpotifyGtkAlbumGrid *self, guint *first_out, guint *last_out,
+                   gboolean *smooth_out)
+{
+  if (!self->scroller || !self->view || !self->vadj)
+    return FALSE;
+
+  GtkSelectionModel *selection = self->wrap
+    ? gtk_grid_view_get_model (GTK_GRID_VIEW (self->view))
+    : gtk_list_view_get_model (GTK_LIST_VIEW (self->view));
+  guint n = selection ? g_list_model_get_n_items (G_LIST_MODEL (selection)) : 0;
+  if (n == 0)
+    return FALSE;
+
+  gdouble page = gtk_adjustment_get_page_size (self->vadj);
+  gdouble upper = gtk_adjustment_get_upper (self->vadj);
+  if (page <= 0.0 || upper <= 0.0)
+    return FALSE;
+
+  gdouble value = gtk_adjustment_get_value (self->vadj);
+  gdouble destination = value;
+  gboolean smooth = spotifygtk_smooth_scroll_get_target (
+    GTK_SCROLLED_WINDOW (self->scroller), &destination);
+  destination = CLAMP (destination, gtk_adjustment_get_lower (self->vadj),
+                       MAX (gtk_adjustment_get_lower (self->vadj), upper - page));
+
+  if (self->wrap) {
+    guint columns = CLAMP (
+      (guint) MAX (1.0, floor ((gdouble) gtk_widget_get_width (self->scroller)
+                               / CARD_WIDTH)), 2, 8);
+    guint rows = (n + columns - 1) / columns;
+    /* During the first allocation GTK temporarily reports an upper bound only
+     * about one viewport high even though all model rows already exist.
+     * Dividing that provisional value by row count produced a fictitious
+     * 10-20px row, classified nearly all 290 albums as visible and queued 241
+     * covers. A row cannot physically be shorter than its 176px art plus the
+     * card's text/margin allowance; use that as the geometry trust floor. */
+    gdouble row_extent = MAX (upper / MAX (rows, 1u),
+                              (gdouble) (CARD_ART_PX + SHELF_TEXT_ALLOWANCE));
+    if (row_extent < 1.0)
+      return FALSE;
+
+    guint first_row = MIN ((guint) floor (destination / row_extent), rows - 1);
+    guint visible_rows = MAX (1u, (guint) ceil (page / row_extent));
+    guint start_row = first_row > 0 ? first_row - 1 : 0;
+    guint end_row = MIN (rows, first_row + visible_rows + 1);
+    *first_out = start_row * columns;
+    *last_out = MIN (n, end_row * columns);
+  } else {
+    /* Horizontal shelves remain one-dimensional. Their item extent comes from
+     * the adjustment itself, so margins and theme spacing are included. */
+    gdouble item_extent = upper / n;
+    if (item_extent < 1.0)
+      return FALSE;
+    guint first = MIN ((guint) floor (destination / item_extent), n - 1);
+    guint visible = MAX (1u, (guint) ceil (page / item_extent));
+    *first_out = first > 0 ? first - 1 : 0;
+    *last_out = MIN (n, first + visible + 1);
+  }
+  if (smooth_out)
+    *smooth_out = smooth;
+  return TRUE;
+}
 
 static void
 schedule_grid_settle (SpotifyGtkAlbumGrid *self)
@@ -241,8 +308,15 @@ card_retry_cover (GtkWidget *card)
    * from each bind keeps the worker pool and Vulkan texture uploads busy for
    * cards that have already left the viewport. The settle pass below retries
    * the small visible set once motion stops. */
-  if (grid && grid->scrolling)
-    return;
+  if (grid && grid->scrolling) {
+    guint first, last;
+    gboolean smooth = FALSE;
+    /* A touchpad/scrollbar has no stable destination, so retain the established
+     * settle behavior. An eased wheel does have one: permit only that bounded
+     * destination-row window to decode while motion is active. */
+    if (!grid_model_window (grid, &first, &last, &smooth) || !smooth)
+      return;
+  }
 
   GCancellable *cancel = g_cancellable_new ();
   g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
@@ -328,23 +402,23 @@ card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 {
   if (!self->scroller)
     return TRUE;                /* nothing to measure against */
-  if (!gtk_widget_get_mapped (card))
-    return FALSE;               /* an answer, not a missing one */
 
-  graphene_rect_t b;
-  if (!gtk_widget_compute_bounds (card, self->scroller, &b))
+  /* Do not use widget bounds here. GtkGridView initially binds a large pool
+   * of children before their final allocation, and those children temporarily
+   * share plausible-looking geometry.  The old bounds test consequently
+   * classified 241 of 257 bound Library cards as visible and decoded all of
+   * their covers.  Position and adjustment range are stable even while GTK is
+   * laying out/recycling that pool, so calculate the viewport in model space. */
+  gpointer encoded_position = g_object_get_data (G_OBJECT (card),
+                                                   "bound-position");
+  if (!encoded_position)
     return FALSE;
 
-  gdouble vw = gtk_widget_get_width (self->scroller);
-  gdouble vh = gtk_widget_get_height (self->scroller);
-  /* One row/column of look-ahead is enough with the disk cache. A whole
-   * viewport on every side tripled the live grid and produced the observed
-   * ~100 MB jump once widget and renderer references were counted. */
-  gdouble mx = self->wrap ? 0.0 : CARD_WIDTH;
-  gdouble my = self->wrap ? CARD_ART_PX + SHELF_TEXT_ALLOWANCE : 0.0;
-
-  return (b.origin.x + b.size.width)  > -mx && b.origin.x < (vw + mx)
-      && (b.origin.y + b.size.height) > -my && b.origin.y < (vh + my);
+  guint position = GPOINTER_TO_UINT (encoded_position) - 1;
+  guint first, last;
+  if (!grid_model_window (self, &first, &last, NULL))
+    return FALSE;
+  return position >= first && position < last;
 }
 
 static gboolean
@@ -358,6 +432,9 @@ on_grid_settled (gpointer user_data)
 
   self->settle_id = 0;
   self->scrolling = FALSE;
+
+  self->window_valid = grid_model_window (
+    self, &self->window_first, &self->window_last, NULL);
 
   for (guint i = 0; i < self->bound_cards->len; i++) {
     GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
@@ -386,6 +463,36 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
 
   self->scrolling = TRUE;
   self->last_scroll_us = g_get_monotonic_time ();
+
+  /* A wrapped grid needs a row destination, not a flat moving range. Update
+   * only when a wheel event changes that destination row; animation frames in
+   * between do no ownership work. Existing covers are released by the settle
+   * pass, after they have actually left the viewport. */
+  guint first, last;
+  gboolean smooth = FALSE;
+  if (grid_model_window (self, &first, &last, &smooth) && smooth &&
+      (!self->window_valid || first != self->window_first ||
+       last != self->window_last)) {
+    self->window_valid = TRUE;
+    self->window_first = first;
+    self->window_last = last;
+    for (guint i = 0; i < self->bound_cards->len; i++) {
+      GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+      gpointer encoded = g_object_get_data (G_OBJECT (card), "bound-position");
+      if (!encoded)
+        continue;
+      guint position = GPOINTER_TO_UINT (encoded) - 1;
+      if (position < first || position >= last)
+        continue;
+      SpotifyGtkAlbumItem *item = g_object_get_data (G_OBJECT (card),
+                                                      "bound-album-item");
+      if (item && item->pending && !item->resolving) {
+        item->resolving = TRUE;
+        g_signal_emit (self, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
+      }
+      card_retry_cover (card);
+    }
+  }
 
   /* Keep one inexpensive poll alive through the gesture. Removing and
    * allocating a new GSource for every smooth-scroll frame caused hundreds of
@@ -626,6 +733,10 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     return;
 
   card_apply_item (self, card, item);
+  guint position = gtk_list_item_get_position (list_item);
+  g_object_set_data (G_OBJECT (card), "bound-position",
+                     position == GTK_INVALID_LIST_POSITION
+                       ? NULL : GUINT_TO_POINTER (position + 1));
   g_object_set_data_full (G_OBJECT (card), "bound-album-item",
                           g_object_ref (item), g_object_unref);
 
@@ -699,6 +810,7 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
     return;
 
   g_object_set_data (G_OBJECT (card), "bound-album-item", NULL);
+  g_object_set_data (G_OBJECT (card), "bound-position", NULL);
 
   /* Clearing the data fires cancel_and_unref, stopping an in-flight decode. */
   g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);

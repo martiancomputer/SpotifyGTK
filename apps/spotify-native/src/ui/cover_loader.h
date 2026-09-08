@@ -127,7 +127,6 @@ gboolean spotifygtk_cache_clear_finish (GAsyncResult        *result,
                                         GError             **error);
 
 /* Apply a changed performance preference to the already-live loader. */
-void spotifygtk_cover_set_aggressive_mode (gboolean enabled);
 
 void spotifygtk_cover_log_stats (const gchar *context);
 

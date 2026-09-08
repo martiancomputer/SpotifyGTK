@@ -58,6 +58,8 @@
 #define LOADING_PROGRESS_FINISH_US 240000.0
 #define LOADING_PROGRESS_HOLD_US 100000.0
 #define LOADING_PROGRESS_FADE_US 260000.0
+#define MPRIS_BUS_NAME "org.mpris.MediaPlayer2.spotifygtk"
+#define MPRIS_OBJECT_PATH "/org/mpris/MediaPlayer2"
 
 struct _SpotifyGtkNativeWindow {
   GtkApplicationWindow parent_instance;
@@ -75,6 +77,13 @@ struct _SpotifyGtkNativeWindow {
   gboolean        loading_active;
   gboolean        loading_finishing;
   gboolean        loading_fading;
+
+  /* MPRIS is hosted by the window because this is where native playback
+   * metadata, queue policy and transport state meet. */
+  guint            mpris_owner_id;
+  GDBusConnection *mpris_connection;
+  guint            mpris_root_registration;
+  guint            mpris_player_registration;
 
   /* Sidebar */
   SpotifyGtkSidebar *sidebar;
@@ -96,6 +105,7 @@ struct _SpotifyGtkNativeWindow {
 
   /* Pages */
   GtkStack *page_stack;
+  GtkWidget *window_title;       /* centered header label, borrowed */
   /* Every track list wired through wire_track_list(), so a liked mark can be
    * fanned out to all of them: one track can be on screen in more than one
    * list at a time. Borrowed -- the lists belong to their pages. */
@@ -294,6 +304,12 @@ static gboolean dev_nav_probe (gpointer data);
 static void navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
                                  const gchar *title, const gchar *kind);
 static void spotifygtk_native_window_collapse_queue (SpotifyGtkNativeWindow *self);
+static void mpris_start (SpotifyGtkNativeWindow *self);
+static void mpris_emit_root_changed (SpotifyGtkNativeWindow *self,
+                                     const gchar *property);
+static void mpris_emit_player_changed (SpotifyGtkNativeWindow *self,
+                                       const gchar *property);
+static void mpris_emit_seeked (SpotifyGtkNativeWindow *self);
 
 static gboolean
 advance_loading_bar (GtkWidget *widget, GdkFrameClock *clock,
@@ -989,6 +1005,8 @@ refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
                        (opos + 1 < (gint) self->order->len ||
                         self->repeat != SPOTIFYGTK_REPEAT_OFF));
   spotifygtk_playback_bar_set_skip_sensitive (self->playback_bar, can_prev, can_next);
+  mpris_emit_player_changed (self, "CanGoPrevious");
+  mpris_emit_player_changed (self, "CanGoNext");
 
   /* Up next = user-queued tracks first, then the tail of the context, capped
    * to a small window. The Now Playing queue is a plain GtkListBox (one
@@ -2017,6 +2035,7 @@ on_shuffle_mode_changed (SpotifyGtkPlaybackBar *bar, guint mode,
                                     self->shuffle);
   refresh_transport_and_queue (self);
   broadcast_playing_uri (self);
+  mpris_emit_player_changed (self, "Shuffle");
 }
 
 static void
@@ -2028,6 +2047,7 @@ on_repeat_changed (SpotifyGtkPlaybackBar *bar, guint mode, gpointer user_data)
   self->repeat = (SpotifyGtkRepeatMode) mode;
   spotifygtk_settings_set_repeat (spotifygtk_settings_get_default (), mode);
   refresh_transport_and_queue (self);   /* repeat-all makes Next reachable at the end */
+  mpris_emit_player_changed (self, "LoopStatus");
 }
 
 static void
@@ -3306,6 +3326,7 @@ on_volume_changed (SpotifyGtkPlaybackBar *bar, gint percent, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   spotifygtk_player_service_set_volume (self->player, percent);
+  mpris_emit_player_changed (self, "Volume");
   (void) bar;
 }
 
@@ -3325,6 +3346,7 @@ on_seek_requested (SpotifyGtkPlaybackBar *bar, gint64 position_ms, gpointer user
   self->last_position_ms = MAX (position_ms, 0);
   spotifygtk_player_service_seek (self->player, position_ms);
   broadcast_playing_uri (self);
+  mpris_emit_seeked (self);
   (void) bar;
 }
 
@@ -3342,6 +3364,359 @@ on_prev_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
   SpotifyGtkNativeWindow *self = user_data;
   advance_prev (self);
   (void) bar;
+}
+
+/* ── MPRIS2 ───────────────────────────────────────────────────────────────
+ *
+ * Keep this in window.c: the window already owns the play context, current
+ * display metadata, repeat/shuffle policy and player service. Exporting a
+ * second state model would create exactly the drift MPRIS is meant to avoid.
+ */
+static const gchar mpris_xml[] =
+  "<node>"
+  " <interface name='org.mpris.MediaPlayer2'>"
+  "  <method name='Raise'/><method name='Quit'/>"
+  "  <property name='CanQuit' type='b' access='read'/>"
+  "  <property name='CanRaise' type='b' access='read'/>"
+  "  <property name='HasTrackList' type='b' access='read'/>"
+  "  <property name='Identity' type='s' access='read'/>"
+  "  <property name='DesktopEntry' type='s' access='read'/>"
+  "  <property name='SupportedUriSchemes' type='as' access='read'/>"
+  "  <property name='SupportedMimeTypes' type='as' access='read'/>"
+  " </interface>"
+  " <interface name='org.mpris.MediaPlayer2.Player'>"
+  "  <method name='Next'/><method name='Previous'/><method name='Pause'/>"
+  "  <method name='PlayPause'/><method name='Stop'/><method name='Play'/>"
+  "  <method name='Seek'><arg direction='in' type='x' name='Offset'/></method>"
+  "  <method name='SetPosition'>"
+  "   <arg direction='in' type='o' name='TrackId'/>"
+  "   <arg direction='in' type='x' name='Position'/>"
+  "  </method>"
+  "  <method name='OpenUri'><arg direction='in' type='s' name='Uri'/></method>"
+  "  <signal name='Seeked'><arg type='x' name='Position'/></signal>"
+  "  <property name='PlaybackStatus' type='s' access='read'/>"
+  "  <property name='LoopStatus' type='s' access='readwrite'/>"
+  "  <property name='Rate' type='d' access='readwrite'/>"
+  "  <property name='Shuffle' type='b' access='readwrite'/>"
+  "  <property name='Metadata' type='a{sv}' access='read'/>"
+  "  <property name='Volume' type='d' access='readwrite'/>"
+  "  <property name='Position' type='x' access='read'/>"
+  "  <property name='MinimumRate' type='d' access='read'/>"
+  "  <property name='MaximumRate' type='d' access='read'/>"
+  "  <property name='CanGoNext' type='b' access='read'/>"
+  "  <property name='CanGoPrevious' type='b' access='read'/>"
+  "  <property name='CanPlay' type='b' access='read'/>"
+  "  <property name='CanPause' type='b' access='read'/>"
+  "  <property name='CanSeek' type='b' access='read'/>"
+  "  <property name='CanControl' type='b' access='read'/>"
+  " </interface>"
+  "</node>";
+
+static GDBusNodeInfo *mpris_node_info;
+
+static const SpotifyNativeTrack *
+mpris_current_track (SpotifyGtkNativeWindow *self)
+{
+  return self->current_track_uri && self->display_tracks
+    ? g_hash_table_lookup (self->display_tracks, self->current_track_uri) : NULL;
+}
+
+static gchar *
+mpris_track_path (const gchar *uri)
+{
+  if (!uri || !*uri)
+    return g_strdup ("/org/mpris/MediaPlayer2/Track/NoTrack");
+  GString *path = g_string_new ("/org/mpris/MediaPlayer2/Track/");
+  for (const gchar *p = uri; *p; p++)
+    g_string_append_c (path, g_ascii_isalnum (*p) ? *p : '_');
+  return g_string_free (path, FALSE);
+}
+
+static GVariant *
+mpris_metadata (SpotifyGtkNativeWindow *self)
+{
+  GVariantBuilder metadata;
+  g_variant_builder_init (&metadata, G_VARIANT_TYPE ("a{sv}"));
+  const SpotifyNativeTrack *track = mpris_current_track (self);
+  g_autofree gchar *track_path = mpris_track_path (track ? track->uri : NULL);
+  g_variant_builder_add (&metadata, "{sv}", "mpris:trackid",
+                         g_variant_new_object_path (track_path));
+  if (track) {
+    g_variant_builder_add (&metadata, "{sv}", "mpris:length",
+                           g_variant_new_int64 (MAX (track->duration_ms, 0) * 1000));
+    g_variant_builder_add (&metadata, "{sv}", "xesam:url",
+                           g_variant_new_string (track->uri ? track->uri : ""));
+    if (track->album)
+      g_variant_builder_add (&metadata, "{sv}", "xesam:album",
+                             g_variant_new_string (track->album));
+    if (track->cover_id && *track->cover_id) {
+      g_autofree gchar *art = g_strdup_printf ("https://i.scdn.co/image/%s",
+                                               track->cover_id);
+      g_variant_builder_add (&metadata, "{sv}", "mpris:artUrl",
+                             g_variant_new_string (art));
+    }
+  }
+  return g_variant_builder_end (&metadata);
+}
+
+static gboolean
+mpris_can_next (SpotifyGtkNativeWindow *self)
+{
+  gint pos = self->order_pos >= 0 ? self->order_pos
+                                  : order_pos_of (self, self->context_index);
+  return !g_queue_is_empty (self->user_queue) ||
+    (self->order && pos >= 0 &&
+     (pos + 1 < (gint) self->order->len || self->repeat != SPOTIFYGTK_REPEAT_OFF));
+}
+
+static gboolean
+mpris_can_previous (SpotifyGtkNativeWindow *self)
+{
+  gint pos = self->order_pos >= 0 ? self->order_pos
+                                  : order_pos_of (self, self->context_index);
+  return self->order && (pos > 0 ||
+    (self->repeat == SPOTIFYGTK_REPEAT_ALL && self->order->len > 0));
+}
+
+static const gchar *
+mpris_playback_status (SpotifyGtkNativeWindow *self)
+{
+  SpotifyNativePlayerState state = spotifygtk_player_service_get_state (self->player);
+  if (state == SPOTIFYGTK_PLAYER_PLAYING)
+    return "Playing";
+  if (state == SPOTIFYGTK_PLAYER_PAUSED)
+    return "Paused";
+  return "Stopped";
+}
+
+static GVariant *
+mpris_get_property (GDBusConnection *connection, const gchar *sender,
+                    const gchar *object_path, const gchar *interface_name,
+                    const gchar *property_name, GError **error,
+                    gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) connection; (void) sender; (void) object_path; (void) error;
+  if (g_str_equal (interface_name, "org.mpris.MediaPlayer2")) {
+    if (g_str_equal (property_name, "CanQuit")) return g_variant_new_boolean (TRUE);
+    if (g_str_equal (property_name, "CanRaise")) return g_variant_new_boolean (TRUE);
+    if (g_str_equal (property_name, "HasTrackList")) return g_variant_new_boolean (FALSE);
+    if (g_str_equal (property_name, "Identity")) {
+      const SpotifyNativeTrack *track = mpris_current_track (self);
+      return g_variant_new_string (track && track->name && *track->name
+                                    ? track->name : "SpotifyGTK");
+    }
+    if (g_str_equal (property_name, "DesktopEntry")) return g_variant_new_string ("com.github.spotifygtk.SpotifyNative");
+    if (g_str_equal (property_name, "SupportedUriSchemes"))
+      return g_variant_new_strv (NULL, 0);
+    if (g_str_equal (property_name, "SupportedMimeTypes"))
+      return g_variant_new_strv (NULL, 0);
+  } else if (g_str_equal (interface_name, "org.mpris.MediaPlayer2.Player")) {
+    if (g_str_equal (property_name, "PlaybackStatus")) return g_variant_new_string (mpris_playback_status (self));
+    if (g_str_equal (property_name, "LoopStatus")) return g_variant_new_string (self->repeat == SPOTIFYGTK_REPEAT_ONE ? "Track" : self->repeat == SPOTIFYGTK_REPEAT_ALL ? "Playlist" : "None");
+    if (g_str_equal (property_name, "Rate")) return g_variant_new_double (1.0);
+    if (g_str_equal (property_name, "Shuffle")) return g_variant_new_boolean (self->shuffle);
+    if (g_str_equal (property_name, "Metadata")) return mpris_metadata (self);
+    if (g_str_equal (property_name, "Volume")) return g_variant_new_double (spotifygtk_player_service_get_volume (self->player) / 100.0);
+    if (g_str_equal (property_name, "Position")) return g_variant_new_int64 (MAX (self->last_position_ms, 0) * 1000);
+    if (g_str_equal (property_name, "MinimumRate") || g_str_equal (property_name, "MaximumRate")) return g_variant_new_double (1.0);
+    if (g_str_equal (property_name, "CanGoNext")) return g_variant_new_boolean (mpris_can_next (self));
+    if (g_str_equal (property_name, "CanGoPrevious")) return g_variant_new_boolean (mpris_can_previous (self));
+    if (g_str_equal (property_name, "CanPlay")) return g_variant_new_boolean (self->current_track_uri != NULL);
+    if (g_str_equal (property_name, "CanPause")) return g_variant_new_boolean (self->current_track_uri != NULL);
+    if (g_str_equal (property_name, "CanSeek")) return g_variant_new_boolean (self->current_track_uri != NULL && self->current_track_duration_ms > 0);
+    if (g_str_equal (property_name, "CanControl")) return g_variant_new_boolean (TRUE);
+  }
+  return NULL;
+}
+
+static gboolean
+mpris_set_property (GDBusConnection *connection, const gchar *sender,
+                    const gchar *object_path, const gchar *interface_name,
+                    const gchar *property_name, GVariant *value, GError **error,
+                    gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) connection; (void) sender; (void) object_path;
+  if (!g_str_equal (interface_name, "org.mpris.MediaPlayer2.Player"))
+    return FALSE;
+  if (g_str_equal (property_name, "Volume")) {
+    gint percent = (gint) CLAMP (g_variant_get_double (value) * 100.0, 0.0, 100.0);
+    spotifygtk_player_service_set_volume (self->player, percent);
+    spotifygtk_playback_bar_set_volume (self->playback_bar, percent);
+    mpris_emit_player_changed (self, "Volume");
+    return TRUE;
+  }
+  if (g_str_equal (property_name, "Shuffle")) {
+    gboolean enabled = g_variant_get_boolean (value);
+    self->shuffle = enabled;
+    self->smart_shuffle = FALSE;
+    self->server_order = FALSE;
+    rebuild_order (self, self->context_index);
+    spotifygtk_settings_set_shuffle (spotifygtk_settings_get_default (), enabled);
+    spotifygtk_playback_bar_set_modes (self->playback_bar,
+      enabled ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF, self->repeat);
+    refresh_transport_and_queue (self);
+    mpris_emit_player_changed (self, "Shuffle");
+    return TRUE;
+  }
+  if (g_str_equal (property_name, "LoopStatus")) {
+    const gchar *loop = g_variant_get_string (value, NULL);
+    if (g_str_equal (loop, "None")) self->repeat = SPOTIFYGTK_REPEAT_OFF;
+    else if (g_str_equal (loop, "Playlist")) self->repeat = SPOTIFYGTK_REPEAT_ALL;
+    else if (g_str_equal (loop, "Track")) self->repeat = SPOTIFYGTK_REPEAT_ONE;
+    else { g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "Unknown LoopStatus"); return FALSE; }
+    spotifygtk_settings_set_repeat (spotifygtk_settings_get_default (), self->repeat);
+    spotifygtk_playback_bar_set_modes (self->playback_bar,
+      self->smart_shuffle ? SPOTIFYGTK_SHUFFLE_SMART : self->shuffle ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF,
+      self->repeat);
+    refresh_transport_and_queue (self);
+    mpris_emit_player_changed (self, "LoopStatus");
+    return TRUE;
+  }
+  if (g_str_equal (property_name, "Rate") && g_variant_get_double (value) == 1.0)
+    return TRUE;
+  g_set_error (error, G_DBUS_ERROR, G_DBUS_ERROR_NOT_SUPPORTED,
+               "Property %s cannot be changed", property_name);
+  return FALSE;
+}
+
+static void
+mpris_method_call (GDBusConnection *connection, const gchar *sender,
+                   const gchar *object_path, const gchar *interface_name,
+                   const gchar *method_name, GVariant *parameters,
+                   GDBusMethodInvocation *invocation, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) connection; (void) sender; (void) object_path;
+  if (g_str_equal (interface_name, "org.mpris.MediaPlayer2")) {
+    if (g_str_equal (method_name, "Raise")) gtk_window_present (GTK_WINDOW (self));
+    else if (g_str_equal (method_name, "Quit")) g_application_quit (g_application_get_default ());
+    g_dbus_method_invocation_return_value (invocation, NULL);
+    return;
+  }
+  if (g_str_equal (method_name, "Next")) advance_next (self, FALSE);
+  else if (g_str_equal (method_name, "Previous")) advance_prev (self);
+  else if (g_str_equal (method_name, "Pause")) on_pause_clicked (NULL, self);
+  else if (g_str_equal (method_name, "Play")) on_play_clicked (NULL, self);
+  else if (g_str_equal (method_name, "PlayPause")) {
+    if (g_str_equal (mpris_playback_status (self), "Playing")) on_pause_clicked (NULL, self);
+    else on_play_clicked (NULL, self);
+  } else if (g_str_equal (method_name, "Stop")) {
+    spotifygtk_player_service_stop (self->player);
+  } else if (g_str_equal (method_name, "Seek")) {
+    gint64 offset_us; g_variant_get (parameters, "(x)", &offset_us);
+    self->last_position_ms = CLAMP (self->last_position_ms + offset_us / 1000,
+                                    (gint64) 0, self->current_track_duration_ms);
+    spotifygtk_player_service_seek (self->player, self->last_position_ms);
+    mpris_emit_seeked (self);
+  } else if (g_str_equal (method_name, "SetPosition")) {
+    const gchar *track_path; gint64 position_us;
+    g_variant_get (parameters, "(&ox)", &track_path, &position_us);
+    g_autofree gchar *current_path = mpris_track_path (self->current_track_uri);
+    if (g_str_equal (track_path, current_path)) {
+      self->last_position_ms = CLAMP (position_us / 1000, (gint64) 0,
+                                      self->current_track_duration_ms);
+      spotifygtk_player_service_seek (self->player, self->last_position_ms);
+      mpris_emit_seeked (self);
+    }
+  } else if (g_str_equal (method_name, "OpenUri")) {
+    g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
+      G_DBUS_ERROR_NOT_SUPPORTED, "Opening an arbitrary URI is not supported");
+    return;
+  }
+  g_dbus_method_invocation_return_value (invocation, NULL);
+}
+
+static const GDBusInterfaceVTable mpris_vtable = {
+  mpris_method_call, mpris_get_property, mpris_set_property, { 0 }
+};
+
+static void
+mpris_emit_root_changed (SpotifyGtkNativeWindow *self, const gchar *property)
+{
+  if (!self->mpris_connection || !self->mpris_root_registration)
+    return;
+  GVariantBuilder changed, invalidated;
+  g_variant_builder_init (&changed, G_VARIANT_TYPE ("a{sv}"));
+  g_variant_builder_init (&invalidated, G_VARIANT_TYPE ("as"));
+  GVariant *value = mpris_get_property (self->mpris_connection, NULL,
+    MPRIS_OBJECT_PATH, "org.mpris.MediaPlayer2", property, NULL, self);
+  if (value)
+    g_variant_builder_add (&changed, "{sv}", property, value);
+  g_dbus_connection_emit_signal (self->mpris_connection, NULL, MPRIS_OBJECT_PATH,
+    "org.freedesktop.DBus.Properties", "PropertiesChanged",
+    g_variant_new ("(sa{sv}as)", "org.mpris.MediaPlayer2", &changed,
+                   &invalidated), NULL);
+}
+
+static void
+mpris_emit_player_changed (SpotifyGtkNativeWindow *self, const gchar *property)
+{
+  if (!self->mpris_connection || !self->mpris_player_registration)
+    return;
+  GVariantBuilder changed, invalidated;
+  g_variant_builder_init (&changed, G_VARIANT_TYPE ("a{sv}"));
+  g_variant_builder_init (&invalidated, G_VARIANT_TYPE ("as"));
+  GVariant *value = mpris_get_property (self->mpris_connection, NULL,
+    MPRIS_OBJECT_PATH, "org.mpris.MediaPlayer2.Player", property, NULL, self);
+  if (value)
+    g_variant_builder_add (&changed, "{sv}", property, value);
+  g_dbus_connection_emit_signal (self->mpris_connection, NULL, MPRIS_OBJECT_PATH,
+    "org.freedesktop.DBus.Properties", "PropertiesChanged",
+    g_variant_new ("(sa{sv}as)", "org.mpris.MediaPlayer2.Player", &changed,
+                   &invalidated), NULL);
+}
+
+static void
+mpris_emit_seeked (SpotifyGtkNativeWindow *self)
+{
+  if (self->mpris_connection && self->mpris_player_registration)
+    g_dbus_connection_emit_signal (self->mpris_connection, NULL,
+      MPRIS_OBJECT_PATH, "org.mpris.MediaPlayer2.Player", "Seeked",
+      g_variant_new ("(x)", MAX (self->last_position_ms, 0) * 1000), NULL);
+}
+
+static void
+mpris_bus_acquired (GDBusConnection *connection, const gchar *name,
+                    gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  g_set_object (&self->mpris_connection, connection);
+  GError *error = NULL;
+  self->mpris_root_registration = g_dbus_connection_register_object (
+    connection, MPRIS_OBJECT_PATH, mpris_node_info->interfaces[0],
+    &mpris_vtable, self, NULL, &error);
+  if (!self->mpris_root_registration) {
+    g_warning ("MPRIS root registration failed: %s", error->message);
+    g_clear_error (&error);
+  }
+  self->mpris_player_registration = g_dbus_connection_register_object (
+    connection, MPRIS_OBJECT_PATH, mpris_node_info->interfaces[1],
+    &mpris_vtable, self, NULL, &error);
+  if (!self->mpris_player_registration) {
+    g_warning ("MPRIS player registration failed: %s", error->message);
+    g_clear_error (&error);
+  }
+  (void) name;
+}
+
+static void
+mpris_start (SpotifyGtkNativeWindow *self)
+{
+  if (self->mpris_owner_id)
+    return;
+  if (!mpris_node_info) {
+    GError *error = NULL;
+    mpris_node_info = g_dbus_node_info_new_for_xml (mpris_xml, &error);
+    if (!mpris_node_info) {
+      g_warning ("MPRIS introspection parse failed: %s", error->message);
+      g_clear_error (&error);
+      return;
+    }
+  }
+  self->mpris_owner_id = g_bus_own_name (G_BUS_TYPE_SESSION, MPRIS_BUS_NAME,
+    G_BUS_NAME_OWNER_FLAGS_NONE, mpris_bus_acquired, NULL, NULL, self, NULL);
 }
 
 /*
@@ -3849,6 +4224,10 @@ on_player_state_changed (SpotifyNativePlayerService *player,
                           state == SPOTIFYGTK_PLAYER_CONNECTING);
 
   spotifygtk_playback_bar_set_playing (self->playback_bar, is_playing);
+  mpris_emit_player_changed (self, "PlaybackStatus");
+  mpris_emit_player_changed (self, "CanPlay");
+  mpris_emit_player_changed (self, "CanPause");
+  mpris_emit_player_changed (self, "CanSeek");
 
   /* So the equaliser follows the track across pages rather than only appearing
    * on the one that started it. */
@@ -4297,6 +4676,17 @@ show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
   const gchar *artists = track->artists ? track->artists : "";
   const gchar *album   = track->album   ? track->album   : "";
 
+  /* Window managers and task-manager media popups use the native window
+   * title as their compact player heading. A permanent "SpotifyGTK" heading
+   * duplicated the player identity and consumed the space above MPRIS
+   * transport controls. Let the current song be the useful title while the
+   * desktop entry continues to identify the application. */
+  gtk_window_set_title (GTK_WINDOW (self), name);
+  if (self->window_title) {
+    gtk_label_set_text (GTK_LABEL (self->window_title), name);
+    gtk_widget_set_tooltip_text (self->window_title, name);
+  }
+
   spotifygtk_playback_bar_set_track (self->playback_bar, name, artists);
   /* The bar's heart follows whatever is playing. */
   spotifygtk_playback_bar_set_liked (self->playback_bar,
@@ -4306,6 +4696,8 @@ show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
 
   spotifygtk_playback_bar_set_cover (self->playback_bar, track->cover_id);
   spotifygtk_now_playing_panel_set_cover (self->now_playing_panel, track->cover_id);
+  mpris_emit_root_changed (self, "Identity");
+  mpris_emit_player_changed (self, "Metadata");
 }
 
 /* The sink reached a different track. Only now is it true to say so. */
@@ -4947,7 +5339,13 @@ spotifygtk_native_window_constructed (GObject *object)
 
   GtkWidget *title = gtk_label_new ("SpotifyGTK");
   gtk_widget_add_css_class (title, "title");
+  gtk_label_set_ellipsize (GTK_LABEL (title), PANGO_ELLIPSIZE_END);
+  /* Ellipsize gives this a tiny minimum width, while the natural width remains
+   * the complete title. It can therefore use every available header pixel
+   * without a long song increasing the window's minimum size. */
+  gtk_widget_set_hexpand (title, TRUE);
   gtk_header_bar_set_title_widget (GTK_HEADER_BAR (header), title);
+  self->window_title = title;
 
   gtk_window_set_titlebar (GTK_WINDOW (self), header);
 
@@ -5188,6 +5586,7 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_overlay_add_overlay (GTK_OVERLAY (shell), self->login_gate);
 
   gtk_window_set_child (GTK_WINDOW (self), shell);
+  mpris_start (self);
 
   self->queue_expanded = TRUE;
 
@@ -5234,6 +5633,20 @@ static void
 spotifygtk_native_window_dispose (GObject *object)
 {
   SpotifyGtkNativeWindow *self = SPOTIFYGTK_NATIVE_WINDOW (object);
+
+  if (self->mpris_connection && self->mpris_root_registration)
+    g_dbus_connection_unregister_object (self->mpris_connection,
+                                         self->mpris_root_registration);
+  if (self->mpris_connection && self->mpris_player_registration)
+    g_dbus_connection_unregister_object (self->mpris_connection,
+                                         self->mpris_player_registration);
+  self->mpris_root_registration = 0;
+  self->mpris_player_registration = 0;
+  if (self->mpris_owner_id) {
+    g_bus_unown_name (self->mpris_owner_id);
+    self->mpris_owner_id = 0;
+  }
+  g_clear_object (&self->mpris_connection);
 
   g_clear_handle_id (&self->collection_change_id, g_source_remove);
   g_clear_handle_id (&self->dev_nav_probe_id, g_source_remove);

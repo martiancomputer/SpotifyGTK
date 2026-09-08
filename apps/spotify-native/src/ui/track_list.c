@@ -134,6 +134,8 @@ update_velocity_overscan (gpointer user_data)
     (gdouble) (OVERSCAN_MAX_AHEAD - OVERSCAN_BASE_AHEAD));
   guint ahead = OVERSCAN_BASE_AHEAD + velocity_rows;
   gboolean upwards = self->scroll_velocity < 0;
+  guint destination_first = visible_first;
+  guint destination_last = visible_last;
 
   /* Wheel scrolling is deliberately eased, so adjustment deltas describe the
    * animation's current slow frame rather than where the gesture is going.
@@ -148,22 +150,27 @@ update_velocity_overscan (gpointer user_data)
       GTK_SCROLLED_WINDOW (self->scroller), &smooth_target);
   if (smooth_active) {
     gdouble target_delta = smooth_target - value;
-    guint target_rows = (guint) ceil (fabs (target_delta) / row_extent);
-    ahead = MIN (MAX (ahead, OVERSCAN_BASE_AHEAD + target_rows),
-                 OVERSCAN_MAX_AHEAD);
+    destination_first = MIN ((guint) (smooth_target / row_extent), n - 1);
+    destination_last = MIN (
+      destination_first + (visible_last - visible_first), n - 1);
+    /* The destination, not every row between here and there, is what must be
+     * warm when the eased wheel animation lands. Growing one contiguous range
+     * from the current viewport to the target decoded hundreds of transient
+     * covers during a long gesture and permanently raised allocator/renderer
+     * high-water memory. */
+    ahead = OVERSCAN_BASE_AHEAD;
     if (fabs (target_delta) > 0.5)
       upwards = target_delta < 0.0;
   }
 
-  guint first = visible_first;
-  guint last = visible_last;
+  guint first = smooth_active ? destination_first : visible_first;
+  guint last = smooth_active ? destination_last : visible_last;
   if (upwards) {
-    first = visible_first > ahead ? visible_first - ahead : 0;
-    last = MIN (visible_last + OVERSCAN_TRAILING, n - 1);
+    first = first > ahead ? first - ahead : 0;
+    last = MIN (last + OVERSCAN_TRAILING, n - 1);
   } else {
-    first = visible_first > OVERSCAN_TRAILING
-      ? visible_first - OVERSCAN_TRAILING : 0;
-    last = MIN (visible_last + ahead, n - 1);
+    first = first > OVERSCAN_TRAILING ? first - OVERSCAN_TRAILING : 0;
+    last = MIN (last + ahead, n - 1);
   }
 
   if (self->overscan_valid && self->overscan_first == first &&
@@ -181,7 +188,15 @@ update_velocity_overscan (gpointer user_data)
     SpotifyGtkTrackRow *row = g_ptr_array_index (self->bound_rows, i);
     guint position = GPOINTER_TO_UINT (
       g_object_get_data (G_OBJECT (row), "row-position"));
-    gboolean retain = position_in_overscan (self, position);
+    gboolean destination = position_in_overscan (self, position);
+    /* During eased wheel motion, keep artwork that is already on the current
+     * viewport until it leaves, but never start a decode merely because a
+     * transient row passed under the viewport. New work belongs exclusively
+     * to the landing window computed above. */
+    gboolean current_and_shown = smooth_active &&
+      position >= visible_first && position <= visible_last &&
+      spotifygtk_track_row_has_cover (row);
+    gboolean retain = destination || current_and_shown;
     guint previous = GPOINTER_TO_UINT (
       g_object_get_data (G_OBJECT (row), "overscan-retained"));
     if (previous == (retain ? 2u : 1u))
@@ -189,9 +204,9 @@ update_velocity_overscan (gpointer user_data)
     g_object_set_data (G_OBJECT (row), "overscan-retained",
                        GUINT_TO_POINTER (retain ? 2u : 1u));
     spotifygtk_track_row_set_cover_hold (row, !retain);
-    if (retain)
+    if (destination)
       spotifygtk_track_row_retry_cover (row);
-    else
+    else if (!retain)
       spotifygtk_track_row_release_cover (row);
   }
 

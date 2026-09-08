@@ -130,7 +130,7 @@ decode_png_c (const guchar *data, gsize len,
  * the cache unbounded. That is the *compressed JPEG* size; GdkTexture holds
  * the *decoded* pixels, 640x640x4 = 1.6 MB each. Scrolling a library decoded
  * ~90 of them and the process doubled in RSS (117 -> 280 MB). Now capped and
- * evicted oldest-first.
+ * evicted least-recently-used first.
  *
  * Eviction is safe while a cover is on screen: GtkPicture holds its own ref,
  * so dropping the cache entry only means a later request re-fetches it, not
@@ -170,7 +170,7 @@ decode_png_c (const guchar *data, gsize len,
  * this loader creates. */
 static gsize cover_cache_bytes = 0;
 
-/* Evict oldest-first until the cache fits in `budget`. Shared by the insert
+/* Evict least-recently-used entries until the cache fits in `budget`. Shared by the insert
  * path and by spotifygtk_cover_trim_to(). */
 static gsize
 texture_bytes (GdkTexture *texture)
@@ -184,23 +184,29 @@ texture_bytes (GdkTexture *texture)
 
 static GHashTable *cover_cache = NULL;
 
-/* Insertion order of the ids in cover_cache, oldest at the head. Kept in
+/* Recency order of the ids in cover_cache, least recent at the head. Kept in
  * step with the table so eviction is O(1) at the front. */
 static GQueue cover_order = G_QUEUE_INIT;
+
+static void
+cover_touch (const gchar *cache_key)
+{
+  for (GList *link = cover_order.head; link; link = link->next) {
+    if (g_strcmp0 (link->data, cache_key) != 0)
+      continue;
+    if (link != cover_order.tail) {
+      g_queue_unlink (&cover_order, link);
+      g_queue_push_tail_link (&cover_order, link);
+    }
+    return;
+  }
+}
 
 static gboolean
 caching_enabled (void)
 {
   return spotifygtk_settings_get_caching_enabled (
     spotifygtk_settings_get_default ());
-}
-
-static gboolean
-aggressive_media_enabled (void)
-{
-  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
-  return spotifygtk_settings_get_caching_enabled (settings) &&
-         spotifygtk_settings_get_aggressive_media (settings);
 }
 
 /* Pixel buffers are mapped one at a time so that freeing one returns it to
@@ -463,8 +469,7 @@ static struct {
  * is exactly the "still loading what I already scrolled past" effect. A stack
  * fixes that ordering without predicting anything.
  */
-#define COVER_MAX_INFLIGHT_NORMAL 8
-#define COVER_MAX_INFLIGHT_AGGRESSIVE 16
+#define COVER_MAX_INFLIGHT 6
 
 /* Ceiling on queued-but-not-issued fetches. Read-ahead is the only thing that
  * can outrun the drain, and a backlog older than this is for rows long gone. */
@@ -537,8 +542,7 @@ cover_pump (void)
     return;
   pumping = TRUE;
 
-  guint cap = aggressive_media_enabled ()
-    ? COVER_MAX_INFLIGHT_AGGRESSIVE : COVER_MAX_INFLIGHT_NORMAL;
+  guint cap = COVER_MAX_INFLIGHT;
   while (!g_queue_is_empty (&cover_queue)) {
     QueuedFetch *next = g_queue_peek_tail (&cover_queue);
     /* Current-track artwork must not wait behind a full batch of speculative
@@ -642,8 +646,7 @@ spotifygtk_cover_log_stats (const gchar *context)
              "peak queue %u, %u in flight (cap %d)",
              context ? context : "", cover_stats.dropped,
              g_queue_get_length (&cover_queue), cover_stats.peak_queue,
-             cover_active, aggressive_media_enabled ()
-               ? COVER_MAX_INFLIGHT_AGGRESSIVE : COVER_MAX_INFLIGHT_NORMAL);
+             cover_active, COVER_MAX_INFLIGHT);
 
   /* The number that answers "is artwork where the memory goes": decoded
    * pixels still mapped, against the process's own dirty pages. */
@@ -743,7 +746,7 @@ ensure_initialised (void)
    * a 103 KB image appeared to take 1.6 seconds.
    */
   const gchar *conns_env = g_getenv ("SPOTIFY_COVER_CONNS");
-  guint default_conns = aggressive_media_enabled () ? 16 : 6;
+  guint default_conns = 6;
   guint conns = conns_env ? (guint) MAX (1, atoi (conns_env)) : default_conns;
 
   /* Bring the on-disk cache back under budget once per run, off the main
@@ -971,10 +974,12 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  /* Aggressive mode deliberately retains only the widget's reference. The
-   * compressed file remains on disk, but decoded pixels disappear as soon as
-   * the row/card releases them. */
-  if (caching_enabled () && !aggressive_media_enabled ()) {
+  /* Keep a bounded decoded working set in both modes. Disabling this cache in
+   * aggressive mode made every overscan revisit decode the same compressed
+   * file again. Under sustained navigation those temporary full-size decode
+   * buffers raised the allocator high-water mark and eventually made scrolling
+   * miss frames, despite the visible textures themselves being released. */
+  if (caching_enabled ()) {
     gsize incoming = texture_bytes (texture);
 
     cover_evict_to (COVER_CACHE_MAX_BYTES > incoming
@@ -1214,6 +1219,7 @@ cover_load_internal (const gchar          *cover_id,
     ? g_hash_table_lookup (cover_cache, cache_key) : NULL;
   if (cached) {
     cover_stats.hits++;
+    cover_touch (cache_key);
     callback (cached, user_data);
     return;
   }
@@ -1343,20 +1349,6 @@ spotifygtk_cover_trim_to (gsize max_bytes)
   if (before != cover_cache_bytes)
     g_message ("cover: trimmed cache %.1f MB -> %.1f MB",
                before / 1048576.0, cover_cache_bytes / 1048576.0);
-}
-
-void
-spotifygtk_cover_set_aggressive_mode (gboolean enabled)
-{
-  ensure_initialised ();
-  gboolean active = enabled && caching_enabled ();
-  g_object_set (cover_session,
-                "max-conns-per-host", active ? 16u : 6u,
-                "max-conns", active ? 32u : 24u,
-                NULL);
-  if (active)
-    cover_evict_to (0);
-  cover_pump ();
 }
 
 static gboolean

@@ -75,6 +75,7 @@ because it uses the global default context.
 | Track lists | `src/ui/track_list.c`, `track_row.c` | Virtualized rows and overscan |
 | Album cards | `src/ui/album_grid.c` | Album/playlist grids and card ownership |
 | Scrolling | `src/ui/smooth_scroll.c` | Discrete wheel animation |
+| Desktop media control | `src/ui/window.c` | MPRIS2 service, metadata and transport bridge |
 | Pages/shell | `src/ui/*_page.c`, `window.c` | Page-specific models and shared UI |
 | Settings | `src/ui/settings.c`, `settings_page.c` | Persisted preferences and controls |
 
@@ -315,7 +316,7 @@ an explicit `GSK_RENDERER` environment value takes precedence.
 |---|---|---|---|---|
 | Interface → Theme | `theme` | Dark, White, Milk, Dark+ | Selects the application palette. Accent green is reserved for state such as liked, followed, pinned and selected items. | Immediately; CSS is reloaded. |
 | Interface → Previews | `media-mode` | Media, Now playing only, None | Controls which artwork surfaces may request covers. “Now playing only” prevents list/grid artwork work; “None” prevents artwork requests altogether. | Immediately for new requests; existing images are released by the loader. |
-| Interface → Scroll smoothness | `scroll-smoothness` | 0–100 | Tunes mouse-wheel travel and easing together. Low values are shorter and more responsive; high values carry farther with softer gravity. | Immediately for wheel events and animation frames. Touchpad kinetics are unchanged. |
+| Interface → Scroll smoothness | `scroll-smoothness` | 0–100 | Tunes mouse-wheel travel and easing together. Low values are shorter and more responsive; high values carry farther with softer gravity. Slider persistence is debounced for 120 ms so dragging does not synchronously rewrite the settings file on GTK's UI thread. | After the slider pauses; touchpad kinetics are unchanged. |
 | Search Settings → Aggressive Filtering | `aggressive-filtering` | Off/On | Changes local search matching/ranking so exact artist/title matches are promoted while weaker matches remain available. It does not change Spotify's server-side context result. | Immediately on the next filter/search update. |
 | Audio → Sample rate | `sample-rate` | Default, 44.1 kHz, 48 kHz, 96 kHz | Chooses the device rate. Default follows the stream; another rate activates the native polyphase windowed-sinc resampler. | Persisted immediately; used when the next output device/track is opened. |
 | Audio → Sample format | — | Native, 24-bit | Present as an explicit unavailable option. The current PCM path is 16-bit end to end, so this control is intentionally insensitive. | Not implemented. |
@@ -324,7 +325,6 @@ an explicit `GSK_RENDERER` environment value takes precedence.
 | Audio → Equalizer bands | `eq-gains` | 15 bands, −12 to +12 dB | Stores the gain curve from 25 Hz through 16 kHz. The UI uses a draggable response curve rather than fifteen independent slider strips. | Immediately and persisted per band. |
 | Performance → Renderer | `renderer` | Automatic, Vulkan, OpenGL, Cairo | Selects the GSK compositor. Cairo is software rendering; Vulkan/OpenGL are explicit alternatives for diagnosis or hardware-specific behavior. | Saved immediately, applied after restart. `GSK_RENDERER` overrides it. |
 | Performance → Caching | `caching-enabled` | Off/On | Enables the compressed artwork/name disk cache and decoded texture cache. Disabling it also prevents cache reads and trims decoded textures. | Immediately. |
-| Performance → Aggressive media loading | `aggressive-media` | Off/On | Raises bounded artwork worker concurrency and releases decoded textures as soon as widgets stop holding them. It does not remove queue or memory limits. Requires caching. | Immediately. |
 | Performance → Clear cache | — | Action | Removes persisted names/media and trims in-process decoded artwork. It is an action, not a preference. | Immediately; later requests repopulate it. |
 | Playback state → Shuffle | `shuffle` | Off/On | Persists the ordinary play-order preference. It changes the UI play context, not the server's Smart Shuffle capability. | Immediately for the active queue and future contexts. |
 | Playback state → Repeat | `repeat` | Off, one, all | Controls end-of-context behavior. Repeat-one replays the current entry; repeat-all restarts the context. | Immediately. |
@@ -417,6 +417,37 @@ playlists, album/artist contexts, artwork caching, gapless playback, seeking,
 EQ, resampling, Spotify Connect, Smart Shuffle integration, themes, renderer
 selection and Windows WASAPI playback.
 
+### MPRIS2 desktop integration
+
+The native window owns `org.mpris.MediaPlayer2.spotifygtk` at
+`/org/mpris/MediaPlayer2`. Keeping the service in `window.c` is deliberate:
+that object already owns the current context, queue order, displayed metadata,
+shuffle/repeat policy and player service. A parallel MPRIS state model would
+eventually disagree with the UI.
+
+Desktop media keys, shell media controls and compatible clients can play,
+pause, stop, skip, seek, set volume, toggle shuffle and change repeat mode.
+The service publishes playback status, microsecond position and duration,
+album metadata, Spotify URI, CDN artwork URL and capability changes. `Raise`
+presents the existing window and `Quit` exits the application. Property changes
+and explicit seeks emit the standard MPRIS signals so clients do not need to
+poll.
+
+The current song is used as the native window title and as the MPRIS
+`Identity`. This is an intentional compact-shell presentation choice: the KDE
+task-manager media popup otherwise spends its heading on the static player name
+and repeats title/artist beside the transport buttons. Title and artist are
+therefore not duplicated in `Metadata`; the desktop entry remains the stable
+application identity. The GTK title label keeps its full natural width but is
+ellipsized, so it consumes available header space without increasing the
+window's minimum width.
+
+`OpenUri` is intentionally unsupported for now, and the advertised URI and
+MIME-type lists are empty. Accepting arbitrary URIs without routing them
+through the application's context/queue semantics would claim a capability the
+player does not yet implement. Rate is fixed at `1.0`; setting any other rate
+returns an MPRIS not-supported error.
+
 Open or deliberately limited areas include:
 
 - native search relevance differs from Spotify's consumer ranked search;
@@ -424,7 +455,7 @@ Open or deliberately limited areas include:
 - broader PipeWire validation;
 - VA-API hardware JPEG decode in the Connect application;
 - ad-insertion/feature-state research;
-- MPRIS2 and Flatpak packaging;
+- Flatpak packaging;
 - fully removing the old Web API path from the non-libadwaita fallback; and
 - rare source-removal/scroll edge cases that need reproduction before another
   speculative fix.
@@ -441,14 +472,41 @@ Pathfinder loading with one 300-result model update.
 
 Glycin/image-rs caused a measured CPU spike and was removed. The first custom
 viewport implementation still decoded too many cards; repeated cancellation
-then caused a retry loop. Target-sized C decode, bounded queues, ownership
-guards and post-layout selection resolved the underlying resource problem.
+then caused a retry loop. Target-sized C decode, bounded queues and ownership
+guards fixed that loop. A later live profile exposed a second Library-specific
+failure: GTK initially bound 257 cards whose temporary geometry made 241 look
+visible. Album-card selection therefore uses stable model positions and the
+scroll adjustment. Wrapped Library and Playlist grids calculate explicit
+column and row counts, retain the visible rows plus one complete overscan row,
+and warm the eased wheel destination row. Horizontal shelves keep a separate
+one-dimensional calculation. Provisional GTK geometry is clamped to the
+physical card-height floor; without that floor the first allocation advertised
+fictitious 10-20px rows and reproduced the 241-cover/100 MiB spike. Widget
+`mapped` state and pre-layout bounds are not viewport authority.
+
+Track-list velocity overscan has a separate destination rule for eased wheel
+gestures. Moving one contiguous ownership window on every animation frame
+decoded every transient row crossed: one live session issued 541 cover reads,
+completed 426 and cancelled 115 while retaining barely a megabyte of visible
+pixels. Released textures stopped being logically live, but decoder and
+renderer arenas retained their high-water allocation and later scrolling
+stuttered. Wheel overscan now warms only the landing viewport plus eight rows,
+keeps already-painted rows while they remain visible, and never starts a cover
+decode solely because an intermediate row passes through the viewport. A
+14-notch replay issued 59 incremental reads with a peak queue of three and
+changed RSS by only 0.6 MiB.
 
 ### Mouse-wheel behavior
 
 Touchpad scrolling was already smooth because GTK received continuous deltas;
 mouse wheels needed a capture-phase target animation. Anchor corrections and
-elapsed-time easing fixed oscillation and frame-rate-dependent stutter. The
+integer-pixel quantisation require explicit ownership and completion rules. In
+one reproduced failure a gesture remained four pixels from its fractional
+target for more than 1,100 frames, keeping the renderer active and making later
+scrolls stutter. The animation now lands within an eight-pixel perceptual
+tolerance, terminates after three no-progress frames, and logs only genuine
+long frame stalls rather than doing diagnostic I/O on ordinary missed frames.
+Elapsed-time easing fixed oscillation and frame-rate-dependent stutter. The
 current slider exposes the tuned response without touching touchpad kinetics.
 
 ### Library/Playlist timeout and cache loss

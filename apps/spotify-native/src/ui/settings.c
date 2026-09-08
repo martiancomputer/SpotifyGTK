@@ -20,7 +20,6 @@ struct _SpotifyGtkSettings {
   gboolean eq_enabled;
   gboolean aggressive_filtering;
   gboolean caching_enabled;
-  gboolean aggressive_media;
   guint    scroll_smoothness;
   gboolean shuffle;
   guint    repeat;
@@ -81,8 +80,6 @@ load (SpotifyGtkSettings *self)
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "caching-enabled", NULL))
     self->caching_enabled =
       g_key_file_get_boolean (kf, SETTINGS_GROUP, "caching-enabled", NULL);
-  self->aggressive_media =
-    g_key_file_get_boolean (kf, SETTINGS_GROUP, "aggressive-media", NULL);
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "scroll-smoothness", NULL))
     self->scroll_smoothness = CLAMP (
       g_key_file_get_integer (kf, SETTINGS_GROUP, "scroll-smoothness", NULL),
@@ -150,8 +147,8 @@ save (SpotifyGtkSettings *self)
                           self->aggressive_filtering);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "caching-enabled",
                           self->caching_enabled);
-  g_key_file_set_boolean (kf, SETTINGS_GROUP, "aggressive-media",
-                          self->aggressive_media);
+  /* Drop the retired concurrency workaround when rewriting an older file. */
+  g_key_file_remove_key (kf, SETTINGS_GROUP, "aggressive-media", NULL);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "scroll-smoothness",
                           (gint) self->scroll_smoothness);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "shuffle", self->shuffle);
@@ -297,26 +294,6 @@ spotifygtk_settings_set_caching_enabled (SpotifyGtkSettings *self,
   if (self->caching_enabled == enabled)
     return;
   self->caching_enabled = enabled;
-  save (self);
-  g_signal_emit (self, signals[CHANGED], 0);
-}
-
-gboolean
-spotifygtk_settings_get_aggressive_media (SpotifyGtkSettings *self)
-{
-  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
-  return self->aggressive_media;
-}
-
-void
-spotifygtk_settings_set_aggressive_media (SpotifyGtkSettings *self,
-                                          gboolean            enabled)
-{
-  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
-  enabled = !!enabled;
-  if (self->aggressive_media == enabled)
-    return;
-  self->aggressive_media = enabled;
   save (self);
   g_signal_emit (self, signals[CHANGED], 0);
 }
