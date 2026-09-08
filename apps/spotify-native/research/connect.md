@@ -1,9 +1,16 @@
 # What it takes to be a Spotify Connect device
 
-`src/spotify/connect.c` registers a device today by sending a JSON blob over
-Mercury to `hm://connect-state/v1/devices/<id>`. Its own comment says a real
-`PutStateRequest` would be needed. That is right, and the gap is wider than the
-comment suggests: the transport is wrong as well as the payload.
+This began as an investigation of the old Mercury/JSON registration attempt.
+The implementation described as missing below was completed in the August
+16–31 commit series: `spotify/session.c` now owns the dealer WebSocket, protobuf
+`PutStateRequest` registration and keepalive, cluster and command parsing,
+acknowledgements, playback-state reporting, transfer adoption, transport
+commands, active-device arbitration, and Smart Shuffle option handling.
+
+The chronological measurements below are retained because they document how
+the wire format and failure modes were established. Statements such as "the
+current code is wrong" describe the code at that point in the investigation,
+not the present tree.
 
 Recovered from `/opt/spotify/spotify` (2026-08-06) unless marked as measured.
 
@@ -24,9 +31,9 @@ Three things, in order. None of them optional.
 3. **Reacting to `ClusterUpdate`** pushed back down the dealer, so the device
    follows what other clients do with it.
 
-So the current code is wrong twice over: Mercury instead of HTTPS-to-spclient,
-and JSON instead of protobuf — and it has no connection id to send at all,
-because there is no dealer.
+Those were the two defects in the original implementation: Mercury instead of
+HTTPS-to-spclient, and JSON instead of protobuf, without a dealer connection id.
+Both are fixed in the current implementation.
 
 ## The messages
 
@@ -112,7 +119,9 @@ this step. `SPOTIFY_PROBE_DEALER=1` reruns it.
 1. ~~Extend `apresolve` to return the `dealer` list.~~ Done — the request asks
    for both types and `spotifygtk_apresolve_parse_type()` reads either.
 2. ~~Open the dealer WebSocket and log the connection id.~~ Done, above.
-3. **Half done.** The encoding is accepted; the device does not yet appear.
+3. ~~Encode and send the real device state.~~ Done; the device registers,
+   appears in the account's cluster, and remains present through periodic
+   state refreshes.
 
 ## Step 3, as far as it got — measured
 

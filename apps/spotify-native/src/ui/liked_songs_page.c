@@ -542,6 +542,9 @@ spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
 
+  if (self->session == session)
+    return;
+
   self->generation++;
   if (self->in_flight)
     g_cancellable_cancel (self->in_flight);

@@ -5,6 +5,10 @@
 #include "cover_loader.h"
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
+#include <math.h>
+#include <jpeglib.h>
+#include <png.h>
 #ifdef G_OS_WIN32
 #include <windows.h>
 #else
@@ -18,6 +22,107 @@
 #include "../log_verbose.h"
 
 #define COVER_CDN_BASE "https://i.scdn.co/image/"
+
+typedef struct {
+  struct jpeg_error_mgr parent;
+  jmp_buf escape;
+} CoverJpegError;
+
+static void
+cover_jpeg_error_exit (j_common_ptr info)
+{
+  CoverJpegError *error = (CoverJpegError *) info->err;
+  longjmp (error->escape, 1);
+}
+
+/* Decode JPEG coefficients close to the requested size. Spotify's thumbnail
+ * id can still resolve to a 640px file; libjpeg's 1/2, 1/4 and 1/8 DCT scales
+ * avoid doing full-resolution work merely to produce a 96px row texture. */
+static guchar *
+decode_jpeg_c (const guchar *data, gsize len, gint target_px,
+               gint *width, gint *height, gint *channels)
+{
+  if (len < 2 || data[0] != 0xff || data[1] != 0xd8)
+    return NULL;
+
+  struct jpeg_decompress_struct jpeg = {0};
+  CoverJpegError error;
+  guchar * volatile pixels = NULL;
+  jpeg.err = jpeg_std_error (&error.parent);
+  error.parent.error_exit = cover_jpeg_error_exit;
+  if (setjmp (error.escape)) {
+    g_free ((gpointer) pixels);
+    jpeg_destroy_decompress (&jpeg);
+    return NULL;
+  }
+
+  jpeg_create_decompress (&jpeg);
+  jpeg_mem_src (&jpeg, data, (unsigned long) len);
+  if (jpeg_read_header (&jpeg, TRUE) != JPEG_HEADER_OK) {
+    jpeg_destroy_decompress (&jpeg);
+    return NULL;
+  }
+  jpeg.scale_num = 1;
+  jpeg.scale_denom = 1;
+  for (gint denominator = 8; denominator >= 2; denominator /= 2) {
+    if ((gint) jpeg.image_width / denominator >= target_px &&
+        (gint) jpeg.image_height / denominator >= target_px) {
+      jpeg.scale_denom = denominator;
+      break;
+    }
+  }
+  jpeg.out_color_space = JCS_RGB;
+  jpeg_start_decompress (&jpeg);
+
+  *width = (gint) jpeg.output_width;
+  *height = (gint) jpeg.output_height;
+  *channels = 3;
+  if (*width <= 0 || *height <= 0 ||
+      (gsize) *width > G_MAXSIZE / 3 / (gsize) *height) {
+    jpeg_destroy_decompress (&jpeg);
+    return NULL;
+  }
+  pixels = g_malloc ((gsize) *width * *height * 3);
+  while (jpeg.output_scanline < jpeg.output_height) {
+    JSAMPROW row = pixels + (gsize) jpeg.output_scanline * *width * 3;
+    jpeg_read_scanlines (&jpeg, &row, 1);
+  }
+  jpeg_finish_decompress (&jpeg);
+  jpeg_destroy_decompress (&jpeg);
+  return (guchar *) pixels;
+}
+
+static guchar *
+decode_png_c (const guchar *data, gsize len,
+              gint *width, gint *height, gint *channels)
+{
+  if (len < 8 || png_sig_cmp ((png_bytep) data, 0, 8) != 0)
+    return NULL;
+
+  png_image image = {0};
+  image.version = PNG_IMAGE_VERSION;
+  if (!png_image_begin_read_from_memory (&image, data, len))
+    return NULL;
+  image.format = PNG_FORMAT_RGBA;
+  if (image.width == 0 || image.height == 0 ||
+      image.width > G_MAXINT || image.height > G_MAXINT ||
+      PNG_IMAGE_SIZE (image) > 64 * 1024 * 1024) {
+    png_image_free (&image);
+    return NULL;
+  }
+
+  guchar *pixels = g_malloc (PNG_IMAGE_SIZE (image));
+  if (!png_image_finish_read (&image, NULL, pixels, 0, NULL)) {
+    g_free (pixels);
+    png_image_free (&image);
+    return NULL;
+  }
+  *width = (gint) image.width;
+  *height = (gint) image.height;
+  *channels = 4;
+  png_image_free (&image);
+  return pixels;
+}
 
 /* id (owned) -> GdkTexture (owned).
  *
@@ -735,7 +840,6 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
 {
   GBytes *bytes = task_data;
   gint target_px = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (task), "target-px"));
-  g_autoptr(GError) error = NULL;
   g_autoptr(GBytes) from_disk = NULL;
 
   /* Served from the disk cache: read it here rather than on the main thread,
@@ -754,20 +858,25 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
     bytes = from_disk;
   }
 
-  g_autoptr(GInputStream) stream = g_memory_input_stream_new_from_bytes (bytes);
-  g_autoptr(GdkPixbuf) pixbuf =
-    gdk_pixbuf_new_from_stream_at_scale (stream, target_px, target_px, TRUE, NULL, &error);
-  if (!pixbuf) {
-    g_task_return_error (task, g_steal_pointer (&error));
+  gsize encoded_len = 0;
+  const guchar *encoded = g_bytes_get_data (bytes, &encoded_len);
+  gint source_w = 0, source_h = 0, source_channels = 0;
+  guchar *decoded = decode_jpeg_c (encoded, encoded_len, target_px,
+                                   &source_w, &source_h, &source_channels);
+  if (!decoded)
+    decoded = decode_png_c (encoded, encoded_len,
+                            &source_w, &source_h, &source_channels);
+  if (!decoded) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "cover is not a valid JPEG or PNG");
     return;
   }
 
-  /* GdkMemoryTexture is just data, so it is safe to build off the main
-   * thread; the GBytes copies the scaled pixels. */
-  gint     w         = gdk_pixbuf_get_width (pixbuf);
-  gint     h         = gdk_pixbuf_get_height (pixbuf);
-  gint     rowstride = gdk_pixbuf_get_rowstride (pixbuf);
-  gboolean has_alpha = gdk_pixbuf_get_has_alpha (pixbuf);
+  gdouble scale = MIN ((gdouble) target_px / source_w,
+                       (gdouble) target_px / source_h);
+  gint w = MAX (1, (gint) floor (source_w * scale + 0.5));
+  gint h = MAX (1, (gint) floor (source_h * scale + 0.5));
+  gint rowstride = w * 4;
 
   /*
    * Decoded pixels get their own mapping rather than coming off the heap.
@@ -784,12 +893,41 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   gsize  pix_len = (gsize) rowstride * h;
   guchar *mapped = pixel_pages_alloc (pix_len);
   if (!mapped) {
+    g_free (decoded);
     g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
                              "could not map %" G_GSIZE_FORMAT " bytes for a cover",
                              pix_len);
     return;
   }
-  memcpy (mapped, gdk_pixbuf_get_pixels (pixbuf), pix_len);
+
+  /* Bilinear resize directly into the final texture mapping. */
+  for (gint y = 0; y < h; y++) {
+    gdouble sy = ((y + 0.5) * source_h / h) - 0.5;
+    gint y0 = CLAMP ((gint) floor (sy), 0, source_h - 1);
+    gint y1 = MIN (y0 + 1, source_h - 1);
+    gdouble fy = CLAMP (sy - y0, 0.0, 1.0);
+    for (gint x = 0; x < w; x++) {
+      gdouble sx = ((x + 0.5) * source_w / w) - 0.5;
+      gint x0 = CLAMP ((gint) floor (sx), 0, source_w - 1);
+      gint x1 = MIN (x0 + 1, source_w - 1);
+      gdouble fx = CLAMP (sx - x0, 0.0, 1.0);
+      guchar *out = mapped + (gsize) y * rowstride + (gsize) x * 4;
+      const guchar *p00 = decoded + ((gsize) y0 * source_w + x0) * source_channels;
+      const guchar *p10 = decoded + ((gsize) y0 * source_w + x1) * source_channels;
+      const guchar *p01 = decoded + ((gsize) y1 * source_w + x0) * source_channels;
+      const guchar *p11 = decoded + ((gsize) y1 * source_w + x1) * source_channels;
+      for (gint c = 0; c < 4; c++) {
+        if (c == 3 && source_channels == 3) {
+          out[c] = 255;
+          continue;
+        }
+        gdouble top = p00[c] + (p10[c] - p00[c]) * fx;
+        gdouble bottom = p01[c] + (p11[c] - p01[c]) * fx;
+        out[c] = (guchar) CLAMP (top + (bottom - top) * fy + 0.5, 0.0, 255.0);
+      }
+    }
+  }
+  g_free (decoded);
 
   MappedPixels *owner = g_new0 (MappedPixels, 1);
   owner->addr = mapped;
@@ -799,7 +937,7 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   g_autoptr(GBytes) pixels =
     g_bytes_new_with_free_func (mapped, pix_len, mapped_pixels_free, owner);
   GdkTexture *texture = gdk_memory_texture_new (
-    w, h, has_alpha ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8, pixels, rowstride);
+    w, h, GDK_MEMORY_R8G8B8A8, pixels, rowstride);
 
   g_task_return_pointer (task, texture, g_object_unref);
   (void) source; (void) cancellable;

@@ -109,6 +109,9 @@ spotifygtk_home_page_set_session (SpotifyGtkHomePage   *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_HOME_PAGE (self));
 
+  if (self->session == session)
+    return;
+
   self->session = session;
   self->generation++;
 

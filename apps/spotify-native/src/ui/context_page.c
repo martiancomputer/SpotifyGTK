@@ -337,6 +337,9 @@ spotifygtk_context_page_set_session (SpotifyGtkContextPage *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
 
+  if (self->session == session)
+    return;
+
   self->generation++;
   if (self->in_flight)
     g_cancellable_cancel (self->in_flight);

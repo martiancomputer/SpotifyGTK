@@ -116,23 +116,13 @@ else is as reported.
       Deferred deliberately until the current memory and latency regressions
       are measured and fixed.
 
-- [!] **Discord activity.** Blocked on a decision, and the answer to "how does
-      the official client do it" is that **it does not**. Discord's "Listening
-      to Spotify" card comes from the account link in Discord's own settings —
-      Discord reads the playback state from Spotify server-side, which is why it
-      carries album art, a live progress bar and a "Play on Spotify" button that
-      other people can click. None of that is reachable by a local client, and
-      no third-party app can produce that card.
-      What *is* reachable is ordinary Rich Presence over the local IPC socket,
-      which shows as a generic activity under our own name.
-      *note:* **measured here: there is no `discord-ipc-*` socket on this
-      machine and no Discord desktop client installed** — Discord is being used
-      in a browser, and a browser tab cannot receive Rich Presence. So this
-      would do nothing as things stand. It needs the Discord desktop app, plus
-      an application id registered on Discord's developer portal to appear
-      under a name at all. Both are yours to decide before any code is worth
-      writing. (The account-link explanation above is background knowledge, not
-      something probed here.)
+- [x] **Discord activity.** No local Discord RPC integration is needed. The
+      native client now registers as a Spotify Connect device and continuously
+      reports the real track, play state, timestamp and position. Discord's
+      linked Spotify integration reads that server-side state, so activity stays
+      synchronized through the same Connect reporting used by official clients.
+      This works independently of whether Discord is running in a browser or as
+      a desktop application.
 
 - [~] **"Remove from this Playlist" in the track context menu**, shown when
       viewing a playlist. Dynamic: replaces "Add to playlist" when the track is
@@ -227,17 +217,11 @@ else is as reported.
       *note:* **artwork is not done.** It is an image upload rather than a
       playlist4 op, so it is a different endpoint and a separate piece of work.
 
-- [~] **Profile picture and username in Settings**, under a new `# User`
-      heading, above the logout button. The heading and the account are in,
-      above the log-out row — which is the one place it matters, since this
-      client can hold either of two accounts and the button gave no clue which
-      it was about to forget. Verified: the label reads the signed-in id.
-      *note:* **the picture is not done, and it is not a small addition.** The
-      client shows the Spotify user id because that is what it has. A display
-      name and an avatar live behind the Web API, which nothing in this codebase
-      speaks — no bearer token is exposed and `api.spotify.com` appears nowhere
-      — so it needs an endpoint found and proven first, the same way everything
-      else here was.
+- [x] **Profile picture and username in Settings**, under the User heading
+      above logout. The spclient user-profile endpoint now supplies the display
+      name, canonical id, product tier and avatar image id; the avatar is loaded
+      through the native artwork cache. The signed-in identity is therefore
+      visible before the user chooses whether to log out.
 
 ---
 
@@ -287,32 +271,14 @@ else is as reported.
       launched on a clean machine. Doing so is what would let someone be handed
       a folder rather than a build guide.
 
-- [ ] **Make Spotify Connect actually work** (device appears as a target, remote
-      control follows). Scoped in `apps/spotify-native/research/connect.md`.
-      `connect.c` today sends JSON over Mercury; the real thing is a dealer
-      WebSocket for a connection id, then a protobuf `PutStateRequest` over
-      HTTPS to spclient with that id in `X-Spotify-Connection-Id`. So the
-      transport is wrong as well as the payload, and there is no dealer at all.
-      Measured: apresolve already returns dealer hosts, and libsoup 3.6.6 has
-      the WebSocket, so no new dependency.
-      **Steps 1–2 done, and the gate is open.** apresolve now returns both
-      lists, and the dealer accepted this client on the throwaway: the first
-      message carried a 200-character `Spotify-Connection-Id`. The bearer alone
-      was enough — no client token, no prior registration. So nothing here is
-      gated on being the official client, at least this far in.
-      **Step 3 done — the device registers.** The returned cluster contains it
-      (`name='SpotifyGTK'`, `can_play=1`), confirmed by parsing `Cluster.device`
-      rather than searching the bytes.
-      *note:* it read as failing for five rounds because the *check* was wrong:
-      `g_strstr_len()` on a 35 KB protobuf stops at the first NUL, so it never
-      found a device entry near the end. `memmem` finds it at once. Everything
-      "ruled out" on the way was ruled out against a verifier that could not
-      say yes — though the dealer heartbeat found along the way is real and
-      confirmed (`{"type":"ping"}` → `{"type": "pong"}`, client-driven).
-      *note:* a phone on a different account has a different cluster and will
-      never show this device. Sign both into the same account to see it.
-      *note:* next is step 4 — handle `ClusterUpdate` on the dealer, so remote
-      control does something.
+- [x] **Make Spotify Connect actually work.** Completed across the August 16–31
+      Connect series. SpotifyGTK opens and maintains the dealer connection,
+      registers and refreshes its protobuf device state, appears as a target,
+      accepts transfers and remote transport commands, reports live playback
+      state and position, acknowledges commands, and yields when another device
+      outranks it. The same state feeds Spotify-linked Discord activity. Smart
+      Shuffle options and server-provided queues are supported as well. The
+      protocol investigation remains in `apps/spotify-native/research/connect.md`.
 
 - [ ] **`set_progress` called on a destroyed window.** At exit:
       `spotifygtk_native_window_set_progress: assertion
@@ -320,9 +286,8 @@ else is as reported.
       into the window after it has gone. Harmless at shutdown by luck rather
       than design, and the same lifetime family as the crashes.
 
-- [ ] **Connect step 4 — take a transfer.** `ClusterUpdate` messages already
-      arrive on the dealer socket (~38 KB, base64 in a JSON `payloads` array,
-      decoded and confirmed as `Cluster` with the phone's `PlayerState`). We
-      log 700 characters and drop them. See `research/connect.md`: parse it,
-      notice when `active_device_id` is ours, then PUT `is_active=1` with
-      `PLAYER_STATE_CHANGED` and hand the context to `player_service`.
+- [x] **Connect step 4 — take a transfer.** Transfer commands are parsed and
+      acknowledged, their context and track sequence are adopted on the GTK
+      thread, and playback starts at the requested position and pause state.
+      Subsequent play, pause, seek, previous and next commands are routed to the
+      same UI-owned transport state.

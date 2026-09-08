@@ -357,6 +357,13 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
 
+  /* READY is emitted again after an access-point reconnect.  It is still the
+   * same session and the already resolved album model remains valid; clearing
+   * it here discarded every cached name/cover association and started the
+   * expensive collection load again in the middle of normal UI activity. */
+  if (self->session == session)
+    return;
+
   self->session = session;
   self->generation++;
 

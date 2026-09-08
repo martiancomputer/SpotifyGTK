@@ -445,7 +445,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "Applies immediately and is remembered.",
                              theme_dd));
 
-  /* The one setting on this page that is fully wired. */
+  /* Preview policy is applied immediately by every artwork surface. */
   static const gchar * const media_modes[] = {
     "Media", "Now playing only", "None", NULL
   };
@@ -506,8 +506,9 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   static const gchar * const resamplers[] = { "Native", NULL };
   gtk_box_append (GTK_BOX (audio_group),
                   build_row ("Resampler",
-                             "No resampling happens yet — samples reach the "
-                             "device at the rate they were decoded.",
+                             "The native polyphase resampler is used when a "
+                             "sample rate is selected; Default is a byte-exact "
+                             "passthrough.",
                              build_dropdown (resamplers, 0, FALSE)));
 
   GtkWidget *eq_heading = gtk_label_new ("Equalizer");
@@ -585,9 +586,9 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
    * one place it matters, since this client can hold either of two accounts
    * and the log-out button gives no clue which it is about to forget.
    *
-   * The Spotify user id, because that is what the client actually has. A
-   * display name and a picture live behind the Web API, which nothing here
-   * speaks; that is its own piece of work rather than something to fake.
+   * The profile endpoint supplies the display name, canonical id, product
+   * tier and avatar. Keep the canonical id visible as the unambiguous account
+   * identity even when the display name is shared or later changed.
    */
   GtkWidget *account_card = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 18);
   gtk_widget_add_css_class (account_card, "card");

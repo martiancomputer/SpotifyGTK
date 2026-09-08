@@ -63,6 +63,12 @@ void spotifygtk_track_list_release_covers (SpotifyGtkTrackList *self);
 /* Re-request artwork for every bound row, after release_covers. */
 void spotifygtk_track_list_reload_covers (SpotifyGtkTrackList *self);
 
+/* Enable or disable the velocity-aware visible/overscan artwork window.
+ * Track lists enable it by default; this remains available for specialized
+ * embedded lists that may need to opt out. */
+void spotifygtk_track_list_set_velocity_overscan (SpotifyGtkTrackList *self,
+                                                  gboolean             enabled);
+
 SpotifyGtkTrackList *spotifygtk_track_list_new (void);
 
 

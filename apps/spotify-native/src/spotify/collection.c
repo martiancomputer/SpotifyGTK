@@ -379,6 +379,7 @@ spotifygtk_collection_v2_write (SpotifyMercury *mercury, const gchar *username,
   spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_SEND, "POST",
                                    V2_URI_WRITE, payload,
                                    on_v2_write_response, ctx);
+  spotifygtk_mercury_set_content_type (mercury, NULL);
 }
 
 /* PageResponse: items = 1 (CollectionItem), next_page_token = 2. */
@@ -450,4 +451,5 @@ spotifygtk_collection_v2_read_page (SpotifyMercury *mercury, const gchar *userna
   spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_SEND, "POST",
                                    V2_URI_PAGING, payload,
                                    on_v2_page_response, ctx);
+  spotifygtk_mercury_set_content_type (mercury, NULL);
 }

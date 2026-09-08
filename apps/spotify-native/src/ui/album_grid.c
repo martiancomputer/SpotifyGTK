@@ -219,6 +219,16 @@ card_retry_cover (GtkWidget *card)
   if (g_object_get_data (G_OBJECT (card), "cover-shown"))
     return;
 
+  /* A map, settle and page-cover reload can all select the same card before
+   * its asynchronous decode finishes. Replacing cover-cancel in that window
+   * cancels the live job; its NULL callback schedules another settle, which
+   * replaces the next job, creating a cancel/retry loop. In one 290-album
+   * Library run this issued 8,752 requests for 24 retained covers and drove
+   * transient RSS up by more than 100 MB. One card owns one request. */
+  GCancellable *existing = g_object_get_data (G_OBJECT (card), "cover-cancel");
+  if (existing && !g_cancellable_is_cancelled (existing))
+    return;
+
   /* GtkGridView maps its realised overscan, not merely pixels inside the
    * viewport. Mapping alone decoded several screens of 352px art on first
    * open. Cached JPEGs are cheap to revisit; live RGBA textures are not. */
@@ -349,7 +359,6 @@ on_grid_settled (gpointer user_data)
   self->settle_id = 0;
   self->scrolling = FALSE;
 
-  spotifygtk_cover_set_deferred (FALSE);
   for (guint i = 0; i < self->bound_cards->len; i++) {
     GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
     if (!card_near_viewport (self, card)) {
@@ -375,7 +384,6 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
   SpotifyGtkAlbumGrid *self = user_data;
   (void) adj;
 
-  spotifygtk_cover_set_deferred (TRUE);
   self->scrolling = TRUE;
   self->last_scroll_us = g_get_monotonic_time ();
 
@@ -624,20 +632,12 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   if (!g_ptr_array_find (self->bound_cards, card, NULL))
     g_ptr_array_add (self->bound_cards, card);
 
-  /*
-   * Ask for the details the moment the card is actually on screen.
-   *
-   * Resolving every entry up front cost one round trip each, serialised, for
-   * cards the user may never scroll to. Only a dozen or so are visible at a
-   * time, so this turns a fan-out over the whole listing into a handful.
-   */
-  if (gtk_widget_get_mapped (card) && card_near_viewport (self, card) &&
-      item->pending && !item->resolving) {
-    item->resolving = TRUE;
-    g_signal_emit (self, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
-  } else if (gtk_widget_get_mapped (card) && item->pending) {
-    schedule_grid_settle (self);
-  }
+  /* A recycled GridView child can still be mapped and carry its previous
+   * allocation while bind installs the next item.  Looking at its bounds here
+   * therefore classifies a large initial batch as visible before GTK has laid
+   * it out.  In Library that queued 241 covers for a 24-card viewport.  Let one
+   * coalesced settle pass run after allocation and select the real window. */
+  schedule_grid_settle (self);
   (void) factory;
 }
 
@@ -684,11 +684,8 @@ card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem
    * not mapped *yet* at that point, so it would suppress everything and
    * nothing would bring it back on a page that does not scroll.
    */
-  if (item->cover_id && *item->cover_id) {
-    if (gtk_widget_get_mapped (card))
-      card_retry_cover (card);
-  }
-  (void) self;
+  if (item->cover_id && *item->cover_id)
+    schedule_grid_settle (self);
 }
 
 static void
@@ -1022,14 +1019,11 @@ spotifygtk_album_grid_dispose (GObject *object)
 {
   SpotifyGtkAlbumGrid *self = SPOTIFYGTK_ALBUM_GRID (object);
 
-  /* The settle timer holds a plain pointer to this grid, and deferral is
-   * global -- left set, the next page built would treat every miss as
-   * skippable and show no art at all. */
+  /* The settle timer holds a plain pointer to this grid. */
   if (self->settle_id) {
     g_source_remove (self->settle_id);
     self->settle_id = 0;
   }
-  spotifygtk_cover_set_deferred (FALSE);
   g_clear_pointer (&self->bound_cards, g_ptr_array_unref);
   g_clear_pointer (&self->filter_text, g_free);
   g_clear_object (&self->filter);

@@ -33,4 +33,11 @@ G_BEGIN_DECLS
 void spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
                                       GtkOrientation     orientation);
 
+/* Return the destination of an active wheel animation.  Consumers such as a
+ * virtualised list can use this to prepare the rows the viewport is moving
+ * toward instead of trying to reconstruct intent from eased adjustment
+ * updates.  FALSE means GTK (touchpad, scrollbar, keyboard) owns the motion. */
+gboolean spotifygtk_smooth_scroll_get_target (GtkScrolledWindow *scroller,
+                                              gdouble           *target);
+
 G_END_DECLS

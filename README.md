@@ -129,7 +129,11 @@ the original sequential queue rather than leaving recommendations behind.
 The interface includes a slim app-wide loading indicator and selectable GTK
 renderers—Automatic, Vulkan, OpenGL and Cairo—from Settings. Renderer changes
 take effect after restarting the app; an explicit `GSK_RENDERER` environment
-value still takes precedence for debugging.
+value still takes precedence for debugging. Four palettes are included: Dark,
+White, Milk and the near-black Dark+. Media controls can show artwork
+everywhere, restrict it to Now Playing, or disable it; persistent caching and
+aggressive bounded loading can be switched or cleared live. Settings also shows
+the signed-in display name, account id, product tier and avatar.
 
 Windows is supported and plays through WASAPI — sign-in, streaming and
 playback are all verified on real hardware. Build it with

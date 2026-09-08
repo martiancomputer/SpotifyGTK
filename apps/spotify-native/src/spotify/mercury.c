@@ -25,6 +25,7 @@
 #include "config.h"
 #include "mercury.h"
 #include "protobuf_min.h"
+#include "../log_verbose.h"
 #include <string.h>
 
 /* Header field numbers, from mercury.proto. */
@@ -180,6 +181,7 @@ typedef struct {
   MercuryMethod   method;
   gchar          *method_override;
   gchar          *uri;
+  gchar          *content_type; /* snapshot; never read mutable config at send time */
   GBytes         *payload;
   gchar         **field_keys;
   gchar         **field_values;
@@ -270,6 +272,7 @@ request_dispatch_free (gpointer user_data)
   g_clear_object (&request->mercury);
   g_free (request->method_override);
   g_free (request->uri);
+  g_free (request->content_type);
   g_clear_pointer (&request->payload, g_bytes_unref);
   g_strfreev (request->field_keys);
   g_strfreev (request->field_values);
@@ -430,12 +433,12 @@ send_request_parts_on_owner (MercuryRequestDispatch *request)
   const gchar *m = request->method_override
                      ? request->method_override : method_string (request->method);
   pb_write_bytes_field (header, MERCURY_HDR_METHOD, (const guint8 *) m, strlen (m));
-  g_mutex_lock (&self->config_lock);
-  g_autofree gchar *ct = g_strdup (self->content_type);
-  g_mutex_unlock (&self->config_lock);
+  const gchar *ct = request->content_type;
   if (ct && *ct)
     pb_write_bytes_field (header, MERCURY_HDR_CONTENT_TYPE,
                           (const guint8 *) ct, strlen (ct));
+  SPOTIFYGTK_DEBUG ("mercury: dispatch %s %s content-type=%s",
+                    m, request->uri, ct && *ct ? ct : "<none>");
 
   append_u16_be (buf, (guint16) header->len);
   g_byte_array_append (buf, header->data, header->len);
@@ -503,6 +506,9 @@ spotifygtk_mercury_request_parts (SpotifyMercury *self, MercuryMethod method,
   request->method = method;
   request->method_override = g_strdup (method_override);
   request->uri = g_strdup (uri);
+  g_mutex_lock (&self->config_lock);
+  request->content_type = g_strdup (self->content_type);
+  g_mutex_unlock (&self->config_lock);
   request->parts = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
   for (guint i = 0; i < parts->len; i++)
     g_ptr_array_add (request->parts,
@@ -595,16 +601,18 @@ send_request_fields_on_owner (MercuryRequestDispatch *request)
     return;
   }
 
-  g_mutex_lock (&self->config_lock);
-  g_autofree gchar *content_type = g_strdup (self->content_type);
-  g_mutex_unlock (&self->config_lock);
-
   g_autoptr(GByteArray) packet =
     encode_mercury_packet (seq, request->method, request->method_override,
-                           request->uri, content_type, request->payload,
+                           request->uri, request->content_type, request->payload,
                            (const gchar *const *) request->field_keys,
                            (const gchar *const *) request->field_values,
                            request->n_fields);
+  SPOTIFYGTK_DEBUG ("mercury: dispatch %s %s content-type=%s",
+                    request->method_override ? request->method_override
+                                             : method_string (request->method),
+                    request->uri,
+                    request->content_type && *request->content_type
+                      ? request->content_type : "<none>");
 
   /*
    * The pending entry is filed even with no callback: a reply still arrives
@@ -639,6 +647,9 @@ spotifygtk_mercury_request_fields (SpotifyMercury *self, MercuryMethod method,
   request->method = method;
   request->method_override = g_strdup (method_override);
   request->uri = g_strdup (uri);
+  g_mutex_lock (&self->config_lock);
+  request->content_type = g_strdup (self->content_type);
+  g_mutex_unlock (&self->config_lock);
   request->payload = payload ? g_bytes_ref (payload) : NULL;
   request->n_fields = n_fields;
   if (n_fields > 0) {

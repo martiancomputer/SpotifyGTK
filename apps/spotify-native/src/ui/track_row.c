@@ -7,6 +7,7 @@
 /* Width of the like slot, so the hearts line up across rows. */
 #define ROW_LIKE_WIDTH 22
 #define ROW_LIKE_PX    14
+#define ROW_COVER_PX   40
 
 /*
  * Natural-width caps for the text labels. Not display limits -- the labels
@@ -257,7 +258,8 @@ spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
   if (!self->cover_cancellable)
     self->cover_cancellable = g_cancellable_new ();
 
-  spotifygtk_cover_load_deferrable (self->pending_cover_id, 96, self->cover_cancellable,
+  spotifygtk_cover_load_deferrable (self->pending_cover_id, ROW_COVER_PX,
+                                    self->cover_cancellable,
                                     on_row_cover_loaded, self);
 }
 
@@ -337,7 +339,8 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
   if (self->cover_hold)
     return;
 
-  spotifygtk_cover_load_deferrable (cover_id, 96, self->cover_cancellable,
+  spotifygtk_cover_load_deferrable (cover_id, ROW_COVER_PX,
+                                    self->cover_cancellable,
                                     on_row_cover_loaded, self);
 }
 
@@ -385,17 +388,25 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   gtk_widget_set_margin_bottom (GTK_WIDGET (self->root_box), 6);
 
   /* Track number / album art / playing indicator */
+  GtkWidget *cover_slot = gtk_overlay_new ();
+  gtk_widget_set_size_request (cover_slot, ROW_COVER_PX, ROW_COVER_PX);
+  gtk_widget_set_overflow (cover_slot, GTK_OVERFLOW_HIDDEN);
+
   self->track_num = GTK_LABEL (gtk_label_new (""));
-  gtk_widget_set_size_request (GTK_WIDGET (self->track_num), 24, -1);
   gtk_widget_add_css_class (GTK_WIDGET (self->track_num), "row-number");
-  gtk_label_set_xalign (self->track_num, 1.0);
-  gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->track_num));
+  gtk_label_set_xalign (self->track_num, 0.5);
+  gtk_widget_set_halign (GTK_WIDGET (self->track_num), GTK_ALIGN_FILL);
+  gtk_widget_set_valign (GTK_WIDGET (self->track_num), GTK_ALIGN_FILL);
+  gtk_overlay_set_child (GTK_OVERLAY (cover_slot), GTK_WIDGET (self->track_num));
 
   self->album_art = GTK_IMAGE (gtk_image_new_from_icon_name ("audio-x-generic-symbolic"));
-  gtk_image_set_pixel_size (self->album_art, 40);
+  gtk_image_set_pixel_size (self->album_art, ROW_COVER_PX);
+  gtk_widget_set_halign (GTK_WIDGET (self->album_art), GTK_ALIGN_FILL);
+  gtk_widget_set_valign (GTK_WIDGET (self->album_art), GTK_ALIGN_FILL);
   gtk_widget_add_css_class (GTK_WIDGET (self->album_art), "card");
   gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
-  gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->album_art));
+  gtk_overlay_add_overlay (GTK_OVERLAY (cover_slot), GTK_WIDGET (self->album_art));
+  gtk_box_append (GTK_BOX (self->root_box), cover_slot);
 
   /* Track info */
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);

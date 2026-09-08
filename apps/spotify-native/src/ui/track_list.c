@@ -22,6 +22,7 @@
 #include "cover_loader.h"
 #include "track_item.h"
 #include "smooth_scroll.h"
+#include <math.h>
 
 struct _SpotifyGtkTrackList {
   GtkBox parent_instance;
@@ -53,6 +54,16 @@ struct _SpotifyGtkTrackList {
   gint64         last_scroll_us;
   gboolean       scrolling;
   GPtrArray     *bound_rows;   /* borrowed SpotifyGtkTrackRow*, live bindings */
+
+  /* Optional velocity-aware artwork ownership, enabled on Liked Songs only. */
+  gboolean       velocity_overscan;
+  guint          overscan_idle_id;
+  gboolean       overscan_valid;
+  guint          overscan_first;
+  guint          overscan_last;
+  gdouble        scroll_velocity;       /* exponentially smoothed px/second */
+  gdouble        velocity_last_value;
+  gint64         velocity_last_us;
 };
 
 /*
@@ -68,7 +79,129 @@ struct _SpotifyGtkTrackList {
  * flick start warm, not to fetch the whole collection. */
 #define PREFETCH_ROWS 24
 
+#define OVERSCAN_BASE_AHEAD 8
+#define OVERSCAN_MAX_AHEAD  32
+#define OVERSCAN_TRAILING   4
+#define OVERSCAN_HORIZON_S  0.12
+
 G_DEFINE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list, GTK_TYPE_BOX)
+
+static gboolean update_velocity_overscan (gpointer user_data);
+
+static void
+schedule_velocity_overscan (SpotifyGtkTrackList *self)
+{
+  if (self->velocity_overscan && self->overscan_idle_id == 0)
+    self->overscan_idle_id = g_idle_add (update_velocity_overscan, self);
+}
+
+static gboolean
+position_in_overscan (SpotifyGtkTrackList *self, guint position)
+{
+  return self->overscan_valid &&
+         position >= self->overscan_first && position <= self->overscan_last;
+}
+
+/*
+ * Select requests by model position, not by which widgets GTK happened to
+ * bind. The adjustment supplies a stable row extent even though GtkListView's
+ * recycling pool is much larger than the viewport.
+ */
+static gboolean
+update_velocity_overscan (gpointer user_data)
+{
+  SpotifyGtkTrackList *self = user_data;
+  self->overscan_idle_id = 0;
+
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  if (!self->velocity_overscan || !self->vadj || n == 0)
+    return G_SOURCE_REMOVE;
+
+  gdouble upper = gtk_adjustment_get_upper (self->vadj);
+  gdouble page = gtk_adjustment_get_page_size (self->vadj);
+  gdouble value = gtk_adjustment_get_value (self->vadj);
+  if (upper <= 0 || page <= 0)
+    return G_SOURCE_REMOVE;
+
+  gdouble row_extent = upper / n;
+  if (row_extent < 1.0)
+    return G_SOURCE_REMOVE;
+
+  guint visible_first = MIN ((guint) (value / row_extent), n - 1);
+  guint visible_last = MIN ((guint) ((value + page - 1.0) / row_extent), n - 1);
+  guint velocity_rows = (guint) MIN (
+    ceil (fabs (self->scroll_velocity) * OVERSCAN_HORIZON_S / row_extent),
+    (gdouble) (OVERSCAN_MAX_AHEAD - OVERSCAN_BASE_AHEAD));
+  guint ahead = OVERSCAN_BASE_AHEAD + velocity_rows;
+  gboolean upwards = self->scroll_velocity < 0;
+
+  /* Wheel scrolling is deliberately eased, so adjustment deltas describe the
+   * animation's current slow frame rather than where the gesture is going.
+   * Use the smooth scroller's destination to warm the complete path to its
+   * landing viewport.  The current visible range remains the anchor below;
+   * this only grows the leading edge and can never discard an on-screen row.
+   * Touchpads, scrollbar drags and keyboard scrolling have no smooth target
+   * and continue through the velocity estimator above. */
+  gdouble smooth_target = value;
+  gboolean smooth_active = self->scroller &&
+    spotifygtk_smooth_scroll_get_target (
+      GTK_SCROLLED_WINDOW (self->scroller), &smooth_target);
+  if (smooth_active) {
+    gdouble target_delta = smooth_target - value;
+    guint target_rows = (guint) ceil (fabs (target_delta) / row_extent);
+    ahead = MIN (MAX (ahead, OVERSCAN_BASE_AHEAD + target_rows),
+                 OVERSCAN_MAX_AHEAD);
+    if (fabs (target_delta) > 0.5)
+      upwards = target_delta < 0.0;
+  }
+
+  guint first = visible_first;
+  guint last = visible_last;
+  if (upwards) {
+    first = visible_first > ahead ? visible_first - ahead : 0;
+    last = MIN (visible_last + OVERSCAN_TRAILING, n - 1);
+  } else {
+    first = visible_first > OVERSCAN_TRAILING
+      ? visible_first - OVERSCAN_TRAILING : 0;
+    last = MIN (visible_last + ahead, n - 1);
+  }
+
+  if (self->overscan_valid && self->overscan_first == first &&
+      self->overscan_last == last)
+    return G_SOURCE_REMOVE;
+
+  self->overscan_valid = TRUE;
+  self->overscan_first = first;
+  self->overscan_last = last;
+
+  /* Every request has a row owner and therefore a cancellable. GtkListView
+   * binds around 200 rows here, comfortably covering the maximum window; do
+   * not manufacture ownerless prefetch requests for positions outside it. */
+  for (guint i = 0; i < self->bound_rows->len; i++) {
+    SpotifyGtkTrackRow *row = g_ptr_array_index (self->bound_rows, i);
+    guint position = GPOINTER_TO_UINT (
+      g_object_get_data (G_OBJECT (row), "row-position"));
+    gboolean retain = position_in_overscan (self, position);
+    guint previous = GPOINTER_TO_UINT (
+      g_object_get_data (G_OBJECT (row), "overscan-retained"));
+    if (previous == (retain ? 2u : 1u))
+      continue;
+    g_object_set_data (G_OBJECT (row), "overscan-retained",
+                       GUINT_TO_POINTER (retain ? 2u : 1u));
+    spotifygtk_track_row_set_cover_hold (row, !retain);
+    if (retain)
+      spotifygtk_track_row_retry_cover (row);
+    else
+      spotifygtk_track_row_release_cover (row);
+  }
+
+  if (g_getenv ("SPOTIFY_COVER_STATS"))
+    g_message ("overscan: visible=%u..%u window=%u..%u velocity=%.0fpx/s ahead=%u smooth=%s target=%.0f",
+               visible_first, visible_last, first, last,
+               self->scroll_velocity, ahead,
+               smooth_active ? "yes" : "no", smooth_target);
+  return G_SOURCE_REMOVE;
+}
 
 /*
  * Is this row anywhere near the viewport?
@@ -125,6 +258,12 @@ on_scroll_settled (gpointer user_data)
 
   self->settle_id = 0;
   self->scrolling = FALSE;
+
+  if (self->velocity_overscan) {
+    self->scroll_velocity = 0.0;
+    schedule_velocity_overscan (self);  /* contract back to base eight */
+    return G_SOURCE_REMOVE;
+  }
 
   /* Loading first, prefetch second: what is on screen must not queue behind
    * speculative work. */
@@ -183,7 +322,24 @@ static void
 on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
 {
   SpotifyGtkTrackList *self = user_data;
-  (void) adj;
+
+  if (self->velocity_overscan) {
+    gint64 now = g_get_monotonic_time ();
+    gdouble value = gtk_adjustment_get_value (adj);
+    if (self->velocity_last_us > 0 && now > self->velocity_last_us) {
+      gdouble instantaneous = (value - self->velocity_last_value) * G_USEC_PER_SEC /
+                              (now - self->velocity_last_us);
+      self->scroll_velocity = self->scroll_velocity * 0.70 + instantaneous * 0.30;
+    }
+    self->velocity_last_value = value;
+    self->velocity_last_us = now;
+    self->last_scroll_us = now;
+    self->scrolling = TRUE;
+    schedule_velocity_overscan (self);
+    if (!self->settle_id)
+      self->settle_id = g_timeout_add (50, on_scroll_settled, self);
+    return;
+  }
 
   /* Keep one cheap polling source for the whole gesture. Removing and creating
    * a timeout on every animation frame was allocator/main-loop churn in every
@@ -331,6 +487,10 @@ on_list_item_position (GObject *object, GParamSpec *pspec, gpointer user_data)
   if (self->numbered && SPOTIFYGTK_IS_TRACK_ROW (child))
     spotifygtk_track_row_set_number (SPOTIFYGTK_TRACK_ROW (child),
                                      (gint) gtk_list_item_get_position (list_item) + 1);
+  if (SPOTIFYGTK_IS_TRACK_ROW (child))
+    g_object_set_data (G_OBJECT (child), "row-position",
+                       GUINT_TO_POINTER (gtk_list_item_get_position (list_item)));
+  schedule_velocity_overscan (self);
 }
 
 static void
@@ -400,7 +560,13 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
    */
   /* settle_id is live only while the view is moving, so this is exactly "the
    * user is scrolling right now". */
-  spotifygtk_track_row_set_cover_hold (row, self->scrolling);
+  guint position = gtk_list_item_get_position (list_item);
+  spotifygtk_track_row_set_cover_hold (
+    row, self->velocity_overscan ? !position_in_overscan (self, position)
+                                 : self->scrolling);
+  if (self->velocity_overscan)
+    g_object_set_data (G_OBJECT (row), "overscan-retained",
+      GUINT_TO_POINTER (position_in_overscan (self, position) ? 2u : 1u));
 
   spotifygtk_track_row_set_native_track (row,
     spotifygtk_track_item_get_track (item), 0);
@@ -410,7 +576,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   /* Kept whether or not the list is numbered: the playlist removal needs the
    * row, and it is position-based. */
   g_object_set_data (G_OBJECT (row), "row-position",
-                     GINT_TO_POINTER ((gint) gtk_list_item_get_position (list_item)));
+                     GUINT_TO_POINTER (position));
   spotifygtk_track_row_set_playing (row,
     spotifygtk_track_item_get_playing (item),
     spotifygtk_track_item_get_paused (item));
@@ -438,12 +604,15 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     g_object_set_data (G_OBJECT (row), "play-connected", GINT_TO_POINTER (1));
   }
 
+  schedule_velocity_overscan (self);
+
   (void) factory;
 }
 
 static void
 factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
+  SpotifyGtkTrackList *self = user_data;
   SpotifyGtkTrackRow  *row  = SPOTIFYGTK_TRACK_ROW (gtk_list_item_get_child (list_item));
   SpotifyGtkTrackItem *item = gtk_list_item_get_item (list_item);
 
@@ -452,7 +621,11 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
     g_signal_handler_disconnect (item, changed);
   g_object_set_data (G_OBJECT (row), "changed-handler", NULL);
   g_object_set_data (G_OBJECT (row), "bound-item", NULL);
-  g_ptr_array_remove_fast (SPOTIFYGTK_TRACK_LIST (user_data)->bound_rows, row);
+  g_object_set_data (G_OBJECT (row), "overscan-retained", NULL);
+  if (self->velocity_overscan)
+    spotifygtk_track_row_release_cover (row);
+  g_ptr_array_remove_fast (self->bound_rows, row);
+  schedule_velocity_overscan (self);
 
   (void) factory;
 }
@@ -485,6 +658,7 @@ spotifygtk_track_list_dispose (GObject *object)
     g_source_remove (self->settle_id);
     self->settle_id = 0;
   }
+  g_clear_handle_id (&self->overscan_idle_id, g_source_remove);
   spotifygtk_cover_set_deferred (FALSE);
   g_clear_pointer (&self->bound_rows, g_ptr_array_unref);
 
@@ -584,6 +758,11 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), GTK_WIDGET (self->list));
   gtk_box_append (GTK_BOX (self), scroller);
+
+  /* All song lists share the same bounded artwork ownership policy. Keeping
+   * the default here means search, albums, playlists, artist tracks and future
+   * pages cannot accidentally return to loading GTK's entire bound-row pool. */
+  spotifygtk_track_list_set_velocity_overscan (self, TRUE);
 }
 
 void
@@ -816,9 +995,42 @@ spotifygtk_track_list_reload_covers (SpotifyGtkTrackList *self)
 
   for (guint i = 0; i < self->bound_rows->len; i++) {
     GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
-    if (row_near_viewport (self, row))
+    guint position = GPOINTER_TO_UINT (
+      g_object_get_data (G_OBJECT (row), "row-position"));
+    if (self->velocity_overscan ? position_in_overscan (self, position)
+                                : row_near_viewport (self, row))
       spotifygtk_track_row_retry_cover (SPOTIFYGTK_TRACK_ROW (row));
   }
+}
+
+void
+spotifygtk_track_list_set_velocity_overscan (SpotifyGtkTrackList *self,
+                                             gboolean             enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  enabled = !!enabled;
+  if (self->velocity_overscan == enabled)
+    return;
+
+  self->velocity_overscan = enabled;
+  self->overscan_valid = FALSE;
+  self->scroll_velocity = 0.0;
+  self->velocity_last_us = 0;
+
+  for (guint i = 0; i < self->bound_rows->len; i++) {
+    SpotifyGtkTrackRow *row = g_ptr_array_index (self->bound_rows, i);
+    g_object_set_data (G_OBJECT (row), "overscan-retained",
+                       enabled ? GUINT_TO_POINTER (1u) : NULL);
+    spotifygtk_track_row_set_cover_hold (row, enabled);
+    if (enabled)
+      spotifygtk_track_row_release_cover (row);
+    else if (row_near_viewport (self, GTK_WIDGET (row)))
+      spotifygtk_track_row_retry_cover (row);
+  }
+  if (enabled)
+    schedule_velocity_overscan (self);
+  else
+    g_clear_handle_id (&self->overscan_idle_id, g_source_remove);
 }
 
 SpotifyGtkTrackList *
@@ -831,6 +1043,7 @@ void
 spotifygtk_track_list_clear (SpotifyGtkTrackList *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  self->overscan_valid = FALSE;
   g_list_store_remove_all (self->store);
 }
 
@@ -918,6 +1131,8 @@ spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *t
   }
 
   g_list_store_splice (self->store, 0, existing, items->pdata, items->len);
+  self->overscan_valid = FALSE;
+  schedule_velocity_overscan (self);
 
   guint shown = items->len;
   g_ptr_array_unref (items);

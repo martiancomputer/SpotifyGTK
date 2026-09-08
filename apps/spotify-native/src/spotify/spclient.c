@@ -705,6 +705,7 @@ typedef struct {
   "59ee4a659c32e9ad894a71308207594a65ba67bb6b632b183abe97303a51fa55"
 #define SEARCH_PAGE_SIZE 50
 #define SEARCH_RESULT_TARGET 300
+#define SEARCH_PAGE_COUNT (SEARCH_RESULT_TARGET / SEARCH_PAGE_SIZE)
 
 typedef struct {
   SpotifySpclient        *spclient;      /* borrowed; owner keeps requests alive */
@@ -714,11 +715,18 @@ typedef struct {
   gchar                   *query;
   gchar                   *bearer_token;
   gchar                   *client_token;
-  guint                    offset;
   GPtrArray               *uris;         /* owned strings */
   GHashTable              *seen;         /* borrowed keys from uris */
-  SoupMessage             *message;      /* current request, owned */
+  GPtrArray               *pages[SEARCH_PAGE_COUNT]; /* URI strings per offset */
+  guint                    pending_pages;
+  gchar                   *first_error;
 } SearchContextClosure;
+
+typedef struct {
+  SearchContextClosure *search;          /* shared until pending_pages is zero */
+  SoupMessage          *message;         /* owned */
+  guint                 page_index;
+} SearchPageClosure;
 
 gchar *
 spotifygtk_spclient_build_search_uri (const gchar *query)
@@ -837,7 +845,8 @@ request_context_resolve (SpotifySpclient *self, const gchar *context_uri,
 static void
 search_context_closure_free (SearchContextClosure *cl)
 {
-  g_clear_object (&cl->message);
+  for (guint i = 0; i < SEARCH_PAGE_COUNT; i++)
+    g_clear_pointer (&cl->pages[i], g_ptr_array_unref);
   /* `seen` borrows its keys from `uris`, so discard the index first. */
   g_clear_pointer (&cl->seen, g_hash_table_unref);
   g_clear_pointer (&cl->uris, g_ptr_array_unref);
@@ -845,10 +854,9 @@ search_context_closure_free (SearchContextClosure *cl)
   g_free (cl->query);
   g_free (cl->bearer_token);
   g_free (cl->client_token);
+  g_free (cl->first_error);
   g_free (cl);
 }
-
-static void search_context_request_page (SearchContextClosure *cl);
 
 static void
 search_context_complete (SearchContextClosure *cl)
@@ -902,87 +910,91 @@ json_object_child (JsonObject *parent, const gchar *member)
 }
 
 static void
-on_search_context_page (GObject *source, GAsyncResult *result,
-                        gpointer user_data)
+search_context_finish_parallel (SearchContextClosure *cl)
 {
-  SearchContextClosure *cl = user_data;
-  g_autoptr(GError) error = NULL;
-  g_autoptr(GBytes) body =
-    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
-  guint status = cl->message ? soup_message_get_status (cl->message) : 0;
-  g_clear_object (&cl->message);
+  /* Offset zero is authoritative: without it, returning later pages would
+   * start the ranking in the middle. Preserve the existing 20-track fallback
+   * for that case; failures after page one yield a useful partial result. */
+  if (!cl->pages[0] || cl->pages[0]->len == 0) {
+    search_context_fallback (cl, cl->first_error
+      ? cl->first_error : "first page contained no track results");
+    return;
+  }
 
-  if (!body || status < 200 || status >= 300) {
-    if (cl->uris->len > 0) {
-      search_context_complete (cl);       /* a later page failed; keep page 1 */
-      return;
+  for (guint page = 0; page < SEARCH_PAGE_COUNT; page++) {
+    GPtrArray *uris = cl->pages[page];
+    for (guint i = 0; uris && i < uris->len &&
+                      cl->uris->len < SEARCH_RESULT_TARGET; i++) {
+      const gchar *uri = g_ptr_array_index (uris, i);
+      if (g_hash_table_contains (cl->seen, uri))
+        continue;
+      gchar *owned = g_strdup (uri);
+      g_ptr_array_add (cl->uris, owned);
+      g_hash_table_add (cl->seen, owned);
     }
-    g_autofree gchar *why = g_strdup_printf ("HTTP %u%s%s", status,
-      error ? ": " : "", error ? error->message : "");
-    search_context_fallback (cl, why);
-    return;
   }
-
-  gsize len = 0;
-  const gchar *json = g_bytes_get_data (body, &len);
-  g_autoptr(JsonParser) parser = json_parser_new ();
-  if (!json_parser_load_from_data (parser, json, (gssize) len, &error)) {
-    if (cl->uris->len > 0)
-      search_context_complete (cl);
-    else
-      search_context_fallback (cl, error ? error->message : "invalid JSON");
-    return;
-  }
-
-  JsonNode *root_node = json_parser_get_root (parser);
-  JsonObject *root = root_node && JSON_NODE_HOLDS_OBJECT (root_node)
-    ? json_node_get_object (root_node) : NULL;
-  JsonObject *data = json_object_child (root, "data");
-  JsonObject *search = json_object_child (data, "searchV2");
-  JsonObject *tracks = json_object_child (search, "tracksV2");
-  JsonArray *items = tracks && json_object_has_member (tracks, "items")
-    ? json_object_get_array_member (tracks, "items") : NULL;
-
-  for (guint i = 0; items && i < json_array_get_length (items) &&
-                    cl->uris->len < SEARCH_RESULT_TARGET; i++) {
-    JsonObject *wrapper = json_array_get_object_element (items, i);
-    JsonObject *item = json_object_child (wrapper, "item");
-    JsonObject *track = json_object_child (item, "data");
-    if (!track || !json_object_has_member (track, "uri"))
-      continue;
-    const gchar *uri = json_object_get_string_member (track, "uri");
-    if (!uri || !g_str_has_prefix (uri, "spotify:track:") ||
-        g_hash_table_contains (cl->seen, uri))
-      continue;
-    gchar *owned = g_strdup (uri);
-    g_ptr_array_add (cl->uris, owned);
-    g_hash_table_add (cl->seen, owned);
-  }
-
-  JsonObject *paging = json_object_child (tracks, "pagingInfo");
-  gint64 next = -1;
-  if (paging && json_object_has_member (paging, "nextOffset")) {
-    JsonNode *next_node = json_object_get_member (paging, "nextOffset");
-    if (next_node && !JSON_NODE_HOLDS_NULL (next_node))
-      next = json_node_get_int (next_node);
-  }
-
-  if (cl->uris->len >= SEARCH_RESULT_TARGET || next < 0 ||
-      next <= (gint64) cl->offset) {
-    if (cl->uris->len > 0)
-      search_context_complete (cl);
-    else
-      search_context_fallback (cl, "response contained no track results");
-    return;
-  }
-
-  cl->offset = (guint) next;
-  search_context_request_page (cl);
+  search_context_complete (cl);
 }
 
 static void
-search_context_request_page (SearchContextClosure *cl)
+on_search_context_page (GObject *source, GAsyncResult *result,
+                        gpointer user_data)
 {
+  SearchPageClosure *page_cl = user_data;
+  SearchContextClosure *cl = page_cl->search;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body =
+    soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
+  guint status = page_cl->message
+    ? soup_message_get_status (page_cl->message) : 0;
+
+  GPtrArray *page_uris = NULL;
+  if (body && status >= 200 && status < 300) {
+    gsize len = 0;
+    const gchar *json = g_bytes_get_data (body, &len);
+    g_autoptr(JsonParser) parser = json_parser_new ();
+    if (json_parser_load_from_data (parser, json, (gssize) len, &error)) {
+      JsonNode *root_node = json_parser_get_root (parser);
+      JsonObject *root = root_node && JSON_NODE_HOLDS_OBJECT (root_node)
+        ? json_node_get_object (root_node) : NULL;
+      JsonObject *data = json_object_child (root, "data");
+      JsonObject *search = json_object_child (data, "searchV2");
+      JsonObject *tracks = json_object_child (search, "tracksV2");
+      JsonArray *items = tracks && json_object_has_member (tracks, "items")
+        ? json_object_get_array_member (tracks, "items") : NULL;
+
+      page_uris = g_ptr_array_new_with_free_func (g_free);
+      for (guint i = 0; items && i < json_array_get_length (items); i++) {
+        JsonObject *wrapper = json_array_get_object_element (items, i);
+        JsonObject *item = json_object_child (wrapper, "item");
+        JsonObject *track = json_object_child (item, "data");
+        const gchar *uri = track && json_object_has_member (track, "uri")
+          ? json_object_get_string_member (track, "uri") : NULL;
+        if (uri && g_str_has_prefix (uri, "spotify:track:"))
+          g_ptr_array_add (page_uris, g_strdup (uri));
+      }
+    }
+  }
+
+  if (page_uris) {
+    cl->pages[page_cl->page_index] = page_uris;
+  } else if (page_cl->page_index == 0) {
+    cl->first_error = g_strdup_printf ("HTTP %u%s%s", status,
+      error ? ": " : "", error ? error->message : "");
+  }
+
+  g_clear_object (&page_cl->message);
+  g_free (page_cl);
+  g_assert (cl->pending_pages > 0);
+  cl->pending_pages--;
+  if (cl->pending_pages == 0)
+    search_context_finish_parallel (cl);
+}
+
+static void
+search_context_request_page (SearchContextClosure *cl, guint page_index)
+{
+  guint offset = page_index * SEARCH_PAGE_SIZE;
   g_autoptr(JsonBuilder) builder = json_builder_new ();
   json_builder_begin_object (builder);
 #define ADD_BOOL(name, value) G_STMT_START { \
@@ -995,7 +1007,7 @@ search_context_request_page (SearchContextClosure *cl)
 } G_STMT_END
   json_builder_set_member_name (builder, "searchTerm");
   json_builder_add_string_value (builder, cl->query);
-  ADD_INT ("offset", cl->offset);
+  ADD_INT ("offset", offset);
   ADD_INT ("limit", SEARCH_PAGE_SIZE);
   ADD_BOOL ("includeAudiobooks", TRUE);
   ADD_BOOL ("includePreReleases", FALSE);
@@ -1020,8 +1032,11 @@ search_context_request_page (SearchContextClosure *cl)
     "%s?operationName=searchTracks&variables=%s&extensions=%s",
     PATHFINDER_URL, enc_vars, enc_ext);
 
-  cl->message = soup_message_new (SOUP_METHOD_GET, url);
-  SoupMessageHeaders *headers = soup_message_get_request_headers (cl->message);
+  SearchPageClosure *page_cl = g_new0 (SearchPageClosure, 1);
+  page_cl->search = cl;
+  page_cl->page_index = page_index;
+  page_cl->message = soup_message_new (SOUP_METHOD_GET, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (page_cl->message);
   g_autofree gchar *auth_hdr =
     g_strdup_printf ("Bearer %s", cl->bearer_token ? cl->bearer_token : "");
   soup_message_headers_replace (headers, "Authorization", auth_hdr);
@@ -1033,8 +1048,8 @@ search_context_request_page (SearchContextClosure *cl)
     cl->spclient->gql_session = soup_session_new_with_options (
       "user-agent", PATHFINDER_UA, NULL);
   soup_session_send_and_read_async (
-    cl->spclient->gql_session, cl->message, G_PRIORITY_DEFAULT,
-    cl->spclient->cancellable, on_search_context_page, cl);
+    cl->spclient->gql_session, page_cl->message, G_PRIORITY_DEFAULT,
+    cl->spclient->cancellable, on_search_context_page, page_cl);
 }
 
 static void
@@ -1063,7 +1078,9 @@ request_expanded_search (SpotifySpclient *self, const gchar *context_uri,
   cl->client_token = g_strdup (client_token);
   cl->uris = g_ptr_array_new_with_free_func (g_free);
   cl->seen = g_hash_table_new (g_str_hash, g_str_equal);
-  search_context_request_page (cl);
+  cl->pending_pages = SEARCH_PAGE_COUNT;
+  for (guint page = 0; page < SEARCH_PAGE_COUNT; page++)
+    search_context_request_page (cl, page);
 }
 
 

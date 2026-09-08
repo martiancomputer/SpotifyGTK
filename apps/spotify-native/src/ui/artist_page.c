@@ -657,6 +657,8 @@ spotifygtk_artist_page_set_session (SpotifyGtkArtistPage *self,
                                     SpotifyNativeSession *session)
 {
   g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
+  if (self->session == session)
+    return;
   self->generation++;
   self->pending_loads = 0;
   if (self->in_flight)

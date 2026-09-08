@@ -31,6 +31,8 @@ gio_dep        = dependency('gio-2.0',       version: '>= 2.76')
 soup_dep       = dependency('libsoup-3.0',   version: '>= 3.4')  # cdn.c HTTPS Range fetch, native_auth.c OAuth
 json_glib_dep  = dependency('json-glib-1.0', version: '>= 1.6')  # native_auth.c token response parsing
 gtk4_dep       = dependency('gtk4', version: '>= 4.0', required: enable_gui)
+jpeg_dep       = dependency('libjpeg', required: enable_gui)
+png_dep        = dependency('libpng',  required: enable_gui)
 
 # The UI is laid out against a specific GTK, not merely a minimum one.
 #
@@ -83,6 +85,9 @@ all_deps = [
 ]
 if openssl_dep.found()
   all_deps += openssl_dep
+endif
+if enable_gui
+  all_deps += [jpeg_dep, png_dep]
 endif
 
 # ── Optional audio output backends (runtime-probed regardless) ─────────────

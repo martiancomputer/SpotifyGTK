@@ -1,9 +1,9 @@
 /*
  * settings_page.h — Settings page.
  *
- * Interface, Audio and Performance groups. Most options are stored but not
- * yet acted on; those controls are insensitive and say why. "Previews" is
- * the exception and is fully wired — see cover_loader.c.
+ * Interface, Search, Audio, Performance, User and Account groups. Live
+ * controls persist through SpotifyGtkSettings; intentionally unavailable
+ * output formats remain insensitive and explain the missing engine support.
  */
 
 #pragma once

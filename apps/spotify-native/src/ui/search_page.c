@@ -28,7 +28,7 @@ struct _SpotifyGtkSearchPage {
   GtkSearchEntry      *entry;
   SpotifyGtkTrackList *results;
   SpotifyGtkAlbumGrid *albums;
-  GtkWidget           *albums_section;   /* "Albums" heading + shelf; hidden when empty */
+  GtkWidget           *albums_section;   /* Album shelf; hidden when empty */
 
   SpotifyNativeSession *session;
 
@@ -305,18 +305,13 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   /* Albums shelf: hidden until a search returns albums. It sits at the top and
    * carries the header inset so its cards slide under the frosted header; the
    * list below it then needs no inset of its own. */
-  self->albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  self->albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   /* A horizontal shelf must clip at the pane edge. An outer end margin first
    * clips the next card and then leaves a page-coloured strip beside it—the
    * same light-theme rectangle Home used to show. */
   gtk_widget_set_margin_end (self->albums_section, 0);
   gtk_widget_set_margin_top (self->albums_section, SEARCH_HEADER_INSET);
   gtk_widget_set_visible (self->albums_section, FALSE);
-
-  GtkWidget *albums_heading = gtk_label_new ("Albums");
-  gtk_widget_add_css_class (albums_heading, "section-heading");
-  gtk_label_set_xalign (GTK_LABEL (albums_heading), 0.0);
-  gtk_box_append (GTK_BOX (self->albums_section), albums_heading);
 
   self->albums = spotifygtk_album_grid_new_shelf ();
   gtk_box_append (GTK_BOX (self->albums_section), GTK_WIDGET (self->albums));

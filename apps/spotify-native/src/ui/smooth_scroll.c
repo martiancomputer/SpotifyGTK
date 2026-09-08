@@ -8,10 +8,15 @@
 #include <math.h>
 
 #define SMOOTH_SCROLL_STEP  118.0   /* px travelled per wheel notch */
-#define SMOOTH_SCROLL_EASE  0.24    /* fraction of the remaining gap, per 60Hz frame */
+#define SMOOTH_SCROLL_EASE  0.30    /* fraction of the remaining gap, per 60Hz frame */
 #define SMOOTH_SCROLL_FRAME_US 16666.0  /* what that fraction is calibrated against */
 /* A long stall should catch up, not teleport: past this the easing saturates. */
 #define SMOOTH_SCROLL_MAX_FRAMES 6.0
+/* GtkListView adjusts its value by a few pixels while recycled rows above the
+ * viewport are remeasured.  That is viewport anchoring, not another input
+ * device taking ownership.  A wheel notch is 118px, so corrections below half
+ * a notch are safely distinguishable from a scrollbar drag/default wheel. */
+#define SMOOTH_SCROLL_ANCHOR_TOLERANCE 59.0
 
 typedef struct {
   GtkScrolledWindow *scroller;      /* borrowed; owns this via set_data */
@@ -20,6 +25,15 @@ typedef struct {
   gdouble            target;
   gdouble            last_set;      /* what we last wrote, to spot outside changes */
   gint64             last_frame_us; /* to ease by elapsed time, not by frame count */
+  gboolean           writing_adjustment;
+  gboolean           trace;
+  gdouble            observed_value;
+  gint64             observed_us;
+  gint               observed_direction;
+  GtkAdjustment      *observed_adjustment; /* owned while handlers are live */
+  gulong              value_handler;
+  gulong              upper_handler;
+  gulong              page_handler;
 #ifdef SPOTIFYGTK_VERBOSE
   guint64            gesture;
   guint              events;
@@ -28,6 +42,70 @@ typedef struct {
   gint64             max_frame_gap_us;
 #endif
 } SmoothScroll;
+
+static void
+smooth_scroll_free (gpointer data)
+{
+  SmoothScroll *ss = data;
+  if (ss->observed_adjustment) {
+    if (ss->value_handler)
+      g_signal_handler_disconnect (ss->observed_adjustment, ss->value_handler);
+    if (ss->upper_handler)
+      g_signal_handler_disconnect (ss->observed_adjustment, ss->upper_handler);
+    if (ss->page_handler)
+      g_signal_handler_disconnect (ss->observed_adjustment, ss->page_handler);
+    g_clear_object (&ss->observed_adjustment);
+  }
+  g_free (ss);
+}
+
+static void
+set_adjustment_value (SmoothScroll *ss, GtkAdjustment *adj, gdouble value)
+{
+  ss->writing_adjustment = TRUE;
+  gtk_adjustment_set_value (adj, value);
+  ss->writing_adjustment = FALSE;
+}
+
+static void
+on_adjustment_value (GtkAdjustment *adj, gpointer user_data)
+{
+  SmoothScroll *ss = user_data;
+  if (!ss->trace)
+    return;
+
+  gint64 now = g_get_monotonic_time ();
+  gdouble value = gtk_adjustment_get_value (adj);
+  gdouble delta = value - ss->observed_value;
+  gint direction = delta > 0.5 ? 1 : delta < -0.5 ? -1 : 0;
+  gboolean reversal = direction != 0 && ss->observed_direction != 0 &&
+    direction != ss->observed_direction && now - ss->observed_us < 150000;
+
+  g_message ("scroll-trace: adjustment source=%s value=%.2f delta=%+.2f "
+             "target=%.2f active=%s%s",
+             ss->writing_adjustment ? "smooth" : "external", value, delta,
+             ss->target, ss->tick ? "yes" : "no",
+             reversal ? " REVERSAL" : "");
+
+  if (direction != 0)
+    ss->observed_direction = direction;
+  ss->observed_value = value;
+  ss->observed_us = now;
+}
+
+static void
+on_adjustment_geometry (GtkAdjustment *adj, GParamSpec *pspec, gpointer user_data)
+{
+  SmoothScroll *ss = user_data;
+  if (ss->trace)
+    g_message ("scroll-trace: geometry changed=%s lower=%.2f upper=%.2f "
+               "page=%.2f value=%.2f target=%.2f active=%s",
+               pspec->name, gtk_adjustment_get_lower (adj),
+               gtk_adjustment_get_upper (adj),
+               gtk_adjustment_get_page_size (adj),
+               gtk_adjustment_get_value (adj), ss->target,
+               ss->tick ? "yes" : "no");
+}
 
 #ifdef SPOTIFYGTK_VERBOSE
 static const gchar *
@@ -75,13 +153,26 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 
   gdouble value = gtk_adjustment_get_value (adj);
 
-  /* Someone grabbed the scrollbar, or a keyboard or programmatic scroll landed,
-   * while this was still animating. Their position wins -- drop the animation
-   * rather than dragging the view back out from under them. */
-  if (ABS (value - ss->last_set) > 1.0) {
+  /* GtkListView performs small viewport-anchor corrections when its recycled
+   * rows are remeasured. Preserve the remaining animation distance across
+   * those corrections; otherwise every correction looks like outside input,
+   * kills the easing after a few frames, and the next correction can visibly
+   * pull the viewport back. A large displacement is a real scrollbar,
+   * keyboard or programmatic takeover and still wins immediately. */
+  gdouble outside_delta = value - ss->last_set;
+  if (ABS (outside_delta) > 1.0 &&
+      ABS (outside_delta) <= SMOOTH_SCROLL_ANCHOR_TOLERANCE) {
+    ss->target += outside_delta;
+    ss->last_set = value;
+    if (ss->trace)
+      g_message ("scroll-trace: absorbed anchor delta=%+.2f target=%.2f",
+                 outside_delta, ss->target);
+  } else if (ABS (outside_delta) > SMOOTH_SCROLL_ANCHOR_TOLERANCE) {
 #ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "external-change", value);
 #endif
+    if (ss->trace)
+      g_message ("scroll-trace: ownership takeover delta=%+.2f", outside_delta);
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -107,7 +198,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
     /* The content moved out from under the gesture. Finish where the list can
      * actually go and stop, rather than animating into a wall. */
     ss->target = clamped;
-    gtk_adjustment_set_value (adj, clamped);
+    set_adjustment_value (ss, adj, clamped);
 #ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "bounds-changed", clamped);
 #endif
@@ -122,7 +213,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
    * target=9182 was captured continuously for several seconds in telemetry.
    * One pixel is visually exact, so land on the target and retire the tick. */
   if (ABS (remaining) <= 1.0) {
-    gtk_adjustment_set_value (adj, ss->target);
+    set_adjustment_value (ss, adj, ss->target);
 #ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "complete", ss->target);
 #endif
@@ -166,14 +257,14 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 
   gdouble factor = 1.0 - pow (1.0 - SMOOTH_SCROLL_EASE, frames);
 
-  gtk_adjustment_set_value (adj, value + remaining * factor);
+  set_adjustment_value (ss, adj, value + remaining * factor);
   ss->last_set = gtk_adjustment_get_value (adj);
 
   /* Be defensive about other quantisation steps too. If GTK accepted no
    * movement at all, another eased frame cannot improve the situation; snap
    * once rather than leaving a permanent frame-clock callback behind. */
   if (ss->last_set == value) {
-    gtk_adjustment_set_value (adj, ss->target);
+    set_adjustment_value (ss, adj, ss->target);
     ss->last_set = gtk_adjustment_get_value (adj);
 #ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "quantized", ss->last_set);
@@ -192,8 +283,19 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
 #if GTK_CHECK_VERSION (4, 8, 0)
   /* Touchpads already deliver continuous pixel deltas and GTK handles those
    * well, including kinetic follow-through. Only the discrete case needs help. */
-  if (gtk_event_controller_scroll_get_unit (ctrl) != GDK_SCROLL_UNIT_WHEEL)
+  if (gtk_event_controller_scroll_get_unit (ctrl) != GDK_SCROLL_UNIT_WHEEL) {
+    /* A touchpad gesture owns the adjustment from this event onward.  Cancel
+     * an unfinished wheel animation immediately so its next frame cannot tug
+     * against GTK's kinetic motion and produce a one-frame reversal. */
+    if (ss->tick != 0) {
+      if (ss->trace)
+        g_message ("scroll-trace: touchpad takes ownership; cancel target=%.2f",
+                   ss->target);
+      gtk_widget_remove_tick_callback (GTK_WIDGET (ss->scroller), ss->tick);
+      ss->tick = 0;
+    }
     return GDK_EVENT_PROPAGATE;
+  }
 #else
   (void) ctrl;
 #endif
@@ -201,6 +303,11 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
   /* A wheel only ever reports dy, so a horizontal target has to take it from
    * there; dx is preferred when present (tilt wheels, horizontal gestures). */
   gdouble delta = (ss->orientation == GTK_ORIENTATION_HORIZONTAL && dx != 0.0) ? dx : dy;
+  if (ss->trace)
+    g_message ("scroll-trace: input unit=%d dx=%+.3f dy=%+.3f chosen=%+.3f "
+               "active=%s",
+               (gint) gtk_event_controller_scroll_get_unit (ctrl), dx, dy,
+               delta, ss->tick ? "yes" : "no");
   if (delta == 0.0)
     return GDK_EVENT_PROPAGATE;
 
@@ -262,15 +369,34 @@ spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
   SmoothScroll *ss = g_new0 (SmoothScroll, 1);
   ss->scroller    = scroller;
   ss->orientation = orientation;
+  ss->trace       = g_getenv ("SPOTIFY_SCROLL_STATS") != NULL;
 
   /* Tied to the widget's lifetime: the tick callback is removed with the
    * widget, and this frees with it, so there is nothing to unregister. */
   g_object_set_data_full (G_OBJECT (scroller), "spotifygtk-smooth-scroll",
-                          ss, g_free);
+                          ss, smooth_scroll_free);
 
-  /* BOTH_AXES so a horizontal target still sees the vertical wheel. */
+  GtkAdjustment *adj = adjustment_for (ss);
+  if (adj) {
+    ss->observed_adjustment = g_object_ref (adj);
+    ss->observed_value = gtk_adjustment_get_value (adj);
+    ss->value_handler = g_signal_connect (adj, "value-changed",
+      G_CALLBACK (on_adjustment_value), ss);
+    ss->upper_handler = g_signal_connect (adj, "notify::upper",
+      G_CALLBACK (on_adjustment_geometry), ss);
+    ss->page_handler = g_signal_connect (adj, "notify::page-size",
+      G_CALLBACK (on_adjustment_geometry), ss);
+  }
+
+  /* BOTH_AXES so a horizontal target still sees the vertical wheel.
+   * DISCRETE asks GTK to normalise physical wheel detents for this controller
+   * while continuous touchpad events pass through to GtkScrolledWindow.  On
+   * high-resolution libinput wheels, BOTH_AXES alone can expose the event as a
+   * surface delta; the unit guard above then correctly leaves it to GTK, but
+   * the visible result is the old stepped scrolling instead of this easing. */
   GtkEventController *wheel =
-    gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
+    gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES |
+                                     GTK_EVENT_CONTROLLER_SCROLL_DISCRETE);
 
   /*
    * CAPTURE, so this runs *before* GtkScrolledWindow's own scroll handling
@@ -284,4 +410,20 @@ spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
   gtk_event_controller_set_propagation_phase (wheel, GTK_PHASE_CAPTURE);
   g_signal_connect (wheel, "scroll", G_CALLBACK (on_scroll), ss);
   gtk_widget_add_controller (GTK_WIDGET (scroller), wheel);
+}
+
+gboolean
+spotifygtk_smooth_scroll_get_target (GtkScrolledWindow *scroller,
+                                     gdouble           *target)
+{
+  g_return_val_if_fail (GTK_IS_SCROLLED_WINDOW (scroller), FALSE);
+
+  SmoothScroll *ss = g_object_get_data (G_OBJECT (scroller),
+                                        "spotifygtk-smooth-scroll");
+  if (!ss || ss->tick == 0)
+    return FALSE;
+
+  if (target)
+    *target = ss->target;
+  return TRUE;
 }
