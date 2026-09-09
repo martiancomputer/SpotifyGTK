@@ -54,6 +54,7 @@ struct _SpotifyGtkTrackRow {
   /* Cancelled when the row is reused or destroyed, so a slow cover cannot
    * land on a row that now shows a different track. */
   GCancellable *cover_cancellable;
+  gboolean      cover_request_pending; /* cancellable belongs to a live request */
   gboolean      cover_hold;   /* record what is wanted, fetch when the list settles */
   /* The cover this row wants, kept so a load skipped during a scroll can be
    * reissued once the list settles. */
@@ -198,6 +199,12 @@ on_row_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
   SpotifyGtkTrackRow *self = user_data;
 
+  /* The callback may run synchronously for a memory-cache hit. Keep this as
+   * the source of truth instead of inferring request ownership from the
+   * cancellable: release_cover() deliberately leaves a fresh cancellable for
+   * the next retry, but that object by itself is not an outstanding load. */
+  self->cover_request_pending = FALSE;
+
   if (!texture)
     return;   /* keep the placeholder icon; retry_cover() may come back for it */
 
@@ -246,7 +253,8 @@ spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
 
-  if (self->cover_shown || !self->pending_cover_id)
+  if (self->cover_shown || self->cover_request_pending ||
+      !self->pending_cover_id)
     return;
 
   /*
@@ -258,6 +266,7 @@ spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
   if (!self->cover_cancellable)
     self->cover_cancellable = g_cancellable_new ();
 
+  self->cover_request_pending = TRUE;
   spotifygtk_cover_load_deferrable (self->pending_cover_id, ROW_COVER_PX,
                                     self->cover_cancellable,
                                     on_row_cover_loaded, self);
@@ -283,9 +292,11 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
      * row back to its number for as long as the round trip takes. */
     if (self->cover_shown)
       return;
-    /* Already asking for it. */
-    if (self->cover_cancellable &&
-        !g_cancellable_is_cancelled (self->cover_cancellable))
+    /* Already asking for it. A live cancellable is not sufficient evidence:
+     * release_cover() creates one for the next retry before any request owns
+     * it. Treating that spare token as an active load stranded same-track
+     * rebinds with a blank image forever. */
+    if (self->cover_request_pending)
       return;
   }
 
@@ -293,6 +304,7 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
     g_cancellable_cancel (self->cover_cancellable);
     g_clear_object (&self->cover_cancellable);
   }
+  self->cover_request_pending = FALSE;
 
   if (!cover_id || !*cover_id) {
     /*
@@ -339,6 +351,7 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
   if (self->cover_hold)
     return;
 
+  self->cover_request_pending = TRUE;
   spotifygtk_cover_load_deferrable (cover_id, ROW_COVER_PX,
                                     self->cover_cancellable,
                                     on_row_cover_loaded, self);
@@ -614,11 +627,17 @@ spotifygtk_track_row_set_number (SpotifyGtkTrackRow *self, gint track_number)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
 
+  self->row_number = track_number;
+
   if (track_number > 0) {
     g_autofree gchar *num_text = g_strdup_printf ("%d", track_number);
     gtk_label_set_text (self->track_num, num_text);
-    gtk_widget_set_visible (GTK_WIDGET (self->track_num), TRUE);
-    gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
+    /* Position changes renumber a live row while scrolling. They must not
+     * alter its artwork state: doing so hid a texture that had already loaded
+     * while leaving cover_shown TRUE, so every later retry quite correctly
+     * no-op'd. The JSON row path already follows this rule; native lists must
+     * use the same single source of truth. */
+    gtk_widget_set_visible (GTK_WIDGET (self->track_num), !self->cover_shown);
   } else {
     /* No number: hide the column entirely rather than leaving a blank 24px
      * indent, which made unnumbered lists sit further right than numbered
@@ -716,6 +735,7 @@ spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self)
     g_cancellable_cancel (self->cover_cancellable);
     g_clear_object (&self->cover_cancellable);
   }
+  self->cover_request_pending = FALSE;
   if (!self->pending_cover_id)
     return;
 

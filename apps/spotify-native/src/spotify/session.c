@@ -17,6 +17,7 @@
 #include "native_auth.h"
 #include "spclient.h"
 #include "track_meta.h"
+#include "../log_file.h"
 #include "../log_verbose.h"
 
 #include "protobuf_min.h"
@@ -811,6 +812,7 @@ connect_put_state (const gchar *bearer, const gchar *connection_id)
              url, blen);
 
   SoupSession *s = soup_session_new ();
+  spotifygtk_soup_session_configure_tls (s);
   g_object_set_data_full (G_OBJECT (msg), "device-id", g_strdup (device_id), g_free);
   soup_session_send_and_read_async (s, msg, G_PRIORITY_DEFAULT, NULL,
                                     on_put_state_done, msg);
@@ -1614,6 +1616,7 @@ dealer_connect (const gchar *bearer)
     g_strdup_printf ("wss://gae2-dealer.spotify.com/?access_token=%s", bearer);
 
   SoupSession *ws_session = soup_session_new ();
+  spotifygtk_soup_session_configure_tls (ws_session);
   g_autoptr(SoupMessage) msg = soup_message_new (SOUP_METHOD_GET, url);
   if (!msg) {
     g_warning ("[dealer] could not build the request");

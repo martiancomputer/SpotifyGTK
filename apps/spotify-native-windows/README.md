@@ -146,7 +146,8 @@ in your user profile and reused, so this happens once.
 | `bash: pacman: command not found` | An MSYS2 terminal, but not one of them has it on PATH -- reopen "MSYS2 UCRT64". |
 | `Dependency gtk4 found: NO` | Step 3 was run in the wrong shell — most often "MSYS2 MSYS" rather than UCRT64. Packages do not carry across. |
 | The `.exe` exits immediately with no message when double-clicked | Expected outside the UCRT64 shell; the GTK DLLs are not on PATH. Run it from the shell, or build a bundle. |
-| `TLS support is not available` on every request | A bundle missing `lib/gio/modules/` (glib-networking). It reads like a network fault and is not. |
+| `TLS support is not available` on every request | A bundle missing `lib/gio/modules/` (glib-networking). It reads like a network fault and is not. Rebuild with `./build.sh --bundle`. |
+| The browser returns to the app, then sign-in says `Sign in was not completed` (or the log says `Unacceptable TLS certificate`) | The bundle has no CA database, or it was built before the portable trust-store fix. Rebuild with `./build.sh --bundle`; it now ships `etc/ssl/certs/ca-bundle.crt` and configures every libsoup session to use it. |
 | Sign-in succeeds but nothing plays | Check the account is Premium. The audio-key exchange is refused for free accounts, for every format. |
 
 A log of each run is written to `spotify-native.log` beside the executable,
@@ -168,14 +169,48 @@ every compile error without a Windows machine:
 
 A GTK4 application on Windows needs more than its own `.exe`: the DLL closure,
 the Adwaita icon theme (the UI uses `*-symbolic` icons throughout), gdk-pixbuf
-loaders, and compiled GSettings schemas. `./build.sh --bundle` assembles those
-into `build/dist/`. Turning that into an installer (NSIS/MSIX) is not done.
+loaders, compiled GSettings schemas, GIO's module cache, and a CA certificate
+bundle. `./build.sh --bundle` assembles those into `build/dist/`. Turning that
+into an installer (NSIS/MSIX) is not done.
 
 The DLL closure is walked to a fixpoint rather than in one pass, because the
 modules are loaded with dlopen and nothing links them: a walk starting at the
 executable cannot reach `lib/gio/modules` or the gdk-pixbuf loaders, and so
 misses their dependencies as well. Those are copied first and everything in
 `dist` is then re-walked until a pass adds nothing.
+
+### Portable HTTPS trust
+
+MSYS2's GnuTLS backend is compiled with the trust-store location from the
+environment that built it. That location is not a portable path (and in some
+packages contains the build host's drive letter), so a copied bundle could open
+the OAuth browser successfully but reject the callback's token exchange with
+`Unacceptable TLS certificate`.
+
+The app keeps one `GTlsFileDatabase` for the process and attaches it to every
+libsoup session: OAuth, client-token, login5, AP discovery, catalog/pathfinder,
+album art, CDN audio, and Connect's HTTPS/WebSocket requests. On Windows the
+path is resolved from the executable, not the current directory:
+
+```
+dist/
+  spotify-native.exe
+  etc/ssl/certs/ca-bundle.crt
+```
+
+`build.sh --bundle` copies the current UCRT64 CA bundle there. The app also
+sets `GIO_MODULE_DIR`, `GSETTINGS_SCHEMA_DIR`, and `GDK_PIXBUF_MODULE_FILE`
+relative to the executable before GTK initializes, so the same directory works
+when launched from Explorer without MSYS2 on `PATH`. Existing environment
+values are respected for diagnostics. `SPOTIFYGTK_CA_BUNDLE` can point to a
+different PEM bundle when testing a custom installation; certificate
+verification is never disabled.
+
+The normal offline test suite remains offline. Set
+`SPOTIFYGTK_TLS_PROBE=1` to enable the opt-in live probe in
+`tests/test_native_auth.c`; it performs a real libsoup request to
+`https://accounts.spotify.com/` and fails if the configured CA database is not
+accepted. Running that probe from inside `dist/` is the portable-bundle check.
 
 ## Status — honest
 
@@ -193,13 +228,19 @@ below was observed, not inferred:
   returns HTTP 200 (`clienttoken: sending request (windows build=26200 …)`).
   This was the highest-risk unverifiable piece: a wrong platform message fails
   as an opaque HTTP 400 with an empty body.
-- **Sign-in**, through login5 to a usable bearer token.
+- **Sign-in**, through login5 to a usable bearer token when run from MSYS2.
+  The portable-bundle CA lookup is additionally covered by the opt-in live
+  libsoup probe described above; it catches the Windows-only certificate-path
+  failure before a user has to complete a browser flow.
 - **Streaming**, end to end: AP handshake, metadata, CDN resolution, audio key,
   decrypt, decode.
 - **WASAPI playback.** Audio actually comes out. The buffer handling, COM
   apartment pairing and drain loop are exercised.
-- **Packaging.** `build/dist/` runs as a portable directory on a machine with no
-  MSYS2 and no GTK installed.
+- **Packaging.** `build/dist/` contains the executable, the complete DLL
+  closure, loadable GIO/GdkPixbuf modules, icons, schemas, and the CA bundle
+  needed to run without MSYS2 or GTK installed. The GUI itself still needs an
+  interactive Windows desktop; an SSH-launched process in Session 0 cannot
+  display a GTK window, so that route is only a smoke/build check.
 
 Concrete catches from the port, each of which broke something real:
 

@@ -199,8 +199,19 @@ update_velocity_overscan (gpointer user_data)
     gboolean retain = destination || current_and_shown;
     guint previous = GPOINTER_TO_UINT (
       g_object_get_data (G_OBJECT (row), "overscan-retained"));
-    if (previous == (retain ? 2u : 1u))
+    if (previous == (retain ? 2u : 1u)) {
+      /* Window membership and artwork state are separate facts. A request can
+       * be cancelled by a page release or a GTK unbind without changing the
+       * numeric overscan range. The old transition-only pass then considered
+       * this row settled forever even though it had no texture. A forced
+       * settle reconciliation reaches this branch; retry_cover() is safe and
+       * cheap because TrackRow now knows whether a request is genuinely live. */
+      if (destination && !spotifygtk_track_row_has_cover (row)) {
+        spotifygtk_track_row_set_cover_hold (row, FALSE);
+        spotifygtk_track_row_retry_cover (row);
+      }
       continue;
+    }
     g_object_set_data (G_OBJECT (row), "overscan-retained",
                        GUINT_TO_POINTER (retain ? 2u : 1u));
     spotifygtk_track_row_set_cover_hold (row, !retain);
@@ -276,6 +287,10 @@ on_scroll_settled (gpointer user_data)
 
   if (self->velocity_overscan) {
     self->scroll_velocity = 0.0;
+    /* Reconcile the contents even when the final adjustment maps to the same
+     * model indices as the previous animation frame. The range cache is an
+     * optimisation, not proof that every row inside it still owns artwork. */
+    self->overscan_valid = FALSE;
     schedule_velocity_overscan (self);  /* contract back to base eight */
     return G_SOURCE_REMOVE;
   }

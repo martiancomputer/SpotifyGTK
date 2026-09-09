@@ -109,6 +109,7 @@ main (int argc, char *argv[])
 {
   /* Before anything else that might log, so a bug report covers sign-in and
    * the AP handshake rather than starting halfway through the session. */
+  spotifygtk_runtime_init ();
   spotifygtk_log_file_init ();
   apply_renderer_preference ();
 

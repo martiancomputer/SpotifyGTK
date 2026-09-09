@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "spclient.h"
+#include "../log_file.h"
 
 #include <stdlib.h>
 #include "protobuf_min.h"
@@ -492,6 +493,7 @@ spotifygtk_spclient_init (SpotifySpclient *self)
     "max-conns-per-host", conns,
     "max-conns", MAX (conns, 24),
     NULL);
+  spotifygtk_soup_session_configure_tls (self->session);
   g_message ("spclient: session using %u connections per host", conns);
 }
 
@@ -1047,6 +1049,8 @@ search_context_request_page (SearchContextClosure *cl, guint page_index)
   if (!cl->spclient->gql_session)
     cl->spclient->gql_session = soup_session_new_with_options (
       "user-agent", PATHFINDER_UA, NULL);
+  if (cl->spclient->gql_session)
+    spotifygtk_soup_session_configure_tls (cl->spclient->gql_session);
   soup_session_send_and_read_async (
     cl->spclient->gql_session, page_cl->message, G_PRIORITY_DEFAULT,
     cl->spclient->cancellable, on_search_context_page, page_cl);
@@ -1695,6 +1699,8 @@ spotifygtk_spclient_get_artist_header (SpotifySpclient        *self,
 
   if (!self->gql_session)
     self->gql_session = soup_session_new_with_options ("user-agent", PATHFINDER_UA, NULL);
+  if (self->gql_session)
+    spotifygtk_soup_session_configure_tls (self->gql_session);
 
   soup_session_send_and_read_async (self->gql_session, msg, G_PRIORITY_DEFAULT,
                                     self->cancellable, on_artist_header_response, cl);

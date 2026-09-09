@@ -4,7 +4,9 @@
 
 #include "log_file.h"
 
+#include <gio/gio.h>
 #include <glib/gstdio.h>
+#include <libsoup/soup.h>
 #include <stdio.h>
 
 #ifdef G_OS_WIN32
@@ -14,6 +16,9 @@
 static GMutex   log_mutex;      /* the writer runs on whatever thread logged */
 static FILE    *log_stream;
 static gchar   *log_path;
+
+static GTlsDatabase *portable_tls_database;
+static gsize         portable_tls_database_once;
 
 /*
  * Directory holding the running executable.
@@ -37,6 +42,105 @@ executable_dir (void)
   g_autofree gchar *exe = g_file_read_link ("/proc/self/exe", NULL);
   return exe ? g_path_get_dirname (exe) : NULL;
 #endif
+}
+
+void
+spotifygtk_runtime_init (void)
+{
+#ifdef G_OS_WIN32
+  /* GIO and GdkPixbuf normally derive these paths from the MSYS2 prefix that
+   * built them.  A portable bundle has no such prefix, so point the loaders
+   * and schemas at the copy beside the executable before GTK initializes. */
+  g_autofree gchar *directory = executable_dir ();
+  if (!directory)
+    return;
+
+  if (!g_getenv ("GIO_MODULE_DIR")) {
+    g_autofree gchar *modules =
+      g_build_filename (directory, "lib", "gio", "modules", NULL);
+    if (g_file_test (modules, G_FILE_TEST_IS_DIR))
+      g_setenv ("GIO_MODULE_DIR", modules, FALSE);
+  }
+
+  if (!g_getenv ("GSETTINGS_SCHEMA_DIR")) {
+    g_autofree gchar *schemas =
+      g_build_filename (directory, "share", "glib-2.0", "schemas", NULL);
+    if (g_file_test (schemas, G_FILE_TEST_IS_DIR))
+      g_setenv ("GSETTINGS_SCHEMA_DIR", schemas, FALSE);
+  }
+
+  if (!g_getenv ("GDK_PIXBUF_MODULE_FILE")) {
+    g_autofree gchar *loaders =
+      g_build_filename (directory, "lib", "gdk-pixbuf-2.0", "2.10.0",
+                        "loaders.cache", NULL);
+    if (g_file_test (loaders, G_FILE_TEST_IS_REGULAR))
+      g_setenv ("GDK_PIXBUF_MODULE_FILE", loaders, FALSE);
+  }
+#endif
+}
+
+static gchar *
+portable_ca_bundle_path (void)
+{
+  const gchar *override = g_getenv ("SPOTIFYGTK_CA_BUNDLE");
+  if (override && *override)
+    return g_strdup (override);
+
+#ifdef G_OS_WIN32
+  g_autofree gchar *directory = executable_dir ();
+  if (!directory)
+    return NULL;
+
+  g_autofree gchar *bundle =
+    g_build_filename (directory, "etc", "ssl", "certs", "ca-bundle.crt", NULL);
+  if (g_file_test (bundle, G_FILE_TEST_IS_REGULAR))
+    return g_steal_pointer (&bundle);
+
+  /* Accept the alternate MSYS2 name for hand-built bundles.  The official
+   * packaging script ships ca-bundle.crt, but this makes diagnosis and local
+   * packaging less surprising. */
+  bundle = g_build_filename (directory, "etc", "ssl", "certs",
+                             "ca-bundle.trust.crt", NULL);
+  if (g_file_test (bundle, G_FILE_TEST_IS_REGULAR))
+    return g_steal_pointer (&bundle);
+#endif
+
+  return NULL;
+}
+
+static GTlsDatabase *
+portable_tls_database_get (void)
+{
+  if (g_once_init_enter (&portable_tls_database_once)) {
+    g_autofree gchar *path = portable_ca_bundle_path ();
+    if (path) {
+      g_autoptr(GError) error = NULL;
+      portable_tls_database = G_TLS_DATABASE (g_tls_file_database_new (path, &error));
+      if (portable_tls_database) {
+        g_message ("tls: using bundled CA database %s", path);
+      } else {
+        g_warning ("tls: could not load CA database %s: %s; falling back to the platform default",
+                   path, error ? error->message : "unknown error");
+      }
+    }
+    if (!portable_tls_database && !path)
+      g_message ("tls: no bundled CA database; using the platform default");
+    g_once_init_leave (&portable_tls_database_once, 1);
+  }
+
+  return portable_tls_database;
+}
+
+void
+spotifygtk_soup_session_configure_tls (SoupSession *session)
+{
+  g_return_if_fail (SOUP_IS_SESSION (session));
+
+  spotifygtk_runtime_init ();
+
+  GTlsDatabase *database = portable_tls_database_get ();
+  if (database)
+    g_object_set (session, "tls-database", database, NULL);
 }
 
 static const gchar *
@@ -110,6 +214,8 @@ log_writer (GLogLevelFlags level, const GLogField *fields, gsize n_fields,
 void
 spotifygtk_log_file_init (void)
 {
+  spotifygtk_runtime_init ();
+
   if (log_stream)
     return;
 

@@ -1299,6 +1299,7 @@ on_activate (GtkApplication *app, gpointer user_data)
 int
 main (int argc, char *argv[])
 {
+  spotifygtk_runtime_init ();
   spotifygtk_log_file_init ();
 
   GtkApplication *app = gtk_application_new (APP_ID, G_APPLICATION_DEFAULT_FLAGS);

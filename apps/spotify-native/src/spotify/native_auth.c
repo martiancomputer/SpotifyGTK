@@ -21,6 +21,7 @@
 
 #include "config.h"
 #include "native_auth.h"
+#include "../log_file.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -484,6 +485,7 @@ static void
 native_auth_init (NativeAuth *self)
 {
   self->session = soup_session_new_with_options ("user-agent", "spotify-native/" APP_VERSION, NULL);
+  spotifygtk_soup_session_configure_tls (self->session);
 }
 
 NativeAuth *

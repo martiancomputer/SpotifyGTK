@@ -14,6 +14,10 @@
 
 #include <glib.h>
 
+/* Forward declaration keeps this small runtime header usable by the
+ * headless protocol tests without forcing every consumer to include libsoup. */
+typedef struct _SoupSession SoupSession;
+
 G_BEGIN_DECLS
 
 /*
@@ -32,5 +36,15 @@ void spotifygtk_log_file_shutdown (void);
 /* Absolute path of the active log, or NULL if none is open. Owned by the
  * module; do not free. */
 const gchar *spotifygtk_log_file_path (void);
+
+/* Set GIO/GdkPixbuf's module and schema paths relative to a portable bundle
+ * before GTK or libsoup initializes them.  Existing environment overrides are
+ * respected, so this remains useful for development diagnostics. */
+void spotifygtk_runtime_init (void);
+
+/* Attach the CA database shipped next to a portable Windows build to a
+ * libsoup session.  On Linux and on Windows builds without a bundled CA file
+ * this is a no-op, preserving GIO's normal system trust database. */
+void spotifygtk_soup_session_configure_tls (SoupSession *session);
 
 G_END_DECLS

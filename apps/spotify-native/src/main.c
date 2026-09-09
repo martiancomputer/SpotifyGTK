@@ -70,6 +70,7 @@
 #include "audio/resampler.h"
 #include "audio/output.h"
 #include "native_engine.h"
+#include "log_file.h"
 
 #include <glib.h>
 #include <string.h>
@@ -3913,6 +3914,8 @@ int
 main (int argc, char *argv[])
 {
   (void) argc; (void) argv;
+
+  spotifygtk_runtime_init ();
 
   const gchar *session_probe = g_getenv ("SPOTIFY_PROBE_SESSION");
   if (session_probe && *session_probe) {

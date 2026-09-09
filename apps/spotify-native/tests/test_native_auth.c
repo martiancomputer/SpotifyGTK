@@ -11,7 +11,9 @@
  */
 
 #include <glib.h>
+#include <libsoup/soup.h>
 #include <string.h>
+#include "log_file.h"
 #include "spotify/native_auth.h"
 
 static void
@@ -57,11 +59,42 @@ test_object_creation (void)
   g_object_unref (auth);
 }
 
+/* Optional live regression check for a portable bundle.  It stays skipped in
+ * the normal offline test suite; setting SPOTIFYGTK_TLS_PROBE=1 exercises the
+ * same libsoup/GnuTLS path used by OAuth and proves the CA database is not
+ * merely present on disk but accepted by a real HTTPS peer. */
+static void
+test_tls_probe (void)
+{
+  if (!g_getenv ("SPOTIFYGTK_TLS_PROBE")) {
+    g_test_skip ("set SPOTIFYGTK_TLS_PROBE=1 to run the live HTTPS probe");
+    return;
+  }
+
+  SoupSession *session = soup_session_new_with_options ("timeout", 20, NULL);
+  spotifygtk_soup_session_configure_tls (session);
+  GTlsDatabase *database = NULL;
+  g_object_get (session, "tls-database", &database, NULL);
+  g_assert_nonnull (database);
+  g_object_unref (database);
+
+  g_autoptr(SoupMessage) message =
+    soup_message_new (SOUP_METHOD_GET, "https://accounts.spotify.com/");
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body =
+    soup_session_send_and_read (session, message, NULL, &error);
+  if (!body)
+    g_test_message ("TLS probe failed: %s", error ? error->message : "unknown error");
+  g_assert_nonnull (body);
+  g_object_unref (session);
+}
+
 int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/native-auth/constants-match-librespot", test_constants_match_librespot);
   g_test_add_func ("/native-auth/object-creation",           test_object_creation);
+  g_test_add_func ("/native-auth/tls-probe",                 test_tls_probe);
   return g_test_run ();
 }

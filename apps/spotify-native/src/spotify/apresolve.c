@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "apresolve.h"
+#include "../log_file.h"
 
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
@@ -135,6 +136,7 @@ spotifygtk_apresolve_get_async (GCancellable        *cancellable,
 
   SoupSession *session =
     soup_session_new_with_options ("user-agent", "spotify-native/" APP_VERSION, NULL);
+  spotifygtk_soup_session_configure_tls (session);
   SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, APRESOLVE_URL);
 
   soup_session_send_and_read_async (session, msg, G_PRIORITY_DEFAULT, cancellable,

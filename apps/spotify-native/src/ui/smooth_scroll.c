@@ -254,9 +254,11 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
    * Raising the per-frame fraction to the elapsed number of 60Hz frames keeps
    * the travel time constant however the frames actually land, so jank costs
    * smoothness rather than changing the character of the motion.
-   */
+  */
   gint64  now_us  = gdk_frame_clock_get_frame_time (clock);
+#ifdef SPOTIFYGTK_VERBOSE
   gint64  frame_gap_us = ss->last_frame_us > 0 ? now_us - ss->last_frame_us : 0;
+#endif
   gdouble frames  = (ss->last_frame_us > 0)
     ? (gdouble) (now_us - ss->last_frame_us) / SMOOTH_SCROLL_FRAME_US : 1.0;
   frames = CLAMP (frames, 0.1, SMOOTH_SCROLL_MAX_FRAMES);

@@ -17,6 +17,7 @@
 
 #include "config.h"
 #include "cdn.h"
+#include "../log_file.h"
 
 #include <libsoup/soup.h>
 #if HAVE_OPENSSL
@@ -479,6 +480,7 @@ spotifygtk_cdn_fetcher_init (SpotifyCdnFetcher *self)
                                                  "timeout", 20,
                                                  "idle-timeout", 15,
                                                  NULL);
+  spotifygtk_soup_session_configure_tls (self->session);
 }
 
 SpotifyCdnFetcher *

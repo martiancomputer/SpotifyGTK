@@ -19,6 +19,7 @@
 #include <libsoup/soup.h>
 
 #include "settings.h"
+#include "../log_file.h"
 #include "../log_verbose.h"
 
 #define COVER_CDN_BASE "https://i.scdn.co/image/"
@@ -761,6 +762,7 @@ ensure_initialised (void)
     "max-conns-per-host", conns,
     "max-conns", MAX (conns, 24),
     NULL);
+  spotifygtk_soup_session_configure_tls (cover_session);
   g_message ("cover: session using %u connections per host", conns);
 }
 

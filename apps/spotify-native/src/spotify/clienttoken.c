@@ -25,6 +25,7 @@
 
 #include "config.h"
 #include "clienttoken.h"
+#include "../log_file.h"
 #include "protobuf_min.h"
 
 #include <libsoup/soup.h>
@@ -325,6 +326,7 @@ static void
 spotifygtk_client_token_init (SpotifyClientToken *self)
 {
   self->session = soup_session_new_with_options ("user-agent", "spotify-native/" APP_VERSION, NULL);
+  spotifygtk_soup_session_configure_tls (self->session);
 }
 
 SpotifyClientToken *

@@ -46,6 +46,7 @@ if get_option('tests')
     '../src/spotify/spclient.c',
     '../src/spotify/protobuf_min.c',
     '../src/spotify/track_meta.c',
+    '../src/log_file.c',
     include_directories: [config_inc, include_directories('../src')],
     dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
   )
@@ -54,6 +55,7 @@ if get_option('tests')
   test_apresolve = executable('test-apresolve',
     'test_apresolve.c',
     '../src/spotify/apresolve.c',
+    '../src/log_file.c',
     include_directories: [config_inc, include_directories('../src')],
     dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
   )
@@ -98,6 +100,7 @@ if get_option('tests')
   test_native_auth = executable('test-native-auth',
     'test_native_auth.c',
     '../src/spotify/native_auth.c',
+    '../src/log_file.c',
     include_directories: [config_inc, include_directories('../src')],
     dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
   )

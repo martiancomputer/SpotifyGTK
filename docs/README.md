@@ -391,7 +391,9 @@ DSP, resampling, collection writes, login constants and streaming-auth
 encoding. Live protocol behavior requires a real session; use disposable
 playlist operations when testing writes. `-Dallow_old_gtk=true` supports older
 GTK packages. The nightly profile selects PipeWire. Windows uses the MSYS2
-UCRT64/WASAPI instructions in its application README.
+UCRT64/WASAPI instructions in its application README. The native-auth test has
+an opt-in live HTTPS check (`SPOTIFYGTK_TLS_PROBE=1`) for validating a portable
+Windows bundle without making the default suite depend on the network.
 
 ## Contribution rules
 
@@ -520,6 +522,26 @@ Dispatch snapshots and same-session guards address the two independent causes.
 Logs separated visible texture memory from queued decode buffers and stale
 widget references. Deferring work until layout, refusing duplicate card jobs,
 and removing global cover deferral fixed the fan-out and cross-page race.
+
+### Windows portable sign-in certificate failure
+
+The first bundled Windows build contained the TLS DLLs but not a trust store.
+The browser portion of OAuth worked, so the failure looked like a callback or
+state bug; the log showed the decisive `Unacceptable TLS certificate` during the
+POST to `accounts.spotify.com/api/token`. MSYS2's GnuTLS backend resolves its
+system CA path from the build installation, which is not a valid path after a
+`dist/` directory is copied to another machine.
+
+The fix stays in the existing runtime/log module (no new C or header files):
+the app finds the executable with `GetModuleFileNameW`, sets GIO, GSettings and
+GdkPixbuf module paths relative to it before GTK starts, and loads one
+process-lifetime `GTlsFileDatabase` from `etc/ssl/certs/ca-bundle.crt`. Every
+libsoup session is configured with that database, including native OAuth,
+client-token/login5, AP discovery, Pathfinder/catalog, artwork, CDN and
+Connect. Verification remains enabled; there is no insecure “accept any
+certificate” fallback. The Windows bundle script copies both the GIO module
+cache and the CA bundle, and the optional libsoup probe runs from inside
+`dist/` to verify the relative lookup and a real HTTPS handshake.
 
 ## Related documents
 
