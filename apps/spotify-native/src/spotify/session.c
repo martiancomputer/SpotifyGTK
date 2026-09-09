@@ -116,6 +116,8 @@ spotifygtk_native_track_free (SpotifyNativeTrack *track)
   g_free (track->cover_id_small);
   g_free (track->album_uri);
   g_free (track->artist_uri);
+  g_free (track->section_title);
+  g_free (track->section_detail);
   g_free (track);
 }
 
@@ -137,6 +139,8 @@ spotifygtk_native_track_copy (const SpotifyNativeTrack *track)
   copy->release_year = track->release_year;
   copy->album_uri   = g_strdup (track->album_uri);
   copy->artist_uri  = g_strdup (track->artist_uri);
+  copy->section_title = g_strdup (track->section_title);
+  copy->section_detail = g_strdup (track->section_detail);
   return copy;
 }
 

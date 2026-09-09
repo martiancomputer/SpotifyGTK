@@ -101,6 +101,12 @@ gboolean spotifygtk_track_list_duration_inset (SpotifyGtkTrackList *self,
 
 void spotifygtk_track_list_set_inline (SpotifyGtkTrackList *self, gboolean inlined);
 
+/* Use an enclosing scroller as the artwork viewport for an inline list. The
+ * list still sizes into the outer page, but overscan follows what the user can
+ * actually see instead of treating its entire natural height as visible. */
+void spotifygtk_track_list_set_external_viewport (SpotifyGtkTrackList *self,
+                                                  GtkScrolledWindow  *scroller);
+
 void spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered);
 
 /*

@@ -179,6 +179,25 @@ static void on_card_cover_loaded (GdkTexture *texture, gpointer user_data);
 static gboolean card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card);
 static gboolean on_grid_settled (gpointer user_data);
 
+/* A wrapped grid's width is part of its viewport state. Expanding or
+ * collapsing Now Playing can change the column count without changing the
+ * vertical adjustment, so the scroll handler never runs. Coalesce GTK's
+ * intermediate allocations and reconcile artwork against the final geometry. */
+static void
+on_grid_geometry_changed (GtkWidget *widget, GParamSpec *pspec,
+                          gpointer user_data)
+{
+  SpotifyGtkAlbumGrid *self = user_data;
+  (void) widget;
+  (void) pspec;
+
+  self->window_valid = FALSE;
+  self->last_scroll_us = g_get_monotonic_time ();
+  if (!self->settle_id)
+    self->settle_id = g_timeout_add (GRID_SETTLE_MS,
+                                     on_grid_settled, self);
+}
+
 static gboolean
 grid_model_window (SpotifyGtkAlbumGrid *self, guint *first_out, guint *last_out,
                    gboolean *smooth_out)
@@ -421,6 +440,27 @@ card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
   return position >= first && position < last;
 }
 
+/* Final allocations are the source of truth after a resize. The model-space
+ * estimate above is deliberately usable during GridView's provisional bind,
+ * but it cannot know GTK's exact spacing and column decision. At settle time
+ * every mapped card has real bounds, so retain one row beyond the viewport on
+ * either side and reconcile against what GTK actually drew. */
+static gboolean
+card_near_allocated_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
+{
+  if (!self->scroller || !gtk_widget_get_mapped (card))
+    return FALSE;
+
+  graphene_rect_t bounds;
+  if (!gtk_widget_compute_bounds (card, self->scroller, &bounds))
+    return card_near_viewport (self, card);
+
+  gdouble height = gtk_widget_get_height (self->scroller);
+  gdouble margin = MAX (bounds.size.height, 1.0);
+  return bounds.origin.y + bounds.size.height > -margin &&
+         bounds.origin.y < height + margin;
+}
+
 static gboolean
 on_grid_settled (gpointer user_data)
 {
@@ -438,7 +478,7 @@ on_grid_settled (gpointer user_data)
 
   for (guint i = 0; i < self->bound_cards->len; i++) {
     GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
-    if (!card_near_viewport (self, card)) {
+    if (!card_near_allocated_viewport (self, card)) {
       card_release_cover (card);
     } else {
       SpotifyGtkAlbumItem *item = g_object_get_data (G_OBJECT (card),
@@ -1293,6 +1333,16 @@ album_grid_new (gboolean wrap)
 
   self->scroller = scroller;
   self->view     = view;
+
+  /* Width changes alter a grid's column count; height changes alter its row
+   * count. Neither necessarily moves the adjustment, so observe geometry
+   * directly instead of waiting for a synthetic scroll. */
+  if (wrap) {
+    g_signal_connect (scroller, "notify::width",
+                      G_CALLBACK (on_grid_geometry_changed), self);
+    g_signal_connect (scroller, "notify::height",
+                      G_CALLBACK (on_grid_geometry_changed), self);
+  }
 
   self->bound_cards = g_ptr_array_new ();
   self->vadj = wrap

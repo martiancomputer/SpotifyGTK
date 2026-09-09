@@ -67,6 +67,11 @@ typedef struct {
   gchar   *album_uri;    /* spotify:album:<id>;  NULL if unknown */
   gchar   *artist_uri;   /* spotify:artist:<id> (primary); NULL if unknown */
   gint     release_year; /* from the album; 0 when unknown */
+  /* Optional UI grouping carried by flattened compound pages. The artist
+   * discography uses this on the first track of each release so one
+   * virtualised list can retain its release headings. */
+  gchar   *section_title;
+  gchar   *section_detail;
 } SpotifyNativeTrack;
 
 void spotifygtk_native_track_free (SpotifyNativeTrack *track);

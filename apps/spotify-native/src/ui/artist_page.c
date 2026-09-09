@@ -120,6 +120,7 @@ struct _SpotifyGtkArtistPage {
   GtkLabel            *hero_caption;
 
   SpotifyGtkTrackList *list;
+  SpotifyGtkTrackList *releases_list; /* one virtualised discography model */
   GtkWidget           *releases_box;   /* one section per release */
   GtkLabel            *releases_status;
   GtkWidget           *kind_buttons[N_RELEASE_KINDS];
@@ -352,55 +353,36 @@ compare_releases (gconstpointer a, gconstpointer b, gpointer user_data)
 static void
 apply_release_sort (SpotifyGtkArtistPage *self)
 {
-  GtkWidget *child;
-  while ((child = gtk_widget_get_first_child (self->releases_box)) != NULL)
-    gtk_box_remove (GTK_BOX (self->releases_box), child);
-
-  if (!self->all_releases)
+  if (!self->all_releases) {
+    spotifygtk_track_list_clear (self->releases_list);
     return;
+  }
 
   g_autoptr(GPtrArray) ordered = g_ptr_array_sized_new (self->all_releases->len);
   for (guint i = 0; i < self->all_releases->len; i++)
     g_ptr_array_add (ordered, g_ptr_array_index (self->all_releases, i));
   g_ptr_array_sort_with_data (ordered, compare_releases, self);
 
+  g_autoptr(GPtrArray) flattened = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+
   for (guint i = 0; i < ordered->len; i++) {
     const Release *r = g_ptr_array_index (ordered, i);
-
-    /* Heading: the release, then what kind it is and when -- the same shape as
-     * the page title's name-then-year. */
-    GtkWidget *head = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_set_margin_top (head, i == 0 ? 0 : 18);
-
-    GtkWidget *name = gtk_label_new (r->name);
-    gtk_widget_add_css_class (name, "section-heading");
-    gtk_label_set_xalign (GTK_LABEL (name), 0.0);
-    gtk_label_set_ellipsize (GTK_LABEL (name), PANGO_ELLIPSIZE_END);
-    gtk_box_append (GTK_BOX (head), name);
-
     g_autofree gchar *meta = r->year > 0
       ? g_strdup_printf ("%s · %d", KIND_LABELS[release_kind_of (r)], r->year)
       : g_strdup (KIND_LABELS[release_kind_of (r)]);
-    GtkWidget *meta_label = gtk_label_new (meta);
-    gtk_widget_add_css_class (meta_label, "dim-text");
-    gtk_widget_set_valign (meta_label, GTK_ALIGN_END);
-    gtk_widget_set_margin_bottom (meta_label, 2);
-    gtk_box_append (GTK_BOX (head), meta_label);
-
-    gtk_box_append (GTK_BOX (self->releases_box), head);
-
-    /* The release's tracks, as an ordinary list so rows behave as they do
-     * everywhere else. Inline, so the page keeps doing the scrolling. */
-    SpotifyGtkTrackList *list = spotifygtk_track_list_new ();
-    spotifygtk_track_list_set_inline (list, TRUE);
-    spotifygtk_track_list_set_numbered (list, TRUE);
-    g_signal_connect (list, "track-activated",
-                      G_CALLBACK (on_track_activated), self);
-    if (self->wire_list)
-      self->wire_list (list, self->wire_data);
-    spotifygtk_track_list_set_native_tracks (list, r->tracks);
-    gtk_box_append (GTK_BOX (self->releases_box), GTK_WIDGET (list));
+    for (guint j = 0; j < r->tracks->len; j++) {
+      SpotifyNativeTrack *track = spotifygtk_native_track_copy (
+        g_ptr_array_index (r->tracks, j));
+      if (j == 0) {
+        track->section_title = g_strdup (r->name);
+        track->section_detail = g_strdup (meta);
+      }
+      g_ptr_array_add (flattened, track);
+    }
   }
+
+  spotifygtk_track_list_set_native_tracks (self->releases_list, flattened);
 
   gboolean empty = (ordered->len == 0);
   gtk_label_set_text (self->releases_status, empty ? "No releases here." : "");
@@ -650,6 +632,8 @@ spotifygtk_artist_page_set_list_wire (SpotifyGtkArtistPage *self,
   g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
   self->wire_list = fn;
   self->wire_data = user_data;
+  if (fn && self->releases_list)
+    fn (self->releases_list, user_data);
 }
 
 void
@@ -681,6 +665,7 @@ spotifygtk_artist_page_set_playing_uri (SpotifyGtkArtistPage *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
   spotifygtk_track_list_set_playing_uri (self->list, uri, playing);
+  spotifygtk_track_list_set_playing_uri (self->releases_list, uri, playing);
 }
 
 static void
@@ -852,6 +837,8 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
 
   self->list = spotifygtk_track_list_new ();
   spotifygtk_track_list_set_inline (self->list, TRUE);
+  spotifygtk_track_list_set_external_viewport (
+    self->list, GTK_SCROLLED_WINDOW (scroller));
   spotifygtk_track_list_set_numbered (self->list, TRUE);
   g_signal_connect (self->list, "track-activated",
                     G_CALLBACK (on_track_activated), self);
@@ -893,6 +880,19 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
 
   self->releases_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
   gtk_box_append (GTK_BOX (content), self->releases_box);
+
+  /* A single model is essential here. A GtkListView per release combined
+   * with propagate-natural-height realised the entire discography and kept
+   * all those rows and textures alive after leaving the page. */
+  self->releases_list = spotifygtk_track_list_new ();
+  spotifygtk_track_list_set_inline (self->releases_list, TRUE);
+  spotifygtk_track_list_set_external_viewport (
+    self->releases_list, GTK_SCROLLED_WINDOW (scroller));
+  spotifygtk_track_list_set_numbered (self->releases_list, TRUE);
+  g_signal_connect (self->releases_list, "track-activated",
+                    G_CALLBACK (on_track_activated), self);
+  gtk_box_append (GTK_BOX (self->releases_box),
+                  GTK_WIDGET (self->releases_list));
 
   self->releases_status = GTK_LABEL (gtk_label_new (""));
   gtk_widget_add_css_class (GTK_WIDGET (self->releases_status), "dim-text");

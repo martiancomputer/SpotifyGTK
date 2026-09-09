@@ -40,6 +40,9 @@ struct _SpotifyGtkTrackRow {
   GtkLabel *title_label;
   GtkLabel *artist_label;
   GtkLabel *album_label;
+  GtkLabel *section_title;
+  GtkLabel *section_detail;
+  GtkWidget *section_row;
   GtkWidget *status_slot;   /* holds duration OR the equaliser */
   GtkLabel *duration_label;
   GtkWidget *like_icon;     /* indicator only, not a control */
@@ -391,8 +394,32 @@ on_row_hover_leave (GtkEventControllerMotion *ctrl, gpointer user_data)
 static void
 spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
 {
+  /* The reusable row used to have only root_box as a child, so the inherited
+   * horizontal default was invisible. Release headings add a second child:
+   * stack it above the track body instead of placing both side by side. */
+  gtk_orientable_set_orientation (GTK_ORIENTABLE (self),
+                                  GTK_ORIENTATION_VERTICAL);
   self->show_album = TRUE;
   self->show_artists = TRUE;
+
+  self->section_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_margin_start (self->section_row, 8);
+  gtk_widget_set_margin_end (self->section_row, 8);
+  gtk_widget_set_margin_top (self->section_row, 18);
+
+  self->section_title = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->section_title), "section-heading");
+  gtk_label_set_xalign (self->section_title, 0.0);
+  gtk_label_set_ellipsize (self->section_title, PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->section_title), TRUE);
+  gtk_box_append (GTK_BOX (self->section_row), GTK_WIDGET (self->section_title));
+
+  self->section_detail = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->section_detail), "dim-text");
+  gtk_widget_set_valign (GTK_WIDGET (self->section_detail), GTK_ALIGN_END);
+  gtk_box_append (GTK_BOX (self->section_row), GTK_WIDGET (self->section_detail));
+  gtk_widget_set_visible (self->section_row, FALSE);
+  gtk_box_append (GTK_BOX (self), self->section_row);
 
   self->root_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12));
   gtk_widget_set_margin_start (GTK_WIDGET (self->root_box), 8);
@@ -665,6 +692,16 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
   gtk_label_set_text (self->title_label, track->name ? track->name : "Unknown track");
   gtk_label_set_text (self->artist_label, track->artists ? track->artists : "");
   gtk_label_set_text (self->album_label, track->album ? track->album : "");
+
+  gboolean has_section = track->section_title && *track->section_title;
+  gtk_label_set_text (self->section_title,
+                      has_section ? track->section_title : "");
+  gtk_label_set_text (self->section_detail,
+                      track->section_detail ? track->section_detail : "");
+  gtk_widget_set_visible (GTK_WIDGET (self->section_detail),
+                          has_section && track->section_detail &&
+                          *track->section_detail);
+  gtk_widget_set_visible (self->section_row, has_section);
 
   spotifygtk_track_row_set_number (self, track_number);
 

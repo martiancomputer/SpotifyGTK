@@ -50,6 +50,7 @@ struct _SpotifyGtkTrackList {
    * is moving and resumed once it has been still for SETTLE_MS. */
   GtkAdjustment *vadj;         /* borrowed */
   GtkWidget     *scroller;     /* borrowed; NULL-safe */
+  GtkWidget     *viewport_scroller; /* outer scroller for an inline list */
   guint          settle_id;
   gint64         last_scroll_us;
   gboolean       scrolling;
@@ -123,6 +124,21 @@ update_velocity_overscan (gpointer user_data)
   if (upper <= 0 || page <= 0)
     return G_SOURCE_REMOVE;
 
+  /* An inline list's adjustment belongs to the whole compound page. Convert
+   * the outer scroll position into this list's own coordinates; otherwise a
+   * discography below a hero/header treats those pixels as dozens of rows and
+   * warms the wrong covers. */
+  gdouble list_origin = 0.0;
+  if (self->viewport_scroller) {
+    graphene_rect_t bounds;
+    if (gtk_widget_compute_bounds (GTK_WIDGET (self->list),
+                                   self->viewport_scroller, &bounds)) {
+      list_origin = bounds.origin.y + value;
+      upper = bounds.size.height;
+      value = MAX (0.0, value - list_origin);
+    }
+  }
+
   gdouble row_extent = upper / n;
   if (row_extent < 1.0)
     return G_SOURCE_REMOVE;
@@ -145,9 +161,13 @@ update_velocity_overscan (gpointer user_data)
    * Touchpads, scrollbar drags and keyboard scrolling have no smooth target
    * and continue through the velocity estimator above. */
   gdouble smooth_target = value;
-  gboolean smooth_active = self->scroller &&
+  GtkWidget *viewport = self->viewport_scroller ? self->viewport_scroller
+                                                : self->scroller;
+  gboolean smooth_active = viewport &&
     spotifygtk_smooth_scroll_get_target (
-      GTK_SCROLLED_WINDOW (self->scroller), &smooth_target);
+      GTK_SCROLLED_WINDOW (viewport), &smooth_target);
+  if (smooth_active && self->viewport_scroller)
+    smooth_target = MAX (0.0, smooth_target - list_origin);
   if (smooth_active) {
     gdouble target_delta = smooth_target - value;
     destination_first = MIN ((guint) (smooth_target / row_extent), n - 1);
@@ -245,7 +265,9 @@ update_velocity_overscan (gpointer user_data)
 static gboolean
 row_near_viewport (SpotifyGtkTrackList *self, GtkWidget *row)
 {
-  if (!self->scroller)
+  GtkWidget *viewport = self->viewport_scroller ? self->viewport_scroller
+                                                : self->scroller;
+  if (!viewport)
     return TRUE;   /* nothing to measure against; do not skip on a guess */
 
   /*
@@ -263,10 +285,10 @@ row_near_viewport (SpotifyGtkTrackList *self, GtkWidget *row)
     return FALSE;
 
   graphene_rect_t bounds;
-  if (!gtk_widget_compute_bounds (row, self->scroller, &bounds))
+  if (!gtk_widget_compute_bounds (row, viewport, &bounds))
     return TRUE;
 
-  gdouble view_h = gtk_widget_get_height (self->scroller);
+  gdouble view_h = gtk_widget_get_height (viewport);
   gdouble margin = view_h > 0 ? view_h : 600.0;
 
   return (bounds.origin.y + bounds.size.height) > -margin
@@ -689,6 +711,11 @@ spotifygtk_track_list_dispose (GObject *object)
     self->settle_id = 0;
   }
   g_clear_handle_id (&self->overscan_idle_id, g_source_remove);
+  if (self->vadj)
+    g_signal_handlers_disconnect_by_func (self->vadj,
+                                          G_CALLBACK (on_vadj_changed), self);
+  self->vadj = NULL;
+  self->viewport_scroller = NULL;
   spotifygtk_cover_set_deferred (FALSE);
   g_clear_pointer (&self->bound_rows, g_ptr_array_unref);
 
@@ -1115,6 +1142,31 @@ spotifygtk_track_list_set_inline (SpotifyGtkTrackList *self, gboolean inlined)
     GTK_SCROLLED_WINDOW (self->scroller), inlined);
   gtk_widget_set_vexpand (self->scroller, !inlined);
   gtk_widget_set_vexpand (GTK_WIDGET (self), !inlined);
+}
+
+void
+spotifygtk_track_list_set_external_viewport (SpotifyGtkTrackList *self,
+                                             GtkScrolledWindow  *scroller)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  g_return_if_fail (scroller == NULL || GTK_IS_SCROLLED_WINDOW (scroller));
+
+  GtkAdjustment *next = scroller
+    ? gtk_scrolled_window_get_vadjustment (scroller)
+    : gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->scroller));
+  if (self->vadj == next && self->viewport_scroller == GTK_WIDGET (scroller))
+    return;
+
+  if (self->vadj)
+    g_signal_handlers_disconnect_by_func (self->vadj,
+                                          G_CALLBACK (on_vadj_changed), self);
+  self->viewport_scroller = GTK_WIDGET (scroller);
+  self->vadj = next;
+  if (self->vadj)
+    g_signal_connect (self->vadj, "value-changed",
+                      G_CALLBACK (on_vadj_changed), self);
+  self->overscan_valid = FALSE;
+  schedule_velocity_overscan (self);
 }
 
 void

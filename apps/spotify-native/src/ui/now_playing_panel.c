@@ -78,8 +78,39 @@ on_collapse_clicked (GtkButton *button, gpointer user_data)
  */
 typedef struct {
   GtkScrolledWindow *scroller;
+  GtkWidget         *label;
+  guint              tick_id;
   gint64             start_us;
 } Marquee;
+
+static gboolean marquee_tick (GtkWidget *widget, GdkFrameClock *clock,
+                              gpointer user_data);
+
+static void
+marquee_start (Marquee *m)
+{
+  if (!m || m->tick_id || !m->label || !gtk_widget_get_mapped (m->label))
+    return;
+  m->start_us = 0;
+  m->tick_id = gtk_widget_add_tick_callback (m->label, marquee_tick, m, NULL);
+}
+
+static void
+on_marquee_geometry_or_text (GObject *object, GParamSpec *pspec,
+                             gpointer user_data)
+{
+  Marquee *m = user_data;
+  (void) object;
+  (void) pspec;
+  marquee_start (m);
+}
+
+static void
+on_marquee_mapped (GtkWidget *widget, gpointer user_data)
+{
+  (void) widget;
+  marquee_start (user_data);
+}
 
 static gboolean
 marquee_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
@@ -91,7 +122,8 @@ marquee_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   if (span <= 1.0) {                       /* title fits: hold at the start */
     gtk_adjustment_set_value (hadj, 0.0);
     m->start_us = 0;
-    return G_SOURCE_CONTINUE;
+    m->tick_id = 0;
+    return G_SOURCE_REMOVE;
   }
 
   const gdouble speed = 32.0;              /* px per second */
@@ -139,8 +171,14 @@ build_marquee (GtkLabel **out_label, const gchar *css)
 
   Marquee *m = g_new0 (Marquee, 1);
   m->scroller = GTK_SCROLLED_WINDOW (scroller);
+  m->label = label;
   g_object_set_data (G_OBJECT (label), "marquee", m);
-  gtk_widget_add_tick_callback (label, marquee_tick, m, g_free);
+  g_signal_connect (label, "map", G_CALLBACK (on_marquee_mapped), m);
+  g_signal_connect (label, "notify::label",
+                    G_CALLBACK (on_marquee_geometry_or_text), m);
+  g_signal_connect (scroller, "notify::width",
+                    G_CALLBACK (on_marquee_geometry_or_text), m);
+  g_object_set_data_full (G_OBJECT (label), "marquee-owner", m, g_free);
 
   *out_label = GTK_LABEL (label);
   return scroller;
@@ -150,8 +188,10 @@ static void
 marquee_reset (GtkLabel *label)
 {
   Marquee *m = g_object_get_data (G_OBJECT (label), "marquee");
-  if (m)
-    m->start_us = 0;   /* next tick restarts from the left */
+  if (m) {
+    m->start_us = 0;
+    marquee_start (m);
+  }
 }
 
 static void
