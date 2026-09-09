@@ -66,7 +66,12 @@ static gint
 card_decode_px (GtkWidget *widget)
 {
   gint scale = widget ? gtk_widget_get_scale_factor (widget) : 1;
-  return CARD_ART_PX * MAX (2, scale);
+  /* Decode for the physical pixels the card actually occupies. The old 2x
+   * minimum made every 1x Library cover 352px: four times the pixels and GPU
+   * upload bandwidth of its 176px allocation. A scrolling grid can introduce
+   * dozens in one gesture, which pushed Vulkan into missed-vblank/30fps
+   * cadence without adding visible detail at native scale. */
+  return CARD_ART_PX * MAX (1, scale);
 }
 #define CARD_WIDTH      (CARD_ART_PX + 24)
 
@@ -522,8 +527,16 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
       if (!encoded)
         continue;
       guint position = GPOINTER_TO_UINT (encoded) - 1;
-      if (position < first || position >= last)
+      if (position < first || position >= last) {
+        /* Do not retain every destination crossed by a long eased gesture.
+         * A final settle eventually contracted them, but by then one Library
+         * fling could leave 82 textures for 25 mapped cards and saturate the
+         * renderer. Preserve cards GTK says are currently on-screen; release
+         * everything outside both that viewport and the new landing window. */
+        if (!gtk_widget_get_mapped (card))
+          card_release_cover (card);
         continue;
+      }
       SpotifyGtkAlbumItem *item = g_object_get_data (G_OBJECT (card),
                                                       "bound-album-item");
       if (item && item->pending && !item->resolving) {
