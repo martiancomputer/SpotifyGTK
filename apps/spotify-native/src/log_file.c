@@ -9,6 +9,10 @@
 #include <libsoup/soup.h>
 #include <stdio.h>
 
+#if defined(__GLIBC__) && !defined(G_OS_WIN32)
+#include <malloc.h>
+#endif
+
 #ifdef G_OS_WIN32
 #include <windows.h>
 #endif
@@ -19,6 +23,11 @@ static gchar   *log_path;
 
 static GTlsDatabase *portable_tls_database;
 static gsize         portable_tls_database_once;
+
+#if defined(__GLIBC__) && !defined(G_OS_WIN32)
+static gsize allocator_configured;
+static guint heap_trim_source;
+#endif
 
 /*
  * Directory holding the running executable.
@@ -47,6 +56,18 @@ executable_dir (void)
 void
 spotifygtk_runtime_init (void)
 {
+#if defined(__GLIBC__) && !defined(G_OS_WIN32)
+  /* The application has several worker threads, and glibc otherwise gives
+   * many of them independent arenas. Large, short-lived search/context result
+   * sets can then be freed correctly while their arena pages remain resident.
+   * Four arenas retain useful concurrency without letting the process's RSS
+   * high-water mark scale with every worker that decoded catalogue data. */
+  if (g_once_init_enter (&allocator_configured)) {
+    mallopt (M_ARENA_MAX, 4);
+    g_once_init_leave (&allocator_configured, 1);
+  }
+#endif
+
 #ifdef G_OS_WIN32
   /* GIO and GdkPixbuf normally derive these paths from the MSYS2 prefix that
    * built them.  A portable bundle has no such prefix, so point the loaders
@@ -76,6 +97,51 @@ spotifygtk_runtime_init (void)
     if (g_file_test (loaders, G_FILE_TEST_IS_REGULAR))
       g_setenv ("GDK_PIXBUF_MODULE_FILE", loaders, FALSE);
   }
+#endif
+}
+
+#if defined(__GLIBC__) && !defined(G_OS_WIN32)
+static void
+trim_unused_heap_pages (GTask        *task,
+                        gpointer      source_object,
+                        gpointer      task_data,
+                        GCancellable *cancellable)
+{
+  malloc_trim (0);
+  g_task_return_boolean (task, TRUE);
+  (void) source_object;
+  (void) task_data;
+  (void) cancellable;
+}
+
+static gboolean
+dispatch_heap_trim (gpointer user_data)
+{
+  heap_trim_source = 0;
+
+  /* malloc_trim() can walk and lock every arena. Even though it is normally
+   * brief, doing that work in a GTK timeout callback made a single slow frame
+   * possible. GTask keeps it entirely off the UI/frame thread. */
+  g_autoptr(GTask) task = g_task_new (NULL, NULL, NULL, NULL);
+  g_task_set_priority (task, G_PRIORITY_LOW);
+  g_task_run_in_thread (task, trim_unused_heap_pages);
+
+  (void) user_data;
+  return G_SOURCE_REMOVE;
+}
+#endif
+
+void
+spotifygtk_runtime_schedule_heap_trim (void)
+{
+#if defined(__GLIBC__) && !defined(G_OS_WIN32)
+  /* A burst such as incremental search can complete several superseded reads.
+   * Resetting one low-priority timer coalesces all of them into a single trim,
+   * after callback-local arrays have actually gone out of scope. */
+  if (heap_trim_source != 0)
+    g_source_remove (heap_trim_source);
+  heap_trim_source = g_timeout_add_full (G_PRIORITY_LOW, 1500,
+                                         dispatch_heap_trim, NULL, NULL);
 #endif
 }
 

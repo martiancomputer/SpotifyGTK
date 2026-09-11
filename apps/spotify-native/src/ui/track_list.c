@@ -1178,8 +1178,8 @@ spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered
 
 
 
-void
-spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks)
+static void
+set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
 
@@ -1209,7 +1209,9 @@ spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *t
     const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
     if (!track || !track->uri)
       continue;
-    g_ptr_array_add (items, spotifygtk_track_item_new (track, items->len + 1));
+    g_ptr_array_add (items, borrow
+      ? spotifygtk_track_item_new_borrowed (track, items->len + 1)
+      : spotifygtk_track_item_new (track, items->len + 1));
   }
 
   g_list_store_splice (self->store, 0, existing, items->pdata, items->len);
@@ -1236,6 +1238,19 @@ spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *t
    */
   if (shown > 0 && self->settle_id == 0)
     self->settle_id = g_timeout_add (SETTLE_MS, on_scroll_settled, self);
+}
+
+void
+spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks)
+{
+  set_native_tracks (self, tracks, FALSE);
+}
+
+void
+spotifygtk_track_list_set_borrowed_native_tracks (SpotifyGtkTrackList *self,
+                                                   GPtrArray           *tracks)
+{
+  set_native_tracks (self, tracks, TRUE);
 }
 
 GPtrArray *

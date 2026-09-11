@@ -95,6 +95,12 @@ void    spotifygtk_mercury_unsubscribe (SpotifyMercury *self, guint64 sub_id);
  * during session/window teardown. Requests and response cleanup still finish. */
 void spotifygtk_mercury_cancel_callbacks (SpotifyMercury *self);
 
+/* Signals:
+ * - transport-timeout: a request received no AP reply before the transport
+ *   deadline. Individual callbacks still receive a synthetic status 408; the
+ *   owning session uses the signal to replace a half-open AP channel.
+ */
+
 void mercury_response_free (MercuryResponse *response);
 
 G_END_DECLS

@@ -7,7 +7,8 @@
 struct _SpotifyGtkTrackItem {
   GObject parent_instance;
 
-  SpotifyNativeTrack track;   /* owned copy */
+  SpotifyNativeTrack track;   /* owned copy, unless borrowed_track is set */
+  const SpotifyNativeTrack *borrowed_track;
   guint    number;
   gboolean playing;
   gboolean paused;
@@ -22,17 +23,29 @@ static void
 spotifygtk_track_item_finalize (GObject *object)
 {
   SpotifyGtkTrackItem *self = SPOTIFYGTK_TRACK_ITEM (object);
-  g_free (self->track.uri);
-  g_free (self->track.name);
-  g_free (self->track.artists);
-  g_free (self->track.album);
-  g_free (self->track.cover_id);
-  g_free (self->track.cover_id_small);
-  g_free (self->track.album_uri);
-  g_free (self->track.artist_uri);
-  g_free (self->track.section_title);
-  g_free (self->track.section_detail);
+  if (!self->borrowed_track) {
+    g_free (self->track.uri);
+    g_free (self->track.name);
+    g_free (self->track.artists);
+    g_free (self->track.album);
+    g_free (self->track.cover_id);
+    g_free (self->track.cover_id_small);
+    g_free (self->track.album_uri);
+    g_free (self->track.artist_uri);
+    g_free (self->track.section_title);
+    g_free (self->track.section_detail);
+  }
   G_OBJECT_CLASS (spotifygtk_track_item_parent_class)->finalize (object);
+}
+
+SpotifyGtkTrackItem *
+spotifygtk_track_item_new_borrowed (const SpotifyNativeTrack *track, guint number)
+{
+  g_return_val_if_fail (track != NULL, NULL);
+  SpotifyGtkTrackItem *self = g_object_new (SPOTIFYGTK_TYPE_TRACK_ITEM, NULL);
+  self->number = number;
+  self->borrowed_track = track;
+  return self;
 }
 
 static void
@@ -76,7 +89,7 @@ const SpotifyNativeTrack *
 spotifygtk_track_item_get_track (SpotifyGtkTrackItem *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_ITEM (self), NULL);
-  return &self->track;
+  return self->borrowed_track ? self->borrowed_track : &self->track;
 }
 
 guint
@@ -90,7 +103,8 @@ const gchar *
 spotifygtk_track_item_get_uri (SpotifyGtkTrackItem *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_ITEM (self), NULL);
-  return self->track.uri;
+  const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (self);
+  return track ? track->uri : NULL;
 }
 
 gboolean

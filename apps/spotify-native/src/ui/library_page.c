@@ -13,6 +13,7 @@
 
 #include "library_page.h"
 #include "album_grid.h"
+#include "../log_file.h"
 #include "../spotify/collection.h"
 
 /* Artist names are catalogue metadata rather than image data, so they need a
@@ -272,6 +273,7 @@ on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError) err = NULL;
   g_autoptr(GPtrArray) albums = spotifygtk_native_session_load_albums_finish (
     SPOTIFYGTK_NATIVE_SESSION (source), result, &err);
+  spotifygtk_runtime_schedule_heap_trim ();
 
   if (!self)
     return;

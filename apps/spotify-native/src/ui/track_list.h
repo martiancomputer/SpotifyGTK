@@ -84,6 +84,11 @@ SpotifyGtkTrackList *spotifygtk_track_list_new (void);
 void spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self,
                                               GPtrArray           *tracks);
 
+/* As above, but each item borrows its track from the array.  The caller must
+ * keep every track alive until this list is cleared or populated again. */
+void spotifygtk_track_list_set_borrowed_native_tracks (SpotifyGtkTrackList *self,
+                                                       GPtrArray           *tracks);
+
 /* Show a message instead of rows (loading, empty, error). */
 void spotifygtk_track_list_set_status (SpotifyGtkTrackList *self, const gchar *message);
 

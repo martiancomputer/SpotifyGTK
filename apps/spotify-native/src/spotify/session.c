@@ -103,6 +103,9 @@ G_DEFINE_FINAL_TYPE (SpotifyNativeSession, spotifygtk_native_session, G_TYPE_OBJ
 enum { STATE_CHANGED, TRANSFER_REQUESTED, REMOTE_COMMAND, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
+static void on_mercury_transport_timeout (SpotifyMercury *mercury,
+                                          gpointer         user_data);
+
 void
 spotifygtk_native_track_free (SpotifyNativeTrack *track)
 {
@@ -1787,6 +1790,8 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
    */
   if (!self->mercury) {
     SpotifyMercury *mercury = spotifygtk_mercury_new (self->ap);
+    g_signal_connect (mercury, "transport-timeout",
+                      G_CALLBACK (on_mercury_transport_timeout), self);
     g_mutex_lock (&self->lock);
     self->mercury = mercury;
     g_mutex_unlock (&self->lock);
@@ -1938,6 +1943,36 @@ on_session_ap_disconnected (SpotifyApSession *ap, GError *error,
   set_state (self, SPOTIFYGTK_SESSION_CONNECTING, "Reconnecting…");
 
   /* Do not clear the AP object from inside its own signal emission. */
+  GSource *idle = g_idle_source_new ();
+  g_source_set_callback (idle, run_scheduled_reconnect,
+                         g_object_ref (self), g_object_unref);
+  g_source_attach (idle, self->context);
+  g_source_unref (idle);
+}
+
+/* A request deadline is positive evidence that the current AP channel is no
+ * longer usable even if its receive loop has not observed EOF.  Several
+ * requests may expire together, so reconnect_pending turns that burst into
+ * one replacement connection.  Retired Mercury instances are ignored. */
+static void
+on_mercury_transport_timeout (SpotifyMercury *mercury, gpointer user_data)
+{
+  SpotifyNativeSession *self = user_data;
+
+  g_mutex_lock (&self->lock);
+  gboolean is_current = mercury == self->mercury;
+  g_mutex_unlock (&self->lock);
+
+  if (!is_current || self->stopping || self->reconnect_pending)
+    return;
+
+  self->reconnect_pending = TRUE;
+  g_warning ("session: Mercury timed out on the current AP channel; "
+             "reconnecting the stale session");
+  set_state (self, SPOTIFYGTK_SESSION_CONNECTING,
+             "The Spotify session stopped responding; reconnecting…");
+
+  /* Do not replace Mercury from inside its own timeout signal. */
   GSource *idle = g_idle_source_new ();
   g_source_set_callback (idle, run_scheduled_reconnect,
                          g_object_ref (self), g_object_unref);
@@ -2127,6 +2162,12 @@ reconnect_on_worker (gpointer user_data)
   SpotifyMercury *mercury = g_steal_pointer (&self->mercury);
   g_mutex_unlock (&self->lock);
   if (mercury) {
+    /* UI work may still hold this borrowed object, which is why it remains in
+     * retired_mercury.  Disconnect only its health signal: request callbacks
+     * already queued to GTK must still deliver their 408 so pages clear their
+     * loading markers.  Cancelling all callbacks here stranded Library in an
+     * in-flight state and prevented its retry after reconnect. */
+    g_signal_handlers_disconnect_by_data (mercury, self);
     if (!self->retired_mercury)
       self->retired_mercury = g_ptr_array_new_with_free_func (g_object_unref);
     g_ptr_array_add (self->retired_mercury, mercury);

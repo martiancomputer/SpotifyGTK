@@ -38,6 +38,7 @@
 
 #include "../player_service.h"
 #include "../native_engine.h"
+#include "../log_file.h"
 #include "../log_verbose.h"
 #include "../spotify/collection.h"
 #include "../spotify/playlist.h"
@@ -869,6 +870,7 @@ on_smart_station_loaded (GObject *source, GAsyncResult *result,
   g_autoptr(GError) error = NULL;
   g_autoptr(GPtrArray) radio = load_expanded_radio_finish (
     SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  spotifygtk_runtime_schedule_heap_trim ();
   g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
 
   if (!self || load->generation != self->smart_generation ||
@@ -1371,6 +1373,7 @@ on_search_radio_loaded (GObject *source, GAsyncResult *result,
   g_autoptr(GError) error = NULL;
   g_autoptr(GPtrArray) tracks = load_expanded_radio_finish (
     SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  spotifygtk_runtime_schedule_heap_trim ();
   g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
 
   if (!self || load->generation != self->context_generation ||
@@ -2274,6 +2277,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
 
   if (added == 0)
     set_playlists_status (self, "No playlists yet.");
+  spotifygtk_runtime_schedule_heap_trim ();
   (void) m;
 }
 

@@ -120,6 +120,9 @@ typedef struct {
   guint64         seq;
 } MercuryTimeout;
 
+enum { TRANSPORT_TIMEOUT, N_SIGNALS };
+static guint signals[N_SIGNALS];
+
 static void dispatch_response (SpotifyMercury *self, GMainContext *context,
                                MercuryCallback callback, gpointer user_data,
                                const MercuryResponse *response);
@@ -159,6 +162,15 @@ on_request_timeout (gpointer user_data)
     g_ptr_array_unref (response.parts);
   }
   g_hash_table_remove (self->pending, &timeout->seq);
+
+  /* A half-open TCP connection can remain locally writable indefinitely:
+   * neither AP EOF nor a write error is guaranteed when a NAT or the peer has
+   * silently forgotten it.  Completing this request with 408 keeps its caller
+   * bounded; this signal lets the owning session replace the dead AP channel
+   * instead of sending every later Mercury request into it too.  Emit only
+   * after removing the pending entry so reconnect teardown cannot mutate the
+   * table underneath this timeout callback. */
+  g_signal_emit (self, signals[TRANSPORT_TIMEOUT], 0);
   return G_SOURCE_REMOVE;
 }
 
@@ -1013,6 +1025,10 @@ spotifygtk_mercury_class_init (SpotifyMercuryClass *klass)
 {
   G_OBJECT_CLASS (klass)->dispose = spotifygtk_mercury_dispose;
   G_OBJECT_CLASS (klass)->finalize = spotifygtk_mercury_finalize;
+
+  signals[TRANSPORT_TIMEOUT] = g_signal_new (
+    "transport-timeout", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+    0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void

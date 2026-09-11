@@ -361,8 +361,10 @@ spotifygtk_track_meta_clear (SpotifyTrackMeta *meta)
   g_clear_pointer (&meta->album_name, g_free);
   g_clear_pointer (&meta->artist_names, g_free);
   g_clear_pointer (&meta->cover_id, g_free);
+  g_clear_pointer (&meta->cover_id_small, g_free);
   g_clear_pointer (&meta->album_uri, g_free);
   g_clear_pointer (&meta->artist_uri, g_free);
+  meta->release_year = 0;
   meta->duration_ms = 0;
   meta->is_explicit = FALSE;
 }

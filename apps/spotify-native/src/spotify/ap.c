@@ -42,6 +42,8 @@ struct _SpotifyApSession {
   GHashTable      *handler_data;
 
   gboolean         connected;
+  gboolean         disconnect_emitted;
+  gboolean         header_read_pending;
 
   /* Captured from APWelcome on successful login -- this is what
    * feeds login5's StoredCredential, NOT the original OAuth token.
@@ -477,6 +479,7 @@ perform_handshake (SpotifyApSession *self, GError **error)
   shannon_nonce_u32 (&self->recv_cipher, self->recv_nonce);
 
   self->connected = TRUE;
+  self->disconnect_emitted = FALSE;
   return TRUE;
 }
 
@@ -577,10 +580,21 @@ spotifygtk_ap_session_connect_finish (SpotifyApSession *self, GAsyncResult *resu
 static void start_next_read (SpotifyApSession *self);
 
 static void
+emit_disconnected_once (SpotifyApSession *self, GError *error)
+{
+  if (self->disconnect_emitted)
+    return;
+  self->disconnect_emitted = TRUE;
+  g_signal_emit (self, signals[SIG_DISCONNECTED], 0, error);
+}
+
+static void
 on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   SpotifyApSession *self = user_data;
   g_autoptr(GError) err = NULL;
+
+  self->header_read_pending = FALSE;
 
   GBytes *header_bytes = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &err);
   if (!header_bytes || g_bytes_get_size (header_bytes) < 3) {
@@ -595,7 +609,7 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
     }
     g_clear_pointer (&header_bytes, g_bytes_unref);
     spotifygtk_ap_session_disconnect (self);
-    g_signal_emit (self, signals[SIG_DISCONNECTED], 0, close_err);
+    emit_disconnected_once (self, close_err);
     g_object_unref (self);  /* matches the ref taken in start_next_read() */
     return;  /* loop stops -- no automatic reconnect at this layer */
   }
@@ -622,7 +636,7 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
     spotifygtk_ap_session_disconnect (self);
     g_autoptr(GError) payload_err = err ? g_error_copy (err) :
       g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "receive loop payload read failed");
-    g_signal_emit (self, signals[SIG_DISCONNECTED], 0, payload_err);
+    emit_disconnected_once (self, payload_err);
     g_object_unref (self);
     return;
   }
@@ -638,7 +652,7 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
     spotifygtk_ap_session_disconnect (self);
     g_autoptr(GError) mac_err = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
                                              "MAC verification failed on incoming packet (cmd=0x%02x)", cmd);
-    g_signal_emit (self, signals[SIG_DISCONNECTED], 0, mac_err);
+    emit_disconnected_once (self, mac_err);
     g_object_unref (self);
     return;
   }
@@ -687,13 +701,15 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
 static void
 start_next_read (SpotifyApSession *self)
 {
-  if (!self->connected || !self->connection) return;
+  if (!self->connected || !self->connection || self->header_read_pending)
+    return;
 
   /* Ref held across the async gap -- released in on_header_read() on
    * every exit path. Without this, disposing the session while a
    * read is in flight would leave the callback firing on a freed
    * object. */
   g_object_ref (self);
+  self->header_read_pending = TRUE;
 
   GInputStream *in = g_io_stream_get_input_stream (G_IO_STREAM (self->connection));
   g_input_stream_read_bytes_async (in, 3, G_PRIORITY_DEFAULT, self->cancellable,
@@ -818,6 +834,17 @@ on_session_disconnected_during_login (SpotifyApSession *session, GError *error, 
 {
   LoginClosure *lc = user_data;
 
+  /* Remove this closure before invoking arbitrary caller code.  Disconnecting
+   * the currently-running handler is supported by GObject: this invocation
+   * continues, while a second terminal read error cannot invoke us again with
+   * the LoginClosure we free below.  Payload and header reads can both report
+   * the same socket shutdown, so leaving the handler installed is a real UAF,
+   * not merely redundant error reporting. */
+  if (lc->disconnect_handler_id) {
+    g_signal_handler_disconnect (session, lc->disconnect_handler_id);
+    lc->disconnect_handler_id = 0;
+  }
+
   /* The connection dropped (closed, read failure, or MAC failure)
    * before either APWelcome or AuthFailure arrived. Spotify's AP
    * service doesn't always send a structured AuthFailure for a
@@ -833,13 +860,6 @@ on_session_disconnected_during_login (SpotifyApSession *session, GError *error, 
   if (lc->callback) lc->callback (FALSE, NULL, login_err, lc->user_data);
   g_error_free (login_err);
 
-  /* The "disconnected" signal already fired (we're a handler for it
-   * right now) and the session already called disconnect() before
-   * emitting -- don't try to disconnect our own handler ID from
-   * inside its own emission, that's a g_signal_handler_disconnect()
-   * misuse. login_closure_finish() below skips that step since
-   * lc->disconnect_handler_id gets zeroed first. */
-  lc->disconnect_handler_id = 0;
   login_closure_finish (lc, session);
 }
 

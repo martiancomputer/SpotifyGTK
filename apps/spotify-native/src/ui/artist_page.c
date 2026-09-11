@@ -6,6 +6,7 @@
 
 #include "cover_loader.h"
 #include "smooth_scroll.h"
+#include "../log_file.h"
 
 #include <string.h>
 
@@ -447,6 +448,7 @@ on_discography_loaded (GObject *source, GAsyncResult *result, gpointer user_data
 
   g_autoptr(GPtrArray) releases =
     spotifygtk_native_session_load_discography_finish (session, result, &err);
+  spotifygtk_runtime_schedule_heap_trim ();
 
   if (!self)
     return;
@@ -508,6 +510,7 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   g_autoptr(GPtrArray) tracks =
     spotifygtk_native_session_load_tracks_finish (session, result, &err);
+  spotifygtk_runtime_schedule_heap_trim ();
 
   if (!self)
     return;

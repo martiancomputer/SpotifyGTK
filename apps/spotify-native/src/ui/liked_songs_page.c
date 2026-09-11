@@ -4,6 +4,7 @@
 
 #include "liked_songs_page.h"
 #include "track_list.h"
+#include "../log_file.h"
 
 #include <string.h>
 
@@ -133,23 +134,42 @@ track_matches (SpotifyGtkLikedSongsPage *self,
   return TRUE;
 }
 
-/* Build the per-track lookups. Called once per collection load. */
+/* These derived indexes are deliberately lazy. Most sessions never filter or
+ * choose A-Z, so eagerly allocating two more strings for all ~5,000 tracks
+ * permanently raised the page's idle footprint for work the user did not ask
+ * for. */
 static void
-build_track_indexes (SpotifyGtkLikedSongsPage *self)
+clear_track_indexes (SpotifyGtkLikedSongsPage *self)
 {
   g_clear_pointer (&self->haystacks, g_hash_table_unref);
   g_clear_pointer (&self->collate_keys, g_hash_table_unref);
-  if (!self->all_tracks)
+}
+
+static void
+ensure_haystacks (SpotifyGtkLikedSongsPage *self)
+{
+  if (self->haystacks || !self->all_tracks)
     return;
 
-  self->haystacks    = g_hash_table_new_full (NULL, NULL, NULL, g_free);
-  self->collate_keys = g_hash_table_new_full (NULL, NULL, NULL, g_free);
+  self->haystacks = g_hash_table_new_full (NULL, NULL, NULL, g_free);
 
   for (guint i = 0; i < self->all_tracks->len; i++) {
     SpotifyNativeTrack *t = g_ptr_array_index (self->all_tracks, i);
     g_autofree gchar *hay = g_strdup_printf ("%s\t%s\t%s",
       t->name ? t->name : "", t->artists ? t->artists : "", t->album ? t->album : "");
     g_hash_table_insert (self->haystacks, t, g_utf8_casefold (hay, -1));
+  }
+}
+
+static void
+ensure_collate_keys (SpotifyGtkLikedSongsPage *self)
+{
+  if (self->collate_keys || !self->all_tracks)
+    return;
+
+  self->collate_keys = g_hash_table_new_full (NULL, NULL, NULL, g_free);
+  for (guint i = 0; i < self->all_tracks->len; i++) {
+    SpotifyNativeTrack *t = g_ptr_array_index (self->all_tracks, i);
     g_hash_table_insert (self->collate_keys, t,
                          g_utf8_collate_key (t->name ? t->name : "", -1));
   }
@@ -221,6 +241,8 @@ rebuild_sorted (SpotifyGtkLikedSongsPage *self)
   for (guint i = 0; i < self->all_tracks->len; i++)
     g_ptr_array_add (self->sorted_tracks, g_ptr_array_index (self->all_tracks, i));
 
+  if (self->sort_key == SORT_ALPHA)
+    ensure_collate_keys (self);
   sort_visible (self, self->sorted_tracks);
 }
 
@@ -237,12 +259,13 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
     rebuild_sorted (self);
 
   if (!query || !*query) {
-    spotifygtk_track_list_set_native_tracks (self->list, self->sorted_tracks);
+    spotifygtk_track_list_set_borrowed_native_tracks (self->list, self->sorted_tracks);
     if (self->sorted_tracks->len == 0)
       spotifygtk_track_list_set_status (self->list, "No liked songs yet.");
     return;
   }
 
+  ensure_haystacks (self);
   g_autofree gchar *cf = g_utf8_casefold (query, -1);
   g_auto(GStrv) terms = g_strsplit (cf, " ", -1);
 
@@ -256,7 +279,7 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
   }
 
   /* Already in sort order: filtering a sorted list preserves it. */
-  spotifygtk_track_list_set_native_tracks (self->list, filtered);
+  spotifygtk_track_list_set_borrowed_native_tracks (self->list, filtered);
   if (filtered->len == 0)
     spotifygtk_track_list_set_status (self->list, "No matches.");
 }
@@ -320,6 +343,7 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   g_autoptr(GPtrArray) tracks =
     spotifygtk_native_session_load_tracks_finish (session, result, &err);
+  spotifygtk_runtime_schedule_heap_trim ();
 
   if (!self)
     return;
@@ -358,9 +382,16 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
     guint dropped = 0;
     for (guint i = 0; i < tracks->len; i++) {
-      const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
+      SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
       if (t && t->uri && g_hash_table_contains (self->liked_filter, t->uri)) {
-        g_ptr_array_add (kept, spotifygtk_native_track_copy (t));
+        /* load_tracks_finish() hands this callback ownership. Transfer the
+         * matching object instead of deep-copying every string and then
+         * immediately freeing the original array: a full library contains
+         * thousands of these, and that temporary duplicate established an
+         * avoidable allocator high-water mark on every refresh. NULL keeps
+         * the source array's free func from releasing the transferred item. */
+        g_ptr_array_add (kept, t);
+        tracks->pdata[i] = NULL;
         g_hash_table_add (seen, t->uri);
       } else {
         dropped++;
@@ -408,7 +439,7 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   }
   /* Both derived from the tracks, so they are built here and not touched again
    * until the collection reloads. */
-  build_track_indexes (self);
+  clear_track_indexes (self);
   rebuild_sorted (self);
   apply_filter (self);   /* honours whatever is already typed (usually nothing) */
 
@@ -424,6 +455,8 @@ spotifygtk_liked_songs_page_dispose (GObject *object)
     g_cancellable_cancel (self->in_flight);
   g_clear_object (&self->in_flight);
   g_clear_object (&self->session);
+  /* Borrowed TrackItems must go before the page-owned tracks they reference. */
+  spotifygtk_track_list_clear (self->list);
   g_clear_pointer (&self->all_tracks, g_ptr_array_unref);
   g_clear_pointer (&self->sorted_tracks, g_ptr_array_unref);
   g_clear_pointer (&self->haystacks, g_hash_table_unref);
@@ -671,14 +704,14 @@ find_track_index (SpotifyGtkLikedSongsPage *self, const gchar *uri)
 static void
 index_one_track (SpotifyGtkLikedSongsPage *self, SpotifyNativeTrack *t)
 {
-  if (!self->haystacks || !self->collate_keys)
-    return;
-
-  g_autofree gchar *hay = g_strdup_printf ("%s\t%s\t%s",
-    t->name ? t->name : "", t->artists ? t->artists : "", t->album ? t->album : "");
-  g_hash_table_insert (self->haystacks, t, g_utf8_casefold (hay, -1));
-  g_hash_table_insert (self->collate_keys, t,
-                       g_utf8_collate_key (t->name ? t->name : "", -1));
+  if (self->haystacks) {
+    g_autofree gchar *hay = g_strdup_printf ("%s\t%s\t%s",
+      t->name ? t->name : "", t->artists ? t->artists : "", t->album ? t->album : "");
+    g_hash_table_insert (self->haystacks, t, g_utf8_casefold (hay, -1));
+  }
+  if (self->collate_keys)
+    g_hash_table_insert (self->collate_keys, t,
+                         g_utf8_collate_key (t->name ? t->name : "", -1));
 }
 
 void
@@ -754,10 +787,11 @@ spotifygtk_liked_songs_page_remove_track (SpotifyGtkLikedSongsPage *self,
   /* Index entries are keyed by the track pointer, which the removal frees. */
   if (self->haystacks)    g_hash_table_remove (self->haystacks, t);
   if (self->collate_keys) g_hash_table_remove (self->collate_keys, t);
-  g_ptr_array_remove_index (self->all_tracks, at);
 
+  /* The list item borrows t, so remove it before releasing page ownership. */
   if (visible >= 0)
     spotifygtk_track_list_remove_position (self->list, (guint) visible);
+  g_ptr_array_remove_index (self->all_tracks, at);
 
   /* Emptied by that removal: apply_filter is what knows which message to show,
    * and rebuilding nothing costs nothing. */

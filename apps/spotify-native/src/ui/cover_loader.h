@@ -7,14 +7,13 @@
  *
  * Why not the image cache in spotify-connect: that one is built around the
  * Web API's JSON image URLs and carries a VA-API/libjpeg-turbo decode ladder
- * this does not need. GTK4 already decodes JPEG into a GdkTexture, and a
- * texture is what the widgets want, so this stays small rather than sharing
- * a component whose extra machinery would be unused here.
+ * this does not need. This loader decodes directly with libjpeg/libpng into a
+ * GdkMemoryTexture, so there is no Glycin subprocess or hidden decoder cache.
  *
- * Caching is by image id, in memory, for the process lifetime. Album art is
- * small, heavily repeated within a listing (every track of an album shares
- * one), and immutable for a given id — so a plain hash table is enough, and
- * a listing of 100 tracks typically resolves to a handful of fetches.
+ * Encoded files are cached on disk by immutable image id. Decoded textures
+ * are deliberately not cached process-wide: the visible/overscan widgets own
+ * them and release them as they leave the window, preventing RSS from growing
+ * with every cover encountered during a long scroll.
  */
 
 #pragma once
@@ -25,7 +24,8 @@ G_BEGIN_DECLS
 
 /*
  * Called with the decoded texture, or NULL if the cover could not be
- * fetched or decoded. The texture is owned by the cache; ref it to keep it.
+ * fetched or decoded. The texture is borrowed for the callback; ref it or set
+ * it on a GTK object that takes its own reference if it must outlive the call.
  *
  * Always invoked on the thread that made the request.
  */
@@ -39,13 +39,13 @@ typedef void (*SpotifyCoverCallback) (GdkTexture *texture, gpointer user_data);
  * native 640 square is 1.6 MB, and a full list of them doubled the process
  * RSS. A 40px row thumbnail has no use for more than ~96px, so it asks for
  * that and the decoded texture is ~1/40th the size. The panel, which shows
- * the cover large, asks for a large target. Textures are cached per
- * (id, target), so the small and large decodes of one album coexist without
- * one clobbering the other.
+ * the cover large, asks for a large target. In-flight work is deduplicated per
+ * (id, target), so small and large simultaneous requests do not clobber one
+ * another.
  *
- * A cached cover invokes the callback before returning. `cover_id` NULL or
- * empty invokes it with NULL, so callers do not need to special-case a
- * track whose album has no artwork.
+ * A `cover_id` that is NULL or empty invokes the callback immediately with
+ * NULL, so callers do not need to special-case a track whose album has no
+ * artwork. Disk reads, network fetches and decoding complete asynchronously.
  *
  * Cancelling stops the callback from running, which is what list rows need:
  * rows are recycled as results arrive, and a late callback would otherwise

@@ -29,6 +29,9 @@ typedef struct {
   jmp_buf escape;
 } CoverJpegError;
 
+static guchar *pixel_pages_alloc (gsize len);
+static void    pixel_pages_free  (guchar *addr, gsize len);
+
 static void
 cover_jpeg_error_exit (j_common_ptr info)
 {
@@ -41,7 +44,7 @@ cover_jpeg_error_exit (j_common_ptr info)
  * avoid doing full-resolution work merely to produce a 96px row texture. */
 static guchar *
 decode_jpeg_c (const guchar *data, gsize len, gint target_px,
-               gint *width, gint *height, gint *channels)
+               gint *width, gint *height, gint *channels, gsize *pixel_len)
 {
   if (len < 2 || data[0] != 0xff || data[1] != 0xd8)
     return NULL;
@@ -49,10 +52,12 @@ decode_jpeg_c (const guchar *data, gsize len, gint target_px,
   struct jpeg_decompress_struct jpeg = {0};
   CoverJpegError error;
   guchar * volatile pixels = NULL;
+  gsize volatile pixels_size = 0;
   jpeg.err = jpeg_std_error (&error.parent);
   error.parent.error_exit = cover_jpeg_error_exit;
   if (setjmp (error.escape)) {
-    g_free ((gpointer) pixels);
+    if (pixels)
+      pixel_pages_free ((guchar *) pixels, pixels_size);
     jpeg_destroy_decompress (&jpeg);
     return NULL;
   }
@@ -83,19 +88,25 @@ decode_jpeg_c (const guchar *data, gsize len, gint target_px,
     jpeg_destroy_decompress (&jpeg);
     return NULL;
   }
-  pixels = g_malloc ((gsize) *width * *height * 3);
+  pixels_size = (gsize) *width * *height * 3;
+  pixels = pixel_pages_alloc (pixels_size);
+  if (!pixels) {
+    jpeg_destroy_decompress (&jpeg);
+    return NULL;
+  }
   while (jpeg.output_scanline < jpeg.output_height) {
     JSAMPROW row = pixels + (gsize) jpeg.output_scanline * *width * 3;
     jpeg_read_scanlines (&jpeg, &row, 1);
   }
   jpeg_finish_decompress (&jpeg);
   jpeg_destroy_decompress (&jpeg);
+  *pixel_len = pixels_size;
   return (guchar *) pixels;
 }
 
 static guchar *
 decode_png_c (const guchar *data, gsize len,
-              gint *width, gint *height, gint *channels)
+              gint *width, gint *height, gint *channels, gsize *pixel_len)
 {
   if (len < 8 || png_sig_cmp ((png_bytep) data, 0, 8) != 0)
     return NULL;
@@ -112,63 +123,31 @@ decode_png_c (const guchar *data, gsize len,
     return NULL;
   }
 
-  guchar *pixels = g_malloc (PNG_IMAGE_SIZE (image));
+  gsize size = PNG_IMAGE_SIZE (image);
+  guchar *pixels = pixel_pages_alloc (size);
+  if (!pixels) {
+    png_image_free (&image);
+    return NULL;
+  }
   if (!png_image_finish_read (&image, NULL, pixels, 0, NULL)) {
-    g_free (pixels);
+    pixel_pages_free (pixels, size);
     png_image_free (&image);
     return NULL;
   }
   *width = (gint) image.width;
   *height = (gint) image.height;
   *channels = 4;
+  *pixel_len = size;
   png_image_free (&image);
   return pixels;
 }
 
-/* id (owned) -> GdkTexture (owned).
- *
- * The comment that used to sit here said "covers are ~60 KiB each" and left
- * the cache unbounded. That is the *compressed JPEG* size; GdkTexture holds
- * the *decoded* pixels, 640x640x4 = 1.6 MB each. Scrolling a library decoded
- * ~90 of them and the process doubled in RSS (117 -> 280 MB). Now capped and
- * evicted least-recently-used first.
- *
- * Eviction is safe while a cover is on screen: GtkPicture holds its own ref,
- * so dropping the cache entry only means a later request re-fetches it, not
- * that a visible image blanks. */
-/*
- * Bounded by bytes, not by entries.
- *
- * A count was the wrong unit once two callers wanted different sizes. The album
- * grid decodes at 352px (~484 KB a cover) and shows a few dozen; a track list
- * decodes at 96px (~36 KB) and scrolls past thousands. Forty-eight entries is
- * generous for the first and hopeless for the second -- a Liked Songs scroll
- * misses on essentially every row, so nearly every one becomes an HTTP fetch,
- * which is the stutter. It also meant raising the decode size silently raised
- * the memory ceiling, since the bound never counted bytes.
- *
- * A budget adapts on its own: ~1300 small covers or ~100 large ones, and
- * changing a decode size can no longer move the ceiling.
- */
-/*
- * Lowered from 48 MB now that there is a disk cache behind it.
- *
- * The old figure was set by what eviction cost: with nothing underneath, a
- * dropped cover meant another round trip, so the cache had to be large enough
- * that scrolling rarely missed. Evicting now costs a file read and a decode,
- * so the budget can be sized for what is actually on screen.
- *
- * Not smaller than that, though. Sizing it below the visible set backfires: an
- * evicted cover is still referenced by the widget drawing it, so re-reading it
- * decodes a *second* texture for the same image and the pair costs more than
- * keeping the first. Measured at 16 MB, RSS went up rather than down. 24 MB is
- * several screens of either size.
- */
-#define COVER_CACHE_MAX_BYTES (24 * 1024 * 1024)
-
-/* Bytes currently held. GdkTexture does not report its footprint, so this is
- * computed from the dimensions at insert -- exact for the RGBA memory textures
- * this loader creates. */
+/* Decoded textures are owned by visible/overscan widgets, not by a second
+ * process-wide strong-reference cache. Compressed artwork remains on disk,
+ * so returning to a row is still local; the asynchronous overscan decode hides
+ * that work. A non-zero budget made RSS grow with everything scrolled past. */
+/* The table remains as the lookup/trim boundary used by the loader API, but no
+ * completed texture is inserted into it. */
 static gsize cover_cache_bytes = 0;
 
 /* Evict least-recently-used entries until the cache fits in `budget`. Shared by the insert
@@ -866,11 +845,14 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   gsize encoded_len = 0;
   const guchar *encoded = g_bytes_get_data (bytes, &encoded_len);
   gint source_w = 0, source_h = 0, source_channels = 0;
+  gsize decoded_len = 0;
   guchar *decoded = decode_jpeg_c (encoded, encoded_len, target_px,
-                                   &source_w, &source_h, &source_channels);
+                                   &source_w, &source_h, &source_channels,
+                                   &decoded_len);
   if (!decoded)
     decoded = decode_png_c (encoded, encoded_len,
-                            &source_w, &source_h, &source_channels);
+                            &source_w, &source_h, &source_channels,
+                            &decoded_len);
   if (!decoded) {
     g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                              "cover is not a valid JPEG or PNG");
@@ -898,7 +880,7 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   gsize  pix_len = (gsize) rowstride * h;
   guchar *mapped = pixel_pages_alloc (pix_len);
   if (!mapped) {
-    g_free (decoded);
+    pixel_pages_free (decoded, decoded_len);
     g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
                              "could not map %" G_GSIZE_FORMAT " bytes for a cover",
                              pix_len);
@@ -932,7 +914,7 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
       }
     }
   }
-  g_free (decoded);
+  pixel_pages_free (decoded, decoded_len);
 
   MappedPixels *owner = g_new0 (MappedPixels, 1);
   owner->addr = mapped;
@@ -948,7 +930,7 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   (void) source; (void) cancellable;
 }
 
-/* Back on the main thread: cache the texture and hand it to the waiters. */
+/* Back on the main thread: hand the texture to the waiting widgets. */
 static void
 on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -976,21 +958,10 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  /* Keep a bounded decoded working set in both modes. Disabling this cache in
-   * aggressive mode made every overscan revisit decode the same compressed
-   * file again. Under sustained navigation those temporary full-size decode
-   * buffers raised the allocator high-water mark and eventually made scrolling
-   * miss frames, despite the visible textures themselves being released. */
-  if (caching_enabled ()) {
-    gsize incoming = texture_bytes (texture);
-
-    cover_evict_to (COVER_CACHE_MAX_BYTES > incoming
-                      ? COVER_CACHE_MAX_BYTES - incoming : 0);
-
-    g_hash_table_insert (cover_cache, g_strdup (cache_key), g_object_ref (texture));
-    g_queue_push_tail (&cover_order, g_strdup (cache_key));
-    cover_cache_bytes += incoming;
-  }
+  /* Do not take another strong reference here. The row/card receiving this
+   * texture is its memory cache and releases it outside the overscan window.
+   * The encoded file remains in the disk cache for a cheap asynchronous
+   * decode if the user reverses direction. */
 
   complete_waiters (cache_key, texture);
   cover_active--;

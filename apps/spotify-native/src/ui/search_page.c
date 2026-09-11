@@ -12,6 +12,7 @@
 #include "track_list.h"
 #include "album_grid.h"
 #include "settings.h"
+#include "../log_file.h"
 
 #include "spotify/spclient.h"   /* build_search_uri */
 
@@ -140,6 +141,7 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   g_autoptr(GPtrArray) tracks =
     spotifygtk_native_session_load_tracks_finish (session, result, &err);
+  spotifygtk_runtime_schedule_heap_trim ();
 
   if (!self)
     return;                       /* page went away mid-request */

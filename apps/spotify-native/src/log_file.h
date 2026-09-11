@@ -42,6 +42,12 @@ const gchar *spotifygtk_log_file_path (void);
  * respected, so this remains useful for development diagnostics. */
 void spotifygtk_runtime_init (void);
 
+/* Ask glibc to return unused heap pages after a large catalogue operation.
+ * Requests are coalesced and run at low priority after the UI has settled;
+ * this must never be used as part of the scrolling/image hot path. On other
+ * allocators and on Windows this is intentionally a no-op. */
+void spotifygtk_runtime_schedule_heap_trim (void);
+
 /* Attach the CA database shipped next to a portable Windows build to a
  * libsoup session.  On Linux and on Windows builds without a bundled CA file
  * this is a no-op, preserving GIO's normal system trust database. */

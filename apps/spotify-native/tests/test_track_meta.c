@@ -210,6 +210,9 @@ test_cover_picks_the_largest_image (void)
   g_assert_cmpuint (strlen (meta.cover_id), ==, 40);
   g_assert_cmpstr (meta.cover_id, ==,
                    "2222222222222222222222222222222222222222");
+  /* 128px requests choose the narrowest qualifying image: the 300px entry. */
+  g_assert_cmpstr (meta.cover_id_small, ==,
+                   "3333333333333333333333333333333333333333");
 
   spotifygtk_track_meta_clear (&meta);
   g_byte_array_free (track, TRUE);

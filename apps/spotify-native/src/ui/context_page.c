@@ -8,6 +8,7 @@
  */
 
 #include "context_page.h"
+#include "../log_file.h"
 
 #define CONTEXT_PAGE_LIMIT 200
 
@@ -73,6 +74,7 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   g_autoptr(GPtrArray) tracks =
     spotifygtk_native_session_load_tracks_finish (session, result, &err);
+  spotifygtk_runtime_schedule_heap_trim ();
 
   if (!self)
     return;
