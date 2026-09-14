@@ -424,6 +424,128 @@ spotifygtk_library_page_get_artist_grid (SpotifyGtkLibraryPage *self)
   return self->artists;
 }
 
+typedef struct {
+  GWeakRef page;
+  gchar   *uri;
+} SavedAlbumUpdate;
+
+static void
+saved_album_update_free (SavedAlbumUpdate *update)
+{
+  g_weak_ref_clear (&update->page);
+  g_free (update->uri);
+  g_free (update);
+}
+
+static gint
+saved_album_release_index (SpotifyGtkLibraryPage *self, const gchar *uri)
+{
+  if (!self->saved_releases)
+    return -1;
+  for (guint i = 0; i < self->saved_releases->len; i++) {
+    const SpotifyNativeRelease *release =
+      g_ptr_array_index (self->saved_releases, i);
+    if (release && g_strcmp0 (release->uri, uri) == 0)
+      return (gint) i;
+  }
+  return -1;
+}
+
+static void
+on_saved_album_added_loaded (GObject *source, GAsyncResult *result,
+                             gpointer user_data)
+{
+  SavedAlbumUpdate *update = user_data;
+  g_autoptr(SpotifyGtkLibraryPage) self = g_weak_ref_get (&update->page);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) albums = spotifygtk_native_session_load_albums_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+
+  if (!self || source != G_OBJECT (self->session) ||
+      !self->saved_album_dates ||
+      !g_hash_table_contains (self->saved_album_dates, update->uri)) {
+    saved_album_update_free (update);
+    return;
+  }
+
+  if (!albums || albums->len == 0) {
+    if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+      g_warning ("library: saved album metadata failed for %s: %s",
+                 update->uri, error ? error->message : "empty response");
+    saved_album_update_free (update);
+    return;
+  }
+
+  SpotifyNativeRelease *release = g_ptr_array_steal_index (albums, 0);
+  gint old = saved_album_release_index (self, update->uri);
+  if (old >= 0)
+    g_ptr_array_remove_index (self->saved_releases, (guint) old);
+  g_ptr_array_add (self->saved_releases, release);
+  sort_releases_by_date_added (self);
+  show_release_view (self);
+  spotifygtk_runtime_schedule_heap_trim ();
+  saved_album_update_free (update);
+}
+
+void
+spotifygtk_library_page_set_album_saved (SpotifyGtkLibraryPage *self,
+                                         const gchar           *uri,
+                                         gboolean               saved)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
+  if (!uri || !g_str_has_prefix (uri, "spotify:album:"))
+    return;
+
+  if (!saved) {
+    if (self->saved_album_dates)
+      g_hash_table_remove (self->saved_album_dates, uri);
+    if (self->saved_album_uris) {
+      for (guint i = 0; i < self->saved_album_uris->len; i++) {
+        if (g_strcmp0 (g_ptr_array_index (self->saved_album_uris, i), uri) == 0) {
+          g_ptr_array_remove_index (self->saved_album_uris, i);
+          break;
+        }
+      }
+    }
+    gint index = saved_album_release_index (self, uri);
+    if (index >= 0)
+      g_ptr_array_remove_index (self->saved_releases, (guint) index);
+    spotifygtk_album_grid_remove_uri (self->albums, uri);
+    if (self->loaded)
+      show_release_view (self);
+    spotifygtk_runtime_schedule_heap_trim ();
+    return;
+  }
+
+  /* A page that has never loaded will naturally see the album in its first
+   * collection read. Only patch an existing model. */
+  if (!self->loaded || !self->session ||
+      spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY)
+    return;
+
+  if (!self->saved_album_uris)
+    self->saved_album_uris = g_ptr_array_new_with_free_func (g_free);
+  if (!self->saved_album_dates)
+    self->saved_album_dates = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                     g_free, NULL);
+  if (!self->saved_releases)
+    self->saved_releases = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_release_free);
+
+  if (!g_hash_table_contains (self->saved_album_dates, uri))
+    g_ptr_array_add (self->saved_album_uris, g_strdup (uri));
+  g_hash_table_replace (self->saved_album_dates, g_strdup (uri),
+                        GINT_TO_POINTER ((gint) (g_get_real_time () /
+                                                G_USEC_PER_SEC)));
+
+  SavedAlbumUpdate *update = g_new0 (SavedAlbumUpdate, 1);
+  g_weak_ref_init (&update->page, self);
+  update->uri = g_strdup (uri);
+  const gchar *uris[] = { uri };
+  spotifygtk_native_session_load_albums (self->session, uris, 1, NULL,
+                                         on_saved_album_added_loaded, update);
+}
+
 static void
 populate_artist_cards (SpotifyGtkLibraryPage *self)
 {

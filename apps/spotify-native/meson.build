@@ -5,6 +5,10 @@ project('spotify-native', 'c',
     'warning_level=2',
     'werror=false',
     'c_std=gnu17',
+    # This is an interactive, animation-heavy GTK application. Meson's plain
+    # debug default is -O0 and made the documented build visibly miss frames;
+    # keep symbols and assertions while enabling normal compiler optimisation.
+    'buildtype=debugoptimized',
   ]
 )
 

@@ -28,6 +28,13 @@ void spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
                                           SpotifyNativeSession  *session);
 void spotifygtk_library_page_refresh (SpotifyGtkLibraryPage *self);
 
+/* Reflect one confirmed album collection write without rebuilding the whole
+ * saved-album catalogue. Saving resolves only that album's metadata; removing
+ * drops it from both the backing model and the visible filtered grid. */
+void spotifygtk_library_page_set_album_saved (SpotifyGtkLibraryPage *self,
+                                              const gchar           *uri,
+                                              gboolean               saved);
+
 /* The albums grid, so the window can wire "album-activated" to context nav. */
 SpotifyGtkAlbumGrid *spotifygtk_library_page_get_album_grid (SpotifyGtkLibraryPage *self);
 SpotifyGtkAlbumGrid *spotifygtk_library_page_get_artist_grid (SpotifyGtkLibraryPage *self);

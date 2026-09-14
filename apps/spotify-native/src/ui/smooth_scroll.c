@@ -138,6 +138,8 @@ orientation_name (GtkOrientation orientation)
 static void
 log_scroll_end (SmoothScroll *ss, const gchar *reason, gdouble value)
 {
+  if (!ss->trace)
+    return;
   gint64 elapsed = ss->started_us > 0
     ? g_get_monotonic_time () - ss->started_us : 0;
   SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
@@ -271,7 +273,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   /* 33-67ms gaps are already visible in the aggregate end record. Logging
    * every such frame performs synchronous terminal/file work in the GTK loop
    * and makes an overloaded gesture worse. Only record a true long stall. */
-  if (frame_gap_us > 100000)
+  if (ss->trace && frame_gap_us > 100000)
     SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
                       " frame-gap=%.1fms frame=%u value=%.2f target=%.2f remaining=%.2f",
                       ss->gesture, frame_gap_us / 1000.0, ss->frames,
@@ -393,12 +395,13 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
   ss->target   = CLAMP (base + delta * step, lower, upper);
   ss->last_set = value;
 #ifdef SPOTIFYGTK_VERBOSE
-  SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
-                    " event=%u axis=%s unit=%d dx=%.3f dy=%.3f delta=%.3f"
-                    " value=%.2f base=%.2f target=%.2f bounds=%.2f..%.2f",
-                    ss->gesture, ss->events, orientation_name (ss->orientation),
-                    (gint) gtk_event_controller_scroll_get_unit (ctrl),
-                    dx, dy, delta, value, base, ss->target, lower, upper);
+  if (ss->trace)
+    SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
+                      " event=%u axis=%s unit=%d dx=%.3f dy=%.3f delta=%.3f"
+                      " value=%.2f base=%.2f target=%.2f bounds=%.2f..%.2f",
+                      ss->gesture, ss->events, orientation_name (ss->orientation),
+                      (gint) gtk_event_controller_scroll_get_unit (ctrl),
+                      dx, dy, delta, value, base, ss->target, lower, upper);
 #endif
   if (ss->tick == 0) {
     ss->last_frame_us = 0;   /* first frame of a new flick eases by one frame */

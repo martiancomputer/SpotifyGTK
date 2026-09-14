@@ -135,6 +135,8 @@ struct _SpotifyGtkNativeWindow {
    * player" was. Replayed when the session comes back.
    */
   GPtrArray *pending_likes;
+  GPtrArray *pending_library_writes;
+  guint      library_write_retry_id;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
   guint transfer_generation;             /* stale in-flight transfer adoptions */
@@ -236,6 +238,7 @@ static void spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *se
 static void navigate_to_page (SpotifyGtkNativeWindow *self, const gchar *page_name);
 static void spotifygtk_native_window_reload_liked (SpotifyGtkNativeWindow *self);
 static void navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name);
+static void flush_pending_library_writes (SpotifyGtkNativeWindow *self);
 
 #ifdef SPOTIFYGTK_VERBOSE
 #ifdef __linux__
@@ -3065,7 +3068,74 @@ note_local_write (SpotifyGtkNativeWindow *self)
  * ourselves. That is the "sometimes it reloads the whole page" of it, and the
  * "sometimes" was how long the write took.
  */
-typedef struct { GWeakRef win; gchar *what; } LibraryWriteOp;
+static gboolean album_is_saved (SpotifyGtkNativeWindow *self,
+                                const gchar            *uri);
+static gboolean artist_is_followed (SpotifyGtkNativeWindow *self,
+                                    const gchar            *uri);
+static void context_refresh_action (SpotifyGtkNativeWindow *self,
+                                    const gchar            *uri,
+                                    const gchar            *kind);
+
+typedef enum {
+  LIBRARY_WRITE_ALBUM,
+  LIBRARY_WRITE_ARTIST
+} LibraryWriteKind;
+
+typedef struct {
+  GWeakRef         win;
+  gchar           *what;
+  gchar           *uri;
+  const gchar     *set;
+  LibraryWriteKind kind;
+  gboolean         is_removed;
+  guint            attempts;
+} LibraryWriteOp;
+
+static void
+library_write_op_free (gpointer data)
+{
+  LibraryWriteOp *op = data;
+  g_weak_ref_clear (&op->win);
+  g_free (op->what);
+  g_free (op->uri);
+  g_free (op);
+}
+
+static gboolean issue_library_write (SpotifyGtkNativeWindow *self,
+                                     LibraryWriteOp         *op);
+
+static gboolean
+retry_library_writes (gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  if (!self->pending_library_writes ||
+      self->pending_library_writes->len == 0) {
+    self->library_write_retry_id = 0;
+    return G_SOURCE_REMOVE;
+  }
+
+  if (spotifygtk_native_session_get_state (self->session) ==
+      SPOTIFYGTK_SESSION_READY)
+    flush_pending_library_writes (self);
+
+  if (!self->pending_library_writes ||
+      self->pending_library_writes->len == 0) {
+    self->library_write_retry_id = 0;
+    return G_SOURCE_REMOVE;
+  }
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+queue_library_write (SpotifyGtkNativeWindow *self, LibraryWriteOp *op)
+{
+  if (!self->pending_library_writes)
+    self->pending_library_writes =
+      g_ptr_array_new_with_free_func (library_write_op_free);
+  g_ptr_array_add (self->pending_library_writes, op);
+  if (!self->library_write_retry_id)
+    self->library_write_retry_id = g_timeout_add (250, retry_library_writes, self);
+}
 
 static void
 on_library_write_done (gboolean ok, guint16 status, gpointer user_data)
@@ -3073,23 +3143,95 @@ on_library_write_done (gboolean ok, guint16 status, gpointer user_data)
   LibraryWriteOp *op = user_data;
   g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&op->win);
 
-  if (!ok)
-    g_warning ("library: %s failed (status %u)", op->what, status);
-  else if (self)
-    note_local_write (self);
+  if (!ok && self && (status == 0 || status == 408) && op->attempts < 3) {
+    g_warning ("library: %s interrupted (status %u); retrying after reconnect",
+               op->what, status);
+    queue_library_write (self, op);
+    return;
+  }
 
-  g_weak_ref_clear (&op->win);
-  g_free (op->what);
-  g_free (op);
+  if (!ok) {
+    g_warning ("library: %s failed after %u attempt(s) (status %u)",
+               op->what, op->attempts, status);
+    if (self) {
+      gboolean desired = !op->is_removed;
+      if (op->kind == LIBRARY_WRITE_ALBUM &&
+          album_is_saved (self, op->uri) == desired) {
+        if (op->is_removed)
+          g_hash_table_add (self->liked_uris, g_strdup (op->uri));
+        else
+          g_hash_table_remove (self->liked_uris, op->uri);
+        context_refresh_action (self, op->uri, "album");
+      } else if (op->kind == LIBRARY_WRITE_ARTIST &&
+                 artist_is_followed (self, op->uri) == desired) {
+        if (op->is_removed)
+          g_hash_table_add (self->followed_uris, g_strdup (op->uri));
+        else
+          g_hash_table_remove (self->followed_uris, op->uri);
+        spotifygtk_library_page_set_followed_artists (self->library_page,
+                                                      self->followed_uris);
+        spotifygtk_artist_page_set_following (self->artist_page,
+                                              op->is_removed);
+      }
+    }
+  } else if (self) {
+    note_local_write (self);
+    if (op->kind == LIBRARY_WRITE_ALBUM &&
+        album_is_saved (self, op->uri) == !op->is_removed)
+      spotifygtk_library_page_set_album_saved (self->library_page, op->uri,
+                                               !op->is_removed);
+  }
+
+  library_write_op_free (op);
 }
 
 static LibraryWriteOp *
-library_write_op (SpotifyGtkNativeWindow *self, const gchar *what)
+library_write_op (SpotifyGtkNativeWindow *self, const gchar *what,
+                  const gchar *uri, const gchar *set,
+                  LibraryWriteKind kind, gboolean is_removed)
 {
   LibraryWriteOp *op = g_new0 (LibraryWriteOp, 1);
   g_weak_ref_init (&op->win, self);
   op->what = g_strdup (what);
+  op->uri = g_strdup (uri);
+  op->set = set;
+  op->kind = kind;
+  op->is_removed = is_removed;
   return op;
+}
+
+static gboolean
+issue_library_write (SpotifyGtkNativeWindow *self, LibraryWriteOp *op)
+{
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = m
+    ? spotifygtk_native_session_dup_username (self->session) : NULL;
+  if (!m || !user)
+    return FALSE;
+
+  const gchar *uris[] = { op->uri };
+  op->attempts++;
+  spotifygtk_collection_v2_write (m, user, op->set, uris, 1, op->is_removed,
+                                  on_library_write_done, op);
+  return TRUE;
+}
+
+static void
+flush_pending_library_writes (SpotifyGtkNativeWindow *self)
+{
+  if (!self->pending_library_writes ||
+      self->pending_library_writes->len == 0)
+    return;
+
+  g_autoptr(GPtrArray) queued =
+    g_steal_pointer (&self->pending_library_writes);
+  guint count = queued->len;
+  g_message ("library: replaying %u write(s) after reconnect", count);
+  while (queued->len > 0) {
+    LibraryWriteOp *op = g_ptr_array_steal_index (queued, 0);
+    if (!issue_library_write (self, op))
+      queue_library_write (self, op);
+  }
 }
 
 static gboolean
@@ -3157,29 +3299,17 @@ on_context_action (const gchar *uri, const gchar *kind, gpointer user_data)
 
   if (g_str_has_prefix (uri, "spotify:album:")) {
     gboolean saved = album_is_saved (self, uri);
-    const gchar *uris[1] = { uri };
     note_local_write (self);
-    spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_ALBUMS,
-                                    uris, 1, saved, on_library_write_done,
-                                    library_write_op (self, saved ? "unsave album"
-                                                                  : "save album"));
+    LibraryWriteOp *op = library_write_op (
+      self, saved ? "unsave album" : "save album", uri,
+      SPOTIFYGTK_COLLECTION_SET_ALBUMS, LIBRARY_WRITE_ALBUM, saved);
+    if (!issue_library_write (self, op))
+      queue_library_write (self, op);
     /* Reflected immediately; the next collection read confirms it. */
     if (saved) g_hash_table_remove (self->liked_uris, uri);
     else       g_hash_table_add (self->liked_uris, g_strdup (uri));
     context_refresh_action (self, uri, kind);
 
-    /*
-     * Take the card out of Library too.
-     *
-     * The button flipped, but the grid behind it only ever learned about a
-     * removal from the next full collection read -- which the grace window
-     * above is there to suppress. So unsaving appeared to do nothing at all
-     * while having gone through on the server, and whether it appeared to work
-     * came down to whether the echo happened to land outside the window.
-     */
-    if (saved && self->library_page)
-      spotifygtk_album_grid_remove_uri (
-        spotifygtk_library_page_get_album_grid (self->library_page), uri);
     return;
   }
 
@@ -3202,12 +3332,12 @@ on_artist_follow_toggled (const gchar *artist_uri, gpointer user_data)
                                                  g_free, NULL);
 
   gboolean following = artist_is_followed (self, artist_uri);
-  const gchar *uris[1] = { artist_uri };
   note_local_write (self);
-  spotifygtk_collection_v2_write (m, user, SPOTIFYGTK_COLLECTION_SET_ARTISTS,
-                                  uris, 1, following, on_library_write_done,
-                                  library_write_op (self, following ? "unfollow artist"
-                                                                    : "follow artist"));
+  LibraryWriteOp *op = library_write_op (
+    self, following ? "unfollow artist" : "follow artist", artist_uri,
+    SPOTIFYGTK_COLLECTION_SET_ARTISTS, LIBRARY_WRITE_ARTIST, following);
+  if (!issue_library_write (self, op))
+    queue_library_write (self, op);
   if (following) g_hash_table_remove (self->followed_uris, artist_uri);
   else           g_hash_table_add (self->followed_uris, g_strdup (artist_uri));
 
@@ -4452,6 +4582,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     /* Liked state for every list and every context menu. Paged, so the size of
      * the collection does not matter. */
     flush_pending_likes (self);
+    flush_pending_library_writes (self);
     spotifygtk_native_window_reload_liked (self);
     spotifygtk_native_window_reload_followed (self);
 
@@ -5654,6 +5785,7 @@ spotifygtk_native_window_dispose (GObject *object)
 
   g_clear_handle_id (&self->collection_change_id, g_source_remove);
   g_clear_handle_id (&self->dev_nav_probe_id, g_source_remove);
+  g_clear_handle_id (&self->library_write_retry_id, g_source_remove);
 #ifdef SPOTIFYGTK_VERBOSE
   g_clear_handle_id (&self->memory_sample_id, g_source_remove);
 #endif
@@ -5685,6 +5817,7 @@ spotifygtk_native_window_dispose (GObject *object)
   smart_saved_queue_clear (self);
   g_clear_pointer (&self->nav_history, g_ptr_array_unref);
   g_clear_pointer (&self->pending_likes, g_ptr_array_unref);
+  g_clear_pointer (&self->pending_library_writes, g_ptr_array_unref);
   g_clear_pointer (&self->display_tracks, g_hash_table_unref);
   g_clear_pointer (&self->awaiting_uri, g_free);
   g_clear_pointer (&self->liked_uris, g_hash_table_unref);
