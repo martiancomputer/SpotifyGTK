@@ -306,6 +306,14 @@ have no public track URL, so their row action is disabled rather than copying
 a misleading link. Menu state owns its own URL copy so a recycled row or a
 track change cannot make an open Share menu point at a different song.
 
+Album and playlist cards also expose sharing in their right-click menus:
+**Share Album** and **Share Playlist**, respectively. Each copies the matching
+`https://open.spotify.com/album/<id>` or
+`https://open.spotify.com/playlist/<id>` URL to the clipboard. These use the
+same local URI validation as songs; invalid or non-shareable card URIs leave
+the action disabled. The open menu keeps a URL snapshot because a virtualized
+card can be rebound while the menu is visible.
+
 ## Settings and controls
 
 Preferences are persisted in:

@@ -103,6 +103,10 @@ gchar *spotifygtk_gid_to_base62 (const guint8 *gid, gsize len);
  * The conversion is local and does not require a Web API request. */
 gchar *spotifygtk_track_share_url (const gchar *track_uri);
 
+/* Browser-openable URL for a canonical track, album or playlist URI. Returns
+ * NULL for unsupported or malformed URIs; free with g_free(). */
+gchar *spotifygtk_context_share_url (const gchar *uri);
+
 /*
  * Release year out of an Album.date submessage, or 0 when absent or absurd.
  *

@@ -343,6 +343,25 @@ test_track_share_url (void)
     "spotify:track:6rqhFgbbKwnb9MLmUQDhG/"));
 }
 
+static void
+test_context_share_url (void)
+{
+  g_autofree gchar *album = spotifygtk_context_share_url (
+    "spotify:album:6rqhFgbbKwnb9MLmUQDhG6");
+  g_autofree gchar *playlist = spotifygtk_context_share_url (
+    "spotify:playlist:3cEYpjA9oz9GiPac4AsH4n");
+  g_assert_cmpstr (album, ==,
+    "https://open.spotify.com/album/6rqhFgbbKwnb9MLmUQDhG6");
+  g_assert_cmpstr (playlist, ==,
+    "https://open.spotify.com/playlist/3cEYpjA9oz9GiPac4AsH4n");
+
+  g_assert_null (spotifygtk_context_share_url (NULL));
+  g_assert_null (spotifygtk_context_share_url ("spotify:artist:6rqhFgbbKwnb9MLmUQDhG6"));
+  g_assert_null (spotifygtk_context_share_url ("spotify:album:too-short"));
+  g_assert_null (spotifygtk_context_share_url ("spotify:playlist:3cEYpjA9oz9GiPac4AsH4n/"));
+  g_assert_null (spotifygtk_context_share_url ("spotify:user:someone:playlist:3cEYpjA9oz9GiPac4AsH4n"));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -358,6 +377,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/track-meta/malformed-gid", test_malformed_gid_yields_no_uri);
   g_test_add_func ("/track-meta/empty-and-garbage", test_empty_and_garbage);
   g_test_add_func ("/track-meta/track-share-url", test_track_share_url);
+  g_test_add_func ("/track-meta/context-share-url", test_context_share_url);
 
   return g_test_run ();
 }

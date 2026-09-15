@@ -239,18 +239,38 @@ spotifygtk_gid_to_base62 (const guint8 *gid, gsize len)
 gchar *
 spotifygtk_track_share_url (const gchar *track_uri)
 {
-  static const gchar prefix[] = "spotify:track:";
-  if (!track_uri || !g_str_has_prefix (track_uri, prefix))
+  if (!track_uri || !g_str_has_prefix (track_uri, "spotify:track:"))
     return NULL;
 
-  const gchar *id = track_uri + sizeof prefix - 1;
+  return spotifygtk_context_share_url (track_uri);
+}
+
+gchar *
+spotifygtk_context_share_url (const gchar *uri)
+{
+  const gchar *kind = NULL;
+  const gchar *id = NULL;
+
+  if (uri && g_str_has_prefix (uri, "spotify:track:")) {
+    kind = "track";
+    id = uri + strlen ("spotify:track:");
+  } else if (uri && g_str_has_prefix (uri, "spotify:album:")) {
+    kind = "album";
+    id = uri + strlen ("spotify:album:");
+  } else if (uri && g_str_has_prefix (uri, "spotify:playlist:")) {
+    kind = "playlist";
+    id = uri + strlen ("spotify:playlist:");
+  } else {
+    return NULL;
+  }
+
   if (strlen (id) != 22)
     return NULL;
   for (const gchar *p = id; *p; p++)
     if (!g_ascii_isalnum (*p))
       return NULL;
 
-  return g_strconcat ("https://open.spotify.com/track/", id, NULL);
+  return g_strconcat ("https://open.spotify.com/", kind, "/", id, NULL);
 }
 
 /* Build "spotify:<kind>:<id>" from a submessage's gid field, or NULL if the

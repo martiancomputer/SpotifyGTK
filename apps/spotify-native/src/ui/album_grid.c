@@ -40,6 +40,7 @@
 #include "context_menu.h"
 #include "cover_loader.h"
 #include "smooth_scroll.h"
+#include "spotify/track_meta.h"
 
 #define CARD_ART_PX     176   /* on-screen card art size */
 /*
@@ -618,6 +619,7 @@ typedef struct {
   gchar               *uri;
   gchar               *name;
   gchar               *cover_id;   /* so a pin can show the same art */
+  gchar               *share_url;  /* snapshot: a recycled card may change URI */
 } AlbumMenuCtx;
 
 static void
@@ -627,6 +629,7 @@ album_menu_ctx_free (gpointer data)
   g_free (ctx->uri);
   g_free (ctx->name);
   g_free (ctx->cover_id);
+  g_free (ctx->share_url);
   g_free (ctx);
 }
 
@@ -667,6 +670,20 @@ static void on_album_menu_queue (GtkButton *b, gpointer d) { (void) d; album_men
 static void on_album_menu_rename (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_RENAME); }
 
 static void
+on_album_menu_share (GtkButton *button, gpointer user_data)
+{
+  (void) user_data;
+  GtkWidget *widget = GTK_WIDGET (button);
+  AlbumMenuCtx *ctx = spotifygtk_context_menu_get_context (widget);
+  if (ctx && ctx->share_url)
+    gdk_clipboard_set_text (gtk_widget_get_clipboard (widget), ctx->share_url);
+
+  GtkPopover *popover = spotifygtk_context_menu_get_popover (widget);
+  if (popover)
+    gtk_popover_popdown (popover);
+}
+
+static void
 on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
                            gdouble x, gdouble y, gpointer user_data)
 {
@@ -682,6 +699,7 @@ on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
   ctx->uri  = g_strdup (uri);
   ctx->name = g_strdup (g_object_get_data (G_OBJECT (card), "album-name"));
   ctx->cover_id = g_strdup (g_object_get_data (G_OBJECT (card), "cover-id"));
+  ctx->share_url = spotifygtk_context_share_url (uri);
 
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
   spotifygtk_context_menu_add (menu, "Add to Liked Songs", TRUE, NULL,
@@ -708,8 +726,15 @@ on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
                                "The album list does not carry an artist id yet",
                                NULL, NULL);
   spotifygtk_context_menu_add_separator (menu);
-  spotifygtk_context_menu_add (menu, "Share album", FALSE,
-                               "Not implemented yet", NULL, NULL);
+  gboolean playlist = g_str_has_prefix (uri, "spotify:playlist:");
+  gboolean album = g_str_has_prefix (uri, "spotify:album:");
+  if (playlist || album)
+    spotifygtk_context_menu_add (menu,
+                                 playlist ? "Share Playlist" : "Share Album",
+                                 ctx->share_url != NULL,
+                                 ctx->share_url ? NULL :
+                                 "This item has no public Spotify link",
+                                 G_CALLBACK (on_album_menu_share), NULL);
 
   spotifygtk_context_menu_present (menu, card, x, y, ctx, album_menu_ctx_free);
 
