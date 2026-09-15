@@ -107,6 +107,19 @@ gchar *spotifygtk_track_share_url (const gchar *track_uri);
  * NULL for unsupported or malformed URIs; free with g_free(). */
 gchar *spotifygtk_context_share_url (const gchar *uri);
 
+/* Parse ordinary [mm:ss.xx] LRC into ordered, owned timed lines. Metadata and
+ * malformed lines are ignored. The returned array owns SpotifyGtkLyricLine
+ * entries and is freed with g_ptr_array_unref(). */
+typedef struct {
+  gint64 start_ms;
+  gchar *text;
+} SpotifyGtkLyricLine;
+
+GPtrArray *spotifygtk_lrc_parse (const gchar *lrc);
+
+/* Index of the most recent line at position_ms, or -1 before the first line. */
+gint spotifygtk_lrc_active_line (GPtrArray *lines, gint64 position_ms);
+
 /*
  * Release year out of an Album.date submessage, or 0 when absent or absurd.
  *

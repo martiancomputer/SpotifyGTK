@@ -20,6 +20,8 @@ struct _SpotifyGtkSettings {
   gboolean eq_enabled;
   gboolean aggressive_filtering;
   gboolean caching_enabled;
+  gboolean online_lyrics;
+  guint    lyrics_font_size;
   guint    scroll_smoothness;
   gboolean shuffle;
   guint    repeat;
@@ -80,6 +82,16 @@ load (SpotifyGtkSettings *self)
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "caching-enabled", NULL))
     self->caching_enabled =
       g_key_file_get_boolean (kf, SETTINGS_GROUP, "caching-enabled", NULL);
+  if (g_key_file_has_key (kf, SETTINGS_GROUP, "online-lyrics", NULL))
+    self->online_lyrics =
+      g_key_file_get_boolean (kf, SETTINGS_GROUP, "online-lyrics", NULL);
+  if (g_key_file_has_key (kf, SETTINGS_GROUP, "lyrics-font-size", NULL)) {
+    gint size = g_key_file_get_integer (kf, SETTINGS_GROUP,
+                                        "lyrics-font-size", NULL);
+    if (size == 19 || size == 20 ||
+        (size >= 22 && size <= 28 && size % 2 == 0))
+      self->lyrics_font_size = (guint) size;
+  }
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "scroll-smoothness", NULL))
     self->scroll_smoothness = CLAMP (
       g_key_file_get_integer (kf, SETTINGS_GROUP, "scroll-smoothness", NULL),
@@ -147,6 +159,10 @@ save (SpotifyGtkSettings *self)
                           self->aggressive_filtering);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "caching-enabled",
                           self->caching_enabled);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "online-lyrics",
+                          self->online_lyrics);
+  g_key_file_set_integer (kf, SETTINGS_GROUP, "lyrics-font-size",
+                          (gint) self->lyrics_font_size);
   /* Drop the retired concurrency workaround when rewriting an older file. */
   g_key_file_remove_key (kf, SETTINGS_GROUP, "aggressive-media", NULL);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "scroll-smoothness",
@@ -212,6 +228,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
   self->renderer    = SPOTIFYGTK_RENDERER_AUTOMATIC;
   self->caching_enabled = TRUE;
+  self->lyrics_font_size = 19;
   self->scroll_smoothness = 50;
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
   self->unavailable = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
@@ -258,6 +275,26 @@ DEFINE_SETTING (media_mode,  SpotifyGtkMediaMode,  media_mode,  SPOTIFYGTK_MEDIA
 DEFINE_SETTING (sample_rate, SpotifyGtkSampleRate, sample_rate, SPOTIFYGTK_SAMPLE_RATE_96000)
 DEFINE_SETTING (renderer,    SpotifyGtkRenderer,   renderer,    SPOTIFYGTK_RENDERER_CAIRO)
 
+guint
+spotifygtk_settings_get_lyrics_font_size (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), 19);
+  return self->lyrics_font_size;
+}
+
+void
+spotifygtk_settings_set_lyrics_font_size (SpotifyGtkSettings *self, guint pixels)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (!(pixels == 19 || pixels == 20 ||
+        (pixels >= 22 && pixels <= 28 && pixels % 2 == 0)) ||
+      self->lyrics_font_size == pixels)
+    return;
+  self->lyrics_font_size = pixels;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
 gboolean
 spotifygtk_settings_get_aggressive_filtering (SpotifyGtkSettings *self)
 {
@@ -294,6 +331,26 @@ spotifygtk_settings_set_caching_enabled (SpotifyGtkSettings *self,
   if (self->caching_enabled == enabled)
     return;
   self->caching_enabled = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+gboolean
+spotifygtk_settings_get_online_lyrics (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  return self->online_lyrics;
+}
+
+void
+spotifygtk_settings_set_online_lyrics (SpotifyGtkSettings *self,
+                                       gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->online_lyrics == enabled)
+    return;
+  self->online_lyrics = enabled;
   save (self);
   g_signal_emit (self, signals[CHANGED], 0);
 }

@@ -314,6 +314,53 @@ same local URI validation as songs; invalid or non-shareable card URIs leave
 the action disabled. The open menu keeps a URL snapshot because a virtualized
 card can be rebound while the menu is visible.
 
+### Lyrics
+
+The right Now Playing panel has Queue and Lyrics views. Lyrics are keyed to
+the *audible* track, not to a track merely decoding ahead for gapless playback.
+Lookup is lazy: it begins only when the Lyrics view is opened, and only for
+the current track, so leaving Queue selected adds no file or network work.
+The first source is a local UTF-8 `.lrc` sidecar named for the track's 22-character
+base62 Spotify ID in the user's GLib data directory:
+
+```text
+~/.local/share/spotifygtk/lyrics/<track-id>.lrc   (usual Linux path)
+```
+
+For example, a sidecar can contain `[00:17.12] First line` and
+`[00:21.50] Second line`. Plain text without timestamps is displayed as a
+read-only text view. Synchronized lines are parsed once, sorted by timestamp,
+and selected by binary search against the player's existing 250 ms audible
+position reports. The panel reuses three labels for previous/current/next;
+it changes them only when the active line changes, so lyric playback does not
+create a per-frame GTK layout or a row widget for every line. Seek, pause and
+natural track handover therefore follow the same position/identity signals as
+the playback bar.
+
+The Queue/Lyrics selector sits close to the track details. The Font size
+dropdown in Settings → Lyrics changes the highlighted and surrounding timed
+lines and plain-text lyrics without refetching or reparsing the song.
+The initial 19 px highlighted-line size preserves the original appearance;
+20, 22, 24, 26 and 28 px are the larger choices. This is saved in
+`lyrics-font-size` and applies immediately. Timed lines render inside a
+viewport that does not propagate lyric-derived width or height requests:
+long lines wrap within the current Now Playing pane and use the remaining
+height rather than resizing its artwork, track details or selector. The timed
+viewport scrolls internally only if the window is too short for all three
+lines, and follows the current line after a lyric change.
+
+Settings → Lyrics → Online lyrics optionally asks LRCLIB for the current song
+when no local sidecar exists. It is **off by default** because the request
+sends title, primary artist, album and duration to a third-party service.
+Requests identify SpotifyGTK with a User-Agent, are asynchronous, and cancel
+on track changes. Only one current-track request is allowed; results are
+held in a bounded 16-song in-memory cache, with short-lived missing-result
+entries. `429` responses honor `Retry-After` by suspending further requests.
+Responses larger than 256 KiB are rejected. No Rust or external lyric-rendering
+library is bundled into the app. LRCLIB availability and lyric matching are
+independent of Spotify's playback/catalog services; not every recording has
+matching lyrics.
+
 ## Settings and controls
 
 Preferences are persisted in:
@@ -323,11 +370,13 @@ Preferences are persisted in:
 ```
 
 The existing settings singleton stores theme, media mode, renderer, EQ gains,
-caching, aggressive media, shuffle/repeat and `scroll-smoothness`. Setters save
+caching, online lyrics, aggressive filtering, shuffle/repeat and
+`scroll-smoothness`. Setters save
 before emitting `changed`, so listeners see the new value.
 
 The UI exposes four themes, artwork policy, cache controls, aggressive media,
-scroll smoothness, GSK renderer selection, sample rate, EQ and account profile.
+scroll smoothness, optional lyric lookup, GSK renderer selection, sample rate,
+EQ and account profile.
 Renderer changes require restart because GSK chooses one renderer per process;
 an explicit `GSK_RENDERER` environment value takes precedence.
 
@@ -338,6 +387,8 @@ an explicit `GSK_RENDERER` environment value takes precedence.
 | Interface → Theme | `theme` | Dark, White, Milk, Dark+ | Selects the application palette. Accent green is reserved for state such as liked, followed, pinned and selected items. | Immediately; CSS is reloaded. |
 | Interface → Previews | `media-mode` | Media, Now playing only, None | Controls which artwork surfaces may request covers. “Now playing only” prevents list/grid artwork work; “None” prevents artwork requests altogether. | Immediately for new requests; existing images are released by the loader. |
 | Interface → Scroll smoothness | `scroll-smoothness` | 0–100 | Tunes mouse-wheel travel and easing together. Low values are shorter and more responsive; high values carry farther with softer gravity. Slider persistence is debounced for 120 ms so dragging does not synchronously rewrite the settings file on GTK's UI thread. | After the slider pauses; touchpad kinetics are unchanged. |
+| Lyrics → Online lyrics | `online-lyrics` | Off/On (default Off) | Allows an asynchronous LRCLIB lookup for the current audible song after checking the local LRC sidecar. Sends its title, primary artist, album and duration to LRCLIB; no scan of a playlist or library occurs. | Immediately; an active track is rechecked when toggled. |
+| Lyrics → Font size | `lyrics-font-size` | 19, 20, 22, 24, 26, 28 px (default 19) | Sizes the current timed lyric line, scales neighboring lines, and sizes plain-text lyrics. It does not change lyrics loading. | Immediately and retained across launches. |
 | Search Settings → Aggressive Filtering | `aggressive-filtering` | Off/On | Changes local search matching/ranking so exact artist/title matches are promoted while weaker matches remain available. It does not change Spotify's server-side context result. | Immediately on the next filter/search update. |
 | Audio → Sample rate | `sample-rate` | Default, 44.1 kHz, 48 kHz, 96 kHz | Chooses the device rate. Default follows the stream; another rate activates the native polyphase windowed-sinc resampler. | Persisted immediately; used when the next output device/track is opened. |
 | Audio → Sample format | — | Native, 24-bit | Present as an explicit unavailable option. The current PCM path is 16-bit end to end, so this control is intentionally insensitive. | Not implemented. |

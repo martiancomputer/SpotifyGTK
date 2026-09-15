@@ -4357,6 +4357,9 @@ on_player_state_changed (SpotifyNativePlayerService *player,
                           state == SPOTIFYGTK_PLAYER_BUFFERING ||
                           state == SPOTIFYGTK_PLAYER_CONNECTING);
 
+  if (!has_track)
+    spotifygtk_now_playing_panel_set_lyrics_track (self->now_playing_panel, NULL);
+
   spotifygtk_playback_bar_set_playing (self->playback_bar, is_playing);
   mpris_emit_player_changed (self, "PlaybackStatus");
   mpris_emit_player_changed (self, "CanPlay");
@@ -4829,6 +4832,7 @@ show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
     track->uri && self->liked_uris &&
     g_hash_table_contains (self->liked_uris, track->uri));
   spotifygtk_now_playing_panel_set_track (self->now_playing_panel, name, artists, album);
+  spotifygtk_now_playing_panel_set_lyrics_track (self->now_playing_panel, track);
 
   spotifygtk_playback_bar_set_cover (self->playback_bar, track->cover_id);
   spotifygtk_now_playing_panel_set_cover (self->now_playing_panel, track->cover_id);

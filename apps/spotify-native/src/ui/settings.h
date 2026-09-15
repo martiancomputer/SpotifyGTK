@@ -85,6 +85,17 @@ gboolean spotifygtk_settings_get_caching_enabled (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_caching_enabled (SpotifyGtkSettings *self,
                                                   gboolean enabled);
 
+/* Third-party LRCLIB lookup. Off by default; local LRC files work regardless. */
+gboolean spotifygtk_settings_get_online_lyrics (SpotifyGtkSettings *self);
+void     spotifygtk_settings_set_online_lyrics (SpotifyGtkSettings *self,
+                                                gboolean enabled);
+
+/* Highlighted lyric size in pixels. The UI offers 19 (current), 20, 22,
+ * 24, 26 and 28; invalid persisted values fall back to 19. */
+guint spotifygtk_settings_get_lyrics_font_size (SpotifyGtkSettings *self);
+void  spotifygtk_settings_set_lyrics_font_size (SpotifyGtkSettings *self,
+                                                guint pixels);
+
 /* Mouse-wheel animation character, 0 (short and responsive) through 100
  * (longer, softer glide). Touchpad scrolling remains native. */
 guint spotifygtk_settings_get_scroll_smoothness (SpotifyGtkSettings *self);

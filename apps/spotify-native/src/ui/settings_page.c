@@ -285,6 +285,39 @@ on_aggressive_filtering_toggled (GtkSwitch *sw, GParamSpec *pspec,
   (void) pspec;
 }
 
+static void
+on_online_lyrics_toggled (GtkSwitch *sw, GParamSpec *pspec,
+                          gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_online_lyrics (self->settings,
+                                         gtk_switch_get_active (sw));
+  (void) pspec;
+}
+
+static const guint lyric_font_sizes[] = { 19, 20, 22, 24, 26, 28 };
+
+static guint
+lyrics_font_size_index (guint pixels)
+{
+  for (guint i = 0; i < G_N_ELEMENTS (lyric_font_sizes); i++)
+    if (lyric_font_sizes[i] == pixels)
+      return i;
+  return 0;
+}
+
+static void
+on_lyrics_font_size_changed (GtkDropDown *dropdown, GParamSpec *pspec,
+                             gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  guint selected = gtk_drop_down_get_selected (dropdown);
+  if (selected < G_N_ELEMENTS (lyric_font_sizes))
+    spotifygtk_settings_set_lyrics_font_size (
+      self->settings, lyric_font_sizes[selected]);
+  (void) pspec;
+}
+
 static gboolean
 commit_scroll_smoothness_cb (gpointer user_data)
 {
@@ -513,6 +546,37 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              scroll_scale));
 
   gtk_box_append (GTK_BOX (content), interface_group);
+
+  /* Local lyric sidecars need no network permission. LRCLIB receives title,
+   * artist, album and duration, so make that lookup an explicit opt-in. */
+  GtkWidget *lyrics_group = build_group ("Lyrics");
+  GtkWidget *online_lyrics = gtk_switch_new ();
+  gtk_switch_set_active (GTK_SWITCH (online_lyrics),
+    spotifygtk_settings_get_online_lyrics (self->settings));
+  g_signal_connect (online_lyrics, "notify::active",
+                    G_CALLBACK (on_online_lyrics_toggled), self);
+  gtk_box_append (GTK_BOX (lyrics_group),
+    build_row ("Online lyrics",
+               "Look up the current song on LRCLIB when no local .lrc file "
+               "exists. Sends its title, artist, album and duration to "
+               "LRCLIB. Off by default; local files always work.",
+               online_lyrics));
+  static const gchar * const lyric_font_options[] = {
+    "19 px", "20 px", "22 px", "24 px", "26 px", "28 px", NULL
+  };
+  GtkWidget *lyrics_font = build_dropdown (
+    lyric_font_options,
+    lyrics_font_size_index (spotifygtk_settings_get_lyrics_font_size (
+      self->settings)), TRUE);
+  g_signal_connect (lyrics_font, "notify::selected",
+                    G_CALLBACK (on_lyrics_font_size_changed), self);
+  gtk_box_append (GTK_BOX (lyrics_group),
+    build_row ("Font size",
+               "Sets the highlighted lyric size from the current 19 px "
+               "through 28 px. Surrounding lines and plain lyrics scale "
+               "with it. Applies immediately without reloading lyrics.",
+               lyrics_font));
+  gtk_box_append (GTK_BOX (content), lyrics_group);
 
   /* ── Search Settings ──────────────────────────────────────── */
   GtkWidget *search_group = build_group ("Search Settings");

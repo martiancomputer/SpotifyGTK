@@ -273,6 +273,114 @@ spotifygtk_context_share_url (const gchar *uri)
   return g_strconcat ("https://open.spotify.com/", kind, "/", id, NULL);
 }
 
+static void
+lyric_line_free (gpointer data)
+{
+  SpotifyGtkLyricLine *line = data;
+  g_free (line->text);
+  g_free (line);
+}
+
+/* A timestamp may have one or more minute digits and one to three decimal
+ * digits. Interpret the fractional part as decimal seconds, not milliseconds:
+ * .1 means 100 ms, .12 means 120 ms, and .123 means 123 ms. */
+static gboolean
+lrc_timestamp (const gchar *p, const gchar **end, gint64 *start_ms)
+{
+  if (!p || *p++ != '[' || !g_ascii_isdigit (*p))
+    return FALSE;
+
+  guint64 minutes = 0;
+  while (g_ascii_isdigit (*p)) {
+    minutes = minutes * 10 + (*p++ - '0');
+    if (minutes > 10000)
+      return FALSE;
+  }
+  if (*p++ != ':' || !g_ascii_isdigit (p[0]) || !g_ascii_isdigit (p[1]))
+    return FALSE;
+  guint seconds = (p[0] - '0') * 10 + (p[1] - '0');
+  p += 2;
+  if (seconds >= 60)
+    return FALSE;
+
+  guint fraction = 0, digits = 0;
+  if (*p == '.') {
+    p++;
+    while (g_ascii_isdigit (*p) && digits < 3) {
+      fraction = fraction * 10 + (*p++ - '0');
+      digits++;
+    }
+    if (digits == 0 || g_ascii_isdigit (*p))
+      return FALSE;
+    while (digits++ < 3)
+      fraction *= 10;
+  }
+  if (*p++ != ']')
+    return FALSE;
+
+  *start_ms = (gint64) minutes * 60000 + seconds * 1000 + fraction;
+  *end = p;
+  return TRUE;
+}
+
+static gint
+compare_lyric_lines (gconstpointer a, gconstpointer b)
+{
+  const SpotifyGtkLyricLine *x = *(SpotifyGtkLyricLine * const *) a;
+  const SpotifyGtkLyricLine *y = *(SpotifyGtkLyricLine * const *) b;
+  return (x->start_ms > y->start_ms) - (x->start_ms < y->start_ms);
+}
+
+GPtrArray *
+spotifygtk_lrc_parse (const gchar *lrc)
+{
+  GPtrArray *lines = g_ptr_array_new_with_free_func (lyric_line_free);
+  if (!lrc)
+    return lines;
+
+  g_auto(GStrv) rows = g_strsplit (lrc, "\n", -1);
+  for (guint i = 0; rows[i]; i++) {
+    const gchar *p = rows[i];
+    GArray *times = g_array_new (FALSE, FALSE, sizeof (gint64));
+    gint64 ms;
+    const gchar *next;
+    while (lrc_timestamp (p, &next, &ms)) {
+      g_array_append_val (times, ms);
+      p = next;
+    }
+
+    g_autofree gchar *text = g_strdup (p);
+    g_strstrip (text);
+    if (*text && times->len > 0)
+      for (guint j = 0; j < times->len; j++) {
+        SpotifyGtkLyricLine *line = g_new0 (SpotifyGtkLyricLine, 1);
+        line->start_ms = g_array_index (times, gint64, j);
+        line->text = g_strdup (text);
+        g_ptr_array_add (lines, line);
+      }
+    g_array_unref (times);
+  }
+  g_ptr_array_sort (lines, compare_lyric_lines);
+  return lines;
+}
+
+gint
+spotifygtk_lrc_active_line (GPtrArray *lines, gint64 position_ms)
+{
+  if (!lines || lines->len == 0 || position_ms < 0)
+    return -1;
+  guint low = 0, high = lines->len;
+  while (low < high) {
+    guint mid = low + (high - low) / 2;
+    SpotifyGtkLyricLine *line = g_ptr_array_index (lines, mid);
+    if (line->start_ms <= position_ms)
+      low = mid + 1;
+    else
+      high = mid;
+  }
+  return (gint) low - 1;
+}
+
 /* Build "spotify:<kind>:<id>" from a submessage's gid field, or NULL if the
  * submessage carries no (valid) gid. */
 static gchar *

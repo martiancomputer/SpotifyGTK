@@ -36,6 +36,11 @@ void spotifygtk_now_playing_panel_set_progress (SpotifyGtkNowPlayingPanel *self,
                                                 gint64 position_ms,
                                                 gint64 duration_ms);
 
+/* Set the audible track used for lyric lookup. Lookup is asynchronous, only
+ * on track changes; position updates merely select an already parsed line. */
+void spotifygtk_now_playing_panel_set_lyrics_track (SpotifyGtkNowPlayingPanel *self,
+                                                    const SpotifyNativeTrack  *track);
+
 /* Queue */
 void spotifygtk_now_playing_panel_set_queue (SpotifyGtkNowPlayingPanel *self,
                                              JsonArray *tracks);

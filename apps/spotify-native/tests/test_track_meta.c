@@ -362,6 +362,39 @@ test_context_share_url (void)
   g_assert_null (spotifygtk_context_share_url ("spotify:user:someone:playlist:3cEYpjA9oz9GiPac4AsH4n"));
 }
 
+static void
+test_lrc_parser_and_seek (void)
+{
+  g_autoptr(GPtrArray) lines = spotifygtk_lrc_parse (
+    "[ar:Test Artist]\n"
+    "[01:02.3] Third\r\n"
+    "[00:10.12][00:20.123] First and second\n"
+    "[00:61.10] Invalid\n"
+    "[00:30] Middle\n"
+    "[00:40.1234] Invalid fraction\n");
+  g_assert_cmpuint (lines->len, ==, 4);
+  g_assert_cmpstr (((SpotifyGtkLyricLine *) g_ptr_array_index (lines, 0))->text,
+                   ==, "First and second");
+  g_assert_cmpint (((SpotifyGtkLyricLine *) g_ptr_array_index (lines, 0))->start_ms,
+                   ==, 10120);
+  g_assert_cmpint (((SpotifyGtkLyricLine *) g_ptr_array_index (lines, 1))->start_ms,
+                   ==, 20123);
+  g_assert_cmpint (((SpotifyGtkLyricLine *) g_ptr_array_index (lines, 2))->start_ms,
+                   ==, 30000);
+  g_assert_cmpint (((SpotifyGtkLyricLine *) g_ptr_array_index (lines, 3))->start_ms,
+                   ==, 62300);
+
+  g_assert_cmpint (spotifygtk_lrc_active_line (lines, 0), ==, -1);
+  g_assert_cmpint (spotifygtk_lrc_active_line (lines, 10120), ==, 0);
+  g_assert_cmpint (spotifygtk_lrc_active_line (lines, 20123), ==, 1);
+  g_assert_cmpint (spotifygtk_lrc_active_line (lines, 62000), ==, 2);
+  g_assert_cmpint (spotifygtk_lrc_active_line (lines, 62300), ==, 3);
+  g_assert_cmpint (spotifygtk_lrc_active_line (lines, 1000), ==, -1);
+  g_assert_cmpint (spotifygtk_lrc_active_line (NULL, 1000), ==, -1);
+  g_autoptr(GPtrArray) empty = spotifygtk_lrc_parse (NULL);
+  g_assert_cmpuint (empty->len, ==, 0);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -378,6 +411,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/track-meta/empty-and-garbage", test_empty_and_garbage);
   g_test_add_func ("/track-meta/track-share-url", test_track_share_url);
   g_test_add_func ("/track-meta/context-share-url", test_context_share_url);
+  g_test_add_func ("/track-meta/lrc-parser-and-seek", test_lrc_parser_and_seek);
 
   return g_test_run ();
 }
