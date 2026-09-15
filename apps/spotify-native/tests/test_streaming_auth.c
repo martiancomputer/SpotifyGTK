@@ -14,6 +14,56 @@
 #include <glib.h>
 #include <string.h>
 #include "spotify/protobuf_min.h"
+#include "spotify/cdn.h"
+
+typedef struct {
+  guint    calls;
+  goffset  offset;
+  gboolean cancelled;
+} CdnCancelProbe;
+
+static void
+on_cancelled_chunk (GBytes *chunk, goffset offset, GError *error,
+                    gpointer user_data)
+{
+  CdnCancelProbe *probe = user_data;
+  g_assert_nonnull (probe);
+  probe->calls++;
+  probe->offset = offset;
+  probe->cancelled = chunk == NULL &&
+    g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+}
+
+static void
+test_cdn_cancel_preserves_request_context (void)
+{
+  g_autoptr(SpotifyCdnFetcher) fetcher = spotifygtk_cdn_fetcher_new ();
+  guint8 key[AUDIO_KEY_LEN] = { 0 };
+  gint owner = 0;
+  CdnCancelProbe probe = { 0 };
+  CdnCancelProbe different = { 0 };
+
+  /* No Spotify or external network required. Cancellation is synchronous,
+   * before the local loopback request can return its own result. */
+  spotifygtk_cdn_fetch_chunk (fetcher, "http://127.0.0.1:1/seek-test",
+                              key, 4096, 16, &owner,
+                              on_cancelled_chunk, &probe);
+  g_assert_false (spotifygtk_cdn_fetcher_cancel_request (
+    fetcher, &owner, on_cancelled_chunk, &different));
+  g_assert_true (spotifygtk_cdn_fetcher_cancel_request (
+    fetcher, &owner, on_cancelled_chunk, NULL));
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_cmpint (probe.offset, ==, 4096);
+  g_assert_true (probe.cancelled);
+
+  /* A late libsoup completion must not notify the request a second time. */
+  gint64 until = g_get_monotonic_time () + 500 * 1000;
+  while (g_get_monotonic_time () < until) {
+    while (g_main_context_iteration (NULL, FALSE)) {}
+    g_usleep (1000);
+  }
+  g_assert_cmpuint (probe.calls, ==, 1);
+}
 
 /* Mirrors clienttoken.c's request construction. */
 static GByteArray *
@@ -164,5 +214,7 @@ main (int argc, char *argv[])
                    test_login5_request_omits_username_when_null);
   g_test_add_func ("/streaming-auth/storage-resolve-repeated-cdnurl",
                    test_storage_resolve_repeated_cdnurl_parsing);
+  g_test_add_func ("/streaming-auth/cdn-cancel-preserves-request-context",
+                   test_cdn_cancel_preserves_request_context);
   return g_test_run ();
 }

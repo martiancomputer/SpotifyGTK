@@ -4823,6 +4823,7 @@ show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
   }
 
   spotifygtk_playback_bar_set_track (self->playback_bar, name, artists);
+  spotifygtk_playback_bar_set_share_uri (self->playback_bar, track->uri);
   /* The bar's heart follows whatever is playing. */
   spotifygtk_playback_bar_set_liked (self->playback_bar,
     track->uri && self->liked_uris &&
@@ -5939,6 +5940,8 @@ spotifygtk_native_window_set_track_info (SpotifyGtkNativeWindow *self,
    * not be touched here. (This used to g_free it without clearing, leaving a
    * dangling pointer for the next play click and dispose to double-free.) */
   spotifygtk_playback_bar_set_track (self->playback_bar, track_name, artist);
+  spotifygtk_playback_bar_set_share_uri (self->playback_bar,
+                                        self->current_track_uri);
   spotifygtk_now_playing_panel_set_track (self->now_playing_panel,
                                           track_name, artist, album);
   spotifygtk_now_playing_panel_set_album_art (self->now_playing_panel, album_art_url);

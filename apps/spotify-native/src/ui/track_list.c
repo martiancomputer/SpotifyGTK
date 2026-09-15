@@ -22,6 +22,7 @@
 #include "cover_loader.h"
 #include "track_item.h"
 #include "smooth_scroll.h"
+#include "spotify/track_meta.h"
 #include <math.h>
 
 struct _SpotifyGtkTrackList {
@@ -421,6 +422,7 @@ static guint signals[N_SIGNALS];
 typedef struct {
   SpotifyGtkTrackList *list;
   SpotifyNativeTrack  *track;   /* owned copy */
+  gchar               *share_url; /* public link; NULL for unshareable tracks */
   gint                 position;  /* the row it came from, for a playlist Rem */
 } MenuCtx;
 
@@ -429,6 +431,7 @@ menu_ctx_free (gpointer data)
 {
   MenuCtx *ctx = data;
   spotifygtk_native_track_free (ctx->track);
+  g_free (ctx->share_url);
   g_free (ctx);
 }
 
@@ -466,6 +469,19 @@ static void on_menu_go_to_album  (GtkButton *b, gpointer d) { (void) d; menu_emi
 static void on_menu_go_to_artist (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, GO_TO_ARTIST); }
 
 static void
+on_menu_copy_song_link (GtkButton *button, gpointer user_data)
+{
+  MenuCtx *ctx = spotifygtk_context_menu_get_context (GTK_WIDGET (button));
+  if (ctx && ctx->share_url)
+    gdk_clipboard_set_text (gtk_widget_get_clipboard (GTK_WIDGET (button)),
+                            ctx->share_url);
+  GtkPopover *popover = spotifygtk_context_menu_get_popover (GTK_WIDGET (button));
+  if (popover)
+    gtk_popover_popdown (popover);
+  (void) user_data;
+}
+
+static void
 on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
                           gdouble x, gdouble y, gpointer user_data)
 {
@@ -481,6 +497,7 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
   MenuCtx *ctx = g_new0 (MenuCtx, 1);
   ctx->list  = self;
   ctx->track = spotifygtk_native_track_copy (track);
+  ctx->share_url = spotifygtk_track_share_url (ctx->track->uri);
   ctx->position = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (row), "row-position"));
 
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
@@ -517,8 +534,11 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
                                ctx->track->album_uri != NULL, NULL,
                                G_CALLBACK (on_menu_go_to_album), NULL);
   spotifygtk_context_menu_add_separator (menu);
-  spotifygtk_context_menu_add (menu, "Share track", FALSE,
-                               "Not implemented yet", NULL, NULL);
+  spotifygtk_context_menu_add (menu, "Copy Song Link",
+                               ctx->share_url != NULL,
+                               ctx->share_url ? NULL :
+                               "This song has no public Spotify track link",
+                               G_CALLBACK (on_menu_copy_song_link), NULL);
 
   spotifygtk_context_menu_present (menu, row, x, y, ctx, menu_ctx_free);
 

@@ -423,14 +423,20 @@ spotifygtk_cdn_fetcher_cancel_request (SpotifyCdnFetcher *self,
     /* A cancelled libsoup operation is not guaranteed to complete when its
      * pooled connection is wedged (the deadline path documents the observed
      * case), so report cancellation synchronously as well as cancelling it.
-     * `reported` prevents a late response from notifying the caller twice. */
+     * `reported` prevents a late response from notifying the caller twice.
+     * The caller may pass NULL as a wildcard when finding the request, but
+     * the callback must receive the request's original context. Capture it
+     * before cancellation: libsoup may finish synchronously and free cl. */
     cl->reported = TRUE;
+    CdnChunkCallback notify = cl->callback;
+    gpointer caller_data = cl->user_data;
+    goffset offset = cl->offset;
     g_cancellable_cancel (cl->cancel);
 
     g_autoptr(GError) err = g_error_new_literal (G_IO_ERROR,
                                                   G_IO_ERROR_CANCELLED,
                                                   "request superseded");
-    callback (NULL, cl->offset, err, user_data);
+    notify (NULL, offset, err, caller_data);
     return TRUE;
   }
 

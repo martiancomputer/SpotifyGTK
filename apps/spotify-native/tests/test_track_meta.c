@@ -327,6 +327,22 @@ test_empty_and_garbage (void)
   spotifygtk_track_meta_clear (&meta);
 }
 
+static void
+test_track_share_url (void)
+{
+  g_autofree gchar *url = spotifygtk_track_share_url (
+    "spotify:track:6rqhFgbbKwnb9MLmUQDhG6");
+  g_assert_cmpstr (url, ==,
+    "https://open.spotify.com/track/6rqhFgbbKwnb9MLmUQDhG6");
+
+  g_assert_null (spotifygtk_track_share_url (NULL));
+  g_assert_null (spotifygtk_track_share_url ("spotify:album:6rqhFgbbKwnb9MLmUQDhG6"));
+  g_assert_null (spotifygtk_track_share_url ("spotify:local:some-song"));
+  g_assert_null (spotifygtk_track_share_url ("spotify:track:too-short"));
+  g_assert_null (spotifygtk_track_share_url (
+    "spotify:track:6rqhFgbbKwnb9MLmUQDhG/"));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -341,6 +357,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/track-meta/album-artist-uris", test_album_and_artist_uris);
   g_test_add_func ("/track-meta/malformed-gid", test_malformed_gid_yields_no_uri);
   g_test_add_func ("/track-meta/empty-and-garbage", test_empty_and_garbage);
+  g_test_add_func ("/track-meta/track-share-url", test_track_share_url);
 
   return g_test_run ();
 }

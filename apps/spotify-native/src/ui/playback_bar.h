@@ -49,6 +49,9 @@ void spotifygtk_playback_bar_set_modes (SpotifyGtkPlaybackBar *self,
 void spotifygtk_playback_bar_set_track (SpotifyGtkPlaybackBar *self,
                                         const gchar *track_name,
                                         const gchar *artist);
+/* Enable the current-song menu only for a canonical public track URI. */
+void spotifygtk_playback_bar_set_share_uri (SpotifyGtkPlaybackBar *self,
+                                            const gchar           *track_uri);
 void spotifygtk_playback_bar_set_playing (SpotifyGtkPlaybackBar *self,
                                           gboolean is_playing);
 void spotifygtk_playback_bar_set_progress (SpotifyGtkPlaybackBar *self,

@@ -236,6 +236,23 @@ spotifygtk_gid_to_base62 (const guint8 *gid, gsize len)
   return g_strdup (out);
 }
 
+gchar *
+spotifygtk_track_share_url (const gchar *track_uri)
+{
+  static const gchar prefix[] = "spotify:track:";
+  if (!track_uri || !g_str_has_prefix (track_uri, prefix))
+    return NULL;
+
+  const gchar *id = track_uri + sizeof prefix - 1;
+  if (strlen (id) != 22)
+    return NULL;
+  for (const gchar *p = id; *p; p++)
+    if (!g_ascii_isalnum (*p))
+      return NULL;
+
+  return g_strconcat ("https://open.spotify.com/track/", id, NULL);
+}
+
 /* Build "spotify:<kind>:<id>" from a submessage's gid field, or NULL if the
  * submessage carries no (valid) gid. */
 static gchar *

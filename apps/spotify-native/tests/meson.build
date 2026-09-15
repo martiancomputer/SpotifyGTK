@@ -109,8 +109,10 @@ if get_option('tests')
   test_streaming_auth = executable('test-streaming-auth',
     'test_streaming_auth.c',
     '../src/spotify/protobuf_min.c',
+    '../src/spotify/cdn.c',
+    '../src/log_file.c',
     include_directories: [config_inc, include_directories('../src')],
-    dependencies: [glib_dep, gio_dep],
+    dependencies: openssl_dep.found() ? [glib_dep, gio_dep, soup_dep, openssl_dep] : [glib_dep, gio_dep, soup_dep],
   )
   test('streaming-auth-encoding', test_streaming_auth)
 

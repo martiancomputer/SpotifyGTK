@@ -15,6 +15,8 @@
 
 #include "playback_bar.h"
 #include "cover_loader.h"
+#include "context_menu.h"
+#include "spotify/track_meta.h"
 
 /* Side columns are fixed and equal so the transport controls sit in the
  * true centre of the window regardless of how long the track name is. */
@@ -29,6 +31,7 @@ struct _SpotifyGtkPlaybackBar {
   GtkPicture *album_pic;   /* cover, scaled to fill */
   GtkLabel *track_label;
   GtkLabel *artist_label;
+  gchar    *share_url;
 
   /* Centre: transport + progress */
   GtkButton *prev_btn;
@@ -202,6 +205,37 @@ on_like_clicked (GtkButton *button, gpointer user_data)
 }
 
 static void
+on_bar_copy_song_link (GtkButton *button, gpointer user_data)
+{
+  const gchar *url = spotifygtk_context_menu_get_context (GTK_WIDGET (button));
+  if (url)
+    gdk_clipboard_set_text (gtk_widget_get_clipboard (GTK_WIDGET (button)), url);
+  GtkPopover *popover = spotifygtk_context_menu_get_popover (GTK_WIDGET (button));
+  if (popover)
+    gtk_popover_popdown (popover);
+  (void) user_data;
+}
+
+static void
+on_bar_track_secondary_pressed (GtkGestureClick *gesture, gint n_press,
+                                gdouble x, gdouble y, gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+  if (!self->share_url)
+    return;
+
+  GtkWidget *anchor = gtk_event_controller_get_widget (
+    GTK_EVENT_CONTROLLER (gesture));
+  SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
+  spotifygtk_context_menu_add (menu, "Copy Song Link", TRUE, NULL,
+                               G_CALLBACK (on_bar_copy_song_link), NULL);
+  spotifygtk_context_menu_present (menu, anchor, x, y,
+                                   g_strdup (self->share_url), g_free);
+  gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+  (void) n_press;
+}
+
+static void
 on_volume_changed (GtkRange *range, gpointer user_data)
 {
   g_signal_emit (user_data, signals[VOLUME_CHANGED], 0, (gint) gtk_range_get_value (range));
@@ -280,6 +314,7 @@ spotifygtk_playback_bar_dispose (GObject *object)
   SpotifyGtkPlaybackBar *self = SPOTIFYGTK_PLAYBACK_BAR (object);
   g_clear_handle_id (&self->seek_commit_id, g_source_remove);
   g_clear_handle_id (&self->seek_release_id, g_source_remove);
+  g_clear_pointer (&self->share_url, g_free);
   G_OBJECT_CLASS (spotifygtk_playback_bar_parent_class)->dispose (object);
 }
 
@@ -375,6 +410,15 @@ build_left_column (SpotifyGtkPlaybackBar *self)
   gtk_label_set_max_width_chars (self->artist_label, BAR_TEXT_MAX_CHARS);
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "bar-subtitle");
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->artist_label));
+
+  /* The current song can be shared even when its row is not on screen. Keep
+   * the menu on the compact title/artist area, without widening the bar. */
+  GtkGesture *share_click = gtk_gesture_click_new ();
+  gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (share_click),
+                                GDK_BUTTON_SECONDARY);
+  g_signal_connect (share_click, "pressed",
+                    G_CALLBACK (on_bar_track_secondary_pressed), self);
+  gtk_widget_add_controller (info, GTK_EVENT_CONTROLLER (share_click));
 
   gtk_box_append (GTK_BOX (box), info);
 
@@ -607,6 +651,15 @@ spotifygtk_playback_bar_set_track (SpotifyGtkPlaybackBar *self,
     (track_name && g_utf8_strlen (track_name, -1) > cap) ? track_name : NULL);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->artist_label),
     (artist && g_utf8_strlen (artist, -1) > cap) ? artist : NULL);
+}
+
+void
+spotifygtk_playback_bar_set_share_uri (SpotifyGtkPlaybackBar *self,
+                                       const gchar           *track_uri)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  g_free (self->share_url);
+  self->share_url = spotifygtk_track_share_url (track_uri);
 }
 
 void

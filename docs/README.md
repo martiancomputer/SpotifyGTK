@@ -293,6 +293,19 @@ repeat-all, radio expansion and Connect-aware Smart Shuffle over the engine.
 Connect registration uses the dealer WebSocket, reports track/state/position,
 accepts remote transport commands and yields to a higher-ranked device.
 
+### Sharing a song
+
+Right-click a song row on any track-list page and choose **Copy Song Link**.
+The same action is available by right-clicking the current song's title/artist
+area in the playback bar, even when that song's row is no longer visible.
+The action copies a public `https://open.spotify.com/track/<id>` URL to the
+system clipboard for pasting into a message or browser. It converts the native
+`spotify:track:<id>` URI locally; it does not call the Web API, create a
+playlist, or upload any account data. Local songs and malformed/non-track URIs
+have no public track URL, so their row action is disabled rather than copying
+a misleading link. Menu state owns its own URL copy so a recycled row or a
+track change cannot make an open Share menu point at a different song.
+
 ## Settings and controls
 
 Preferences are persisted in:

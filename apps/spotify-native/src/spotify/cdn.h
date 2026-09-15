@@ -47,8 +47,10 @@ void spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self,
                                  CdnChunkCallback callback, gpointer user_data);
 
 /* Cancel and immediately report one outstanding request owned by the given
- * callback/user-data pair.  This is intentionally narrower than cancelling
- * the fetcher: gapless playback can have requests for several tracks sharing
+ * callback/user-data pair. NULL user_data matches any request with that owner
+ * and callback; cancellation still invokes the callback with the request's
+ * original user_data. This is intentionally narrower than cancelling the
+ * fetcher: gapless playback can have requests for several tracks sharing
  * its persistent HTTP session. */
 gboolean spotifygtk_cdn_fetcher_cancel_request (SpotifyCdnFetcher *self,
                                                 gpointer owner,
