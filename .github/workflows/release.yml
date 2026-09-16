@@ -75,7 +75,7 @@ jobs:
             gtk4-devel libadwaita-devel libsoup3-devel json-glib-devel \
             libogg-devel libvorbis-devel openssl-devel libjpeg-turbo-devel \
             libpng-devel glib-networking curl file fuse-libs desktop-file-utils \
-            fontconfig
+            fontconfig patchelf squashfs-tools
       - name: Verify designed GTK stack
         run: |
           gtk=$(pkg-config --modversion gtk4)
@@ -108,7 +108,7 @@ jobs:
             mingw-w64-ucrt-x86_64-glib2 mingw-w64-ucrt-x86_64-gtk4
             mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-libsoup3
             mingw-w64-ucrt-x86_64-json-glib mingw-w64-ucrt-x86_64-openssl
-            mingw-w64-ucrt-x86_64-libogg mingw-w64-ucrt-x86_64-libvorbis
+            mingw-w64-ucrt-x86_64-libogg mingw-w64-ucrt-x86_64-libvorbis curl
       - name: Verify designed GTK stack
         run: |
           gtk=$(pkg-config --modversion gtk4)
