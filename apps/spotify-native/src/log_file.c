@@ -97,6 +97,25 @@ spotifygtk_runtime_init (void)
     if (g_file_test (loaders, G_FILE_TEST_IS_REGULAR))
       g_setenv ("GDK_PIXBUF_MODULE_FILE", loaders, FALSE);
   }
+
+  if (!g_getenv ("FONTCONFIG_FILE")) {
+    g_autofree gchar *fonts = g_build_filename (directory, "etc", "fonts",
+                                                "fonts.conf", NULL);
+    if (g_file_test (fonts, G_FILE_TEST_IS_REGULAR))
+      g_setenv ("FONTCONFIG_FILE", fonts, FALSE);
+  }
+#endif
+
+#ifndef G_OS_WIN32
+  if (!g_getenv ("FONTCONFIG_FILE")) {
+    g_autofree gchar *directory = executable_dir ();
+    if (directory) {
+      g_autofree gchar *fonts = g_build_filename (directory, "etc", "fonts",
+                                                  "fonts.conf", NULL);
+      if (g_file_test (fonts, G_FILE_TEST_IS_REGULAR))
+        g_setenv ("FONTCONFIG_FILE", fonts, FALSE);
+    }
+  }
 #endif
 }
 

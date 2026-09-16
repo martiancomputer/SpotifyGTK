@@ -165,6 +165,18 @@ cp -rn "$prefix/share/icons/Adwaita"           "$DIST/share/icons/"        2>/de
 cp -rn "$prefix/share/icons/hicolor"           "$DIST/share/icons/"        2>/dev/null || true
 cp -rn "$prefix/share/glib-2.0/schemas/"*.compiled "$DIST/share/glib-2.0/schemas/" 2>/dev/null || true
 
+# Ship the interface font instead of inheriting the test machine's font set.
+# GTK/Pango will discover it through the bundled fontconfig file when the
+# launcher sets FONTCONFIG_FILE (the MSYS2 shell is not required at runtime).
+mkdir -p "$DIST/share/spotifygtk/fonts" "$DIST/etc/fonts"
+FONT_URL="https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz,wght%5D.ttf"
+curl -fsSL "$FONT_URL" -o "$DIST/share/spotifygtk/fonts/Inter.ttf"
+cat > "$DIST/etc/fonts/fonts.conf" <<'FONTCONF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig><dir>../share/spotifygtk/fonts</dir><include ignore_missing="yes">fonts.conf</include></fontconfig>
+FONTCONF
+
 # GnuTLS in the MSYS2 glib-networking module is compiled with the build
 # environment's absolute trust-store path.  That path is not present when
 # this directory is copied to another Windows machine, so the portable app

@@ -13,15 +13,6 @@ permissions:
   contents: write
 
 jobs:
-  # The AppImage is not built here. It bundles the GTK stack, so the build
-  # host's version becomes the runtime version, and no runner base has the
-  # GTK 4.22 the UI is laid out against -- it would only ever produce the
-  # older-toolkit look. It is built by hand from packaging/build-appimage.sh on
-  # a machine that does, and attached to the release separately.
-  #
-  # The deb has no such problem: it links the system GTK at runtime rather than
-  # bundling it, so where it is built does not decide how it looks. It declares
-  # the version it needs instead.
   deb:
     name: deb (ubuntu-24.04)
     runs-on: ubuntu-24.04
@@ -72,9 +63,72 @@ jobs:
           name: deb
           path: packaging/out/*.deb
 
+  appimage:
+    name: AppImage (GTK 4.22+)
+    runs-on: ubuntu-24.04
+    container: fedora:rawhide
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK toolchain and packaging tools
+        run: |
+          dnf -y install git gcc gcc-c++ meson ninja-build pkgconf-pkg-config \
+            gtk4-devel libadwaita-devel libsoup3-devel json-glib-devel \
+            libogg-devel libvorbis-devel openssl-devel libjpeg-turbo-devel \
+            libpng-devel glib-networking curl file fuse-libs desktop-file-utils \
+            fontconfig
+      - name: Verify designed GTK stack
+        run: |
+          gtk=$(pkg-config --modversion gtk4)
+          adw=$(pkg-config --modversion libadwaita-1)
+          echo "GTK $gtk; libadwaita $adw"
+          test "$(printf '%s\n' 4.22.4 "$gtk" | sort -V | head -1)" = 4.22.4
+          test "$(printf '%s\n' 1.9.0 "$adw" | sort -V | head -1)" = 1.9.0
+      - name: Build AppImage
+        run: ./packaging/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: packaging/out/*.AppImage
+
+  msix:
+    name: MSIX (MSYS2 UCRT64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-glib2 mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita mingw-w64-ucrt-x86_64-libsoup3
+            mingw-w64-ucrt-x86_64-json-glib mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-libogg mingw-w64-ucrt-x86_64-libvorbis
+      - name: Verify designed GTK stack
+        run: |
+          gtk=$(pkg-config --modversion gtk4)
+          adw=$(pkg-config --modversion libadwaita-1)
+          echo "GTK $gtk; libadwaita $adw"
+          test "$(printf '%s\n' 4.22.4 "$gtk" | sort -V | head -1)" = 4.22.4
+          test "$(printf '%s\n' 1.9.0 "$adw" | sort -V | head -1)" = 1.9.0
+      - name: Build portable Windows bundle
+        run: ./apps/spotify-native-windows/build.sh --bundle
+      - name: Package MSIX
+        shell: pwsh
+        run: ./packaging/build-msix.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix
+          path: packaging/out/*.msix
+
   publish:
     name: Publish release
-    needs: [deb]
+    needs: [deb, appimage, msix]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
@@ -83,6 +137,16 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with: { path: dist }
+
+      # Keep the repository's release staging layout explicit. Generated
+      # binaries are never committed back to main (that would make every tag
+      # grow the repository); this directory is the canonical local layout and
+      # the same files are attached to the GitHub Release below.
+      - name: Stage release packages
+        run: |
+          mkdir -p "releases/$GITHUB_REF_NAME"
+          find dist -type f -maxdepth 3 -exec cp -f {} "releases/$GITHUB_REF_NAME/" \;
+          find "releases/$GITHUB_REF_NAME" -type f -printf '%f\n' | sort
 
       - name: Create release
         env:

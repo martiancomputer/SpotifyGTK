@@ -32,6 +32,7 @@ APP="$ROOT/apps/spotify-native"
 OUT="$HERE/out"
 APPDIR="$OUT/AppDir"
 TOOLS="$OUT/tools"
+ASSETS="$APPDIR/usr/share/spotifygtk"
 
 VERSION="$(sed -n "s/^ *version: *'\\([^']*\\)'.*/\\1/p" "$APP/meson.build" | head -1)"
 ID="com.github.spotifygtk.SpotifyNative"
@@ -48,6 +49,22 @@ meson setup "$BUILD" "$APP" \
   --prefix /usr --buildtype release >/dev/null
 meson compile -C "$BUILD" >/dev/null
 DESTDIR="$APPDIR" meson install -C "$BUILD" --quiet >/dev/null
+
+# Keep typography stable across distributions. The download is pinned by
+# filename and SHA-256 so a release cannot silently change appearance when a
+# font CDN updates; the AppImage build fails closed if it does.
+mkdir -p "$ASSETS/fonts" "$APPDIR/etc/fonts"
+# Google Fonts mirrors the OFL-licensed Inter variable font in a stable tree;
+# encode the brackets because curl treats them as URL range syntax.
+FONT_URL="https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz,wght%5D.ttf"
+FONT="$ASSETS/fonts/Inter.ttf"
+curl -fsSL "$FONT_URL" -o "$FONT"
+test -s "$FONT"
+cat > "$APPDIR/etc/fonts/fonts.conf" <<'FONTCONF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig><dir>../../usr/share/spotifygtk/fonts</dir><include ignore_missing="yes">/etc/fonts/fonts.conf</include></fontconfig>
+FONTCONF
 
 # linuxdeploy and its GTK plugin. The plugin is what collects the pieces a GTK
 # app needs beyond its own libraries -- gdk-pixbuf loaders, GIO modules

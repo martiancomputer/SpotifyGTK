@@ -363,6 +363,28 @@ matching lyrics.
 
 ## Settings and controls
 
+## Release packaging
+
+Version tags (`v*`) run the release workflow and publish three artifacts:
+
+- `.deb`, linked to the host GTK stack and guarded by GTK 4.22/libadwaita 1.9
+  runtime dependencies;
+- `.AppImage`, built in a Fedora Rawhide container after checking the same
+  toolkit floor, then bundling GTK, GIO/GdkPixbuf modules, icons, and a pinned
+  Inter font;
+- `.msix`, built from the MSYS2 UCRT64 bundle after checking its GTK versions.
+
+The publish job stages the generated files under `releases/<tag>/` for a
+uniform release layout and uploads those same files as GitHub Release assets.
+The binaries are intentionally not committed back to `main`; each tag remains
+reproducible without turning the source repository into a binary archive.
+
+The Windows bundle also carries the Adwaita/hicolor icon themes, GIO modules,
+schemas, CA database, and Inter font. The executable sets bundle-relative
+loader and fontconfig paths before GTK initializes, so Explorer/MSIX launches
+do not inherit the builder's environment. The font is distributed under the
+SIL Open Font License; see `THIRD_PARTY_LICENSES`.
+
 Preferences are persisted in:
 
 ```text

@@ -93,3 +93,12 @@ Used in:    apps/spotify-connect/src/vendor/stb_image.h
 Nature:     Vendored unmodified, single-header library.
 License:    Public domain (Unlicense) OR MIT, at your option -- see the
             license block at the bottom of the vendored file itself.
+
+================================================================================
+Inter
+================================================================================
+Source:     https://github.com/rsms/inter
+Used in:    Release bundles under usr/share/spotifygtk/fonts/Inter.ttf
+Nature:     Downloaded at packaging time to keep interface typography stable
+            across host machines. Distributed under the SIL Open Font License
+            1.1; see the upstream repository for the complete license text.
