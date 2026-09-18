@@ -33,6 +33,8 @@ struct _SpotifyGtkTrackList {
   GListStore  *store;
 
   gboolean numbered;
+  gboolean show_type;
+  gboolean hide_covers;
   gboolean show_like;   /* hearts hidden on the Liked Songs page */
 
   /*
@@ -409,10 +411,25 @@ on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
     self->settle_id = g_timeout_add (50, on_scroll_settled, self);
 }
 
-enum { TRACK_ACTIVATED, ADD_TO_QUEUE, GO_TO_ALBUM, GO_TO_ARTIST,
+enum { TRACK_ACTIVATED, CONTEXT_ACTIVATED, CONTEXT_MENU, ADD_TO_QUEUE, GO_TO_ALBUM, GO_TO_ARTIST,
        ADD_TO_LIKED, REMOVE_FROM_LIKED, ADD_TO_PLAYLIST,
        REMOVE_FROM_PLAYLIST, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+static gboolean
+is_context_result (const SpotifyNativeTrack *track)
+{
+  return track && track->uri &&
+    (g_str_has_prefix (track->uri, "spotify:album:") ||
+     g_str_has_prefix (track->uri, "spotify:playlist:"));
+}
+
+static void
+activate_result (SpotifyGtkTrackList *self, const SpotifyNativeTrack *track)
+{
+  g_signal_emit (self, signals[is_context_result (track) ? CONTEXT_ACTIVATED : TRACK_ACTIVATED],
+                 0, (gpointer) track);
+}
 
 /* === Right-click context menu === */
 
@@ -493,6 +510,12 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
     return;
 
   const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (item);
+
+  if (is_context_result (track)) {
+    g_signal_emit (self, signals[CONTEXT_MENU], 0, (gpointer) track, row, x, y);
+    gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    return;
+  }
 
   MenuCtx *ctx = g_new0 (MenuCtx, 1);
   ctx->list  = self;
@@ -607,8 +630,7 @@ on_row_play_clicked (SpotifyGtkTrackRow *row, gpointer user_data)
   SpotifyGtkTrackList *self = user_data;
   SpotifyGtkTrackItem *item = g_object_get_data (G_OBJECT (row), "bound-item");
   if (item)
-    g_signal_emit (self, signals[TRACK_ACTIVATED], 0,
-                   (gpointer) spotifygtk_track_item_get_track (item));
+    activate_result (self, spotifygtk_track_item_get_track (item));
 }
 
 
@@ -640,10 +662,12 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     g_object_set_data (G_OBJECT (row), "overscan-retained",
       GUINT_TO_POINTER (position_in_overscan (self, position) ? 2u : 1u));
 
+  spotifygtk_track_row_set_show_cover (row, !self->hide_covers);
   spotifygtk_track_row_set_native_track (row,
     spotifygtk_track_item_get_track (item), 0);
   spotifygtk_track_row_set_number (row,
     self->numbered ? (gint) gtk_list_item_get_position (list_item) + 1 : 0);
+  spotifygtk_track_row_set_show_type (row, self->show_type);
 
   /* Kept whether or not the list is numbered: the playlist removal needs the
    * row, and it is position-based. */
@@ -652,7 +676,8 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   spotifygtk_track_row_set_playing (row,
     spotifygtk_track_item_get_playing (item),
     spotifygtk_track_item_get_paused (item));
-  spotifygtk_track_row_set_like_visible (row, self->show_like);
+  spotifygtk_track_row_set_like_visible (row, self->show_like &&
+    !is_context_result (spotifygtk_track_item_get_track (item)));
 
   const SpotifyNativeTrack *bt = spotifygtk_track_item_get_track (item);
   spotifygtk_track_row_set_liked (row,
@@ -711,8 +736,7 @@ on_list_activate (GtkListView *list, guint position, gpointer user_data)
   g_autoptr(SpotifyGtkTrackItem) item =
     g_list_model_get_item (G_LIST_MODEL (self->store), position);
   if (item)
-    g_signal_emit (self, signals[TRACK_ACTIVATED], 0,
-                   (gpointer) spotifygtk_track_item_get_track (item));
+    activate_result (self, spotifygtk_track_item_get_track (item));
   (void) list;
 }
 
@@ -751,6 +775,13 @@ spotifygtk_track_list_class_init (SpotifyGtkTrackListClass *klass)
   signals[TRACK_ACTIVATED] = g_signal_new ("track-activated",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_POINTER);
+
+  signals[CONTEXT_ACTIVATED] = g_signal_new ("context-activated",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_POINTER);
+  signals[CONTEXT_MENU] = g_signal_new ("context-menu",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 4, G_TYPE_POINTER, GTK_TYPE_WIDGET, G_TYPE_DOUBLE, G_TYPE_DOUBLE);
 
   signals[ADD_TO_QUEUE] = g_signal_new ("add-to-queue",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
@@ -1196,6 +1227,26 @@ spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered
   self->numbered = numbered;
 }
 
+void
+spotifygtk_track_list_set_show_type (SpotifyGtkTrackList *self, gboolean show)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  self->show_type = !!show;
+  for (guint i = 0; i < self->bound_rows->len; i++)
+    spotifygtk_track_row_set_show_type (g_ptr_array_index (self->bound_rows, i), show);
+}
+
+void
+spotifygtk_track_list_set_show_covers (SpotifyGtkTrackList *self, gboolean show)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  self->hide_covers = !show;
+  for (guint i = 0; i < self->bound_rows->len; i++)
+    spotifygtk_track_row_set_show_cover (g_ptr_array_index (self->bound_rows, i), show);
+  self->overscan_valid = FALSE;
+  schedule_velocity_overscan (self);
+}
+
 
 
 static void
@@ -1273,6 +1324,78 @@ spotifygtk_track_list_set_borrowed_native_tracks (SpotifyGtkTrackList *self,
   set_native_tracks (self, tracks, TRUE);
 }
 
+static SpotifyGtkTrackItem *
+search_context_item (const SpotifyNativeTrack *context, GHashTable *existing)
+{
+  SpotifyGtkTrackItem *item = g_hash_table_lookup (existing, context->uri);
+  const SpotifyNativeTrack *old = item ? spotifygtk_track_item_get_track (item) : NULL;
+  if (old && g_strcmp0 (old->name, context->name) == 0 &&
+      g_strcmp0 (old->artists, context->artists) == 0 &&
+      g_strcmp0 (old->cover_id, context->cover_id) == 0)
+    return g_object_ref (item);
+  return spotifygtk_track_item_new (context, 0);
+}
+
+void
+spotifygtk_track_list_set_search_contexts (SpotifyGtkTrackList *self, GPtrArray *contexts)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  g_autoptr(GPtrArray) previous = g_ptr_array_new_with_free_func (g_object_unref);
+  g_autoptr(GPtrArray) desired = g_ptr_array_new_with_free_func (g_object_unref);
+  g_autoptr(GHashTable) by_uri = g_hash_table_new (g_str_hash, g_str_equal);
+  g_autoptr(GHashTable) old_contexts = g_hash_table_new (g_str_hash, g_str_equal);
+  g_autoptr(GHashTable) used = g_hash_table_new (g_str_hash, g_str_equal);
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  for (guint i = 0; i < n; i++) {
+    SpotifyGtkTrackItem *item = g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    g_ptr_array_add (previous, item);
+    const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (item);
+    if (is_context_result (track)) g_hash_table_insert (old_contexts, track->uri, item);
+  }
+  for (guint i = 0; contexts && i < contexts->len; i++) {
+    const SpotifyNativeTrack *context = g_ptr_array_index (contexts, i);
+    if (is_context_result (context)) g_hash_table_insert (by_uri, context->uri, (gpointer) context);
+  }
+  for (guint i = 0; i < previous->len; i++) {
+    SpotifyGtkTrackItem *item = g_ptr_array_index (previous, i);
+    const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (item);
+    if (is_context_result (track)) continue;
+    g_ptr_array_add (desired, g_object_ref (item));
+    const SpotifyNativeTrack *album = track->album_uri
+      ? g_hash_table_lookup (by_uri, track->album_uri) : NULL;
+    if (album && !g_hash_table_contains (used, album->uri)) {
+      g_hash_table_add (used, album->uri);
+      g_ptr_array_add (desired, search_context_item (album, old_contexts));
+    }
+  }
+  /* Unpaired albums still precede playlists, independent of input ordering. */
+  for (guint pass = 0; pass < 2; pass++) {
+    for (guint i = 0; contexts && i < contexts->len; i++) {
+      const SpotifyNativeTrack *context = g_ptr_array_index (contexts, i);
+      if (!is_context_result (context) || g_hash_table_contains (used, context->uri) ||
+          (g_str_has_prefix (context->uri, "spotify:playlist:") != (pass == 1))) continue;
+      g_hash_table_add (used, context->uri);
+      g_ptr_array_add (desired, search_context_item (context, old_contexts));
+    }
+  }
+  /* Late playlist results change only the suffix, leaving bound primary rows
+   * and their textures intact. Mode changes likewise retain song item objects. */
+  guint prefix = 0, suffix = 0;
+  while (prefix < previous->len && prefix < desired->len &&
+         previous->pdata[prefix] == desired->pdata[prefix]) prefix++;
+  while (suffix < previous->len - prefix && suffix < desired->len - prefix &&
+         previous->pdata[previous->len - suffix - 1] == desired->pdata[desired->len - suffix - 1]) suffix++;
+  guint added = desired->len - prefix - suffix;
+  guint removed = previous->len - prefix - suffix;
+  if (added || removed) {
+    g_list_store_splice (self->store, prefix, removed,
+      added ? desired->pdata + prefix : NULL, added);
+    self->overscan_valid = FALSE;
+    schedule_velocity_overscan (self);
+  }
+  if (desired->len) spotifygtk_track_list_set_status (self, NULL);
+}
+
 GPtrArray *
 spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self)
 {
@@ -1285,8 +1408,10 @@ spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self)
   for (guint i = 0; i < n; i++) {
     g_autoptr(SpotifyGtkTrackItem) item =
       g_list_model_get_item (G_LIST_MODEL (self->store), i);
-    g_ptr_array_add (out,
-                     spotifygtk_native_track_copy (spotifygtk_track_item_get_track (item)));
+    const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (item);
+    /* Display-only context rows must never enter audio playback/Connect queues. */
+    if (!is_context_result (track))
+      g_ptr_array_add (out, spotifygtk_native_track_copy (track));
   }
 
   return out;

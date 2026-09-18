@@ -31,6 +31,7 @@ SpotifyGtkTrackList *spotifygtk_search_page_get_list (SpotifyGtkSearchPage *self
 /* The albums shelf, so the window can wire "album-activated" to the context
  * page exactly as it wires the row menu's "go-to-album". */
 SpotifyGtkAlbumGrid *spotifygtk_search_page_get_album_grid (SpotifyGtkSearchPage *self);
+SpotifyGtkAlbumGrid *spotifygtk_search_page_get_playlist_grid (SpotifyGtkSearchPage *self);
 
 void spotifygtk_search_page_set_playing_uri (SpotifyGtkSearchPage *self,
                                           const gchar *uri,

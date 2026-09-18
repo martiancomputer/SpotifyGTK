@@ -56,6 +56,10 @@ void spotifygtk_player_service_set_eq (SpotifyNativePlayerService *self,
                                        const gdouble *gains_db, gboolean enabled);
 gint spotifygtk_player_service_get_volume (SpotifyNativePlayerService *self);
 gboolean spotifygtk_player_service_is_active (SpotifyNativePlayerService *self);
+/* Whether this URI is audible, producing, or queued as a replacement. Unlike
+ * is_active(), this includes buffered audio after its decoder has exited. */
+gboolean spotifygtk_player_service_has_track (SpotifyNativePlayerService *self,
+                                             const gchar *uri);
 SpotifyNativePlayerState spotifygtk_player_service_get_state (SpotifyNativePlayerService *self);
 
 /* Signals:

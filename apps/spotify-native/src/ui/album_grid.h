@@ -28,6 +28,12 @@ typedef gboolean (*SpotifyGtkAlbumPinQuery) (const gchar *uri, gpointer user_dat
 /* A horizontal, scrolling shelf (Home/Search) or a wrapping grid (Library). */
 SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_shelf (void);
 SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_grid (void);
+/* Search presentation only; existing models and card bindings are retained. */
+void spotifygtk_album_grid_set_compact (SpotifyGtkAlbumGrid *self, gboolean compact);
+void spotifygtk_album_grid_set_show_types (SpotifyGtkAlbumGrid *self, gboolean show);
+void spotifygtk_album_grid_set_external_viewport (SpotifyGtkAlbumGrid *self, GtkScrolledWindow *scroller);
+/* Reuse known card artwork when opening its detail page. Caller owns result. */
+gchar *spotifygtk_album_grid_dup_cover_id (SpotifyGtkAlbumGrid *self, const gchar *uri);
 
 /*
  * Replace the cards with the distinct albums present in `tracks` (a GPtrArray
@@ -56,6 +62,14 @@ typedef struct {
   const gchar *subtitle;
   const gchar *cover_id;
 } SpotifyGtkCardSpec;
+
+/* Owned display-only album/playlist records for a mixed search list. */
+GPtrArray *spotifygtk_album_grid_snapshot_contexts (SpotifyGtkAlbumGrid *self);
+/* Reuse the card actions when the same result is presented as a list row. */
+void spotifygtk_album_grid_present_context_menu (SpotifyGtkAlbumGrid *self,
+                                                  GtkWidget *anchor,
+                                                  const SpotifyGtkCardSpec *spec,
+                                                  gdouble x, gdouble y);
 
 /*
  * Replace the whole grid in a single model change. Prefer this to clear() plus

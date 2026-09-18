@@ -133,6 +133,11 @@ void spotifygtk_spclient_get_user_profile (SpotifySpclient *self,
                                            gpointer user_data);
 
 SpotifySpclient *spotifygtk_spclient_new (void);
+/* Optional catalog playlist search. Uses native bearer/client tokens, not the
+ * Web API. Failure must not replace or delay the main 300-track search. */
+void spotifygtk_spclient_search_playlists (SpotifySpclient *self,
+  const gchar *query, const gchar *bearer_token, const gchar *client_token,
+  GCancellable *cancellable, SpclientContextCallback callback, gpointer data);
 void spotifygtk_spclient_set_cancellable (SpotifySpclient *, GCancellable *);
 
 /* ── API ─────────────────────────────────────────────────────────────────── */

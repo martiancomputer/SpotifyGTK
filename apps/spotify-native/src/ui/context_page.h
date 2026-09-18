@@ -64,6 +64,9 @@ void spotifygtk_context_page_load (SpotifyGtkContextPage *self,
 /* Inner track list, so the window wires play-context and the row context menu
  * to it exactly as it does for search and liked songs. */
 SpotifyGtkTrackList *spotifygtk_context_page_get_list (SpotifyGtkContextPage *self);
+/* Prefer known album/playlist art to the first song's fallback art. */
+void spotifygtk_context_page_set_header_cover (SpotifyGtkContextPage *self,
+                                               const gchar *uri, const gchar *cover_id);
 
 /* Mirror of the other pages, so the playing indicator follows across here. */
 void spotifygtk_context_page_set_playing_uri (SpotifyGtkContextPage *self,

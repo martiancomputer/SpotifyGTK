@@ -537,6 +537,16 @@ spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 positio
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
 
+  /* A new URI can be waiting for the canceled producer to unwind. A remote
+   * play-with-position (or a local slider drag) belongs to that replacement,
+   * not to the outgoing control object that still exists in this interval. */
+  if (self->pending_uri) {
+    g_free (self->pending_seek_uri);
+    self->pending_seek_uri = g_strdup (self->pending_uri);
+    self->pending_seek_ms = MAX (position_ms, 0);
+    return;
+  }
+
   SpotifyNativeEngineControl *c = active_control (self);
 
   /*
@@ -633,6 +643,23 @@ spotifygtk_player_service_is_active (SpotifyNativePlayerService *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self), FALSE);
   return self->task != NULL;
+}
+
+gboolean
+spotifygtk_player_service_has_track (SpotifyNativePlayerService *self, const gchar *uri)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self), FALSE);
+  if (!uri || !*uri) return FALSE;
+  if (self->pending_uri && g_strcmp0 (self->pending_uri, uri) == 0) return TRUE;
+  guint64 seq = spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ());
+  for (guint i = 0; seq && i < self->inflight->len; i++) {
+    InflightTrack *track = g_ptr_array_index (self->inflight, i);
+    if (spotifygtk_native_engine_control_get_sink_seq (track->control) == seq &&
+        g_strcmp0 (track->uri, uri) == 0 &&
+        (!track->cancellable || !g_cancellable_is_cancelled (track->cancellable))) return TRUE;
+  }
+  return self->control && self->track_uri && g_strcmp0 (self->track_uri, uri) == 0 &&
+         (!self->cancellable || !g_cancellable_is_cancelled (self->cancellable));
 }
 
 SpotifyNativePlayerState

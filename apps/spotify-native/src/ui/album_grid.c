@@ -72,7 +72,8 @@ card_decode_px (GtkWidget *widget)
    * upload bandwidth of its 176px allocation. A scrolling grid can introduce
    * dozens in one gesture, which pushed Vulkan into missed-vblank/30fps
    * cadence without adding visible detail at native scale. */
-  return CARD_ART_PX * MAX (1, scale);
+  return (g_object_get_data (G_OBJECT (widget), "compact-card") ? 48 : CARD_ART_PX)
+           * MAX (1, scale);
 }
 #define CARD_WIDTH      (CARD_ART_PX + 24)
 
@@ -149,6 +150,10 @@ struct _SpotifyGtkAlbumGrid {
   GtkCustomFilter *filter;
   gchar       *filter_text;
   gboolean    wrap;
+  gboolean    compact;
+  gboolean    show_types;
+  GtkWidget  *external_viewport; /* weak; an enclosing search/page scroller */
+  GtkAdjustment *external_adjustment;
 
   GtkWidget  *scroller;   /* borrowed: owned by the box */
   GtkWidget  *view;       /* borrowed: owned by the scroller */
@@ -184,6 +189,27 @@ static void cancel_and_unref (gpointer data);
 static void on_card_cover_loaded (GdkTexture *texture, gpointer user_data);
 static gboolean card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card);
 static gboolean on_grid_settled (gpointer user_data);
+
+static gboolean
+card_near_outer_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
+{
+  if (!self->external_viewport) return TRUE;
+  graphene_rect_t bounds;
+  if (!gtk_widget_get_mapped (card) ||
+      !gtk_widget_compute_bounds (card, self->external_viewport, &bounds)) return FALSE;
+  gdouble margin = MAX (bounds.size.height, 1.0);
+  return bounds.origin.y + bounds.size.height > -margin &&
+         bounds.origin.y < gtk_widget_get_height (self->external_viewport) + margin;
+}
+
+static void
+on_outer_scrolled (GtkAdjustment *adjustment, gpointer data)
+{
+  SpotifyGtkAlbumGrid *self = data;
+  (void) adjustment;
+  self->last_scroll_us = g_get_monotonic_time ();
+  if (!self->settle_id) self->settle_id = g_timeout_add (50, on_grid_settled, self);
+}
 
 /* A wrapped grid's width is part of its viewport state. Expanding or
  * collapsing Now Playing can change the column count without changing the
@@ -325,7 +351,8 @@ card_retry_cover (GtkWidget *card)
    * viewport. Mapping alone decoded several screens of 352px art on first
    * open. Cached JPEGs are cheap to revisit; live RGBA textures are not. */
   if (grid && !card_near_viewport (grid, card)) {
-    schedule_grid_settle (grid); /* bounds may not exist at the first map */
+    /* Bind/map/geometry already schedule a post-allocation pass. Re-arming
+     * from that pass for an offscreen card creates a permanent settle poll. */
     return;
   }
 
@@ -393,13 +420,11 @@ card_release_cover (GtkWidget *card)
     g_cancellable_cancel (c);
   g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);
 
-  if (!g_object_get_data (G_OBJECT (card), "cover-shown"))
-    return;
-
   GtkWidget *art = g_object_get_data (G_OBJECT (card), "art");
   if (art) {
     gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
-    gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
+    gtk_image_set_pixel_size (GTK_IMAGE (art),
+      g_object_get_data (G_OBJECT (card), "compact-card") ? 48 : CARD_ART_PX);
   }
   g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
 }
@@ -425,6 +450,7 @@ on_card_mapped (GtkWidget *card, gpointer user_data)
 static gboolean
 card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 {
+  if (!card_near_outer_viewport (self, card)) return FALSE;
   if (!self->scroller)
     return TRUE;                /* nothing to measure against */
 
@@ -454,6 +480,7 @@ card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 static gboolean
 card_near_allocated_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 {
+  if (!card_near_outer_viewport (self, card)) return FALSE;
   if (!self->scroller || !gtk_widget_get_mapped (card))
     return FALSE;
 
@@ -683,22 +710,23 @@ on_album_menu_share (GtkButton *button, gpointer user_data)
     gtk_popover_popdown (popover);
 }
 
-static void
-on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
-                           gdouble x, gdouble y, gpointer user_data)
+void
+spotifygtk_album_grid_present_context_menu (SpotifyGtkAlbumGrid *self,
+                                            GtkWidget *anchor,
+                                            const SpotifyGtkCardSpec *spec,
+                                            gdouble x, gdouble y)
 {
-  SpotifyGtkAlbumGrid *self = user_data;
-  GtkWidget *card = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
-
-  const gchar *uri = g_object_get_data (G_OBJECT (card), "album-uri");
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (GTK_IS_WIDGET (anchor));
+  const gchar *uri = spec ? spec->uri : NULL;
   if (!uri)
     return;   /* card not bound to an album yet */
 
   AlbumMenuCtx *ctx = g_new0 (AlbumMenuCtx, 1);
   ctx->grid = self;
   ctx->uri  = g_strdup (uri);
-  ctx->name = g_strdup (g_object_get_data (G_OBJECT (card), "album-name"));
-  ctx->cover_id = g_strdup (g_object_get_data (G_OBJECT (card), "cover-id"));
+  ctx->name = g_strdup (spec->title);
+  ctx->cover_id = g_strdup (spec->cover_id);
   ctx->share_url = spotifygtk_context_share_url (uri);
 
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
@@ -736,8 +764,21 @@ on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
                                  "This item has no public Spotify link",
                                  G_CALLBACK (on_album_menu_share), NULL);
 
-  spotifygtk_context_menu_present (menu, card, x, y, ctx, album_menu_ctx_free);
+  spotifygtk_context_menu_present (menu, anchor, x, y, ctx, album_menu_ctx_free);
+}
 
+static void
+on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
+                           gdouble x, gdouble y, gpointer user_data)
+{
+  GtkWidget *card = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  SpotifyGtkCardSpec spec = {
+    g_object_get_data (G_OBJECT (card), "album-uri"),
+    g_object_get_data (G_OBJECT (card), "album-name"), NULL,
+    g_object_get_data (G_OBJECT (card), "cover-id")
+  };
+  if (!spec.uri) return;
+  spotifygtk_album_grid_present_context_menu (user_data, card, &spec, x, y);
   gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
   (void) n_press;
 }
@@ -763,30 +804,38 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   g_signal_connect (secondary, "pressed", G_CALLBACK (on_card_secondary_pressed), self);
   gtk_widget_add_controller (card, GTK_EVENT_CONTROLLER (secondary));
 
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  GtkWidget *box = gtk_box_new (self->compact ? GTK_ORIENTATION_HORIZONTAL : GTK_ORIENTATION_VERTICAL, 8);
+  g_object_set_data (G_OBJECT (card), "card-box", box);
+  g_object_set_data (G_OBJECT (card), "compact-card", GUINT_TO_POINTER (self->compact));
+  if (self->compact) gtk_widget_set_size_request (card, 280, -1);
   gtk_widget_set_margin_start (box, 8);
   gtk_widget_set_margin_end (box, 8);
   gtk_widget_set_margin_top (box, 8);
   gtk_widget_set_margin_bottom (box, 8);
 
   GtkWidget *art = gtk_image_new_from_icon_name ("media-optical-symbolic");
-  gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
+  gtk_image_set_pixel_size (GTK_IMAGE (art), self->compact ? 48 : CARD_ART_PX);
   gtk_widget_add_css_class (art, "art-large");
   gtk_box_append (GTK_BOX (box), art);
+
+  GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_set_hexpand (info, TRUE);
+  gtk_widget_set_valign (info, GTK_ALIGN_CENTER);
+  gtk_box_append (GTK_BOX (box), info);
 
   GtkWidget *title = gtk_label_new ("");
   gtk_widget_add_css_class (title, "media-card-title");
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
   gtk_label_set_ellipsize (GTK_LABEL (title), PANGO_ELLIPSIZE_END);
   gtk_label_set_max_width_chars (GTK_LABEL (title), 18);
-  gtk_box_append (GTK_BOX (box), title);
+  gtk_box_append (GTK_BOX (info), title);
 
   GtkWidget *sub = gtk_label_new ("");
   gtk_widget_add_css_class (sub, "media-card-subtitle");
   gtk_label_set_xalign (GTK_LABEL (sub), 0.0);
   gtk_label_set_ellipsize (GTK_LABEL (sub), PANGO_ELLIPSIZE_END);
   gtk_label_set_max_width_chars (GTK_LABEL (sub), 20);
-  gtk_box_append (GTK_BOX (box), sub);
+  gtk_box_append (GTK_BOX (info), sub);
 
   g_object_set_data (G_OBJECT (card), "art",   art);
   g_signal_connect (card, "destroy", G_CALLBACK (on_card_destroy), NULL);
@@ -842,9 +891,22 @@ card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem
   if (!art || !title || !sub)
     return;
 
+  /* A pooled, unbound card may have missed a mode change. Reconcile the
+   * shell on bind as well as updating currently bound cards in the setter. */
+  GtkWidget *box = g_object_get_data (G_OBJECT (card), "card-box");
+  g_object_set_data (G_OBJECT (card), "compact-card", GUINT_TO_POINTER (self->compact));
+  gtk_orientable_set_orientation (GTK_ORIENTABLE (box),
+    self->compact ? GTK_ORIENTATION_HORIZONTAL : GTK_ORIENTATION_VERTICAL);
+  gtk_widget_set_size_request (card, self->compact ? 280 : CARD_WIDTH, -1);
+
   gtk_label_set_text (GTK_LABEL (title), item->name ? item->name : "Unknown album");
-  gtk_label_set_text (GTK_LABEL (sub), item->artist ? item->artist : "");
-  gtk_widget_set_visible (sub, item->artist && *item->artist);
+  const gchar *type = g_str_has_prefix (item->uri, "spotify:playlist:") ? "Playlist" :
+                      g_str_has_prefix (item->uri, "spotify:artist:") ? "Artist" : "Album";
+  g_autofree gchar *subtitle = self->show_types
+    ? g_strdup_printf ("%s%s%s", type, item->artist && *item->artist ? " · " : "", item->artist ? item->artist : "")
+    : g_strdup (item->artist ? item->artist : "");
+  gtk_label_set_text (GTK_LABEL (sub), subtitle);
+  gtk_widget_set_visible (sub, *subtitle != '\0');
 
   g_object_set_data_full (G_OBJECT (card), "album-uri", g_strdup (item->uri), g_free);
   g_object_set_data_full (G_OBJECT (card), "album-name", g_strdup (item->name), g_free);
@@ -852,7 +914,7 @@ card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem
   /* Reset to the placeholder first: this card may still be showing the cover of
    * whichever album it was last bound to. */
   gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
-  gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
+  gtk_image_set_pixel_size (GTK_IMAGE (art), self->compact ? 48 : CARD_ART_PX);
 
   g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
   g_object_set_data_full (G_OBJECT (card), "cover-id",
@@ -990,13 +1052,7 @@ spotifygtk_album_grid_release_covers (SpotifyGtkAlbumGrid *self)
 
   for (guint i = 0; i < self->bound_cards->len; i++) {
     GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
-    GtkWidget *art  = g_object_get_data (G_OBJECT (card), "art");
-    if (!art)
-      continue;
-    g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);   /* cancels in flight */
-    g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
-    gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
-    gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
+    card_release_cover (card);
   }
 }
 
@@ -1204,10 +1260,34 @@ spotifygtk_album_grid_set_from_tracks (SpotifyGtkAlbumGrid *self,
   return items->len;
 }
 
+GPtrArray *
+spotifygtk_album_grid_snapshot_contexts (SpotifyGtkAlbumGrid *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self), NULL);
+  GPtrArray *contexts = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (self->store)); i++) {
+    g_autoptr(SpotifyGtkAlbumItem) item = g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    SpotifyNativeTrack *context = g_new0 (SpotifyNativeTrack, 1);
+    context->uri = g_strdup (item->uri);
+    context->name = g_strdup (item->name);
+    context->artists = g_strdup (item->artist);
+    context->cover_id = g_strdup (item->cover_id);
+    g_ptr_array_add (contexts, context);
+  }
+  return contexts;
+}
+
 static void
 spotifygtk_album_grid_dispose (GObject *object)
 {
   SpotifyGtkAlbumGrid *self = SPOTIFYGTK_ALBUM_GRID (object);
+  if (self->external_viewport)
+    g_object_remove_weak_pointer (G_OBJECT (self->external_viewport), (gpointer *) &self->external_viewport);
+  self->external_viewport = NULL;
+  if (self->external_adjustment)
+    g_signal_handlers_disconnect_by_func (self->external_adjustment, on_outer_scrolled, self);
+  g_clear_object (&self->external_adjustment);
 
   /* The settle timer holds a plain pointer to this grid. */
   if (self->settle_id) {
@@ -1393,6 +1473,20 @@ album_grid_new (gboolean wrap)
   return self;
 }
 
+gchar *
+spotifygtk_album_grid_dup_cover_id (SpotifyGtkAlbumGrid *self, const gchar *uri)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self), NULL);
+  for (guint i = 0; uri && i < g_list_model_get_n_items (G_LIST_MODEL (self->store)); i++) {
+    SpotifyGtkAlbumItem *item = g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    gchar *id = g_strcmp0 (item->uri, uri) == 0 ? g_strdup (item->cover_id) : NULL;
+    gboolean matched = g_strcmp0 (item->uri, uri) == 0;
+    g_object_unref (item);
+    if (matched) return id;
+  }
+  return NULL;
+}
+
 void
 spotifygtk_album_grid_set_filter_text (SpotifyGtkAlbumGrid *self,
                                        const gchar         *text)
@@ -1405,6 +1499,68 @@ spotifygtk_album_grid_set_filter_text (SpotifyGtkAlbumGrid *self,
   g_free (self->filter_text);
   self->filter_text = g_steal_pointer (&folded);
   gtk_filter_changed (GTK_FILTER (self->filter), GTK_FILTER_CHANGE_DIFFERENT);
+}
+
+void
+spotifygtk_album_grid_set_show_types (SpotifyGtkAlbumGrid *self, gboolean show)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  self->show_types = !!show;
+  for (guint i = 0; i < self->bound_cards->len; i++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+    SpotifyGtkAlbumItem *item = g_object_get_data (G_OBJECT (card), "bound-album-item");
+    GtkLabel *sub = g_object_get_data (G_OBJECT (card), "sub");
+    if (!item || !sub) continue;
+    const gchar *type = g_str_has_prefix (item->uri, "spotify:playlist:") ? "Playlist" : "Album";
+    g_autofree gchar *text = show
+      ? g_strdup_printf ("%s%s%s", type, item->artist && *item->artist ? " · " : "", item->artist ? item->artist : "")
+      : g_strdup (item->artist ? item->artist : "");
+    gtk_label_set_text (sub, text);
+    gtk_widget_set_visible (GTK_WIDGET (sub), *text != '\0');
+  }
+}
+
+void
+spotifygtk_album_grid_set_external_viewport (SpotifyGtkAlbumGrid *self, GtkScrolledWindow *scroller)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  if (self->external_viewport == GTK_WIDGET (scroller)) return;
+  if (self->external_viewport)
+    g_object_remove_weak_pointer (G_OBJECT (self->external_viewport), (gpointer *) &self->external_viewport);
+  if (self->external_adjustment)
+    g_signal_handlers_disconnect_by_func (self->external_adjustment, on_outer_scrolled, self);
+  g_clear_object (&self->external_adjustment);
+  self->external_viewport = GTK_WIDGET (scroller);
+  if (scroller) {
+    g_object_add_weak_pointer (G_OBJECT (scroller), (gpointer *) &self->external_viewport);
+    self->external_adjustment = g_object_ref (gtk_scrolled_window_get_vadjustment (scroller));
+    g_signal_connect (self->external_adjustment, "value-changed", G_CALLBACK (on_outer_scrolled), self);
+  }
+  schedule_grid_settle (self);
+}
+
+void
+spotifygtk_album_grid_set_compact (SpotifyGtkAlbumGrid *self, gboolean compact)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  compact = !!compact;
+  if (self->compact == compact || self->wrap) return;
+  self->compact = compact;
+  for (guint i = 0; i < self->bound_cards->len; i++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+    GtkWidget *box = g_object_get_data (G_OBJECT (card), "card-box");
+    GtkImage *art = g_object_get_data (G_OBJECT (card), "art");
+    card_release_cover (card);
+    g_object_set_data (G_OBJECT (card), "compact-card", GUINT_TO_POINTER (compact));
+    gtk_orientable_set_orientation (GTK_ORIENTABLE (box), compact ? GTK_ORIENTATION_HORIZONTAL : GTK_ORIENTATION_VERTICAL);
+    gtk_widget_set_size_request (card, compact ? 280 : CARD_WIDTH, -1);
+    gtk_image_set_pixel_size (art, compact ? 48 : CARD_ART_PX);
+  }
+  gint height = (compact ? 48 : CARD_ART_PX) + (compact ? 24 : SHELF_TEXT_ALLOWANCE);
+  gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (self->scroller), height);
+  gtk_widget_set_size_request (self->scroller, -1, height + SHELF_BAR_ALLOWANCE);
+  self->window_valid = FALSE;
+  schedule_grid_settle (self);
 }
 
 /* The scrolling adjustment, so a page can react to scroll position -- the

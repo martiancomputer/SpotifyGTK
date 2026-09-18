@@ -253,6 +253,37 @@ Activating a search result creates a song-radio context. Recommendations are
 deduplicated and expanded toward a bounded 200-track queue. The endpoint's
 playback-context semantics remain a known relevance limitation.
 
+Search also requests up to 20 playlist results through the native bearer /
+client-token Pathfinder `searchDesktop` query. This is a separate, cancellable
+request started after the main tracks finish, so playlist lookup failures do
+not delay or erase the 300-result song search. Albums remain first, songs next,
+and the optional playlist shelf last, even with Aggressive Filtering disabled.
+With that setting enabled, playlist names or owners must match the normalized
+query; adding playlists does not silently disable filtering. Results always
+identify their type: Track, Album or Playlist. Playlist cards open playlist
+details and use playlist actions rather than being mistaken for albums.
+
+Compact mode places albums and playlists in the same vertical, recycled list
+as songs, with the same 40px thumbnails and explicit type labels. Each distinct
+album follows its first matching song; unpaired albums precede playlists,
+which follow the primary results. The horizontal shelves are hidden entirely.
+Switching it off restores the larger artwork shelves around the song list.
+The Search title and entry are ordinary page content, not a pinned overlay:
+they scroll away with results in either mode. Changing the layout retains song
+item objects and does not rerun the search. Late playlist answers splice only
+the changed tail of compact results instead of rebinding primary rows. Context
+rows open details and reuse card menus (including Share Album/Share Playlist),
+but are excluded from the audio playback snapshot and Connect track queue.
+Artwork release preserves the card's current size, and pooled card shells
+reconcile their layout on bind, including after search → album → search.
+The entire results page uses one vertical viewport, which both expanded
+shelves and the mixed list observe before loading artwork.
+A typed query immediately invalidates older responses, even
+during the debounce interval. Unsupported mosaic/custom playlist images retain
+a placeholder; recognized Spotify image IDs use the same custom cover loader
+as all other artwork. The optional persisted query can change server-side;
+failure is logged and primary results remain usable.
+
 ## Library and playlists
 
 Liked Songs is paged through collection-v2. Date-added keeps the collection's
@@ -269,6 +300,42 @@ settled viewport, preventing cold startup from issuing two requests for every
 playlist. Creating, deleting and renaming playlists work through existing
 operations. Playlist artwork upload is not implemented because it is a separate
 image-upload endpoint.
+
+### Album and playlist detail layouts
+
+Settings → Interface → Compact mode is saved as `compact-mode`. It defaults to
+On to preserve the established small title/year/action header and thumbnail
+rows for existing users. Switching it Off presents a larger 256px square cover at the
+left, a large wrapping title at the right, and a metadata row beginning with
+the existing Save/Saved or playlist action. The row includes album year when
+known, artist (or “Multiple artists” for collaborations/compilations), track
+count and summed duration. A neutral theme-colored separator precedes numbered
+songs. No global search bar, navigation redesign or Now Playing/Queue/Lyrics
+layout change is involved.
+
+Both detail modes use one page-level scroller: the header, metadata and divider
+scroll away with the songs, like the artist page. There is no fixed hero above
+an independently scrolling track pane. Opening a different context returns to
+the top; revisiting the same context retains its current scroll position.
+
+Expanded songs do not request a redundant album thumbnail for every row. The
+one header image uses Now Playing's square `COVER` fit and 12px `art-large`
+corners. Known card artwork is reused when opening a detail page; otherwise
+the first available song cover is a fallback. Unmapping the page, switching
+to Compact mode or disabling page artwork cancels/releases that header image.
+Changing modes preserves the loaded list model rather than refetching tracks.
+Scrolling past the expanded header's retention margin also releases its cover;
+returning to the top reloads that one image through the custom loader.
+Long titles wrap/ellipsize without imposing their full text width on the window.
+In narrow panes the artwork and text stack into separate rows rather than
+compressing the title beside a large cover. The square crop stays unchanged.
+
+Detail pages resolve up to the native context cap of 10,000 tracks instead of
+the former 200-track preview, then fetch ordered display metadata in existing
+batches. This enables useful playlist counts and durations without loading all
+covers. At the cap the count says “tracks loaded”; omitted/unavailable metadata
+can still make totals partial, and playlists do not borrow the first song's
+release year as a fictitious playlist creation date.
 
 ## Playback and Connect
 
@@ -292,6 +359,49 @@ The UI adds Previous/Next, queueing, ordinary shuffle, repeat-one,
 repeat-all, radio expansion and Connect-aware Smart Shuffle over the engine.
 Connect registration uses the dealer WebSocket, reports track/state/position,
 accepts remote transport commands and yields to a higher-ranked device.
+
+Connect state includes duration, correctly encoded double playback speed,
+repeat/shuffle options, previous/next tracks, occurrence IDs and a queue
+revision. Its next-track snapshot contains the explicit user queue followed by
+the remaining playback order, not just the 40-song UI preview. Controllers can
+extrapolate the timestamped position between action reports; the 250ms position
+poll does not initiate HTTPS requests or copy the queue. HTTP state updates reuse
+one session and are serialized: updates arriving during a PUT coalesce into the
+latest pending state. Older timestamped cluster snapshots cannot override a
+newer dealer/HTTP snapshot's ownership.
+Connect checks bearer expiry on its own keepalive/action path instead of
+waiting for a catalog request to trigger refresh. A 401 forces a native login5
+refresh and republishes the latest state. Immediate auth recovery is limited
+to once per 30 seconds so a persistent rejection cannot create a refresh/PUT
+loop. This addresses repeated 401s observed in a long-running idle client;
+the corrected path still needs a live expiry/recovery test.
+
+Structured remote commands support pause/resume, explicit seek (including
+zero), next/previous, selecting another playback context/song, partial repeat
+and shuffle changes, adding to the queue and replacing/removing queue entries.
+Queue edits are processed in arrival order, reuse known display metadata and
+resolve only unfamiliar URIs. An incomplete resolution or stale queue revision
+does not erase the working queue. Replacing a queue does not restart or seek the
+currently sounding song. Duplicate tracks remain distinct occurrences, and
+context-supplied UIDs are retained when resolving a controller's selection.
+
+A same-song controller state update is not an implicit seek: it retains the
+audible position instead of adopting a stale zero. Returning ownership from a
+different device is distinct and can adopt that device's supplied position.
+Loaded-track detection examines audible/buffered and pending engine tracks,
+not merely whether a decoder task still exists or what its last progress state
+was. A decoder can finish while its buffered audio is still playing. Playback
+picks invalidate old transfers still resolving metadata, and a play-with-seek
+command holds its position for a pending replacement rather than seeking the
+canceled outgoing decoder. Yielding ownership pauses without immediately
+reporting the old song as active and reclaiming the device.
+
+These paths have offline wire/JSON regression coverage, but real controller
+interoperability still needs a phone/desktop session test; Spotify's private
+Connect protocol is not a guaranteed public API. Field and command shapes were
+checked against the [extracted player protocol](https://github.com/librespot-org/librespot/blob/dev/protocol/proto/player.proto)
+and [dealer command definitions](https://github.com/librespot-org/librespot/blob/dev/core/src/dealer/protocol/request.rs).
+They are protocol references only, not new Rust dependencies.
 
 ### Sharing a song
 
@@ -407,6 +517,7 @@ an explicit `GSK_RENDERER` environment value takes precedence.
 | Section / control | Stored key | Values | What it changes | When it applies |
 |---|---|---|---|---|
 | Interface → Theme | `theme` | Dark, White, Milk, Dark+ | Selects the application palette. Accent green is reserved for state such as liked, followed, pinned and selected items. | Immediately; CSS is reloaded. |
+| Interface → Compact mode | `compact-mode` | Off/On (default On) | On retains small detail headers and thumbnail rows, and mixes albums/playlists with songs in one vertical search list. Off shows artwork-led detail headers and numbered rows, plus larger search shelves. Result type labels remain visible in either mode. | Immediately; song items are retained and no new search is sent. |
 | Interface → Previews | `media-mode` | Media, Now playing only, None | Controls which artwork surfaces may request covers. “Now playing only” prevents list/grid artwork work; “None” prevents artwork requests altogether. | Immediately for new requests; existing images are released by the loader. |
 | Interface → Scroll smoothness | `scroll-smoothness` | 0–100 | Tunes mouse-wheel travel and easing together. Low values are shorter and more responsive; high values carry farther with softer gravity. Slider persistence is debounced for 120 ms so dragging does not synchronously rewrite the settings file on GTK's UI thread. | After the slider pauses; touchpad kinetics are unchanged. |
 | Lyrics → Online lyrics | `online-lyrics` | Off/On (default Off) | Allows an asynchronous LRCLIB lookup for the current audible song after checking the local LRC sidecar. Sends its title, primary artist, album and duration to LRCLIB; no scan of a playlist or library occurs. | Immediately; an active track is rechecked when toggled. |
@@ -488,6 +599,52 @@ GTK packages. The nightly profile selects PipeWire. Windows uses the MSYS2
 UCRT64/WASAPI instructions in its application README. The native-auth test has
 an opt-in live HTTPS check (`SPOTIFYGTK_TLS_PROBE=1`) for validating a portable
 Windows bundle without making the default suite depend on the network.
+
+The Connect tests also cover stale timestamps, same-song position preservation,
+explicit seeks to zero, queue encoding/revisions/duplicate occurrence IDs,
+structured play and partial option updates, and malformed queue payloads. A
+GUI presentation test reuses the existing settings test source and is built
+when GTK/libadwaita are available. It skips without a display. On headless Linux:
+
+```bash
+GSK_RENDERER=cairo xvfb-run -a meson test -C build --print-errorlogs
+```
+
+The GUI test verifies model retention with 300 songs, both compact/expanded
+search layouts, a narrow window with a long album title, square cover fit, and
+idle frame-clock settling on album and empty artist pages. Setting
+`SPOTIFYGTK_UI_CAPTURE_DIRECTORY` to an existing temporary directory enables
+PNG captures of these mocked/offline widgets; it does not use real credentials
+or alter the running application's settings.
+Offline fixtures also exercise the real detail completion path (compilation
+artists, full loaded counts/duration, and no invented playlist year) and
+playlist matching by name/owner with Aggressive Filtering on and off.
+Search regression assertions also check header movement with vertical scroll,
+hidden compact shelves, mixed result ordering/activation, song-only playback
+snapshots, primary-item retention during playlist changes, and the artwork
+release/remap lifecycle of search → album → search. A synthetic paintable
+exercises compact card release so oversized placeholders cannot go unnoticed.
+Detail regression assertions verify compact/expanded header scrolling, release
+of offscreen hero artwork, and top-reset versus same-context scroll retention
+for album/playlist navigation.
+Address and undefined-behavior sanitizer runs cover the settings, Connect helpers and
+UI presentation paths. Leak checking in the standalone settings test exposed
+missing finalization of its path/pins/unavailable table, now released when a
+settings instance is destroyed. This small shutdown leak is not evidence for
+the much larger intermittent scrolling memory/stutter symptom. The GUI sanitizer
+run disables leak detection for GTK's process-global caches; it is not a
+long-duration whole-application leak test.
+
+Two non-scroll-controller sources of unnecessary work were removed: the
+context header's unbounded duration-alignment tick, and offscreen grid cards
+rearming settle polling from the settle pass itself. Artist header alignment
+also stops after a bounded allocation grace period when there is no scrollbar.
+Verbose builds add passive `frames:` samples beside the existing 5-second
+memory samples while the frame clock is active (FPS, late-frame count, worst
+gap and refresh interval). They inspect existing frame history rather than
+requesting redraws. Idle samples alone cannot establish the cause of an
+intermittent active-scrolling stutter; correlate these samples with an actual
+reproduction and artwork/Connect activity.
 
 ## Contribution rules
 

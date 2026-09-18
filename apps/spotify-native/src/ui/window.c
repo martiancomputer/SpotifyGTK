@@ -37,6 +37,7 @@
 #include "track_list.h"
 
 #include "../player_service.h"
+#include "spotify/connect_options.h"
 #include "../native_engine.h"
 #include "../log_file.h"
 #include "../log_verbose.h"
@@ -201,6 +202,10 @@ struct _SpotifyGtkNativeWindow {
   GPtrArray *play_context;      /* SpotifyNativeTrack*, free func set; may be NULL */
   gint       context_index;     /* -1 when there is no context */
   GQueue    *user_queue;        /* SpotifyNativeTrack*, freed manually */
+  guint      remote_queue_generation;
+  gchar     *connect_queue_revision;
+  gboolean   connect_yielding, remote_edit_pending;
+  GQueue    *remote_edits; /* serialized SpotifyConnectCommand requests */
 
   /*
    * The order the context is played in, as positions into play_context.
@@ -297,6 +302,33 @@ sample_process_memory (gpointer user_data)
   SPOTIFYGTK_DEBUG ("memory: page=%s gate=%s unavailable on this platform",
                     page ? page : "<none>", gated ? "visible" : "hidden");
 #endif
+  /* Inspect completed frame history only. A diagnostic tick must not request
+   * frames itself, otherwise it can create the stutter it is measuring. */
+  GdkFrameClock *clock = gtk_widget_get_frame_clock (GTK_WIDGET (self));
+  gint64 now = g_get_monotonic_time ();
+  if (clock && now - gdk_frame_clock_get_frame_time (clock) < 250000) {
+    gint64 refresh = 16667, presentation = 0;
+    gdk_frame_clock_get_refresh_info (clock, now, &refresh, &presentation);
+    guint samples = 0, late = 0;
+    gint64 previous = 0, worst = 0;
+    for (gint64 frame = gdk_frame_clock_get_history_start (clock);
+         frame <= gdk_frame_clock_get_frame_counter (clock); frame++) {
+      GdkFrameTimings *timings = gdk_frame_clock_get_timings (clock, frame);
+      if (!timings) continue;
+      gint64 time = gdk_frame_timings_get_frame_time (timings);
+      if (time < now - 1000000) continue;
+      if (previous) {
+        gint64 gap = time - previous;
+        samples++;
+        if (gap > MAX (refresh, 1) * 3 / 2) late++;
+        worst = MAX (worst, gap);
+      }
+      previous = time;
+    }
+    SPOTIFYGTK_DEBUG ("frames: page=%s fps=%.1f late=%u/%u worst=%.1f ms refresh=%.1f ms",
+      page ? page : "<none>", gdk_frame_clock_get_fps (clock), late, samples,
+      worst / 1000.0, refresh / 1000.0);
+  }
   return G_SOURCE_CONTINUE;
 }
 #endif
@@ -994,6 +1026,45 @@ smart_queue_fetch (SpotifyGtkNativeWindow *self)
                        on_smart_station_loaded, load);
 }
 
+/* Publish strings, not widget rows: the full Connect queue is independent of
+ * the intentionally small Now Playing widget window. Only action/queue events
+ * call this; position polling never sends HTTP or copies the queue. */
+static void
+publish_connect_state (SpotifyGtkNativeWindow *self)
+{
+  if (!self->session || self->connect_yielding) return;
+  g_autoptr(GPtrArray) next = g_ptr_array_new ();
+  g_autoptr(GPtrArray) previous = g_ptr_array_new ();
+  for (GList *link = self->user_queue->head; link && next->len < SPOTIFYGTK_SESSION_MAX_TRACKS; link = link->next) {
+    const SpotifyNativeTrack *track = link->data;
+    g_ptr_array_add (next, track->uri);
+  }
+  guint queued = next->len;
+  gint cursor = self->order_pos >= 0 ? self->order_pos : order_pos_of (self, self->context_index);
+  if (self->play_context && self->order && cursor >= 0) {
+    for (guint i = (guint) cursor + 1; i < self->order->len && next->len < SPOTIFYGTK_SESSION_MAX_TRACKS; i++) {
+      const SpotifyNativeTrack *track = g_ptr_array_index (self->play_context, g_array_index (self->order, guint, i));
+      g_ptr_array_add (next, track->uri);
+    }
+    for (guint i = cursor > 80 ? cursor - 80 : 0; i < (guint) cursor; i++) {
+      const SpotifyNativeTrack *track = g_ptr_array_index (self->play_context, g_array_index (self->order, guint, i));
+      g_ptr_array_add (previous, track->uri);
+    }
+  }
+  g_ptr_array_add (next, NULL);
+  g_ptr_array_add (previous, NULL);
+  g_free (self->connect_queue_revision);
+  self->connect_queue_revision = spotifygtk_connect_queue_revision (
+    self->current_track_uri, (const gchar *const *) next->pdata, queued);
+  spotifygtk_native_session_report_playback (self->session, self->current_track_uri,
+    self->play_context_uri, self->last_position_ms,
+    spotifygtk_player_service_has_track (self->player, self->current_track_uri) &&
+      !spotifygtk_player_service_is_paused (self->player) && !self->awaiting_uri,
+    self->smart_shuffle ? 2 : self->shuffle ? 1 : 0,
+    self->current_track_duration_ms, self->repeat,
+    (const gchar *const *) next->pdata, queued, (const gchar *const *) previous->pdata);
+}
+
 /* Rebuild the "up next" list the panel shows, and update Prev/Next
  * sensitivity, from the current queue and context. Called whenever either
  * changes. The panel list borrows the track pointers, so it must be rebuilt
@@ -1048,6 +1119,7 @@ refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
   }
   spotifygtk_now_playing_panel_set_native_queue (self->now_playing_panel, up_next);
   g_ptr_array_free (up_next, TRUE);
+  publish_connect_state (self);
 }
 
 /* Show a track on both surfaces and hand its URI to the engine. This is the
@@ -1101,6 +1173,7 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
     g_warning ("Track has no URI; nothing to play");
     return;
   }
+  self->connect_yielding = FALSE;
 
   /*
    * Remember the track so the handover can render it later, then decide
@@ -1113,6 +1186,10 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
    * case the render waits for now-playing-changed, which the player service
    * emits when the sink actually reaches it.
    */
+  /* Explicit playback supersedes any older transfer still resolving catalog
+   * metadata, even when both requests happen to name the same track. */
+  self->transfer_generation++;
+  self->remote_queue_generation++;
   remember_display_track (self, track);
 
   /*
@@ -1139,6 +1216,7 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
      */
     g_free (self->current_track_uri);
     self->current_track_uri = g_strdup (track->uri);
+    self->last_position_ms = 0;
     self->current_track_duration_ms = track->duration_ms;
     spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
     show_now_playing (self, track);
@@ -1148,7 +1226,6 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
      * disagreement, the audible track is the one to believe. */
     if (handover) {
       g_clear_pointer (&self->awaiting_uri, g_free);
-  g_clear_pointer (&self->order, g_array_unref);
     } else {
       g_free (self->awaiting_uri);
       self->awaiting_uri = g_strdup (track->uri);
@@ -2146,6 +2223,8 @@ on_playlist_card_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
   (void) grid;
   if (uri)
     navigate_to_context (self, uri, name && *name ? name : "Playlist", "Playlist");
+  g_autofree gchar *cover_id = spotifygtk_album_grid_dup_cover_id (grid, uri);
+  spotifygtk_context_page_set_header_cover (self->context_page, uri, cover_id);
 }
 
 /* Second step: the first track, for a cover. Adds the finished card. */
@@ -2824,8 +2903,10 @@ on_album_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
   SpotifyGtkNativeWindow *self = user_data;
   if (!uri || !*uri)
     return;
-  navigate_to_context (self, uri, name && *name ? name : "Album", "Album");
-  (void) grid;
+  const gchar *kind = g_str_has_prefix (uri, "spotify:playlist:") ? "Playlist" : "Album";
+  navigate_to_context (self, uri, name && *name ? name : kind, kind);
+  g_autofree gchar *cover_id = spotifygtk_album_grid_dup_cover_id (grid, uri);
+  spotifygtk_context_page_set_header_cover (self->context_page, uri, cover_id);
 }
 
 static void
@@ -3411,6 +3492,7 @@ static void
 on_play_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  self->connect_yielding = FALSE;
 
   /* Resuming a paused stream is not the same as starting one: restarting the
    * URI would re-fetch from byte zero and lose the buffered position. */
@@ -3990,10 +4072,21 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
    * because an ordinary report for the still-loaded track would immediately
    * try to reclaim ownership and recreate two simultaneous outputs. */
   if (g_strcmp0 (endpoint, "connect_ownership_lost") == 0) {
+    self->connect_yielding = TRUE;
+    self->transfer_generation++;
+    self->remote_queue_generation++;
+    if (self->remote_edits)
+      g_queue_clear_full (self->remote_edits, (GDestroyNotify) spotifygtk_connect_command_free);
     spotifygtk_player_service_pause (self->player);
     return;
   }
+  self->connect_yielding = FALSE;
 
+  if (self->awaiting_uri && (g_strcmp0 (endpoint, "pause") == 0 || g_strcmp0 (endpoint, "resume") == 0)) {
+    self->pending_paused = g_strcmp0 (endpoint, "pause") == 0;
+    g_free (self->pending_pause_uri);
+    self->pending_pause_uri = g_strdup (self->awaiting_uri);
+  }
   if (g_strcmp0 (endpoint, "pause") == 0)
     spotifygtk_player_service_pause (self->player);
   else if (g_strcmp0 (endpoint, "resume") == 0)
@@ -4037,6 +4130,327 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
   broadcast_playing_uri (self);
 }
 
+/* Structured Connect commands are serialized so an asynchronous metadata
+ * lookup cannot let a later queue edit overtake an earlier one. Known metadata
+ * is reused; adding/removing one song does not resolve the entire library. */
+typedef struct {
+  GWeakRef window;
+  SpotifyConnectCommand *command;
+  GPtrArray *context, *owned;
+  GHashTable *known;
+  gchar *revision;
+  guint generation;
+  gboolean resolving_context;
+} RemoteEdit;
+
+static void process_remote_edits (SpotifyGtkNativeWindow *self);
+
+static void
+remote_edit_free (RemoteEdit *edit)
+{
+  g_weak_ref_clear (&edit->window);
+  spotifygtk_connect_command_free (edit->command);
+  g_clear_pointer (&edit->context, g_ptr_array_unref);
+  g_ptr_array_unref (edit->owned);
+  g_hash_table_unref (edit->known);
+  g_free (edit->revision);
+  g_free (edit);
+}
+
+static void
+apply_remote_options (SpotifyGtkNativeWindow *self, SpotifyConnectCommand *cmd)
+{
+  if (cmd->shuffle_mode >= 0)
+    on_session_remote_command (self->session, "set_options", cmd->shuffle_mode, self);
+  if (cmd->repeating_track == 1) self->repeat = SPOTIFYGTK_REPEAT_ONE;
+  else if (cmd->repeating_context == 1) self->repeat = SPOTIFYGTK_REPEAT_ALL;
+  else if ((cmd->repeating_track == 0 && self->repeat == SPOTIFYGTK_REPEAT_ONE) ||
+           (cmd->repeating_context == 0 && self->repeat == SPOTIFYGTK_REPEAT_ALL))
+    self->repeat = SPOTIFYGTK_REPEAT_OFF;
+  if (cmd->repeating_context >= 0 || cmd->repeating_track >= 0) {
+    spotifygtk_settings_set_repeat (spotifygtk_settings_get_default (), self->repeat);
+    spotifygtk_playback_bar_set_modes (self->playback_bar,
+      self->smart_shuffle ? SPOTIFYGTK_SHUFFLE_SMART : self->shuffle ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF,
+      self->repeat);
+    refresh_transport_and_queue (self);
+  }
+}
+
+static gboolean
+remote_skip_to (SpotifyGtkNativeWindow *self, SpotifyConnectCommand *cmd)
+{
+  guint position = 0;
+  for (GList *link = self->user_queue->head; link; link = link->next, position++) {
+    SpotifyNativeTrack *track = link->data;
+    g_autofree gchar *uid = spotifygtk_connect_track_uid (track->uri, "queue", position);
+    if ((cmd->uri && g_strcmp0 (cmd->uri, track->uri)) || (cmd->track_uid && g_strcmp0 (cmd->track_uid, uid))) continue;
+    for (guint i = 0; i < position; i++) spotifygtk_native_track_free (g_queue_pop_head (self->user_queue));
+    SpotifyNativeTrack *selected = g_queue_pop_head (self->user_queue);
+    play_native_track (self, selected, FALSE);
+    spotifygtk_native_track_free (selected);
+    return TRUE;
+  }
+  if (self->play_context && self->order) {
+    gint cursor = self->order_pos >= 0 ? self->order_pos : order_pos_of (self, self->context_index);
+    for (guint i = (guint) MAX (0, cursor + 1); i < self->order->len; i++, position++) {
+      guint index = g_array_index (self->order, guint, i);
+      const SpotifyNativeTrack *track = g_ptr_array_index (self->play_context, index);
+      g_autofree gchar *uid = spotifygtk_connect_track_uid (track->uri, "context", position);
+      if ((cmd->uri && g_strcmp0 (cmd->uri, track->uri)) || (cmd->track_uid && g_strcmp0 (cmd->track_uid, uid))) continue;
+      g_queue_clear_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
+      play_context_at (self, index, FALSE);
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static void
+finish_remote_edit (RemoteEdit *edit, GPtrArray *resolved, const GError *error)
+{
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&edit->window);
+  if (!self) { remote_edit_free (edit); return; }
+  SpotifyConnectCommand *cmd = edit->command;
+  gboolean current = edit->generation == self->remote_queue_generation &&
+                     g_strcmp0 (edit->revision, self->connect_queue_revision) == 0;
+  if (error || !current) {
+    g_message ("Connect: %s not applied: %s", cmd->endpoint,
+               error ? error->message : "a newer local playback/queue change won");
+    goto done;
+  }
+  for (guint i = 0; resolved && i < resolved->len; i++) {
+    SpotifyNativeTrack *track = g_ptr_array_index (resolved, i);
+    g_hash_table_insert (edit->known, track->uri, track);
+    if (edit->resolving_context) {
+      SpotifyConnectTrack *item = g_new0 (SpotifyConnectTrack, 1);
+      item->uri = g_strdup (track->uri); item->provider = g_strdup ("context");
+      item->uid = g_strdup (track->context_uid);
+      g_ptr_array_add (cmd->next, item);
+    }
+  }
+  /* Atomic validation: do not erase a good queue for a partial response. */
+  GPtrArray *arrays[] = { cmd->previous, cmd->next };
+  for (guint a = 0; a < G_N_ELEMENTS (arrays); a++)
+    for (guint i = 0; i < arrays[a]->len; i++) {
+      SpotifyConnectTrack *track = g_ptr_array_index (arrays[a], i);
+      if (!g_hash_table_lookup (edit->known, track->uri)) {
+        g_message ("Connect: %s omitted unresolved track %s; queue retained", cmd->endpoint, track->uri);
+        goto done;
+      }
+    }
+  self->connect_yielding = FALSE;
+  if (g_str_equal (cmd->endpoint, "add_to_queue")) {
+    for (guint i = 0; i < cmd->next->len; i++) {
+      SpotifyConnectTrack *item = g_ptr_array_index (cmd->next, i);
+      g_queue_push_tail (self->user_queue, spotifygtk_native_track_copy (g_hash_table_lookup (edit->known, item->uri)));
+    }
+    refresh_transport_and_queue (self);
+  } else if (g_str_equal (cmd->endpoint, "set_queue")) {
+    const SpotifyNativeTrack *now = self->current_track_uri ? g_hash_table_lookup (edit->known, self->current_track_uri) : NULL;
+    if (!now) goto done;
+    GPtrArray *context = g_ptr_array_new_with_free_func ((GDestroyNotify) spotifygtk_native_track_free);
+    GQueue *queue = g_queue_new ();
+    for (guint i = 0; i < cmd->previous->len; i++) {
+      SpotifyConnectTrack *item = g_ptr_array_index (cmd->previous, i);
+      g_ptr_array_add (context, spotifygtk_native_track_copy (g_hash_table_lookup (edit->known, item->uri)));
+    }
+    gint index = context->len;
+    g_ptr_array_add (context, spotifygtk_native_track_copy (now));
+    for (guint i = 0; i < cmd->next->len; i++) {
+      SpotifyConnectTrack *item = g_ptr_array_index (cmd->next, i);
+      SpotifyNativeTrack *copy = spotifygtk_native_track_copy (g_hash_table_lookup (edit->known, item->uri));
+      if (g_str_has_prefix (item->provider, "queue")) g_queue_push_tail (queue, copy);
+      else g_ptr_array_add (context, copy);
+    }
+    g_clear_pointer (&self->play_context, g_ptr_array_unref);
+    self->play_context = context;
+    g_queue_free_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
+    self->user_queue = queue;
+    self->context_index = index;
+    self->server_order = TRUE;
+    rebuild_order (self, index);
+    refresh_transport_and_queue (self); /* No restart or seek. */
+  } else if (g_str_equal (cmd->endpoint, "play") || g_str_equal (cmd->endpoint, "update_context")) {
+    if (!cmd->next->len) goto done;
+    gboolean update = g_str_equal (cmd->endpoint, "update_context");
+    gint selected = cmd->track_index;
+    const gchar *wanted = cmd->uri ? cmd->uri : update ? self->current_track_uri : NULL;
+    if (wanted || cmd->track_uid) {
+      selected = -1;
+      for (guint i = 0; i < cmd->next->len; i++) {
+        SpotifyConnectTrack *item = g_ptr_array_index (cmd->next, i);
+        if ((cmd->track_uid && g_strcmp0 (cmd->track_uid, item->uid) == 0) ||
+            (!cmd->track_uid && g_strcmp0 (wanted, item->uri) == 0)) { selected = i; break; }
+      }
+      if (selected < 0) goto done;
+    }
+    if (selected < 0) selected = 0;
+    if ((guint) selected >= cmd->next->len) goto done;
+    GPtrArray *context = g_ptr_array_new_with_free_func ((GDestroyNotify) spotifygtk_native_track_free);
+    for (guint i = 0; i < cmd->next->len; i++) {
+      SpotifyConnectTrack *item = g_ptr_array_index (cmd->next, i);
+      g_ptr_array_add (context, spotifygtk_native_track_copy (g_hash_table_lookup (edit->known, item->uri)));
+    }
+    g_clear_pointer (&self->play_context, g_ptr_array_unref);
+    self->play_context = context;
+    g_free (self->play_context_uri); self->play_context_uri = g_strdup (cmd->context_uri);
+    self->context_index = selected;
+    self->server_order = FALSE;
+    if (cmd->shuffle_mode >= 0) {
+      self->shuffle = cmd->shuffle_mode != 0;
+      self->smart_shuffle = cmd->shuffle_mode == 2;
+    }
+    rebuild_order (self, selected);
+    if (!update) {
+      g_queue_clear_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
+      const SpotifyNativeTrack *track = g_ptr_array_index (self->play_context, selected);
+      self->transfer_generation++;
+      self->smart_generation++;
+      self->pending_paused = cmd->paused;
+      g_free (self->pending_pause_uri); self->pending_pause_uri = g_strdup (track->uri);
+      play_native_track (self, track, FALSE);
+      if (cmd->seek_ms >= 0) {
+        self->last_position_ms = cmd->seek_ms;
+        spotifygtk_player_service_seek (self->player, cmd->seek_ms);
+      }
+    }
+    apply_remote_options (self, cmd);
+    refresh_transport_and_queue (self);
+    broadcast_playing_uri (self);
+  }
+done:
+  self->remote_edit_pending = FALSE;
+  remote_edit_free (edit);
+  /* Also acknowledge rejected/stale edits with the actual current snapshot;
+   * controllers must not wait 30 seconds for the next periodic keepalive. */
+  publish_connect_state (self);
+  process_remote_edits (self);
+}
+
+static void
+on_remote_metadata (GObject *source, GAsyncResult *result, gpointer data)
+{
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  finish_remote_edit (data, tracks, error);
+}
+
+static void
+process_remote_edits (SpotifyGtkNativeWindow *self)
+{
+  if (self->remote_edit_pending || !self->remote_edits || g_queue_is_empty (self->remote_edits)) return;
+  SpotifyConnectCommand *cmd = g_queue_pop_head (self->remote_edits);
+  gboolean async = g_str_equal (cmd->endpoint, "play") || g_str_equal (cmd->endpoint, "update_context") ||
+                   g_str_equal (cmd->endpoint, "set_queue") || g_str_equal (cmd->endpoint, "add_to_queue");
+  if (!async) {
+    if (g_str_equal (cmd->endpoint, "set_options") || g_str_has_prefix (cmd->endpoint, "set_repeating") ||
+        g_str_equal (cmd->endpoint, "set_shuffling_context")) {
+      self->connect_yielding = FALSE;
+      apply_remote_options (self, cmd);
+      publish_connect_state (self);
+    } else if (g_str_equal (cmd->endpoint, "skip_next") && (cmd->uri || cmd->track_uid)) {
+      if (!remote_skip_to (self, cmd)) g_message ("Connect: skip target no longer in queue");
+    } else if (g_str_equal (cmd->endpoint, "pause") || g_str_equal (cmd->endpoint, "resume") ||
+               g_str_equal (cmd->endpoint, "skip_next") || g_str_equal (cmd->endpoint, "skip_prev") ||
+               (g_str_equal (cmd->endpoint, "seek_to") && cmd->seek_ms >= 0))
+      on_session_remote_command (self->session, cmd->endpoint, cmd->seek_ms, self);
+    else g_message ("Connect: unsupported/malformed command %s", cmd->endpoint);
+    publish_connect_state (self);
+    spotifygtk_connect_command_free (cmd);
+    process_remote_edits (self);
+    return;
+  }
+  RemoteEdit *edit = g_new0 (RemoteEdit, 1);
+  g_weak_ref_init (&edit->window, self);
+  edit->command = cmd;
+  edit->context = self->play_context ? g_ptr_array_ref (self->play_context) : NULL;
+  edit->owned = g_ptr_array_new_with_free_func ((GDestroyNotify) spotifygtk_native_track_free);
+  edit->known = g_hash_table_new (g_str_hash, g_str_equal);
+  edit->revision = g_strdup (self->connect_queue_revision);
+  edit->generation = self->remote_queue_generation;
+  self->remote_edit_pending = TRUE;
+  for (guint i = 0; edit->context && i < edit->context->len; i++) {
+    SpotifyNativeTrack *track = g_ptr_array_index (edit->context, i);
+    g_hash_table_insert (edit->known, track->uri, track);
+  }
+  for (GList *link = self->user_queue->head; link; link = link->next) {
+    SpotifyNativeTrack *copy = spotifygtk_native_track_copy (link->data);
+    g_ptr_array_add (edit->owned, copy); g_hash_table_insert (edit->known, copy->uri, copy);
+  }
+  if (self->display_tracks) {
+    /* A one-song queue edit must not duplicate the entire search/library
+     * metadata index. Snapshot only missing entries named by this command. */
+    GPtrArray *arrays[] = { cmd->previous, cmd->next };
+    for (guint a = 0; a < G_N_ELEMENTS (arrays); a++)
+      for (guint i = 0; i < arrays[a]->len; i++) {
+        SpotifyConnectTrack *item = g_ptr_array_index (arrays[a], i);
+        if (g_hash_table_contains (edit->known, item->uri)) continue;
+        SpotifyNativeTrack *known = g_hash_table_lookup (self->display_tracks, item->uri);
+        if (!known) continue;
+        SpotifyNativeTrack *copy = spotifygtk_native_track_copy (known);
+        g_ptr_array_add (edit->owned, copy);
+        g_hash_table_insert (edit->known, copy->uri, copy);
+      }
+    if (self->current_track_uri && !g_hash_table_contains (edit->known, self->current_track_uri)) {
+      SpotifyNativeTrack *known = g_hash_table_lookup (self->display_tracks, self->current_track_uri);
+      if (known) {
+        SpotifyNativeTrack *copy = spotifygtk_native_track_copy (known);
+        g_ptr_array_add (edit->owned, copy);
+        g_hash_table_insert (edit->known, copy->uri, copy);
+      }
+    }
+  }
+  if (g_str_equal (cmd->endpoint, "set_queue") && cmd->queue_revision &&
+      *cmd->queue_revision && g_strcmp0 (cmd->queue_revision, self->connect_queue_revision)) {
+    g_autoptr(GError) error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED, "Stale queue revision");
+    finish_remote_edit (edit, NULL, error);
+    return;
+  }
+  if (!cmd->next->len && cmd->context_uri &&
+      (g_str_equal (cmd->endpoint, "play") || g_str_equal (cmd->endpoint, "update_context"))) {
+    edit->resolving_context = TRUE;
+    spotifygtk_native_session_load_tracks (self->session, cmd->context_uri, SPOTIFYGTK_SESSION_MAX_TRACKS,
+      NULL, on_remote_metadata, edit);
+    return;
+  }
+  g_autoptr(GPtrArray) missing = g_ptr_array_new ();
+  g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
+  GPtrArray *arrays[] = { cmd->previous, cmd->next };
+  for (guint a = 0; a < G_N_ELEMENTS (arrays); a++)
+    for (guint i = 0; i < arrays[a]->len; i++) {
+      SpotifyConnectTrack *track = g_ptr_array_index (arrays[a], i);
+      if (!g_hash_table_contains (edit->known, track->uri) && g_hash_table_add (seen, track->uri))
+        g_ptr_array_add (missing, track->uri);
+    }
+  if (!missing->len) finish_remote_edit (edit, NULL, NULL);
+  else spotifygtk_native_session_load_track_uris (self->session,
+    (const gchar *const *) missing->pdata, missing->len, NULL, on_remote_metadata, edit);
+}
+
+static void
+on_session_remote_data (SpotifyNativeSession *session, const gchar *endpoint,
+                         const gchar *json, gpointer data)
+{
+  SpotifyGtkNativeWindow *self = data;
+  (void) session;
+  g_autoptr(GError) error = NULL;
+  SpotifyConnectCommand *cmd = spotifygtk_connect_parse_command (json, &error);
+  if (!cmd || g_strcmp0 (cmd->endpoint, endpoint)) {
+    g_message ("Connect: command rejected: %s", error ? error->message : "endpoint mismatch");
+    spotifygtk_connect_command_free (cmd);
+    return;
+  }
+  if (!self->remote_edits) self->remote_edits = g_queue_new ();
+  if (self->remote_edits->length >= 64) {
+    g_message ("Connect: command backlog full");
+    spotifygtk_connect_command_free (cmd);
+    return;
+  }
+  g_queue_push_tail (self->remote_edits, cmd);
+  process_remote_edits (self);
+}
+
 /*
  * Another client handed playback to this device.
  *
@@ -4055,6 +4469,11 @@ typedef struct {
   guint                   shuffle_mode;
   gboolean                server_order;
   guint                   generation;
+  gchar                 **queue_uris;
+  GPtrArray              *first_tracks;
+  gboolean                secondary;
+  gboolean                resume_from_remote; /* ownership returned from another device */
+  gint64                  observed_at_ms;
 } TransferAdopt;
 
 static void
@@ -4064,6 +4483,8 @@ transfer_adopt_free (TransferAdopt *a)
     g_object_remove_weak_pointer (G_OBJECT (a->window), (gpointer *) &a->window);
   g_free (a->uri);
   g_free (a->context_uri);
+  g_strfreev (a->queue_uris);
+  g_clear_pointer (&a->first_tracks, g_ptr_array_unref);
   g_free (a);
 }
 
@@ -4084,11 +4505,33 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
 
   SpotifyGtkNativeWindow *self = a->window;
 
-  if (!tracks || tracks->len == 0) {
+  if (!tracks) {
     g_warning ("window: could not resolve the transferred track %s: %s",
                a->uri, err ? err->message : "no tracks came back");
     transfer_adopt_free (a);
     return;
+  }
+
+  /* The transferred user queue is independent of the context. Resolve it
+   * separately, also covering a current queue song absent from the album. */
+  g_autoptr(GPtrArray) queue_metadata = NULL;
+  if (!a->secondary) {
+    gboolean found = FALSE;
+    for (guint i = 0; i < tracks->len; i++)
+      if (g_strcmp0 (((SpotifyNativeTrack *) g_ptr_array_index (tracks, i))->uri, a->uri) == 0) found = TRUE;
+    g_autoptr(GPtrArray) needed = g_ptr_array_new ();
+    if (!found) g_ptr_array_add (needed, a->uri);
+    for (guint i = 0; a->queue_uris && a->queue_uris[i]; i++) g_ptr_array_add (needed, a->queue_uris[i]);
+    if (needed->len) {
+      a->first_tracks = g_steal_pointer (&tracks);
+      a->secondary = TRUE;
+      spotifygtk_native_session_load_track_uris (SPOTIFYGTK_NATIVE_SESSION (source),
+        (const gchar *const *) needed->pdata, needed->len, NULL, on_transfer_track_resolved, a);
+      return;
+    }
+  } else {
+    queue_metadata = g_steal_pointer (&tracks);
+    tracks = g_steal_pointer (&a->first_tracks);
   }
 
   const SpotifyNativeTrack *track = NULL;
@@ -4097,6 +4540,16 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
     if (g_strcmp0 (candidate->uri, a->uri) == 0) {
       track = candidate;
       break;
+    }
+  }
+  if (!track) {
+    for (guint i = 0; queue_metadata && i < queue_metadata->len; i++) {
+      const SpotifyNativeTrack *candidate = g_ptr_array_index (queue_metadata, i);
+      if (g_strcmp0 (candidate->uri, a->uri) == 0) {
+        g_ptr_array_add (tracks, spotifygtk_native_track_copy (candidate));
+        track = g_ptr_array_index (tracks, tracks->len - 1);
+        break;
+      }
     }
   }
   if (!track) {
@@ -4126,6 +4579,18 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
     }
   }
   rebuild_order (self, self->context_index);
+  if (a->queue_uris) {
+    g_queue_clear_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
+    for (guint i = 0; a->queue_uris[i]; i++) {
+      for (guint j = 0; queue_metadata && j < queue_metadata->len; j++) {
+        const SpotifyNativeTrack *queued = g_ptr_array_index (queue_metadata, j);
+        if (g_strcmp0 (queued->uri, a->queue_uris[i]) == 0) {
+          g_queue_push_tail (self->user_queue, spotifygtk_native_track_copy (queued));
+          break;
+        }
+      }
+    }
+  }
   spotifygtk_playback_bar_set_modes (
     self->playback_bar,
     self->smart_shuffle ? SPOTIFYGTK_SHUFFLE_SMART :
@@ -4147,31 +4612,20 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
    */
   gboolean already_current =
     g_strcmp0 (self->current_track_uri, track->uri) == 0 &&
-    spotifygtk_player_service_is_active (self->player);
+    spotifygtk_player_service_has_track (self->player, track->uri);
+  gint64 target_position = spotifygtk_connect_transfer_position (
+    self->last_position_ms, a->position_ms,
+    already_current && (!a->resume_from_remote || a->position_ms < 0));
+  if ((!already_current || a->resume_from_remote) && a->position_ms >= 0)
+    target_position = spotifygtk_connect_live_position (target_position,
+      a->observed_at_ms, g_get_monotonic_time () / 1000, !a->paused);
+  target_position = MIN (target_position, MAX (0, track->duration_ms));
 
-  /*
-   * A phone that is still playing does not get to drag this device around.
-   *
-   * The background app advances through its own queue and sends a transfer on
-   * every track change. Following those meant local playback was torn down
-   * and replaced at random by whatever the phone had moved on to -- music
-   * stopping for no reason the listener could see.
-   *
-   * The test is whether the server accepted the last claim. Until it has been
-   * refused once, transfers are honoured normally, so genuinely picking this
-   * device from the phone still works; it is only after being told another
-   * device is the active one that unsolicited orders are declined.
-   */
-  if (!already_current && self->session &&
-      !spotifygtk_native_session_connect_is_active (self->session) &&
-      self->current_track_uri && spotifygtk_player_service_is_active (self->player)) {
-    g_message ("window: declining a transfer to %s -- this device is not the "
-               "active one and something is already playing here", track->uri);
-    transfer_adopt_free (a);
-    return;
-  }
 
   if (!already_current) {
+    self->pending_paused = a->paused;
+    g_free (self->pending_pause_uri);
+    self->pending_pause_uri = g_strdup (track->uri);
     /*
      * Go in by the same door a click uses.
      *
@@ -4201,14 +4655,11 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
    * The tolerance is generous because the controller's idea of the position
    * and ours differ by however long the round trip took.
    */
-  const gint64 SEEK_TOLERANCE_MS = 3000;
-  gint64 drift = ABS (a->position_ms - self->last_position_ms);
-
-  if (a->position_ms > 0 && (!already_current || drift > SEEK_TOLERANCE_MS))
-    spotifygtk_player_service_seek (self->player, a->position_ms);
-  else if (a->position_ms > 0)
-    g_message ("window: already within %" G_GINT64_FORMAT "ms of %"
-               G_GINT64_FORMAT "ms; not seeking", drift, a->position_ms);
+  /* Transfers change ownership/state; seek_to is the explicit seek command.
+   * A stale controller/queue snapshot must never rewind the current song. */
+  if ((!already_current && target_position > 0) ||
+      (a->resume_from_remote && a->position_ms >= 0))
+    spotifygtk_player_service_seek (self->player, target_position);
 
   /*
    * Apply the play state to the engine that ends up sounding, not the one on
@@ -4237,7 +4688,8 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
                track->uri, a->paused ? "paused" : "playing");
   }
 
-  self->last_position_ms = a->position_ms;
+  self->last_position_ms = target_position;
+  refresh_transport_and_queue (self);
   broadcast_playing_uri (self);
   transfer_adopt_free (a);
 }
@@ -4245,6 +4697,7 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
 static void
 on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
                                const gchar *context_uri, gchar **track_uris,
+                               gchar **queue_uris,
                                gint64 position_ms, gboolean paused,
                                guint shuffle_mode,
                                gpointer user_data)
@@ -4253,6 +4706,19 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
 
   if (!uri || !*uri)
     return;
+  gboolean resume_from_remote = self->connect_yielding;
+  self->connect_yielding = FALSE;
+
+  /* Ordinary controller buttons do not need metadata or queue rebuilding. */
+  if (!resume_from_remote && !queue_uris && (!track_uris || !*track_uris) &&
+      g_strcmp0 (uri, self->current_track_uri) == 0 &&
+      g_strcmp0 (context_uri, self->play_context_uri) == 0 &&
+      shuffle_mode == (self->smart_shuffle ? 2u : self->shuffle ? 1u : 0u) &&
+      spotifygtk_player_service_has_track (self->player, uri)) {
+    self->transfer_generation++;
+    on_session_remote_command (session, paused ? "pause" : "resume", 0, self);
+    return;
+  }
 
   guint n_uris = track_uris ? g_strv_length (track_uris) : 0;
   g_message ("window: transfer -> %s at %" G_GINT64_FORMAT
@@ -4282,6 +4748,9 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
   a->shuffle_mode = shuffle_mode;
   a->server_order = n_uris > 0;
   a->generation  = ++self->transfer_generation;
+  a->queue_uris = queue_uris ? g_strdupv (queue_uris) : NULL;
+  a->resume_from_remote = resume_from_remote;
+  a->observed_at_ms = g_get_monotonic_time () / 1000;
   g_object_add_weak_pointer (G_OBJECT (self), (gpointer *) &a->window);
 
   if (n_uris > 0)
@@ -4291,7 +4760,7 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
   else
     spotifygtk_native_session_load_tracks (
       session, context_uri && *context_uri ? context_uri : uri,
-      context_uri && *context_uri ? 0 : 1, NULL,
+      context_uri && *context_uri ? SPOTIFYGTK_SESSION_MAX_TRACKS : 1, NULL,
       on_transfer_track_resolved, a);
 }
 
@@ -4314,13 +4783,7 @@ broadcast_playing_uri (SpotifyGtkNativeWindow *self)
 
   /* Spotify Connect needs the same news: a device registered as active while
    * reporting nothing playing gets dropped. */
-  if (self->session)
-    spotifygtk_native_session_report_playback (self->session, uri,
-                                               self->play_context_uri,
-                                               self->last_position_ms,
-                                               is_playing,
-                                               self->smart_shuffle ? 2 :
-                                               self->shuffle ? 1 : 0);
+  publish_connect_state (self);
 
   spotifygtk_search_page_set_playing_uri (self->search_page, uri, is_playing);
   spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, uri, is_playing);
@@ -4408,12 +4871,12 @@ on_player_position_changed (SpotifyNativePlayerService *player,
   /* Kept, not reported: put_state is an HTTPS round trip and this fires four
    * times a second. PlayerState pairs a position with the timestamp it was
    * true at, so a controller extrapolates between our reports. */
-  self->last_position_ms = position_ms;
 
   /* The position still belongs to the outgoing track; painting it against the
    * new track's duration is what made the old song appear to start playing. */
   if (self->awaiting_uri)
     return;
+  self->last_position_ms = position_ms;
 
   spotifygtk_native_window_set_progress (self, position_ms,
                                          self->current_track_duration_ms);
@@ -4722,6 +5185,15 @@ set_page_covers_loaded (SpotifyGtkNativeWindow *self, const gchar *page_name,
   if (list) {
     if (loaded) spotifygtk_track_list_reload_covers (list);
     else        spotifygtk_track_list_release_covers (list);
+    if (g_strcmp0 (page_name, "search") == 0) {
+      SpotifyGtkAlbumGrid *grids[] = {
+        spotifygtk_search_page_get_album_grid (self->search_page),
+        spotifygtk_search_page_get_playlist_grid (self->search_page) };
+      for (guint i = 0; i < G_N_ELEMENTS (grids); i++) {
+        if (loaded) spotifygtk_album_grid_reload_covers (grids[i]);
+        else spotifygtk_album_grid_release_covers (grids[i]);
+      }
+    }
     return;
   }
 
@@ -5030,6 +5502,7 @@ static const gchar *theme_body =
   ".sidebar-action { color: @fg_dim; font-size: 13px; }"
 
   /* ── Typography ────────────────────────────────────────────── */
+  ".context-hero-title { color: @fg_strong; font-weight: 800; font-size: 40px; }"
   ".title-text { color: @fg_strong; font-weight: 800; font-size: 30px;"
   "  letter-spacing: -0.5px; }"
   ".greeting { color: @fg_dim; font-size: 14px; }"
@@ -5434,6 +5907,8 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_player_position_changed), self);
   g_signal_connect (self->session, "remote-command",
                     G_CALLBACK (on_session_remote_command), self);
+  g_signal_connect (self->session, "remote-data",
+                    G_CALLBACK (on_session_remote_data), self);
   g_signal_connect (self->session, "transfer-requested",
                     G_CALLBACK (on_session_transfer_requested), self);
   g_signal_connect (self->session, "state-changed",
@@ -5618,6 +6093,7 @@ spotifygtk_native_window_constructed (GObject *object)
   spotifygtk_artist_page_set_list_wire (self->artist_page, wire_track_list_for, self);
 
   wire_album_grid (self, spotifygtk_search_page_get_album_grid (self->search_page));
+  wire_album_grid (self, spotifygtk_search_page_get_playlist_grid (self->search_page));
   wire_album_grid (self, spotifygtk_home_page_get_album_grid (self->home_page));
   wire_album_grid (self, spotifygtk_library_page_get_album_grid (self->library_page));
   {
@@ -5840,6 +6316,12 @@ spotifygtk_native_window_dispose (GObject *object)
   if (self->user_queue) {
     g_queue_free_full (self->user_queue, (GDestroyNotify) spotifygtk_native_track_free);
     self->user_queue = NULL;
+  }
+  self->remote_queue_generation++;
+  g_clear_pointer (&self->connect_queue_revision, g_free);
+  if (self->remote_edits) {
+    g_queue_free_full (self->remote_edits, (GDestroyNotify) spotifygtk_connect_command_free);
+    self->remote_edits = NULL;
   }
 
   G_OBJECT_CLASS (spotifygtk_native_window_parent_class)->dispose (object);

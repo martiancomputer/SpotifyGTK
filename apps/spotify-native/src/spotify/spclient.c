@@ -1087,6 +1087,101 @@ request_expanded_search (SpotifySpclient *self, const gchar *context_uri,
     search_context_request_page (cl, page);
 }
 
+typedef struct {
+  SoupMessage *message;
+  SpclientContextCallback callback;
+  gpointer data;
+} PlaylistSearch;
+
+static void
+on_playlist_search (GObject *source, GAsyncResult *result, gpointer data)
+{
+  PlaylistSearch *request = data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) body = soup_session_send_and_read_finish (
+    SOUP_SESSION (source), result, &error);
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  JsonNode *answer = NULL;
+  if (body && !error) {
+    guint status = soup_message_get_status (request->message);
+    if (status != SOUP_STATUS_OK)
+      g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "playlist search returned HTTP %u", status);
+    else {
+      gsize len;
+      const gchar *bytes = g_bytes_get_data (body, &len);
+      if (json_parser_load_from_data (parser, bytes, len, &error)) {
+        JsonNode *root = json_parser_get_root (parser);
+        if (JSON_NODE_HOLDS_OBJECT (root) &&
+            !json_object_has_member (json_node_get_object (root), "errors"))
+          answer = json_node_copy (root);
+        else
+          g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "playlist search query unavailable");
+      }
+    }
+  }
+  request->callback (answer, error, request->data);
+  g_object_unref (request->message);
+  g_free (request);
+}
+
+void
+spotifygtk_spclient_search_playlists (SpotifySpclient *self, const gchar *query,
+  const gchar *bearer_token, const gchar *client_token, GCancellable *cancellable,
+  SpclientContextCallback callback, gpointer data)
+{
+  /* Verified desktop query reference (2026-06-02):
+   * github.com/jbaruch/spotify-playlist-driver/blob/main/skills/spotify-playlist-driver/spotify-playlist.jsh
+   * Isolated from searchTracks so a rotated hash cannot break song search. */
+  g_autoptr(JsonBuilder) builder = json_builder_new ();
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "operationName");
+  json_builder_add_string_value (builder, "searchDesktop");
+  json_builder_set_member_name (builder, "variables");
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "searchTerm");
+  json_builder_add_string_value (builder, query);
+  json_builder_set_member_name (builder, "offset"); json_builder_add_int_value (builder, 0);
+  json_builder_set_member_name (builder, "limit"); json_builder_add_int_value (builder, 20);
+  json_builder_set_member_name (builder, "numberOfTopResults"); json_builder_add_int_value (builder, 5);
+  const gchar *flags[] = { "includeAudiobooks", "includeArtistHasConcertsField",
+    "includePreReleases", "includeLocalConcertsField" };
+  for (guint i = 0; i < G_N_ELEMENTS (flags); i++) {
+    json_builder_set_member_name (builder, flags[i]);
+    json_builder_add_boolean_value (builder, FALSE);
+  }
+  json_builder_end_object (builder);
+  json_builder_set_member_name (builder, "extensions"); json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "persistedQuery"); json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "version"); json_builder_add_int_value (builder, 1);
+  json_builder_set_member_name (builder, "sha256Hash");
+  json_builder_add_string_value (builder, "d9f785900f0710b31c07818d617f4f7600c1e21217e80f5b043d1e78d74e6026");
+  json_builder_end_object (builder); json_builder_end_object (builder); json_builder_end_object (builder);
+  g_autoptr(JsonNode) root = json_builder_get_root (builder);
+  g_autoptr(JsonGenerator) generator = json_generator_new ();
+  json_generator_set_root (generator, root);
+  g_autofree gchar *body = json_generator_to_data (generator, NULL);
+  PlaylistSearch *request = g_new0 (PlaylistSearch, 1);
+  request->callback = callback;
+  request->data = data;
+  request->message = soup_message_new (SOUP_METHOD_POST,
+    "https://api-partner.spotify.com/pathfinder/v2/query");
+  g_autoptr(GBytes) bytes = g_bytes_new (body, strlen (body));
+  soup_message_set_request_body_from_bytes (request->message, "application/json", bytes);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (request->message);
+  g_autofree gchar *auth = g_strdup_printf ("Bearer %s", bearer_token ? bearer_token : "");
+  soup_message_headers_replace (headers, "Authorization", auth);
+  if (client_token && *client_token)
+    soup_message_headers_replace (headers, "Client-Token", client_token);
+  if (!self->gql_session) {
+    self->gql_session = soup_session_new_with_options ("user-agent", PATHFINDER_UA, NULL);
+    spotifygtk_soup_session_configure_tls (self->gql_session);
+  }
+  soup_session_send_and_read_async (self->gql_session, request->message,
+    G_PRIORITY_DEFAULT, cancellable, on_playlist_search, request);
+}
+
 
 /*
  * Artist portrait, over the same batch endpoint the track metadata uses.

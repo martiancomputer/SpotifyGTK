@@ -113,6 +113,7 @@ struct _SpotifyGtkArtistPage {
   GtkLabel            *year_label;
   GtkWidget           *follow_btn;
   GtkWidget           *title_row;   /* right edge kept level with the hero */
+  guint                align_frames;
   GtkWidget           *scroller;
   SpotifyGtkArtistFollowFunc follow_fn;
   gpointer                   follow_data;
@@ -247,6 +248,9 @@ align_title_to_hero (GtkWidget *w, GdkFrameClock *clock, gpointer data)
 {
   SpotifyGtkArtistPage *self = data;
   (void) w; (void) clock;
+  /* A scrollbar may legitimately have no allocation (short/unmapped page).
+   * Never keep a global frame clock alive waiting for a non-existent gutter. */
+  if (++self->align_frames > 8) return G_SOURCE_REMOVE;
 
   if (!self->title_row || !self->scroller)
     return G_SOURCE_REMOVE;

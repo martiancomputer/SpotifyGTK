@@ -40,6 +40,7 @@ struct _SpotifyGtkTrackRow {
   GtkLabel *title_label;
   GtkLabel *artist_label;
   GtkLabel *album_label;
+  GtkWidget *type_label;
   GtkLabel *section_title;
   GtkLabel *section_detail;
   GtkWidget *section_row;
@@ -66,6 +67,7 @@ struct _SpotifyGtkTrackRow {
   gboolean      cover_shown;
 
   gboolean show_album;
+  gboolean show_cover;
   gboolean show_artists;
   gboolean is_playing;
   gboolean is_paused;
@@ -256,7 +258,7 @@ spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
 
-  if (self->cover_shown || self->cover_request_pending ||
+  if (!self->show_cover || self->cover_shown || self->cover_request_pending ||
       !self->pending_cover_id)
     return;
 
@@ -351,7 +353,7 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
    * re-asked only for its own rows and everything else was lost. Here the list
    * that holds is the list that retries, so there is no one else to lose.
    */
-  if (self->cover_hold)
+  if (self->cover_hold || !self->show_cover)
     return;
 
   self->cover_request_pending = TRUE;
@@ -400,6 +402,7 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self),
                                   GTK_ORIENTATION_VERTICAL);
   self->show_album = TRUE;
+  self->show_cover = TRUE;
   self->show_artists = TRUE;
 
   self->section_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
@@ -467,6 +470,11 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->title_label));
 
   GtkWidget *meta_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  self->type_label = gtk_label_new ("Track");
+  gtk_widget_add_css_class (self->type_label, "caption");
+  gtk_widget_add_css_class (self->type_label, "dim-label");
+  gtk_widget_set_visible (self->type_label, FALSE);
+  gtk_box_append (GTK_BOX (meta_row), self->type_label);
   self->artist_label = GTK_LABEL (gtk_label_new ("Artist"));
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "dim-label");
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "caption");
@@ -693,6 +701,17 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
   gtk_label_set_text (self->artist_label, track->artists ? track->artists : "");
   gtk_label_set_text (self->album_label, track->album ? track->album : "");
 
+  gboolean album = track->uri && g_str_has_prefix (track->uri, "spotify:album:");
+  gboolean playlist = track->uri && g_str_has_prefix (track->uri, "spotify:playlist:");
+  gtk_label_set_text (GTK_LABEL (self->type_label),
+                      playlist ? "Playlist" : album ? "Album" : "Track");
+  gtk_widget_set_visible (self->status_slot, !album && !playlist);
+  gtk_widget_set_visible (GTK_WIDGET (self->album_label), self->show_album && !album && !playlist);
+  gtk_button_set_icon_name (self->play_btn,
+    album || playlist ? "go-next-symbolic" : "media-playback-start-symbolic");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->play_btn),
+    playlist ? "View Playlist" : album ? "View Album" : "Play");
+
   gboolean has_section = track->section_title && *track->section_title;
   gtk_label_set_text (self->section_title,
                       has_section ? track->section_title : "");
@@ -789,6 +808,23 @@ spotifygtk_track_row_set_show_album (SpotifyGtkTrackRow *self, gboolean show)
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
   self->show_album = show;
   gtk_widget_set_visible (GTK_WIDGET (self->album_label), show);
+}
+
+void
+spotifygtk_track_row_set_show_type (SpotifyGtkTrackRow *self, gboolean show)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+  gtk_widget_set_visible (self->type_label, show);
+}
+
+void
+spotifygtk_track_row_set_show_cover (SpotifyGtkTrackRow *self, gboolean show)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+  show = !!show;
+  if (self->show_cover == show) return;
+  self->show_cover = show;
+  if (!show) spotifygtk_track_row_release_cover (self);
 }
 
 void

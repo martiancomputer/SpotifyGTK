@@ -89,6 +89,12 @@ void spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self,
 void spotifygtk_track_list_set_borrowed_native_tracks (SpotifyGtkTrackList *self,
                                                        GPtrArray           *tracks);
 
+/* Search-only display rows. Albums follow their first matching song; playlists
+ * follow primary results. NULL removes contexts. Song items are retained, and
+ * snapshot() includes only songs so Next/Connect never see an album URI. */
+void spotifygtk_track_list_set_search_contexts (SpotifyGtkTrackList *self,
+                                                GPtrArray *contexts);
+
 /* Show a message instead of rows (loading, empty, error). */
 void spotifygtk_track_list_set_status (SpotifyGtkTrackList *self, const gchar *message);
 
@@ -113,6 +119,8 @@ void spotifygtk_track_list_set_external_viewport (SpotifyGtkTrackList *self,
                                                   GtkScrolledWindow  *scroller);
 
 void spotifygtk_track_list_set_numbered (SpotifyGtkTrackList *self, gboolean numbered);
+void spotifygtk_track_list_set_show_type (SpotifyGtkTrackList *self, gboolean show);
+void spotifygtk_track_list_set_show_covers (SpotifyGtkTrackList *self, gboolean show);
 
 /*
  * Reserve `px` of empty space above the first row, inside the scrollable area
@@ -147,6 +155,8 @@ GPtrArray *spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self);
 
 /* Signals:
  * - track-activated (gpointer track)
+ * - context-activated (gpointer context) — album/playlist result, never audio
+ * - context-menu (gpointer context, GtkWidget *anchor, gdouble x, gdouble y)
  *
  *   The payload type follows whichever setter populated the list:
  *   JsonObject* after set_tracks(), SpotifyNativeTrack* after

@@ -286,6 +286,15 @@ on_aggressive_filtering_toggled (GtkSwitch *sw, GParamSpec *pspec,
 }
 
 static void
+on_compact_mode_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  (void) pspec;
+  spotifygtk_settings_set_compact_mode (self->settings,
+                                        gtk_switch_get_active (sw));
+}
+
+static void
 on_online_lyrics_toggled (GtkSwitch *sw, GParamSpec *pspec,
                           gpointer user_data)
 {
@@ -496,6 +505,15 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
 
   /* ── Interface ─────────────────────────────────────────────── */
   GtkWidget *interface_group = build_group ("Interface");
+  GtkWidget *compact = gtk_switch_new ();
+  gtk_switch_set_active (GTK_SWITCH (compact),
+                         spotifygtk_settings_get_compact_mode (self->settings));
+  g_signal_connect (compact, "notify::active",
+                    G_CALLBACK (on_compact_mode_toggled), self);
+  gtk_box_append (GTK_BOX (interface_group),
+    build_row ("Compact mode",
+               "Use smaller album and playlist headers and mix search results "
+               "into one vertical list. Turn off for artwork-led detail pages.", compact));
 
   static const gchar * const themes[] = { "Dark", "White", "Milk", "Dark+", NULL };
   GtkWidget *theme_dd = build_dropdown (themes,

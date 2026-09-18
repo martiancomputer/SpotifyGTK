@@ -20,7 +20,7 @@ if get_option('tests')
     '../src/spotify/connect_options.c',
     '../src/spotify/protobuf_min.c',
     include_directories: [config_inc, include_directories('../src')],
-    dependencies: [glib_dep, gio_dep],
+    dependencies: [glib_dep, gio_dep, json_glib_dep],
   )
   test('connect-shuffle-options', test_connect_options)
 
@@ -31,6 +31,19 @@ if get_option('tests')
     dependencies: [glib_dep, gio_dep],
   )
   test('settings', test_settings)
+
+  if enable_gui and adw_dep.found()
+    # Reuse the settings test source; no extra application C/H files are needed.
+    # This test requires a display (xvfb-run on headless Linux builders).
+    test_ui = executable('test-ui-presentation',
+      ['test_settings.c', '../src/main.c', '../src/player_service.c', '../src/playback_probe.c'] +
+        ui_sources + runtime_sources + spotify_connect_api_sources + spotify_proto_sources + audio_engine_sources,
+      include_directories: [config_inc, include_directories('../src'), spotify_connect_inc],
+      dependencies: all_deps + [gtk4_dep, adw_dep],
+      c_args: ['-DSPOTIFYGTK_ENGINE_LIBRARY', '-DSPOTIFYGTK_UI_TESTS'],
+    )
+    test('ui-presentation', test_ui, suite: 'gui')
+  endif
 
   test_track_meta = executable('test-track-meta',
     'test_track_meta.c',
