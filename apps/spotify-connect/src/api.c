@@ -28,10 +28,6 @@ on_api_response (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   RequestClosure    *cl   = user_data;
   g_autoptr(GError)  err  = NULL;
-  /* Transport failures jump to cleanup before JSON parsing. Cleanup-managed
-   * variables must already be initialized on that path. */
-  g_autoptr(JsonParser) parser = NULL;
-  g_autoptr(GError) parse_err = NULL;
 
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
 
@@ -52,7 +48,8 @@ on_api_response (GObject *source, GAsyncResult *result, gpointer user_data)
             cl->method, cl->url, status, reason ? reason : "", len);
 
   JsonObject *root = NULL;
-  parser = json_parser_new ();
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  g_autoptr(GError) parse_err = NULL;
 
   if (len > 0) {
     if (json_parser_load_from_data (parser, body, (gssize) len, &parse_err)) {

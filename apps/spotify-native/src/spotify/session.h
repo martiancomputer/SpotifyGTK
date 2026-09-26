@@ -55,7 +55,6 @@ typedef enum {
  * server did not supply one — rendering a placeholder is the UI's call. */
 typedef struct {
   gchar   *uri;
-  gchar   *context_uid; /* occurrence ID supplied by ContextTrack; duplicates differ */
   gchar   *name;
   gchar   *artists;      /* ", "-joined */
   gchar   *album;
@@ -109,11 +108,7 @@ void spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
                                                 const gchar *context_uri,
                                                 gint64 position_ms,
                                                 gboolean playing,
-                                                guint shuffle_mode,
-                                                gint64 duration_ms, guint repeat_mode,
-                                                const gchar *const *next_uris,
-                                                guint queued_count,
-                                                const gchar *const *previous_uris);
+                                                guint shuffle_mode);
 
 /*
  * Drop the connection and sign in again.
@@ -192,12 +187,6 @@ void spotifygtk_native_session_load_track_uris (SpotifyNativeSession *self,
 GPtrArray *spotifygtk_native_session_load_tracks_finish (SpotifyNativeSession *self,
                                                          GAsyncResult         *result,
                                                          GError              **error);
-
-/* Optional playlist search; finish returns an owned native catalog JSON node. */
-void spotifygtk_native_session_search_playlists (SpotifyNativeSession *self,
-  const gchar *query, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer data);
-JsonNode *spotifygtk_native_session_search_playlists_finish (SpotifyNativeSession *self,
-  GAsyncResult *result, GError **error);
 
 /* One release, with its tracks. Free with spotifygtk_native_release_free(). */
 typedef struct {
