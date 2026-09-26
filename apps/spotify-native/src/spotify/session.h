@@ -188,6 +188,15 @@ GPtrArray *spotifygtk_native_session_load_tracks_finish (SpotifyNativeSession *s
                                                          GAsyncResult         *result,
                                                          GError              **error);
 
+/* Optional playlist search, independent of the main track request. */
+void spotifygtk_native_session_search_playlists (SpotifyNativeSession *self,
+                                                 const gchar *query,
+                                                 GCancellable *cancellable,
+                                                 GAsyncReadyCallback callback,
+                                                 gpointer user_data);
+JsonNode *spotifygtk_native_session_search_playlists_finish (
+  SpotifyNativeSession *self, GAsyncResult *result, GError **error);
+
 /* One release, with its tracks. Free with spotifygtk_native_release_free(). */
 typedef struct {
   gchar               *uri;

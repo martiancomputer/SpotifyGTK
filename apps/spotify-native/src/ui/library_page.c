@@ -121,6 +121,8 @@ struct _SpotifyGtkLibraryPage {
   GtkWidget            *header_revealer; /* title + heading, folds away on scroll */
   SpotifyNativeSession *session;         /* not owned */
   GCancellable         *load_cancel;
+  guint                 load_timeout_id;
+  guint                 load_retry_count;
   gboolean              loading;
   gboolean              loaded;
 };
@@ -148,6 +150,7 @@ spotifygtk_library_page_dispose (GObject *object)
     g_cancellable_cancel (self->load_cancel);
     g_clear_object (&self->load_cancel);
   }
+  g_clear_handle_id (&self->load_timeout_id, g_source_remove);
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
@@ -179,6 +182,39 @@ spotifygtk_library_page_class_init (SpotifyGtkLibraryPageClass *klass)
  * over that read, and the names and covers are one batched lookup.
  */
 typedef struct { GWeakRef page; guint generation; } LibLoad;
+static void start_library_load (SpotifyGtkLibraryPage *self);
+
+static gboolean
+on_library_timeout (gpointer user_data)
+{
+  SpotifyGtkLibraryPage *self = user_data;
+  self->load_timeout_id = 0;
+  if (!self->load_cancel)
+    return G_SOURCE_REMOVE;
+
+  /* Mercury reads cannot be cancelled, so the generation guards their late
+   * replies. The metadata phase does obey the cancellable. */
+  self->generation++;
+  g_cancellable_cancel (self->load_cancel);
+  g_clear_object (&self->load_cancel);
+  set_loading (self, FALSE);
+  if (self->load_retry_count++ == 0) {
+    g_message ("library: read timed out; retrying once");
+    start_library_load (self);
+  } else {
+    gtk_label_set_text (GTK_LABEL (self->albums_status),
+                        "Library took too long to load. Reopen it to retry.");
+    gtk_widget_set_visible (self->albums_status, TRUE);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+static void
+arm_library_timeout (SpotifyGtkLibraryPage *self)
+{
+  g_clear_handle_id (&self->load_timeout_id, g_source_remove);
+  self->load_timeout_id = g_timeout_add_seconds (30, on_library_timeout, self);
+}
 
 static gboolean
 release_in_view (const SpotifyNativeRelease *release, LibraryView view)
@@ -279,15 +315,19 @@ on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   if (cl_generation != self->generation)
     return;   /* a newer load has already replaced this one */
+  g_clear_handle_id (&self->load_timeout_id, g_source_remove);
   g_clear_object (&self->load_cancel);
   set_loading (self, FALSE);
   if (!albums) {
-    if (!g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    if (!g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
       gtk_label_set_text (GTK_LABEL (self->albums_status),
                           "Could not load your albums right now.");
+      gtk_widget_set_visible (self->albums_status, TRUE);
+    }
     return;
   }
   self->loaded = TRUE;
+  self->load_retry_count = 0;
 
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
   self->saved_releases = g_steal_pointer (&albums);
@@ -297,25 +337,33 @@ on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
 /* Every album URI in the collection set. Liked tracks share that set and are
  * skipped here by prefix. */
+static gboolean
+read_saved_page (SpotifyGtkLibraryPage *self, const gchar *token);
+
 static void
 on_saved_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
                guint n_items, const gchar *next_token, gpointer user_data)
 {
-  SpotifyGtkLibraryPage *self = user_data;
+  LibLoad *cl = user_data;
+  g_autoptr(SpotifyGtkLibraryPage) self = g_weak_ref_get (&cl->page);
+  guint mine = cl->generation;
+  g_weak_ref_clear (&cl->page);
+  g_free (cl);
 
   /* Mercury replies cannot be cancelled at the transport layer. A session
    * replacement cancels and clears this marker, so discard its late pages
    * instead of continuing the old read against the new session. */
-  if (!self->load_cancel || g_cancellable_is_cancelled (self->load_cancel))
+  if (!self || mine != self->generation || !self->load_cancel ||
+      g_cancellable_is_cancelled (self->load_cancel))
     return;
 
-  guint mine = self->generation;
-
   if (!ok) {
+    g_clear_handle_id (&self->load_timeout_id, g_source_remove);
     g_clear_object (&self->load_cancel);
     set_loading (self, FALSE);
     gtk_label_set_text (GTK_LABEL (self->albums_status),
                         "Could not read your library right now.");
+    gtk_widget_set_visible (self->albums_status, TRUE);
     g_message ("library: saved-album read failed (status %u)", status);
     return;
   }
@@ -336,21 +384,43 @@ on_saved_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
     }
   }
 
-  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
-  g_autofree gchar *user = spotifygtk_native_session_dup_username (self->session);
-
-  if (next_token && *next_token && m && user) {
-    spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
-                                        next_token, 500, on_saved_page, self);
+  if (next_token && *next_token) {
+    if (read_saved_page (self, next_token))
+      return;
+    g_clear_handle_id (&self->load_timeout_id, g_source_remove);
+    g_clear_object (&self->load_cancel);
+    set_loading (self, FALSE);
+    gtk_label_set_text (GTK_LABEL (self->albums_status),
+                        "Library connection was lost. Reopen it to retry.");
+    gtk_widget_set_visible (self->albums_status, TRUE);
     return;
   }
 
-  LibLoad *cl = g_new0 (LibLoad, 1);
+  cl = g_new0 (LibLoad, 1);
   g_weak_ref_init (&cl->page, self);
   cl->generation = mine;
+  arm_library_timeout (self);
   spotifygtk_native_session_load_albums (self->session,
     (const gchar *const *) self->saved_album_uris->pdata,
     self->saved_album_uris->len, self->load_cancel, on_album_meta_loaded, cl);
+}
+
+static gboolean
+read_saved_page (SpotifyGtkLibraryPage *self, const gchar *token)
+{
+  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *user = m
+    ? spotifygtk_native_session_dup_username (self->session) : NULL;
+  if (!m || !user)
+    return FALSE;
+
+  LibLoad *cl = g_new0 (LibLoad, 1);
+  g_weak_ref_init (&cl->page, self);
+  cl->generation = self->generation;
+  arm_library_timeout (self);
+  spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
+                                      token, 500, on_saved_page, cl);
+  return TRUE;
 }
 
 void
@@ -368,6 +438,8 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
 
   self->session = session;
   self->generation++;
+  g_clear_handle_id (&self->load_timeout_id, g_source_remove);
+  self->load_retry_count = 0;
 
   if (self->load_cancel) {
     g_cancellable_cancel (self->load_cancel);
@@ -380,22 +452,11 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
   g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
 }
 
-void
-spotifygtk_library_page_refresh (SpotifyGtkLibraryPage *self)
+static void
+start_library_load (SpotifyGtkLibraryPage *self)
 {
-  g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
-
-  /* Resolving every saved album is substantial on a large collection. Do it
-   * on first visit instead of behind Home during every cold start. */
-  if (self->loaded || self->load_cancel)
-    return;
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY)
-    return;
-
-  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
-  g_autofree gchar *user = spotifygtk_native_session_dup_username (self->session);
-  if (!m || !user)
     return;
 
   gtk_label_set_text (GTK_LABEL (self->albums_status), "");
@@ -406,8 +467,21 @@ spotifygtk_library_page_refresh (SpotifyGtkLibraryPage *self)
   self->generation++;
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
-  spotifygtk_collection_v2_read_page (m, user, SPOTIFYGTK_COLLECTION_SET_LIKED,
-                                      NULL, 500, on_saved_page, self);
+  if (!read_saved_page (self, NULL)) {
+    g_clear_object (&self->load_cancel);
+    set_loading (self, FALSE);
+  }
+}
+
+void
+spotifygtk_library_page_refresh (SpotifyGtkLibraryPage *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
+  /* Lazy first visit, with a clear retry path after a failed request. */
+  if (self->loaded || self->load_cancel)
+    return;
+  self->load_retry_count = 0;
+  start_library_load (self);
 }
 
 SpotifyGtkAlbumGrid *

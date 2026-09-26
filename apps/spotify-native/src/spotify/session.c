@@ -3144,6 +3144,77 @@ spotifygtk_native_session_load_albums_finish (SpotifyNativeSession *self,
   return g_task_propagate_pointer (G_TASK (result), error);
 }
 
+static void
+on_catalog_playlists (JsonNode *answer, GError *error, gpointer user_data)
+{
+  GTask *task = user_data;
+  if (error) {
+    if (answer)
+      json_node_unref (answer);
+    g_task_return_error (task, g_error_copy (error));
+  } else if (answer) {
+    g_task_return_pointer (task, answer, (GDestroyNotify) json_node_unref);
+  } else {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                             "No playlist search response");
+  }
+  g_object_unref (task);
+}
+
+static gboolean
+start_catalog_playlists (gpointer user_data)
+{
+  GTask *task = user_data;
+  SpotifyNativeSession *self = g_task_get_source_object (task);
+  if (g_task_return_error_if_cancelled (task)) {
+    g_object_unref (task);
+    return G_SOURCE_REMOVE;
+  }
+  g_mutex_lock (&self->lock);
+  gboolean ready = self->state == SPOTIFYGTK_SESSION_READY;
+  g_autofree gchar *bearer = g_strdup (self->bearer_token);
+  g_autofree gchar *client = g_strdup (self->client_token);
+  g_mutex_unlock (&self->lock);
+  if (!ready || !self->spclient) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
+                             "Session not ready");
+    g_object_unref (task);
+  } else {
+    spotifygtk_spclient_search_playlists (self->spclient,
+      g_task_get_task_data (task), bearer, client, g_task_get_cancellable (task),
+      on_catalog_playlists, task);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+void
+spotifygtk_native_session_search_playlists (SpotifyNativeSession *self,
+                                             const gchar *query,
+                                             GCancellable *cancellable,
+                                             GAsyncReadyCallback callback,
+                                             gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+  GTask *task = g_task_new (self, cancellable, callback, user_data);
+  g_task_set_task_data (task, g_strdup (query), g_free);
+  if (!self->context) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
+                             "Session not started");
+    g_object_unref (task);
+  } else {
+    g_main_context_invoke (self->context, start_catalog_playlists, task);
+  }
+}
+
+JsonNode *
+spotifygtk_native_session_search_playlists_finish (SpotifyNativeSession *self,
+                                                   GAsyncResult *result,
+                                                   GError **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+  return g_task_propagate_pointer (G_TASK (result), error);
+}
+
 /* First leg: every release URI the artist has, and which group it sits in. */
 static void
 on_disco_releases (GPtrArray *releases, GError *error, gpointer user_data)

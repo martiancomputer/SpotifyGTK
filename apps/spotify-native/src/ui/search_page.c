@@ -19,9 +19,8 @@
 #define SEARCH_DEBOUNCE_MS 350
 #define SEARCH_RESULT_LIMIT SPOTIFYGTK_SESSION_MAX_TRACKS
 
-/* Height reserved above the first row for the floating header (title + entry
- * + its top/bottom margins). Rows scroll up under the header's fading edge. */
-#define SEARCH_HEADER_INSET 128
+#define SEARCH_ALBUM_LIMIT 50
+#define SEARCH_PLAYLIST_LIMIT 50
 
 struct _SpotifyGtkSearchPage {
   GtkBox parent_instance;
@@ -29,11 +28,20 @@ struct _SpotifyGtkSearchPage {
   GtkSearchEntry      *entry;
   SpotifyGtkTrackList *results;
   SpotifyGtkAlbumGrid *albums;
-  GtkWidget           *albums_section;   /* Album shelf; hidden when empty */
+  GtkWidget           *albums_section;
+  GtkLabel            *message;
+  GPtrArray           *contexts; /* owned album and playlist display records */
+  guint                album_count;
+  guint                track_count;
+  JsonNode            *playlist_answer;
+  gchar               *result_query;
+  gboolean             compact;
+  gboolean             aggressive;
 
   SpotifyNativeSession *session;
 
   GCancellable *in_flight;
+  GCancellable *playlist_request;
   guint         debounce_id;
   gboolean      searching;
   guint64       serial;
@@ -93,6 +101,159 @@ compare_search_tracks (gconstpointer a, gconstpointer b, gpointer user_data)
   return (ra > rb) - (ra < rb);
 }
 
+static JsonObject *
+object_child (JsonObject *parent, const gchar *name)
+{
+  JsonNode *node = parent ? json_object_get_member (parent, name) : NULL;
+  return node && JSON_NODE_HOLDS_OBJECT (node) ? json_node_get_object (node) : NULL;
+}
+
+static JsonArray *
+array_child (JsonObject *parent, const gchar *name)
+{
+  JsonNode *node = parent ? json_object_get_member (parent, name) : NULL;
+  return node && JSON_NODE_HOLDS_ARRAY (node) ? json_node_get_array (node) : NULL;
+}
+
+static const gchar *
+string_child (JsonObject *parent, const gchar *name)
+{
+  JsonNode *node = parent ? json_object_get_member (parent, name) : NULL;
+  return node && JSON_NODE_HOLDS_VALUE (node) &&
+    json_node_get_value_type (node) == G_TYPE_STRING
+    ? json_node_get_string (node) : NULL;
+}
+
+static void
+sync_result_layout (SpotifyGtkSearchPage *self)
+{
+  gtk_widget_set_visible (self->albums_section,
+    !self->compact && self->contexts->len > 0);
+  spotifygtk_track_list_set_search_contexts (self->results,
+    self->compact ? self->contexts : NULL);
+}
+
+static void
+show_message (SpotifyGtkSearchPage *self, const gchar *text)
+{
+  gtk_label_set_text (self->message, text ? text : "");
+  gtk_widget_set_visible (GTK_WIDGET (self->message), text && *text);
+}
+
+/* Search returns a ranked track list. The first distinct albums in that list
+ * form the first fifty shelf cards. Keep the records separately so adding
+ * playlists later does not rebuild those cards or the already bound rows. */
+static void
+render_albums (SpotifyGtkSearchPage *self, GPtrArray *tracks)
+{
+  g_ptr_array_set_size (self->contexts, 0);
+  g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
+  for (guint i = 0; i < tracks->len && self->contexts->len < SEARCH_ALBUM_LIMIT; i++) {
+    const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
+    if (!track->album_uri || !*track->album_uri ||
+        g_hash_table_contains (seen, track->album_uri))
+      continue;
+    g_hash_table_add (seen, track->album_uri);
+    SpotifyNativeTrack *context = g_new0 (SpotifyNativeTrack, 1);
+    context->uri = g_strdup (track->album_uri);
+    context->name = g_strdup (track->album ? track->album : "Album");
+    context->artists = g_strdup (track->artists);
+    context->cover_id = g_strdup (track->cover_id);
+    context->cover_id_small = g_strdup (track->cover_id_small);
+    g_ptr_array_add (self->contexts, context);
+  }
+  self->album_count = self->contexts->len;
+  g_autofree SpotifyGtkCardSpec *cards =
+    g_new0 (SpotifyGtkCardSpec, self->album_count);
+  g_autoptr(GPtrArray) subtitles = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < self->album_count; i++) {
+    const SpotifyNativeTrack *context = g_ptr_array_index (self->contexts, i);
+    gchar *subtitle = g_strdup_printf ("Album · %s",
+      context->artists ? context->artists : "");
+    g_ptr_array_add (subtitles, subtitle);
+    cards[i] = (SpotifyGtkCardSpec) { context->uri, context->name,
+                                     subtitle, context->cover_id };
+  }
+  spotifygtk_album_grid_set_cards (self->albums, cards, self->album_count);
+}
+
+static void
+render_playlists (SpotifyGtkSearchPage *self)
+{
+  JsonObject *root = self->playlist_answer && JSON_NODE_HOLDS_OBJECT (self->playlist_answer)
+    ? json_node_get_object (self->playlist_answer) : NULL;
+  JsonObject *search = object_child (object_child (root, "data"), "searchV2");
+  JsonArray *items = array_child (object_child (search, "playlists"), "items");
+  if (!items)
+    items = array_child (object_child (search, "playlistsV2"), "items");
+  g_ptr_array_set_size (self->contexts, self->album_count);
+  g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
+  g_autofree gchar *key = search_key (self->result_query);
+  guint count = items ? json_array_get_length (items) : 0;
+  for (guint i = 0; i < count &&
+       self->contexts->len - self->album_count < SEARCH_PLAYLIST_LIMIT; i++) {
+    JsonNode *node = json_array_get_element (items, i);
+    if (!JSON_NODE_HOLDS_OBJECT (node)) continue;
+    JsonObject *item = json_node_get_object (node);
+    JsonObject *data = object_child (object_child (item, "item"), "data");
+    if (!data) data = object_child (item, "data");
+    if (!data) data = item;
+    const gchar *uri = string_child (data, "uri");
+    const gchar *name = string_child (data, "name");
+    if (!uri || !name || !g_str_has_prefix (uri, "spotify:playlist:") ||
+        g_hash_table_contains (seen, uri)) continue;
+    g_hash_table_add (seen, (gpointer) uri);
+    JsonObject *owner = object_child (object_child (data, "ownerV2"), "data");
+    const gchar *owner_name = string_child (owner, "name");
+    if (!owner_name) owner_name = string_child (owner, "username");
+    if (self->aggressive) {
+      g_autofree gchar *name_key = search_key (name);
+      g_autofree gchar *owner_key = search_key (owner_name);
+      if (!*key || (!strstr (name_key, key) && !strstr (owner_key, key))) continue;
+    }
+    SpotifyNativeTrack *context = g_new0 (SpotifyNativeTrack, 1);
+    context->uri = g_strdup (uri);
+    context->name = g_strdup (name);
+    context->artists = g_strdup (owner_name);
+    JsonArray *images = array_child (object_child (data, "images"), "items");
+    for (guint j = 0; images && j < json_array_get_length (images) &&
+         !context->cover_id; j++) {
+      JsonNode *image = json_array_get_element (images, j);
+      if (!JSON_NODE_HOLDS_OBJECT (image)) continue;
+      JsonArray *sources = array_child (json_node_get_object (image), "sources");
+      for (guint k = 0; sources && k < json_array_get_length (sources); k++) {
+        JsonNode *source = json_array_get_element (sources, k);
+        const gchar *url = JSON_NODE_HOLDS_OBJECT (source)
+          ? string_child (json_node_get_object (source), "url") : NULL;
+        const gchar *prefix = "https://i.scdn.co/image/";
+        if (url && g_str_has_prefix (url, prefix)) {
+          context->cover_id = g_strdup (url + strlen (prefix));
+          break;
+        }
+      }
+    }
+    g_ptr_array_add (self->contexts, context);
+  }
+  guint n = self->contexts->len - self->album_count;
+  g_autofree SpotifyGtkCardSpec *cards = g_new0 (SpotifyGtkCardSpec, n);
+  g_autoptr(GPtrArray) subtitles = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < n; i++) {
+    const SpotifyNativeTrack *context =
+      g_ptr_array_index (self->contexts, self->album_count + i);
+    gchar *subtitle = g_strdup_printf ("Playlist · %s",
+      context->artists ? context->artists : "");
+    g_ptr_array_add (subtitles, subtitle);
+    cards[i] = (SpotifyGtkCardSpec) { context->uri, context->name,
+                                     subtitle, context->cover_id };
+  }
+  spotifygtk_album_grid_replace_tail (self->albums, self->album_count, cards, n);
+  sync_result_layout (self);
+  if (n > 0)
+    show_message (self, NULL);
+  else if (self->album_count == 0 && self->track_count == 0)
+    show_message (self, "No results.");
+}
+
 static void
 set_searching (SpotifyGtkSearchPage *self, gboolean searching)
 {
@@ -112,18 +273,85 @@ on_track_activated (SpotifyGtkTrackList *list, gpointer track, gpointer user_dat
   (void) list;
 }
 
-/* The floating header must clear whichever section is topmost. When albums
- * show, they sit at the top and carry the inset (set once at build time), so
- * the list drops its own; when there are no albums, the list is topmost and
- * takes the inset back. */
 static void
-set_albums_visible (SpotifyGtkSearchPage *self, gboolean visible)
+on_context_activated (SpotifyGtkTrackList *list,
+                      const SpotifyNativeTrack *context,
+                      SpotifyGtkSearchPage *self)
 {
-  gtk_widget_set_visible (self->albums_section, visible);
-  spotifygtk_track_list_set_top_inset (self->results,
-                                       visible ? 0 : SEARCH_HEADER_INSET);
-  if (!visible)
-    spotifygtk_album_grid_clear (self->albums);
+  g_signal_emit_by_name (self->albums, "album-activated",
+                         context->uri, context->name);
+  (void) list;
+}
+
+static void
+on_context_menu (SpotifyGtkTrackList *list,
+                 const SpotifyNativeTrack *context,
+                 GtkWidget *anchor, gdouble x, gdouble y,
+                 SpotifyGtkSearchPage *self)
+{
+  SpotifyGtkCardSpec card = { context->uri, context->name,
+                             context->artists, context->cover_id };
+  spotifygtk_album_grid_present_context_menu (self->albums, anchor,
+                                               &card, x, y);
+  (void) list;
+}
+
+static void
+on_settings_changed (SpotifyGtkSettings *settings,
+                     SpotifyGtkSearchPage *self)
+{
+  gboolean compact = spotifygtk_settings_get_compact_mode (settings);
+  if (compact != self->compact) {
+    self->compact = compact;
+    sync_result_layout (self);
+  }
+  gboolean aggressive = spotifygtk_settings_get_aggressive_filtering (settings);
+  if (aggressive != self->aggressive) {
+    self->aggressive = aggressive;
+    if (self->playlist_answer)
+      render_playlists (self);
+  }
+}
+
+static void
+on_playlists_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  SearchClosure *cl = user_data;
+  g_autoptr(SpotifyGtkSearchPage) self = g_weak_ref_get (&cl->page);
+  guint64 serial = cl->serial;
+  g_weak_ref_clear (&cl->page);
+  g_free (cl->query);
+  g_free (cl);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(JsonNode) answer = spotifygtk_native_session_search_playlists_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  if (!self || serial != self->serial) return;
+  g_clear_object (&self->playlist_request);
+  if (!answer) {
+    if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+      g_message ("search: optional playlist results unavailable: %s",
+                 error ? error->message : "empty response");
+    if (self->track_count == 0)
+      show_message (self, "No results.");
+    return;
+  }
+  g_clear_pointer (&self->playlist_answer, json_node_unref);
+  self->playlist_answer = g_steal_pointer (&answer);
+  render_playlists (self);
+}
+
+static void
+request_playlists (SpotifyGtkSearchPage *self, const gchar *query)
+{
+  g_free (self->result_query);
+  self->result_query = g_strdup (query);
+  if (!self->session) return;
+  self->playlist_request = g_cancellable_new ();
+  SearchClosure *cl = g_new0 (SearchClosure, 1);
+  g_weak_ref_init (&cl->page, self);
+  cl->serial = self->serial;
+  spotifygtk_native_session_search_playlists (self->session, query,
+    self->playlist_request, on_playlists_loaded, cl);
 }
 
 static void
@@ -155,16 +383,27 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
       return;
     g_autofree gchar *msg = g_strdup_printf ("Search failed: %s", err->message);
-    set_albums_visible (self, FALSE);
+    g_ptr_array_set_size (self->contexts, 0);
+    self->album_count = 0;
+    self->track_count = 0;
+    spotifygtk_album_grid_clear (self->albums);
     spotifygtk_track_list_clear (self->results);
-    spotifygtk_track_list_set_status (self->results, msg);
+    spotifygtk_track_list_set_status (self->results, NULL);
+    sync_result_layout (self);
+    show_message (self, msg);
     return;
   }
 
   if (tracks->len == 0) {
-    set_albums_visible (self, FALSE);
+    g_ptr_array_set_size (self->contexts, 0);
+    self->album_count = 0;
+    self->track_count = 0;
+    spotifygtk_album_grid_clear (self->albums);
     spotifygtk_track_list_clear (self->results);
-    spotifygtk_track_list_set_status (self->results, "No results.");
+    spotifygtk_track_list_set_status (self->results, NULL);
+    sync_result_layout (self);
+    show_message (self, "No track results. Checking playlists…");
+    request_playlists (self, query);
     return;
   }
 
@@ -173,6 +412,7 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
    * playback filler; applying that filter here would throw away Spotify's
    * fuzzy/semantic matches and make the expanded result set look small again. */
   g_autoptr(GPtrArray) shown = g_ptr_array_ref (tracks);
+  self->track_count = shown->len;
   if (spotifygtk_settings_get_aggressive_filtering (
         spotifygtk_settings_get_default ())) {
     g_autofree gchar *query_key = search_key (query);
@@ -181,10 +421,11 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 
   /* The albums shelf is the distinct albums present in these very results --
    * real matches, grouped, not a second query. */
-  guint n_albums = spotifygtk_album_grid_set_from_tracks (self->albums, shown, 40);
-  set_albums_visible (self, n_albums > 0);
-
+  show_message (self, NULL);
+  render_albums (self, shown);
   spotifygtk_track_list_set_native_tracks (self->results, shown);
+  sync_result_layout (self);
+  request_playlists (self, query);
 }
 
 static gboolean
@@ -202,19 +443,29 @@ dispatch_search (gpointer user_data)
     g_cancellable_cancel (self->in_flight);
     g_clear_object (&self->in_flight);
   }
+  if (self->playlist_request) {
+    g_cancellable_cancel (self->playlist_request);
+    g_clear_object (&self->playlist_request);
+  }
+  g_clear_pointer (&self->playlist_answer, json_node_unref);
 
   if (!query || !*query) {
     set_searching (self, FALSE);
-    set_albums_visible (self, FALSE);
+    g_ptr_array_set_size (self->contexts, 0);
+    self->album_count = 0;
+    self->track_count = 0;
+    spotifygtk_album_grid_clear (self->albums);
     spotifygtk_track_list_clear (self->results);
     spotifygtk_track_list_set_status (self->results, NULL);
+    sync_result_layout (self);
+    show_message (self, NULL);
     return G_SOURCE_REMOVE;
   }
 
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
     set_searching (self, FALSE);
-    spotifygtk_track_list_set_status (self->results, "Not signed in yet.");
+    show_message (self, "Not signed in yet.");
     return G_SOURCE_REMOVE;
   }
 
@@ -228,6 +479,7 @@ dispatch_search (gpointer user_data)
    * progress strip floats above the page, so searching neither inserts a row
    * nor makes the content jump between list and status views. */
   spotifygtk_track_list_set_status (self->results, NULL);
+  show_message (self, NULL);
   set_searching (self, TRUE);
 
   self->in_flight = g_cancellable_new ();
@@ -247,6 +499,11 @@ on_search_changed (GtkSearchEntry *entry, gpointer user_data)
 {
   SpotifyGtkSearchPage *self = user_data;
   g_clear_handle_id (&self->debounce_id, g_source_remove);
+  self->serial++;
+  if (self->in_flight)
+    g_cancellable_cancel (self->in_flight);
+  if (self->playlist_request)
+    g_cancellable_cancel (self->playlist_request);
   self->debounce_id = g_timeout_add (SEARCH_DEBOUNCE_MS, dispatch_search, self);
   (void) entry;
 }
@@ -269,6 +526,13 @@ spotifygtk_search_page_dispose (GObject *object)
   if (self->in_flight)
     g_cancellable_cancel (self->in_flight);
   g_clear_object (&self->in_flight);
+  if (self->playlist_request)
+    g_cancellable_cancel (self->playlist_request);
+  g_clear_object (&self->playlist_request);
+  g_clear_pointer (&self->playlist_answer, json_node_unref);
+  g_clear_pointer (&self->contexts, g_ptr_array_unref);
+  g_clear_pointer (&self->result_query, g_free);
+  g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
   g_clear_object (&self->session);
 
   G_OBJECT_CLASS (spotifygtk_search_page_parent_class)->dispose (object);
@@ -294,49 +558,30 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
+  self->contexts = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  self->compact = spotifygtk_settings_get_compact_mode (settings);
+  self->aggressive = spotifygtk_settings_get_aggressive_filtering (settings);
+  g_signal_connect (settings, "changed", G_CALLBACK (on_settings_changed), self);
 
-  /* The list fills the whole page and the header floats over its top edge, so
-   * rows scroll up *underneath* the title and entry rather than starting below
-   * them. The list is inset by the header's height so the first row clears it. */
-  GtkWidget *overlay = gtk_overlay_new ();
-  gtk_widget_set_hexpand (overlay, TRUE);
-  gtk_widget_set_vexpand (overlay, TRUE);
-
-  GtkWidget *base = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
-
-  /* Albums shelf: hidden until a search returns albums. It sits at the top and
-   * carries the header inset so its cards slide under the frosted header; the
-   * list below it then needs no inset of its own. */
-  self->albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-  /* A horizontal shelf must clip at the pane edge. An outer end margin first
-   * clips the next card and then leaves a page-coloured strip beside it—the
-   * same light-theme rectangle Home used to show. */
-  gtk_widget_set_margin_end (self->albums_section, 0);
-  gtk_widget_set_margin_top (self->albums_section, SEARCH_HEADER_INSET);
-  gtk_widget_set_visible (self->albums_section, FALSE);
-
-  self->albums = spotifygtk_album_grid_new_shelf ();
-  gtk_box_append (GTK_BOX (self->albums_section), GTK_WIDGET (self->albums));
-  gtk_box_append (GTK_BOX (base), self->albums_section);
-
+  /* GtkListView's section header travels with its rows and has a single
+   * vertical adjustment. An outer GtkScrolledWindow would measure all 300
+   * rows and defeat virtualization; an overlay would pin this header. */
   self->results = spotifygtk_track_list_new ();
-  spotifygtk_track_list_set_content_margins (self->results, 35, 14);
-  /* No bottom margin; see the note in liked_songs_page.c. */
+  spotifygtk_track_list_set_content_margins (self->results, 28, 14);
+  spotifygtk_track_list_set_show_type (self->results, TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self->results), TRUE);
-  spotifygtk_track_list_set_top_inset (self->results, SEARCH_HEADER_INSET);
   g_signal_connect (self->results, "track-activated", G_CALLBACK (on_track_activated), self);
-  gtk_box_append (GTK_BOX (base), GTK_WIDGET (self->results));
+  g_signal_connect (self->results, "context-activated",
+                    G_CALLBACK (on_context_activated), self);
+  g_signal_connect (self->results, "context-menu",
+                    G_CALLBACK (on_context_menu), self);
 
-  gtk_overlay_set_child (GTK_OVERLAY (overlay), base);
-
-  /* Frosted header: pinned to the top, its own height only, so clicks below it
-   * fall through to the list. `.search-glass` gives it the gradient fade. */
   GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
-  gtk_widget_add_css_class (header, "search-glass");
-  gtk_widget_set_valign (header, GTK_ALIGN_START);
   gtk_widget_set_hexpand (header, TRUE);
   gtk_widget_set_margin_top (header, 24);
-  gtk_widget_set_margin_bottom (header, 22);
+  gtk_widget_set_margin_bottom (header, 10);
 
   GtkWidget *title = gtk_label_new ("Search");
   gtk_widget_add_css_class (title, "title-text");
@@ -351,9 +596,22 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   g_signal_connect (self->entry, "activate", G_CALLBACK (on_search_activate), self);
   gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->entry));
 
-  gtk_overlay_add_overlay (GTK_OVERLAY (overlay), header);
+  self->message = GTK_LABEL (gtk_label_new (NULL));
+  gtk_widget_add_css_class (GTK_WIDGET (self->message), "dim-label");
+  gtk_widget_set_visible (GTK_WIDGET (self->message), FALSE);
+  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->message));
 
-  gtk_box_append (GTK_BOX (self), overlay);
+  self->albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_margin_top (self->albums_section, 8);
+  gtk_widget_set_visible (self->albums_section, FALSE);
+  self->albums = spotifygtk_album_grid_new_shelf ();
+  spotifygtk_album_grid_set_content_margins (self->albums, 0, 0);
+  gtk_box_append (GTK_BOX (self->albums_section), GTK_WIDGET (self->albums));
+  gtk_box_append (GTK_BOX (header), self->albums_section);
+
+  spotifygtk_track_list_set_page_header (self->results, header);
+  spotifygtk_track_list_set_status (self->results, NULL);
+  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->results));
 }
 
 SpotifyGtkSearchPage *

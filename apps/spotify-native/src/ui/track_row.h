@@ -36,6 +36,7 @@ void spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self,
 /* The row's ordinal, or 0 to hide the column. Position-derived in numbered
  * lists, so it changes without the track changing. */
 void spotifygtk_track_row_set_number (SpotifyGtkTrackRow *self, gint track_number);
+void spotifygtk_track_row_set_show_type (SpotifyGtkTrackRow *self, gboolean show);
 
 /* While held, a bind records the cover it wants but does not fetch it. The
  * owning list lifts this and calls retry_cover() when scrolling settles. */
@@ -56,6 +57,8 @@ gboolean spotifygtk_track_row_duration_edge (SpotifyGtkTrackRow *self,
 void spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self);
 
 void spotifygtk_track_row_set_show_album (SpotifyGtkTrackRow *self,
+                                          gboolean show);
+void spotifygtk_track_row_set_show_cover (SpotifyGtkTrackRow *self,
                                           gboolean show);
 void spotifygtk_track_row_set_show_artists (SpotifyGtkTrackRow *self,
                                             gboolean show);

@@ -160,6 +160,33 @@ adjustment_for (SmoothScroll *ss)
 }
 
 static gboolean
+event_over_nested_horizontal_shelf (SmoothScroll *ss,
+                                    GtkEventControllerScroll *ctrl)
+{
+  if (ss->orientation != GTK_ORIENTATION_VERTICAL)
+    return FALSE;
+  GdkEvent *event = gtk_event_controller_get_current_event (GTK_EVENT_CONTROLLER (ctrl));
+  GtkNative *native = gtk_widget_get_native (GTK_WIDGET (ss->scroller));
+  gdouble x, y, tx, ty;
+  if (!event || !native || !gdk_event_get_position (event, &x, &y))
+    return FALSE;
+  gtk_native_get_surface_transform (native, &tx, &ty);
+  GtkWidget *picked = gtk_widget_pick (GTK_WIDGET (native), x + tx, y + ty,
+                                      GTK_PICK_DEFAULT);
+  for (GtkWidget *w = picked; w && w != GTK_WIDGET (ss->scroller);
+       w = gtk_widget_get_parent (w)) {
+    if (GTK_IS_SCROLLED_WINDOW (w)) {
+      GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (
+        GTK_SCROLLED_WINDOW (w));
+      if (hadj && gtk_adjustment_get_upper (hadj) >
+                  gtk_adjustment_get_page_size (hadj))
+        return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static gboolean
 smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 {
   SmoothScroll  *ss  = user_data;
@@ -326,9 +353,16 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
 {
   SmoothScroll *ss = user_data;
 
+  /* Capture runs from the parent toward the leaf. Give an embedded album
+   * shelf first refusal before the page's wheel animation claims the event. */
+  if (event_over_nested_horizontal_shelf (ss, ctrl))
+    return GDK_EVENT_PROPAGATE;
+
 #if GTK_CHECK_VERSION (4, 8, 0)
-  /* Touchpads already deliver continuous pixel deltas and GTK handles those
-   * well, including kinetic follow-through. Only the discrete case needs help. */
+  /* Native touchpad motion is left alone for vertical pages. A horizontal
+   * shelf nested in a vertical page is different: GTK otherwise lets its dy
+   * travel to the parent page. Translate that gesture into the shelf's own
+   * adjustment and stop it only while the shelf can actually move. */
   if (gtk_event_controller_scroll_get_unit (ctrl) != GDK_SCROLL_UNIT_WHEEL) {
     /* A touchpad gesture owns the adjustment from this event onward.  Cancel
      * an unfinished wheel animation immediately so its next frame cannot tug
@@ -339,6 +373,20 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
                    ss->target);
       gtk_widget_remove_tick_callback (GTK_WIDGET (ss->scroller), ss->tick);
       ss->tick = 0;
+    }
+    if (ss->orientation == GTK_ORIENTATION_HORIZONTAL) {
+      GtkAdjustment *adj = adjustment_for (ss);
+      if (adj) {
+        gdouble lower = gtk_adjustment_get_lower (adj);
+        gdouble upper = MAX (lower, gtk_adjustment_get_upper (adj) -
+                                   gtk_adjustment_get_page_size (adj));
+        gdouble delta = fabs (dx) > fabs (dy) ? dx : dy;
+        gdouble value = gtk_adjustment_get_value (adj);
+        if ((delta < 0 && value > lower) || (delta > 0 && value < upper)) {
+          set_adjustment_value (ss, adj, CLAMP (value + delta, lower, upper));
+          return GDK_EVENT_STOP;
+        }
+      }
     }
     return GDK_EVENT_PROPAGATE;
   }

@@ -61,6 +61,7 @@
 #define LOADING_PROGRESS_FADE_US 260000.0
 #define MPRIS_BUS_NAME "org.mpris.MediaPlayer2.spotifygtk"
 #define MPRIS_OBJECT_PATH "/org/mpris/MediaPlayer2"
+#define PLAYLIST_LOAD_TIMEOUT_SECONDS 30
 
 struct _SpotifyGtkNativeWindow {
   GtkApplicationWindow parent_instance;
@@ -139,6 +140,8 @@ struct _SpotifyGtkNativeWindow {
   guint      library_write_retry_id;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
+  guint playlists_timeout_id;
+  guint playlists_retry_count;
   guint transfer_generation;             /* stale in-flight transfer adoptions */
   guint context_generation;              /* stale search-radio resolutions */
   guint smart_generation;                /* stale Smart Shuffle resolutions */
@@ -1055,18 +1058,11 @@ refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
  * drift from what's on screen. It does not touch the queue or context —
  * callers own that decision. */
 static void
-remember_display_track (SpotifyGtkNativeWindow *self,
-                        const SpotifyNativeTrack *track)
+prune_display_tracks (SpotifyGtkNativeWindow *self)
 {
   enum { MAX_DISPLAY_TRACKS = 64 };
-
   if (!self->display_tracks)
-    self->display_tracks = g_hash_table_new_full (
-      g_str_hash, g_str_equal, g_free,
-      (GDestroyNotify) spotifygtk_native_track_free);
-
-  g_hash_table_replace (self->display_tracks, g_strdup (track->uri),
-                        spotifygtk_native_track_copy (track));
+    return;
 
   while (g_hash_table_size (self->display_tracks) > MAX_DISPLAY_TRACKS) {
     GHashTableIter iter;
@@ -1091,6 +1087,22 @@ remember_display_track (SpotifyGtkNativeWindow *self,
     if (!removed)
       break;
   }
+}
+
+static void
+remember_display_track (SpotifyGtkNativeWindow *self,
+                        const SpotifyNativeTrack *track)
+{
+  if (!self->display_tracks)
+    self->display_tracks = g_hash_table_new_full (
+      g_str_hash, g_str_equal, g_free,
+      (GDestroyNotify) spotifygtk_native_track_free);
+
+  /* Protect the new URI before pruning. A hash-table iteration can otherwise
+   * evict this very entry when the 64-entry limit is reached, leaving the
+   * audible handover without the metadata needed for its cover and title. */
+  g_hash_table_replace (self->display_tracks, g_strdup (track->uri),
+                        spotifygtk_native_track_copy (track));
 }
 
 static void
@@ -1148,12 +1160,17 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
      * disagreement, the audible track is the one to believe. */
     if (handover) {
       g_clear_pointer (&self->awaiting_uri, g_free);
-  g_clear_pointer (&self->order, g_array_unref);
     } else {
       g_free (self->awaiting_uri);
       self->awaiting_uri = g_strdup (track->uri);
     }
+  } else {
+    /* A natural gapless transition also needs a protected destination until
+     * the sink announces it. Keep the outgoing song on screen until then. */
+    g_free (self->awaiting_uri);
+    self->awaiting_uri = g_strdup (track->uri);
   }
+  prune_display_tracks (self);
 
   GError *error = NULL;
   /*
@@ -2220,31 +2237,69 @@ set_playlists_status (SpotifyGtkNativeWindow *self, const gchar *message)
   gtk_widget_set_visible (self->playlists_status, have);
 }
 
+typedef struct {
+  GWeakRef window;
+  guint generation;
+} PlaylistRootLoad;
+
+static void reload_playlists (SpotifyGtkNativeWindow *self);
+
+static gboolean
+on_playlists_timeout (gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  self->playlists_timeout_id = 0;
+  if (!self->playlists_loading)
+    return G_SOURCE_REMOVE;
+
+  self->playlists_generation++; /* invalidate the uncancellable Mercury reply */
+  self->playlists_loading = FALSE;
+  self->playlists_loaded = FALSE;
+  set_loading_source (self, self->playlists_grid, FALSE);
+  if (self->playlists_retry_count++ == 0) {
+    g_message ("playlists: rootlist timed out; retrying once");
+    reload_playlists (self);
+  } else {
+    set_playlists_status (self, "Playlists took too long to load. Reopen to retry.");
+  }
+  return G_SOURCE_REMOVE;
+}
+
 static void
 on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entries,
                           guint n_entries, gpointer user_data)
 {
-  SpotifyGtkNativeWindow *self = user_data;
+  PlaylistRootLoad *load = user_data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
+  guint generation = load->generation;
+  g_weak_ref_clear (&load->window);
+  g_free (load);
+  if (!self || generation != self->playlists_generation)
+    return;
+
+  g_clear_handle_id (&self->playlists_timeout_id, g_source_remove);
   self->playlists_loading = FALSE;
   set_loading_source (self, self->playlists_grid, FALSE);
   if (!self->playlists_grid)
     return;
 
-  /* Invalidates anything still in flight from a previous load. */
-  self->playlists_generation++;
-  spotifygtk_album_grid_clear (self->playlists_grid);
-
   if (!ok) {
+    self->playlists_loaded = FALSE;
     set_playlists_status (self, "Couldn\u2019t load your playlists.");
     g_warning ("playlists: rootlist read failed (status %d)", status);
     return;
   }
   if (n_entries == 0) {
+    spotifygtk_album_grid_clear (self->playlists_grid);
+    self->playlists_loaded = TRUE;
+    self->playlists_retry_count = 0;
     set_playlists_status (self, "No playlists yet.");
     return;
   }
+  spotifygtk_album_grid_clear (self->playlists_grid);
   set_playlists_status (self, NULL);
   self->playlists_loaded = TRUE;
+  self->playlists_retry_count = 0;
 
   SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
   if (!m)
@@ -2329,10 +2384,16 @@ reload_playlists (SpotifyGtkNativeWindow *self)
   if (!m || !user)
     return;
 
+  self->playlists_generation++;
   self->playlists_loading = TRUE;
   set_playlists_status (self, NULL);
   set_loading_source (self, self->playlists_grid, TRUE);
-  spotifygtk_playlist_list (m, user, on_page_playlists_listed, self);
+  PlaylistRootLoad *load = g_new0 (PlaylistRootLoad, 1);
+  g_weak_ref_init (&load->window, self);
+  load->generation = self->playlists_generation;
+  self->playlists_timeout_id = g_timeout_add_seconds (
+    PLAYLIST_LOAD_TIMEOUT_SECONDS, on_playlists_timeout, self);
+  spotifygtk_playlist_list (m, user, on_page_playlists_listed, load);
 }
 
 /*
@@ -4869,6 +4930,8 @@ on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
   self->current_track_duration_ms = track->duration_ms;
   spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
   show_now_playing (self, track);
+  refresh_transport_and_queue (self);
+  prune_display_tracks (self);
 
   /* The transfer that started this track said whether it should be playing.
    * This is the first moment an engine exists to be told. */
@@ -5791,6 +5854,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_handle_id (&self->collection_change_id, g_source_remove);
   g_clear_handle_id (&self->dev_nav_probe_id, g_source_remove);
   g_clear_handle_id (&self->library_write_retry_id, g_source_remove);
+  g_clear_handle_id (&self->playlists_timeout_id, g_source_remove);
 #ifdef SPOTIFYGTK_VERBOSE
   g_clear_handle_id (&self->memory_sample_id, g_source_remove);
 #endif

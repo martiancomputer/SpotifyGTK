@@ -70,6 +70,10 @@ void spotifygtk_track_list_set_velocity_overscan (SpotifyGtkTrackList *self,
                                                   gboolean             enabled);
 
 SpotifyGtkTrackList *spotifygtk_track_list_new (void);
+/* Own a page header as the list's single scrollable GTK section header.
+ * The widget must be unparented when passed and is used for this list's life. */
+void spotifygtk_track_list_set_page_header (SpotifyGtkTrackList *self,
+                                            GtkWidget *header);
 
 
 /*
@@ -88,6 +92,17 @@ void spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self,
  * keep every track alive until this list is cleared or populated again. */
 void spotifygtk_track_list_set_borrowed_native_tracks (SpotifyGtkTrackList *self,
                                                        GPtrArray           *tracks);
+
+/* Search-only album and playlist rows in the same virtual list as songs.
+ * NULL removes them; snapshot() continues to return playable tracks only. */
+void spotifygtk_track_list_set_search_contexts (SpotifyGtkTrackList *self,
+                                                GPtrArray *contexts);
+void spotifygtk_track_list_set_show_type (SpotifyGtkTrackList *self,
+                                          gboolean show);
+void spotifygtk_track_list_set_show_album (SpotifyGtkTrackList *self,
+                                           gboolean show);
+void spotifygtk_track_list_set_show_cover (SpotifyGtkTrackList *self,
+                                           gboolean show);
 
 /* Show a message instead of rows (loading, empty, error). */
 void spotifygtk_track_list_set_status (SpotifyGtkTrackList *self, const gchar *message);
@@ -147,6 +162,8 @@ GPtrArray *spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self);
 
 /* Signals:
  * - track-activated (gpointer track)
+ * - context-activated (gpointer album_or_playlist)
+ * - context-menu (gpointer context, GtkWidget *anchor, gdouble x, gdouble y)
  *
  *   The payload type follows whichever setter populated the list:
  *   JsonObject* after set_tracks(), SpotifyNativeTrack* after

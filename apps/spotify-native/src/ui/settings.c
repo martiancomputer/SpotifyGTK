@@ -19,6 +19,7 @@ struct _SpotifyGtkSettings {
 
   gboolean eq_enabled;
   gboolean aggressive_filtering;
+  gboolean compact_mode;
   gboolean caching_enabled;
   gboolean online_lyrics;
   guint    lyrics_font_size;
@@ -79,6 +80,9 @@ load (SpotifyGtkSettings *self)
   self->eq_enabled = g_key_file_get_boolean (kf, SETTINGS_GROUP, "eq-enabled", NULL);
   self->aggressive_filtering =
     g_key_file_get_boolean (kf, SETTINGS_GROUP, "aggressive-filtering", NULL);
+  if (g_key_file_has_key (kf, SETTINGS_GROUP, "compact-mode", NULL))
+    self->compact_mode =
+      g_key_file_get_boolean (kf, SETTINGS_GROUP, "compact-mode", NULL);
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "caching-enabled", NULL))
     self->caching_enabled =
       g_key_file_get_boolean (kf, SETTINGS_GROUP, "caching-enabled", NULL);
@@ -157,6 +161,8 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "eq-enabled", self->eq_enabled);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "aggressive-filtering",
                           self->aggressive_filtering);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "compact-mode",
+                          self->compact_mode);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "caching-enabled",
                           self->caching_enabled);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "online-lyrics",
@@ -228,6 +234,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
   self->renderer    = SPOTIFYGTK_RENDERER_AUTOMATIC;
   self->caching_enabled = TRUE;
+  self->compact_mode = TRUE;
   self->lyrics_font_size = 19;
   self->scroll_smoothness = 50;
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
@@ -311,6 +318,26 @@ spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
   if (self->aggressive_filtering == enabled)
     return;
   self->aggressive_filtering = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+gboolean
+spotifygtk_settings_get_compact_mode (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), TRUE);
+  return self->compact_mode;
+}
+
+void
+spotifygtk_settings_set_compact_mode (SpotifyGtkSettings *self,
+                                      gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->compact_mode == enabled)
+    return;
+  self->compact_mode = enabled;
   save (self);
   g_signal_emit (self, signals[CHANGED], 0);
 }

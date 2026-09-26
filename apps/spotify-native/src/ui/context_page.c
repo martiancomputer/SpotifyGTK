@@ -8,6 +8,8 @@
  */
 
 #include "context_page.h"
+#include "cover_loader.h"
+#include "settings.h"
 #include "../log_file.h"
 
 #define CONTEXT_PAGE_LIMIT 200
@@ -31,6 +33,14 @@ struct _SpotifyGtkContextPage {
   SpotifyGtkContextActionFunc action_fn;
   gpointer                    action_data;
   GtkLabel            *year_label;
+  GtkWidget           *compact_header;
+  GtkWidget           *expanded_header;
+  GtkLabel            *expanded_title;
+  GtkLabel            *expanded_kind;
+  GtkLabel            *expanded_meta;
+  GtkPicture          *expanded_cover;
+  GtkWidget           *expanded_action_btn;
+  GCancellable        *cover_request;
   SpotifyGtkTrackList *list;
 
   SpotifyNativeSession *session;
@@ -49,6 +59,83 @@ typedef struct {
   GWeakRef page;
   guint    generation;
 } ContextLoad;
+
+static void
+on_cover_loaded (GdkTexture *texture, gpointer user_data)
+{
+  SpotifyGtkContextPage *self = user_data;
+  gtk_picture_set_paintable (self->expanded_cover,
+                             texture ? GDK_PAINTABLE (texture) : NULL);
+  gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), texture != NULL);
+}
+
+static void
+on_layout_changed (SpotifyGtkSettings *settings,
+                   SpotifyGtkContextPage *self)
+{
+  gboolean compact = spotifygtk_settings_get_compact_mode (settings);
+  gtk_widget_set_visible (self->compact_header, compact);
+  gtk_widget_set_visible (self->expanded_header, !compact);
+  spotifygtk_track_list_set_show_album (self->list, compact);
+  spotifygtk_track_list_set_show_cover (self->list, compact);
+  spotifygtk_track_list_set_numbered (self->list, TRUE);
+  if (!compact && self->align_tick != 0) {
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->align_tick);
+    self->align_tick = 0;
+  } else if (compact && self->align_tick == 0 && self->list)
+    self->align_tick = gtk_widget_add_tick_callback (
+      GTK_WIDGET (self), align_action_to_durations, self, NULL);
+}
+
+static void
+update_expanded_metadata (SpotifyGtkContextPage *self, GPtrArray *tracks)
+{
+  gint year = 0;
+  gint64 total_ms = 0;
+  const gchar *artist = NULL;
+  gboolean multiple = FALSE;
+  for (guint i = 0; i < tracks->len; i++) {
+    const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
+    if (!year && track->release_year > 0) year = track->release_year;
+    if (!artist) artist = track->artists;
+    else if (g_strcmp0 (artist, track->artists) != 0) multiple = TRUE;
+    total_ms += MAX (track->duration_ms, 0);
+  }
+  if (year > 0 && g_str_has_prefix (self->current_uri, "spotify:album:")) {
+    g_autofree gchar *text = g_strdup_printf ("%d", year);
+    gtk_label_set_text (self->year_label, text);
+  }
+  const gchar *credit = multiple ? "Multiple artists" :
+    (artist && *artist ? artist : "Unknown artist");
+  guint hours = (guint) (total_ms / 3600000);
+  guint minutes = (guint) ((total_ms / 60000) % 60);
+  g_autofree gchar *meta = year > 0 &&
+    g_str_has_prefix (self->current_uri, "spotify:album:")
+    ? g_strdup_printf ("%d · %s · %u tracks · %u hr %u min",
+                       year, credit, tracks->len, hours, minutes)
+    : g_strdup_printf ("%s · %u tracks · %u hr %u min",
+                       credit, tracks->len, hours, minutes);
+  gtk_label_set_text (self->expanded_meta, meta);
+
+  /* An album's tracks carry its actual cover. A playlist's tracks do not
+   * carry playlist artwork, so never substitute an unrelated first-song art. */
+  if (self->cover_request)
+    g_cancellable_cancel (self->cover_request);
+  g_clear_object (&self->cover_request);
+  gtk_picture_set_paintable (self->expanded_cover, NULL);
+  gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), FALSE);
+  if (!g_str_has_prefix (self->current_uri, "spotify:album:") ||
+      tracks->len == 0) return;
+  const gchar *cover_id = NULL;
+  for (guint i = 0; i < tracks->len && !cover_id; i++) {
+    const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
+    cover_id = track->cover_id;
+  }
+  if (!cover_id) return;
+  self->cover_request = g_cancellable_new ();
+  spotifygtk_cover_load (cover_id, 260, self->cover_request,
+                         on_cover_loaded, self);
+}
 
 static void
 set_loading (SpotifyGtkContextPage *self, gboolean loading)
@@ -93,6 +180,10 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     /* A failed load must not be remembered as the current URI, or a retry via
      * re-navigation would be swallowed by the same-URI no-op. */
     g_clear_pointer (&self->current_uri, g_free);
+    if (self->align_tick) {
+      gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->align_tick);
+      self->align_tick = 0;
+    }
     return;
   }
 
@@ -104,18 +195,14 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
    * none. A mixed context (a playlist) will show its first track's year, which
    * is why the caller only asks for this on albums.
    */
-  for (guint i = 0; i < tracks->len; i++) {
-    const SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
-    if (t->release_year > 0) {
-      g_autofree gchar *year = g_strdup_printf ("%d", t->release_year);
-      gtk_label_set_text (self->year_label, year);
-      break;
-    }
-  }
-
+  update_expanded_metadata (self, tracks);
   spotifygtk_track_list_set_native_tracks (self->list, tracks);
   if (tracks->len == 0)
     spotifygtk_track_list_set_status (self->list, "Nothing here.");
+  if (tracks->len == 0 && self->align_tick) {
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->align_tick);
+    self->align_tick = 0;
+  }
 }
 
 static void
@@ -126,6 +213,10 @@ spotifygtk_context_page_dispose (GObject *object)
   if (self->in_flight)
     g_cancellable_cancel (self->in_flight);
   g_clear_object (&self->in_flight);
+  if (self->cover_request)
+    g_cancellable_cancel (self->cover_request);
+  g_clear_object (&self->cover_request);
+  g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_uri, g_free);
   g_clear_pointer (&self->current_kind, g_free);
@@ -146,24 +237,22 @@ static void
 spotifygtk_context_page_init (SpotifyGtkContextPage *self)
 {
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
-  gtk_box_set_spacing (GTK_BOX (self), 4);
-  gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
-  gtk_widget_set_margin_end (GTK_WIDGET (self), 12);
-  gtk_widget_set_margin_top (GTK_WIDGET (self), 24);
-  /*
-   * No bottom margin. It was 24px, and it cost twice: a dead band above the
-   * playback bar, and a viewport shortened by that much so the last row was
-   * cut wherever the new edge fell. Liked Songs and Search had the same margin
-   * removed for the same reason; this page kept it and so kept the stray
-   * rectangle after they lost it.
-   */
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
+
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_margin_start (header, 35);
+  gtk_widget_set_margin_end (header, 12);
+  gtk_widget_set_margin_top (header, 24);
+  gtk_widget_set_margin_bottom (header, 12);
+  gtk_widget_set_hexpand (header, TRUE);
+  self->compact_header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+  gtk_box_append (GTK_BOX (header), self->compact_header);
 
   self->kind_label = GTK_LABEL (gtk_label_new (""));
   gtk_widget_add_css_class (GTK_WIDGET (self->kind_label), "dim-text");
   gtk_label_set_xalign (self->kind_label, 0.0);
-  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->kind_label));
+  gtk_box_append (GTK_BOX (self->compact_header), GTK_WIDGET (self->kind_label));
 
   /*
    * Title and release year share a row, the year sitting just past the end of
@@ -207,17 +296,62 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   gtk_box_append (GTK_BOX (title_row), self->action_btn);
   self->title_row = title_row;
 
-  gtk_box_append (GTK_BOX (self), title_row);
+  gtk_box_append (GTK_BOX (self->compact_header), title_row);
+
+  self->expanded_header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 16);
+  GtkWidget *hero = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 24);
+  GtkWidget *cover_frame = gtk_overlay_new ();
+  gtk_widget_set_size_request (cover_frame, 232, 232);
+  GtkWidget *placeholder = gtk_image_new_from_icon_name ("audio-x-generic-symbolic");
+  gtk_image_set_pixel_size (GTK_IMAGE (placeholder), 72);
+  gtk_widget_add_css_class (placeholder, "art-large");
+  gtk_overlay_set_child (GTK_OVERLAY (cover_frame), placeholder);
+  self->expanded_cover = GTK_PICTURE (gtk_picture_new ());
+  gtk_picture_set_content_fit (self->expanded_cover, GTK_CONTENT_FIT_COVER);
+  gtk_picture_set_can_shrink (self->expanded_cover, TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->expanded_cover), "art-large");
+  gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), FALSE);
+  gtk_overlay_add_overlay (GTK_OVERLAY (cover_frame), GTK_WIDGET (self->expanded_cover));
+  gtk_box_append (GTK_BOX (hero), cover_frame);
+  GtkWidget *hero_text = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_set_hexpand (hero_text, TRUE);
+  gtk_widget_set_valign (hero_text, GTK_ALIGN_CENTER);
+  self->expanded_kind = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->expanded_kind), "dim-text");
+  gtk_label_set_xalign (self->expanded_kind, 0);
+  gtk_box_append (GTK_BOX (hero_text), GTK_WIDGET (self->expanded_kind));
+  self->expanded_title = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->expanded_title), "title-text");
+  gtk_label_set_xalign (self->expanded_title, 0);
+  gtk_label_set_ellipsize (self->expanded_title, PANGO_ELLIPSIZE_END);
+  gtk_box_append (GTK_BOX (hero_text), GTK_WIDGET (self->expanded_title));
+  self->expanded_action_btn = gtk_button_new_with_label ("");
+  gtk_widget_add_css_class (self->expanded_action_btn, "flat");
+  gtk_widget_set_halign (self->expanded_action_btn, GTK_ALIGN_START);
+  gtk_widget_set_visible (self->expanded_action_btn, FALSE);
+  g_signal_connect (self->expanded_action_btn, "clicked",
+                    G_CALLBACK (on_action_clicked), self);
+  gtk_box_append (GTK_BOX (hero_text), self->expanded_action_btn);
+  self->expanded_meta = GTK_LABEL (gtk_label_new (""));
+  gtk_widget_add_css_class (GTK_WIDGET (self->expanded_meta), "dim-text");
+  gtk_label_set_xalign (self->expanded_meta, 0);
+  gtk_label_set_ellipsize (self->expanded_meta, PANGO_ELLIPSIZE_END);
+  gtk_box_append (GTK_BOX (hero_text), GTK_WIDGET (self->expanded_meta));
+  gtk_box_append (GTK_BOX (hero), hero_text);
+  gtk_box_append (GTK_BOX (self->expanded_header), hero);
+  GtkWidget *separator = gtk_separator_new (GTK_ORIENTATION_HORIZONTAL);
+  gtk_box_append (GTK_BOX (self->expanded_header), separator);
+  gtk_box_append (GTK_BOX (header), self->expanded_header);
 
   self->list = spotifygtk_track_list_new ();
+  spotifygtk_track_list_set_content_margins (self->list, 35, 12);
   spotifygtk_track_list_set_numbered (self->list, TRUE);
+  spotifygtk_track_list_set_page_header (self->list, header);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->list));
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  g_signal_connect (settings, "changed", G_CALLBACK (on_layout_changed), self);
+  on_layout_changed (settings, self);
 
-  /* One at a time: a tick is armed per load, and each removes itself once it
-   * has a usable number, so navigating repeatedly must not stack them up. */
-  if (self->align_tick == 0)
-    self->align_tick = gtk_widget_add_tick_callback (
-      GTK_WIDGET (self), align_action_to_durations, self, NULL);
 }
 
 /*
@@ -235,6 +369,10 @@ align_action_to_durations (GtkWidget *w, GdkFrameClock *clock, gpointer data)
   (void) w; (void) clock;
 
   if (!self->title_row || !self->list) {
+    self->align_tick = 0;
+    return G_SOURCE_REMOVE;
+  }
+  if (!gtk_widget_get_visible (self->action_btn)) {
     self->align_tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -319,12 +457,22 @@ spotifygtk_context_page_set_action (SpotifyGtkContextPage *self,
     return;
   gtk_button_set_label (GTK_BUTTON (self->action_btn), label ? label : "");
   gtk_widget_set_visible (self->action_btn, visible);
+  if (visible && self->align_tick == 0 &&
+      spotifygtk_settings_get_compact_mode (spotifygtk_settings_get_default ()))
+    self->align_tick = gtk_widget_add_tick_callback (
+      GTK_WIDGET (self), align_action_to_durations, self, NULL);
+  gtk_button_set_label (GTK_BUTTON (self->expanded_action_btn), label ? label : "");
+  gtk_widget_set_visible (self->expanded_action_btn, visible);
 
   /* Colour on hover only, and only for the one that destroys something. */
   if (destructive)
     gtk_widget_add_css_class (self->action_btn, "destructive-hover");
   else
     gtk_widget_remove_css_class (self->action_btn, "destructive-hover");
+  if (destructive)
+    gtk_widget_add_css_class (self->expanded_action_btn, "destructive-hover");
+  else
+    gtk_widget_remove_css_class (self->expanded_action_btn, "destructive-hover");
 }
 
 SpotifyGtkContextPage *
@@ -362,7 +510,8 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
   self->current_kind = g_strdup (kind);
 
   /* Re-measure for this context's list, unless one is already pending. */
-  if (self->align_tick == 0)
+  if (spotifygtk_settings_get_compact_mode (spotifygtk_settings_get_default ()) &&
+      self->align_tick == 0)
     self->align_tick = gtk_widget_add_tick_callback (
       GTK_WIDGET (self), align_action_to_durations, self, NULL);
   if (!uri || !*uri)
@@ -370,13 +519,19 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
 
   gtk_label_set_text (self->kind_label, kind ? kind : "");
   gtk_label_set_text (self->title_label, title ? title : "");
-  /* Cleared here rather than left stale: the year belongs to the previous
-   * context until this one's tracks come back with their own. */
-  gtk_label_set_text (self->year_label, "");
-
+  gtk_label_set_text (self->expanded_kind, kind ? kind : "");
+  gtk_label_set_text (self->expanded_title, title ? title : "");
   /* Already showing this exactly — don't re-fetch on a repeat navigation. */
   if (g_strcmp0 (uri, self->current_uri) == 0 && !self->in_flight)
     return;
+
+  gtk_label_set_text (self->year_label, "");
+  gtk_label_set_text (self->expanded_meta, "");
+  if (self->cover_request)
+    g_cancellable_cancel (self->cover_request);
+  g_clear_object (&self->cover_request);
+  gtk_picture_set_paintable (self->expanded_cover, NULL);
+  gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), FALSE);
 
   if (self->in_flight) {
     self->generation++;

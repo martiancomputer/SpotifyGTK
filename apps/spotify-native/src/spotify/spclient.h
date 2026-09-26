@@ -135,6 +135,15 @@ void spotifygtk_spclient_get_user_profile (SpotifySpclient *self,
 SpotifySpclient *spotifygtk_spclient_new (void);
 void spotifygtk_spclient_set_cancellable (SpotifySpclient *, GCancellable *);
 
+/* Optional catalog playlist results. This request cannot delay track search. */
+void spotifygtk_spclient_search_playlists (SpotifySpclient *self,
+                                           const gchar *query,
+                                           const gchar *bearer_token,
+                                           const gchar *client_token,
+                                           GCancellable *cancellable,
+                                           SpclientContextCallback callback,
+                                           gpointer user_data);
+
 /* ── API ─────────────────────────────────────────────────────────────────── */
 
 /*

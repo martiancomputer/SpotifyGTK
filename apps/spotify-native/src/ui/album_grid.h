@@ -66,6 +66,20 @@ void spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid      *self,
                                       const SpotifyGtkCardSpec *cards,
                                       guint                     n_cards);
 
+/* Replace only the suffix of a shelf. Search uses this when optional playlist
+ * results arrive so the already visible album cards are not rebound. */
+void spotifygtk_album_grid_replace_tail (SpotifyGtkAlbumGrid      *self,
+                                         guint                     first,
+                                         const SpotifyGtkCardSpec *cards,
+                                         guint                     n_cards);
+
+/* Same album/playlist menu for a compact search row as for a shelf card. */
+void spotifygtk_album_grid_present_context_menu (SpotifyGtkAlbumGrid      *self,
+                                                 GtkWidget                *anchor,
+                                                 const SpotifyGtkCardSpec *card,
+                                                 gdouble                   x,
+                                                 gdouble                   y);
+
 /* Batch counterpart to add_pending_card(), so a followed-artist collection can
  * enter the virtualised model in one change and resolve only mapped cards. */
 void spotifygtk_album_grid_set_pending_cards (SpotifyGtkAlbumGrid      *self,

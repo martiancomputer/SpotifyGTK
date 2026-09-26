@@ -683,22 +683,25 @@ on_album_menu_share (GtkButton *button, gpointer user_data)
     gtk_popover_popdown (popover);
 }
 
-static void
-on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
-                           gdouble x, gdouble y, gpointer user_data)
+void
+spotifygtk_album_grid_present_context_menu (SpotifyGtkAlbumGrid      *self,
+                                            GtkWidget                *anchor,
+                                            const SpotifyGtkCardSpec *card,
+                                            gdouble                   x,
+                                            gdouble                   y)
 {
-  SpotifyGtkAlbumGrid *self = user_data;
-  GtkWidget *card = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (GTK_IS_WIDGET (anchor));
+  if (!card || !card->uri)
+    return;
 
-  const gchar *uri = g_object_get_data (G_OBJECT (card), "album-uri");
-  if (!uri)
-    return;   /* card not bound to an album yet */
+  const gchar *uri = card->uri;
 
   AlbumMenuCtx *ctx = g_new0 (AlbumMenuCtx, 1);
   ctx->grid = self;
   ctx->uri  = g_strdup (uri);
-  ctx->name = g_strdup (g_object_get_data (G_OBJECT (card), "album-name"));
-  ctx->cover_id = g_strdup (g_object_get_data (G_OBJECT (card), "cover-id"));
+  ctx->name = g_strdup (card->title);
+  ctx->cover_id = g_strdup (card->cover_id);
   ctx->share_url = spotifygtk_context_share_url (uri);
 
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
@@ -736,7 +739,24 @@ on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
                                  "This item has no public Spotify link",
                                  G_CALLBACK (on_album_menu_share), NULL);
 
-  spotifygtk_context_menu_present (menu, card, x, y, ctx, album_menu_ctx_free);
+  spotifygtk_context_menu_present (menu, anchor, x, y, ctx, album_menu_ctx_free);
+}
+
+static void
+on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
+                           gdouble x, gdouble y, gpointer user_data)
+{
+  SpotifyGtkAlbumGrid *self = user_data;
+  GtkWidget *card = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+  SpotifyGtkCardSpec spec = {
+    g_object_get_data (G_OBJECT (card), "album-uri"),
+    g_object_get_data (G_OBJECT (card), "album-name"),
+    NULL,
+    g_object_get_data (G_OBJECT (card), "cover-id")
+  };
+  if (!spec.uri)
+    return;
+  spotifygtk_album_grid_present_context_menu (self, card, &spec, x, y);
 
   gtk_gesture_set_state (GTK_GESTURE (gesture), GTK_EVENT_SEQUENCE_CLAIMED);
   (void) n_press;
@@ -1124,6 +1144,28 @@ spotifygtk_album_grid_set_cards (SpotifyGtkAlbumGrid       *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
   set_card_specs (self, cards, n_cards, FALSE);
+}
+
+void
+spotifygtk_album_grid_replace_tail (SpotifyGtkAlbumGrid       *self,
+                                    guint                      first,
+                                    const SpotifyGtkCardSpec  *cards,
+                                    guint                      n_cards)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  guint existing = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  g_return_if_fail (first <= existing);
+
+  g_autofree gpointer *items = g_new0 (gpointer, MAX (n_cards, 1u));
+  guint count = 0;
+  for (guint i = 0; i < n_cards; i++) {
+    if (cards[i].uri)
+      items[count++] = album_item_new (cards[i].uri, cards[i].title,
+                                       cards[i].subtitle, cards[i].cover_id);
+  }
+  g_list_store_splice (self->store, first, existing - first, items, count);
+  for (guint i = 0; i < count; i++)
+    g_object_unref (items[i]);
 }
 
 void
