@@ -73,6 +73,10 @@ void spotifygtk_album_grid_replace_tail (SpotifyGtkAlbumGrid      *self,
                                          const SpotifyGtkCardSpec *cards,
                                          guint                     n_cards);
 
+/* Borrow no card widget state: return the model's known cover ID, if any. */
+gchar *spotifygtk_album_grid_dup_cover_id (SpotifyGtkAlbumGrid *self,
+                                           const gchar *uri);
+
 /* Same album/playlist menu for a compact search row as for a shelf card. */
 void spotifygtk_album_grid_present_context_menu (SpotifyGtkAlbumGrid      *self,
                                                  GtkWidget                *anchor,

@@ -46,6 +46,7 @@ struct _SpotifyGtkContextPage {
   SpotifyNativeSession *session;
   GCancellable         *in_flight;
   gchar                *current_uri;
+  gchar                *context_cover_id; /* the playlist's own art, not a track's */
   guint                 generation;
   gboolean              loading;
 };
@@ -117,23 +118,24 @@ update_expanded_metadata (SpotifyGtkContextPage *self, GPtrArray *tracks)
                        credit, tracks->len, hours, minutes);
   gtk_label_set_text (self->expanded_meta, meta);
 
-  /* An album's tracks carry its actual cover. A playlist's tracks do not
-   * carry playlist artwork, so never substitute an unrelated first-song art. */
+  /* An album's tracks carry its cover. A playlist's tracks do not: use the
+   * cover known by the card/navigation source, never the first song's art. */
   if (self->cover_request)
     g_cancellable_cancel (self->cover_request);
   g_clear_object (&self->cover_request);
   gtk_picture_set_paintable (self->expanded_cover, NULL);
   gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), FALSE);
-  if (!g_str_has_prefix (self->current_uri, "spotify:album:") ||
-      tracks->len == 0) return;
-  const gchar *cover_id = NULL;
-  for (guint i = 0; i < tracks->len && !cover_id; i++) {
-    const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
-    cover_id = track->cover_id;
-  }
+  const gchar *cover_id = self->context_cover_id;
+  if (!cover_id && g_str_has_prefix (self->current_uri, "spotify:album:"))
+    for (guint i = 0; i < tracks->len && !cover_id; i++) {
+      const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
+      cover_id = track->cover_id;
+    }
   if (!cover_id) return;
   self->cover_request = g_cancellable_new ();
-  spotifygtk_cover_load (cover_id, 260, self->cover_request,
+  spotifygtk_cover_load (cover_id,
+                         260 * MAX (1, gtk_widget_get_scale_factor (GTK_WIDGET (self))),
+                         self->cover_request,
                          on_cover_loaded, self);
 }
 
@@ -219,6 +221,7 @@ spotifygtk_context_page_dispose (GObject *object)
   g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_uri, g_free);
+  g_clear_pointer (&self->context_cover_id, g_free);
   g_clear_pointer (&self->current_kind, g_free);
 
   G_OBJECT_CLASS (spotifygtk_context_page_parent_class)->dispose (object);
@@ -502,7 +505,8 @@ void
 spotifygtk_context_page_load (SpotifyGtkContextPage *self,
                               const gchar           *uri,
                               const gchar           *title,
-                              const gchar           *kind)
+                              const gchar           *kind,
+                              const gchar           *cover_id)
 {
   g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
 
@@ -522,9 +526,24 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
   gtk_label_set_text (self->expanded_kind, kind ? kind : "");
   gtk_label_set_text (self->expanded_title, title ? title : "");
   /* Already showing this exactly — don't re-fetch on a repeat navigation. */
-  if (g_strcmp0 (uri, self->current_uri) == 0 && !self->in_flight)
+  if (g_strcmp0 (uri, self->current_uri) == 0 && !self->in_flight) {
+    if (cover_id && g_strcmp0 (cover_id, self->context_cover_id) != 0) {
+      g_free (self->context_cover_id);
+      self->context_cover_id = g_strdup (cover_id);
+      if (self->cover_request)
+        g_cancellable_cancel (self->cover_request);
+      g_clear_object (&self->cover_request);
+      self->cover_request = g_cancellable_new ();
+      spotifygtk_cover_load (cover_id,
+                             260 * MAX (1, gtk_widget_get_scale_factor (GTK_WIDGET (self))),
+                             self->cover_request,
+                             on_cover_loaded, self);
+    }
     return;
+  }
 
+  g_free (self->context_cover_id);
+  self->context_cover_id = g_strdup (cover_id);
   gtk_label_set_text (self->year_label, "");
   gtk_label_set_text (self->expanded_meta, "");
   if (self->cover_request)

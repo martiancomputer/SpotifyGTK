@@ -505,6 +505,30 @@ nav_record (SpotifyGtkNativeWindow *self, const gchar *page,
   nav_update_buttons (self);
 }
 
+static gchar *
+dup_context_cover (SpotifyGtkNativeWindow *self, const gchar *uri)
+{
+  if (!uri) return NULL;
+  SpotifyGtkAlbumGrid *grids[] = {
+    self->search_page ? spotifygtk_search_page_get_album_grid (self->search_page) : NULL,
+    self->playlists_grid,
+    self->library_page ? spotifygtk_library_page_get_album_grid (self->library_page) : NULL,
+    self->home_page ? spotifygtk_home_page_get_album_grid (self->home_page) : NULL,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (grids); i++) {
+    if (!grids[i]) continue;
+    gchar *cover = spotifygtk_album_grid_dup_cover_id (grids[i], uri);
+    if (cover) return cover;
+  }
+  GPtrArray *pins = spotifygtk_settings_get_pins (spotifygtk_settings_get_default ());
+  for (guint i = 0; pins && i < pins->len; i++) {
+    const SpotifyGtkPin *pin = g_ptr_array_index (pins, i);
+    if (g_strcmp0 (pin->uri, uri) == 0)
+      return g_strdup (pin->cover_id);
+  }
+  return NULL;
+}
+
 /* Step Back (-1) or Forward (+1) without recording -- replaying history. */
 static void
 nav_go (SpotifyGtkNativeWindow *self, gint dir)
@@ -520,10 +544,12 @@ nav_go (SpotifyGtkNativeWindow *self, gint dir)
      * recorded from, or Back would land an artist in the album view. */
     if (g_str_has_prefix (e->uri, "spotify:artist:"))
       spotifygtk_artist_page_show (self->artist_page, e->uri, e->title);
-    else
+    else {
+      g_autofree gchar *cover = dup_context_cover (self, e->uri);
       spotifygtk_context_page_load (self->context_page, e->uri,
                                     e->title ? e->title : "Album",
-                                    e->kind ? e->kind : "Album");
+                                    e->kind ? e->kind : "Album", cover);
+    }
   }
   navigate_raw (self, e->page);
   nav_update_buttons (self);
@@ -4963,7 +4989,8 @@ navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
     return;
   }
 
-  spotifygtk_context_page_load (self->context_page, uri, title, kind);
+  g_autofree gchar *cover = dup_context_cover (self, uri);
+  spotifygtk_context_page_load (self->context_page, uri, title, kind, cover);
   context_refresh_action (self, uri, kind);
   navigate_raw (self, "context");
   nav_record (self, "context", uri, title, kind);

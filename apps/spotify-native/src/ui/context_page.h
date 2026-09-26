@@ -59,7 +59,8 @@ void spotifygtk_context_page_set_action (SpotifyGtkContextPage *self,
 void spotifygtk_context_page_load (SpotifyGtkContextPage *self,
                                    const gchar           *uri,
                                    const gchar           *title,
-                                   const gchar           *kind);
+                                   const gchar           *kind,
+                                   const gchar           *cover_id);
 
 /* Inner track list, so the window wires play-context and the row context menu
  * to it exactly as it does for search and liked songs. */

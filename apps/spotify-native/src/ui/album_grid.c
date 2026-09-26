@@ -1168,6 +1168,22 @@ spotifygtk_album_grid_replace_tail (SpotifyGtkAlbumGrid       *self,
     g_object_unref (items[i]);
 }
 
+gchar *
+spotifygtk_album_grid_dup_cover_id (SpotifyGtkAlbumGrid *self,
+                                   const gchar *uri)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self), NULL);
+  if (!uri) return NULL;
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  for (guint i = 0; i < n; i++) {
+    g_autoptr(SpotifyGtkAlbumItem) item =
+      g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    if (g_strcmp0 (item->uri, uri) == 0)
+      return g_strdup (item->cover_id);
+  }
+  return NULL;
+}
+
 void
 spotifygtk_album_grid_set_pending_cards (SpotifyGtkAlbumGrid       *self,
                                          const SpotifyGtkCardSpec  *cards,
