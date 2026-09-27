@@ -32,7 +32,7 @@
 #include "cover_loader.h"
 
 struct _SpotifyGtkTrackRow {
-  GtkListBoxRow parent_instance;
+  GtkBox parent_instance;
 
   GtkBox *root_box;
   GtkImage *album_art;
@@ -72,6 +72,7 @@ struct _SpotifyGtkTrackRow {
   gboolean show_artists;
   gboolean is_playing;
   gboolean is_paused;
+  gboolean trace_hover;
 
   gchar *track_uri;
   gchar *track_id;
@@ -84,6 +85,7 @@ enum {
   QUEUE_CLICKED,
   ARTIST_ACTIVATED,
   ALBUM_ACTIVATED,
+  HOVER_CHANGED,
   N_SIGNALS
 };
 
@@ -128,6 +130,10 @@ spotifygtk_track_row_class_init (SpotifyGtkTrackRowClass *klass)
   signals[ALBUM_ACTIVATED] = g_signal_new ("album-activated",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  signals[HOVER_CHANGED] = g_signal_new ("hover-changed",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 }
 
 /* === Now-playing equaliser === */
@@ -259,7 +265,8 @@ spotifygtk_track_row_retry_cover (SpotifyGtkTrackRow *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
 
-  if (!self->show_cover || self->cover_shown || self->cover_request_pending ||
+  if (!self->show_cover || self->cover_hold || self->cover_shown ||
+      self->cover_request_pending ||
       !self->pending_cover_id)
     return;
 
@@ -382,7 +389,14 @@ static void
 on_row_hover_enter (GtkEventControllerMotion *ctrl, gdouble x, gdouble y, gpointer user_data)
 {
   SpotifyGtkTrackRow *self = user_data;
-  gtk_widget_set_visible (GTK_WIDGET (self->action_box), TRUE);
+  /* Keep the action slot allocated. Showing/hiding it as a row passes under a
+   * stationary pointer invalidates that row's layout on every scroll step. */
+  gtk_widget_set_opacity (GTK_WIDGET (self->action_box), 1.0);
+  gtk_widget_set_can_target (GTK_WIDGET (self->action_box), TRUE);
+  gtk_widget_set_opacity (GTK_WIDGET (self->duration_label), 0.0);
+  gtk_widget_set_opacity (self->eq_area, 0.0);
+  if (self->trace_hover)
+    g_signal_emit (self, signals[HOVER_CHANGED], 0, TRUE);
   (void) ctrl; (void) x; (void) y;
 }
 
@@ -390,13 +404,19 @@ static void
 on_row_hover_leave (GtkEventControllerMotion *ctrl, gpointer user_data)
 {
   SpotifyGtkTrackRow *self = user_data;
-  gtk_widget_set_visible (GTK_WIDGET (self->action_box), FALSE);
+  gtk_widget_set_can_target (GTK_WIDGET (self->action_box), FALSE);
+  gtk_widget_set_opacity (GTK_WIDGET (self->action_box), 0.0);
+  gtk_widget_set_opacity (GTK_WIDGET (self->duration_label), 1.0);
+  gtk_widget_set_opacity (self->eq_area, 1.0);
+  if (self->trace_hover)
+    g_signal_emit (self, signals[HOVER_CHANGED], 0, FALSE);
   (void) ctrl;
 }
 
 static void
 spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
 {
+  self->trace_hover = g_getenv ("SPOTIFY_SCROLL_STATS") != NULL;
   /* The reusable row used to have only root_box as a child, so the inherited
    * horizontal default was invisible. Release headings add a second child:
    * stack it above the track body instead of placing both side by side. */
@@ -549,15 +569,25 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   gtk_widget_set_halign (self->eq_area, GTK_ALIGN_END);
   gtk_widget_set_hexpand (self->eq_area, TRUE);
   gtk_box_append (GTK_BOX (self->status_slot), self->eq_area);
-  gtk_box_append (GTK_BOX (self->root_box), self->status_slot);
+  /* The action occupies the existing fixed-width status column, rather than
+   * adding another column and moving every duration left. Painting it over
+   * the duration on hover changes neither the row width nor its height. */
+  GtkWidget *status_overlay = gtk_overlay_new ();
+  gtk_overlay_set_child (GTK_OVERLAY (status_overlay), self->status_slot);
+  gtk_box_append (GTK_BOX (self->root_box), status_overlay);
 
-  /* Actions (hidden by default, shown on hover) */
+  /* Reserve the action slot at all times so hover cannot resize the row.
+   * An invisible button must not remain clickable. */
   self->action_box = GTK_BOX (gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4));
+  gtk_widget_set_halign (GTK_WIDGET (self->action_box), GTK_ALIGN_END);
+  gtk_widget_set_valign (GTK_WIDGET (self->action_box), GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_end (GTK_WIDGET (self->action_box), ROW_STATUS_MARGIN_END);
   self->play_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("media-playback-start-symbolic"));
   gtk_widget_add_css_class (GTK_WIDGET (self->play_btn), "flat");
   gtk_box_append (GTK_BOX (self->action_box), GTK_WIDGET (self->play_btn));
-  gtk_widget_set_visible (GTK_WIDGET (self->action_box), FALSE);
-  gtk_box_append (GTK_BOX (self->root_box), GTK_WIDGET (self->action_box));
+  gtk_widget_set_opacity (GTK_WIDGET (self->action_box), 0.0);
+  gtk_widget_set_can_target (GTK_WIDGET (self->action_box), FALSE);
+  gtk_overlay_add_overlay (GTK_OVERLAY (status_overlay), GTK_WIDGET (self->action_box));
 
   g_signal_connect (self->play_btn, "clicked", G_CALLBACK (on_play_btn_clicked), self);
 

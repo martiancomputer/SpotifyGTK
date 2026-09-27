@@ -4,8 +4,6 @@
 
 #include "smooth_scroll.h"
 #include "settings.h"
-#include "../log_verbose.h"
-
 #include <math.h>
 
 #define SMOOTH_SCROLL_FRAME_US 16666.0  /* what that fraction is calibrated against */
@@ -41,13 +39,19 @@ typedef struct {
   gulong              value_handler;
   gulong              upper_handler;
   gulong              page_handler;
-#ifdef SPOTIFYGTK_VERBOSE
   guint64            gesture;
   guint              events;
   guint              frames;
   gint64             started_us;
   gint64             max_frame_gap_us;
-#endif
+  guint              frame_gaps_over_33ms;
+  guint              frame_gaps_over_100ms;
+  guint              adjustments;
+  guint              external_adjustments;
+  guint              reversals;
+  guint              geometry_changes;
+  guint              anchor_corrections;
+  gdouble            max_adjustment_delta;
 } SmoothScroll;
 
 /* The centre reproduces the tuned 118px/0.30 behaviour. Moving toward Glide
@@ -102,11 +106,12 @@ on_adjustment_value (GtkAdjustment *adj, gpointer user_data)
   gboolean reversal = direction != 0 && ss->observed_direction != 0 &&
     direction != ss->observed_direction && now - ss->observed_us < 150000;
 
-  g_message ("scroll-trace: adjustment source=%s value=%.2f delta=%+.2f "
-             "target=%.2f active=%s%s",
-             ss->writing_adjustment ? "smooth" : "external", value, delta,
-             ss->target, ss->tick ? "yes" : "no",
-             reversal ? " REVERSAL" : "");
+  ss->adjustments++;
+  if (!ss->writing_adjustment)
+    ss->external_adjustments++;
+  if (reversal)
+    ss->reversals++;
+  ss->max_adjustment_delta = MAX (ss->max_adjustment_delta, fabs (delta));
 
   if (direction != 0)
     ss->observed_direction = direction;
@@ -119,16 +124,11 @@ on_adjustment_geometry (GtkAdjustment *adj, GParamSpec *pspec, gpointer user_dat
 {
   SmoothScroll *ss = user_data;
   if (ss->trace)
-    g_message ("scroll-trace: geometry changed=%s lower=%.2f upper=%.2f "
-               "page=%.2f value=%.2f target=%.2f active=%s",
-               pspec->name, gtk_adjustment_get_lower (adj),
-               gtk_adjustment_get_upper (adj),
-               gtk_adjustment_get_page_size (adj),
-               gtk_adjustment_get_value (adj), ss->target,
-               ss->tick ? "yes" : "no");
+    ss->geometry_changes++;
+  (void) adj;
+  (void) pspec;
 }
 
-#ifdef SPOTIFYGTK_VERBOSE
 static const gchar *
 orientation_name (GtkOrientation orientation)
 {
@@ -142,14 +142,18 @@ log_scroll_end (SmoothScroll *ss, const gchar *reason, gdouble value)
     return;
   gint64 elapsed = ss->started_us > 0
     ? g_get_monotonic_time () - ss->started_us : 0;
-  SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
-                    " axis=%s end=%s events=%u frames=%u elapsed=%.1fms"
-                    " max-frame-gap=%.1fms value=%.2f target=%.2f",
-                    ss->gesture, orientation_name (ss->orientation), reason,
-                    ss->events, ss->frames, elapsed / 1000.0,
-                    ss->max_frame_gap_us / 1000.0, value, ss->target);
+  g_message ("scroll-profile: gesture=%" G_GUINT64_FORMAT
+             " axis=%s end=%s events=%u frames=%u elapsed=%.1fms"
+             " max-frame-gap=%.1fms gaps>33ms=%u gaps>100ms=%u"
+             " adjustments=%u external=%u reversals=%u geometry=%u"
+             " anchors=%u max-adjustment=%.1fpx value=%.1f target=%.1f",
+             ss->gesture, orientation_name (ss->orientation), reason,
+             ss->events, ss->frames, elapsed / 1000.0,
+             ss->max_frame_gap_us / 1000.0, ss->frame_gaps_over_33ms,
+             ss->frame_gaps_over_100ms, ss->adjustments,
+             ss->external_adjustments, ss->reversals, ss->geometry_changes,
+             ss->anchor_corrections, ss->max_adjustment_delta, value, ss->target);
 }
-#endif
 
 static GtkAdjustment *
 adjustment_for (SmoothScroll *ss)
@@ -194,9 +198,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   (void) widget;
 
   if (!adj) {
-#ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "no-adjustment", 0.0);
-#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -215,14 +217,9 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
     ss->target += outside_delta;
     ss->last_set = value;
     if (ss->trace)
-      g_message ("scroll-trace: absorbed anchor delta=%+.2f target=%.2f",
-                 outside_delta, ss->target);
+      ss->anchor_corrections++;
   } else if (ABS (outside_delta) > SMOOTH_SCROLL_ANCHOR_TOLERANCE) {
-#ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "external-change", value);
-#endif
-    if (ss->trace)
-      g_message ("scroll-trace: ownership takeover delta=%+.2f", outside_delta);
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -249,9 +246,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
      * actually go and stop, rather than animating into a wall. */
     ss->target = clamped;
     set_adjustment_value (ss, adj, clamped);
-#ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "bounds-changed", clamped);
-#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -261,9 +256,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
    * Do not wait for an exact floating-point target that the view cannot hold. */
   if (ABS (remaining) <= SMOOTH_SCROLL_STOP_EPSILON) {
     set_adjustment_value (ss, adj, ss->target);
-#ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "complete", ss->target);
-#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -285,27 +278,21 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
    * smoothness rather than changing the character of the motion.
   */
   gint64  now_us  = gdk_frame_clock_get_frame_time (clock);
-#ifdef SPOTIFYGTK_VERBOSE
-  gint64  frame_gap_us = ss->last_frame_us > 0 ? now_us - ss->last_frame_us : 0;
-#endif
+  gint64  frame_gap_us = ss->trace && ss->last_frame_us > 0
+    ? now_us - ss->last_frame_us : 0;
   gdouble frames  = (ss->last_frame_us > 0)
     ? (gdouble) (now_us - ss->last_frame_us) / SMOOTH_SCROLL_FRAME_US : 1.0;
   frames = CLAMP (frames, 0.1, SMOOTH_SCROLL_MAX_FRAMES);
   ss->last_frame_us = now_us;
 
-#ifdef SPOTIFYGTK_VERBOSE
-  ss->frames++;
-  if (frame_gap_us > ss->max_frame_gap_us)
-    ss->max_frame_gap_us = frame_gap_us;
-  /* 33-67ms gaps are already visible in the aggregate end record. Logging
-   * every such frame performs synchronous terminal/file work in the GTK loop
-   * and makes an overloaded gesture worse. Only record a true long stall. */
-  if (ss->trace && frame_gap_us > 100000)
-    SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
-                      " frame-gap=%.1fms frame=%u value=%.2f target=%.2f remaining=%.2f",
-                      ss->gesture, frame_gap_us / 1000.0, ss->frames,
-                      value, ss->target, remaining);
-#endif
+  if (ss->trace) {
+    ss->frames++;
+    ss->max_frame_gap_us = MAX (ss->max_frame_gap_us, frame_gap_us);
+    if (frame_gap_us > 33000)
+      ss->frame_gaps_over_33ms++;
+    if (frame_gap_us > 100000)
+      ss->frame_gaps_over_100ms++;
+  }
 
   gdouble ease = 0.30;
   scroll_character (NULL, &ease);
@@ -326,9 +313,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   if (ss->stalled_frames >= SMOOTH_SCROLL_STALL_FRAMES) {
     set_adjustment_value (ss, adj, ss->target);
     ss->last_set = gtk_adjustment_get_value (adj);
-#ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "stalled", ss->last_set);
-#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -339,9 +324,7 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   if (ss->last_set == value) {
     set_adjustment_value (ss, adj, ss->target);
     ss->last_set = gtk_adjustment_get_value (adj);
-#ifdef SPOTIFYGTK_VERBOSE
     log_scroll_end (ss, "quantized", ss->last_set);
-#endif
     ss->tick = 0;
     return G_SOURCE_REMOVE;
   }
@@ -368,9 +351,9 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
      * an unfinished wheel animation immediately so its next frame cannot tug
      * against GTK's kinetic motion and produce a one-frame reversal. */
     if (ss->tick != 0) {
-      if (ss->trace)
-        g_message ("scroll-trace: touchpad takes ownership; cancel target=%.2f",
-                   ss->target);
+      GtkAdjustment *active_adj = adjustment_for (ss);
+      log_scroll_end (ss, "touchpad-takeover",
+                      active_adj ? gtk_adjustment_get_value (active_adj) : 0.0);
       gtk_widget_remove_tick_callback (GTK_WIDGET (ss->scroller), ss->tick);
       ss->tick = 0;
     }
@@ -397,11 +380,6 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
   /* A wheel only ever reports dy, so a horizontal target has to take it from
    * there; dx is preferred when present (tilt wheels, horizontal gestures). */
   gdouble delta = (ss->orientation == GTK_ORIENTATION_HORIZONTAL && dx != 0.0) ? dx : dy;
-  if (ss->trace)
-    g_message ("scroll-trace: input unit=%d dx=%+.3f dy=%+.3f chosen=%+.3f "
-               "active=%s",
-               (gint) gtk_event_controller_scroll_get_unit (ctrl), dx, dy,
-               delta, ss->tick ? "yes" : "no");
   if (delta == 0.0)
     return GDK_EVENT_PROPAGATE;
 
@@ -425,32 +403,32 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
    * the whole distance instead of each notch cancelling the last. */
   gdouble base = (ss->tick != 0) ? ss->target : value;
 
-#ifdef SPOTIFYGTK_VERBOSE
-  if (ss->tick == 0) {
+  if (ss->trace && ss->tick == 0) {
     ss->gesture++;
     ss->events = 0;
     ss->frames = 0;
     ss->started_us = g_get_monotonic_time ();
     ss->max_frame_gap_us = 0;
+    ss->frame_gaps_over_33ms = 0;
+    ss->frame_gaps_over_100ms = 0;
+    ss->adjustments = 0;
+    ss->external_adjustments = 0;
+    ss->reversals = 0;
+    ss->geometry_changes = 0;
+    ss->anchor_corrections = 0;
+    ss->max_adjustment_delta = 0.0;
+  }
+  if (ss->trace)
+    ss->events++;
+  if (ss->tick == 0) {
     ss->progress_value = value;
     ss->stalled_frames = 0;
   }
-  ss->events++;
-#endif
 
   gdouble step = 118.0;
   scroll_character (&step, NULL);
   ss->target   = CLAMP (base + delta * step, lower, upper);
   ss->last_set = value;
-#ifdef SPOTIFYGTK_VERBOSE
-  if (ss->trace)
-    SPOTIFYGTK_DEBUG ("wheel: gesture=%" G_GUINT64_FORMAT
-                      " event=%u axis=%s unit=%d dx=%.3f dy=%.3f delta=%.3f"
-                      " value=%.2f base=%.2f target=%.2f bounds=%.2f..%.2f",
-                      ss->gesture, ss->events, orientation_name (ss->orientation),
-                      (gint) gtk_event_controller_scroll_get_unit (ctrl),
-                      dx, dy, delta, value, base, ss->target, lower, upper);
-#endif
   if (ss->tick == 0) {
     ss->last_frame_us = 0;   /* first frame of a new flick eases by one frame */
     ss->tick = gtk_widget_add_tick_callback (GTK_WIDGET (ss->scroller),

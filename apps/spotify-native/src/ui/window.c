@@ -2322,14 +2322,15 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
     set_playlists_status (self, "No playlists yet.");
     return;
   }
-  spotifygtk_album_grid_clear (self->playlists_grid);
   set_playlists_status (self, NULL);
   self->playlists_loaded = TRUE;
   self->playlists_retry_count = 0;
 
   SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
-  if (!m)
+  if (!m) {
+    spotifygtk_album_grid_clear (self->playlists_grid);
     return;
+  }
 
   /*
    * Cards go up straight away, knowing only their URIs; each fetches its own
@@ -2341,6 +2342,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
    * this page take fifteen seconds to open, most of it for cards below the
    * fold.
    */
+  g_autofree SpotifyGtkCardSpec *cards = g_new0 (SpotifyGtkCardSpec, n_entries);
   guint added = 0;
   for (guint i = 0; i < n_entries; i++) {
     if (!entries[i].uri)
@@ -2352,12 +2354,17 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
     if (!g_str_has_prefix (entries[i].uri, "spotify:playlist:"))
       continue;
 
-    spotifygtk_album_grid_add_pending_card (self->playlists_grid, entries[i].uri,
-                                            entries[i].name ? entries[i].name
-                                                            : "Playlist",
-                                            "Playlist");
-    added++;
+    cards[added++] = (SpotifyGtkCardSpec) {
+      .uri = entries[i].uri,
+      .title = entries[i].name ? entries[i].name : "Playlist",
+      .subtitle = "Playlist",
+    };
   }
+
+  /* The rootlist arrives as one snapshot. Publish it in one model mutation:
+   * appending each entry makes GridView revalidate its layout N times before
+   * the first frame and can leave that work running until a resize. */
+  spotifygtk_album_grid_set_pending_cards (self->playlists_grid, cards, added);
 
   if (added == 0)
     set_playlists_status (self, "No playlists yet.");
@@ -5380,13 +5387,21 @@ palette_for (SpotifyGtkTheme theme)
 static void
 apply_theme (SpotifyGtkTheme theme)
 {
+  static GtkCssProvider *provider = NULL;
+  static gint applied_theme = -1;
+  /* The settings singleton emits one generic "changed" signal. A scroll or
+   * audio setting must not reload the display-wide provider: that dirties
+   * every CSS node and can turn the next animated scroll into a full-tree
+   * style-validation pass. */
+  if (provider && applied_theme == (gint) theme)
+    return;
+
   /* Icons compiled into the binary -- the theme ships no outline heart. Added
    * before any widget asks for one; repeat calls are harmless. */
   gtk_icon_theme_add_resource_path (
     gtk_icon_theme_get_for_display (gdk_display_get_default ()),
     "/com/github/spotifygtk/SpotifyNative/icons");
 
-  static GtkCssProvider *provider = NULL;
   if (!provider) {
     provider = gtk_css_provider_new ();
     gtk_style_context_add_provider_for_display (gdk_display_get_default (),
@@ -5396,6 +5411,10 @@ apply_theme (SpotifyGtkTheme theme)
 
   g_autofree gchar *css = g_strconcat (palette_for (theme), theme_body, NULL);
   gtk_css_provider_load_from_string (provider, css);
+  applied_theme = (gint) theme;
+  if (g_getenv ("SPOTIFY_SCROLL_STATS"))
+    g_message ("style-profile: display theme provider reloaded theme=%d",
+               (gint) theme);
 
   adw_style_manager_set_color_scheme (
     adw_style_manager_get_default (),

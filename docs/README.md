@@ -386,6 +386,7 @@ an explicit `GSK_RENDERER` environment value takes precedence.
 |---|---|---|---|---|
 | Interface → Theme | `theme` | Dark, White, Milk, Dark+ | Selects the application palette. Accent green is reserved for state such as liked, followed, pinned and selected items. | Immediately; CSS is reloaded. |
 | Interface → Previews | `media-mode` | Media, Now playing only, None | Controls which artwork surfaces may request covers. “Now playing only” prevents list/grid artwork work; “None” prevents artwork requests altogether. | Immediately for new requests; existing images are released by the loader. |
+| Interface → Expanded album and playlist view | `compact-mode` | Off (compact, default), On (expanded) | The toggle enables a scrolling artwork-led hero: cover at left, type and title at right, then the save action and release metadata on one line, followed by a divider and numbered tracks. Off keeps the short header and row covers. It also selects the corresponding search presentation. The hero cover is only decoded and retained while expanded; both views share one virtualized track list. | Immediately and retained across launches. |
 | Interface → Scroll smoothness | `scroll-smoothness` | 0–100 | Tunes mouse-wheel travel and easing together. Low values are shorter and more responsive; high values carry farther with softer gravity. Slider persistence is debounced for 120 ms so dragging does not synchronously rewrite the settings file on GTK's UI thread. | After the slider pauses; touchpad kinetics are unchanged. |
 | Lyrics → Online lyrics | `online-lyrics` | Off/On (default Off) | Allows an asynchronous LRCLIB lookup for the current audible song after checking the local LRC sidecar. Sends its title, primary artist, album and duration to LRCLIB; no scan of a playlist or library occurs. | Immediately; an active track is rechecked when toggled. |
 | Lyrics → Font size | `lyrics-font-size` | 19, 20, 22, 24, 26, 28 px (default 19) | Sizes the current timed lyric line, scales neighboring lines, and sizes plain-text lyrics. It does not change lyrics loading. | Immediately and retained across launches. |
@@ -430,7 +431,8 @@ Useful switches are:
 
 ```text
 SPOTIFY_COVER_STATS   cover queue/cache statistics at settle boundaries
-SPOTIFY_SCROLL_STATS  wheel input, frame gaps and ownership transitions
+SPOTIFY_SCROLL_STATS  per-gesture wheel/frame-gap, row binding, overscan and
+                      style-provider reload summaries (no per-frame log I/O)
 SPOTIFY_NAV_PROBE     development navigation probe
 SPOTIFY_DEV_START_PAGE  page to open for a probe
 ```

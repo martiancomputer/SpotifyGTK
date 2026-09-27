@@ -242,29 +242,26 @@ static void on_follow_clicked (GtkButton *button, gpointer user_data);
  * hardcoded: the gutter is whatever the scrollbar is actually allocated, and
  * the margin is the one the content box carries.
  */
-static gboolean
-align_title_to_hero (GtkWidget *w, GdkFrameClock *clock, gpointer data)
+static void
+align_title_to_hero (GtkWidget *widget, GParamSpec *pspec, gpointer data)
 {
   SpotifyGtkArtistPage *self = data;
-  (void) w; (void) clock;
+  (void) widget; (void) pspec;
 
   if (!self->title_row || !self->scroller)
-    return G_SOURCE_REMOVE;
+    return;
 
   GtkWidget *vsb = gtk_scrolled_window_get_vscrollbar (
     GTK_SCROLLED_WINDOW (self->scroller));
-  gint gutter = vsb ? gtk_widget_get_width (vsb) : 0;
-
-  /* Not laid out yet; come back next frame rather than guess. */
-  if (gutter <= 0)
-    return G_SOURCE_CONTINUE;
+  /* A hidden or not-yet-allocated scrollbar occupies no gutter. Waiting for
+   * a positive width in a frame callback kept the frame clock running forever
+   * on pages without overflow; a resize happened to give it an allocation. */
+  gint gutter = vsb && gtk_widget_get_visible (vsb)
+    ? gtk_widget_get_width (vsb) : 0;
 
   gint want = gutter + CONTENT_MARGIN_END;
-  if (gtk_widget_get_margin_end (self->title_row) != want) {
+  if (gtk_widget_get_margin_end (self->title_row) != want)
     gtk_widget_set_margin_end (self->title_row, want);
-    return G_SOURCE_CONTINUE;   /* verify after it has been laid out */
-  }
-  return G_SOURCE_REMOVE;
 }
 
 static void
@@ -676,6 +673,13 @@ spotifygtk_artist_page_dispose (GObject *object)
 {
   SpotifyGtkArtistPage *self = SPOTIFYGTK_ARTIST_PAGE (object);
 
+  if (self->scroller) {
+    GtkWidget *vsb = gtk_scrolled_window_get_vscrollbar (
+      GTK_SCROLLED_WINDOW (self->scroller));
+    if (vsb)
+      g_signal_handlers_disconnect_by_data (vsb, self);
+  }
+
   if (self->in_flight)
     g_cancellable_cancel (self->in_flight);
   g_clear_object (&self->in_flight);
@@ -906,7 +910,15 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
   gtk_box_append (GTK_BOX (self), scroller);
 
-  gtk_widget_add_tick_callback (GTK_WIDGET (self), align_title_to_hero, self, NULL);
+  GtkWidget *vsb = gtk_scrolled_window_get_vscrollbar (
+    GTK_SCROLLED_WINDOW (scroller));
+  if (vsb) {
+    g_signal_connect (vsb, "notify::width",
+                      G_CALLBACK (align_title_to_hero), self);
+    g_signal_connect (vsb, "notify::visible",
+                      G_CALLBACK (align_title_to_hero), self);
+  }
+  align_title_to_hero (scroller, NULL, self);
 }
 
 SpotifyGtkArtistPage *

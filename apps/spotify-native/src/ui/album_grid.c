@@ -977,7 +977,7 @@ spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
 
     /* A pending artist is deliberately visible so its metadata can resolve.
      * Re-evaluate now that its real searchable name is available. */
-    if (self->filter)
+    if (self->filter && self->filter_text && *self->filter_text)
       gtk_filter_changed (GTK_FILTER (self->filter), GTK_FILTER_CHANGE_DIFFERENT);
 
     for (guint c = 0; c < self->bound_cards->len; c++) {

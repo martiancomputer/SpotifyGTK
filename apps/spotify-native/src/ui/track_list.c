@@ -70,6 +70,30 @@ struct _SpotifyGtkTrackList {
   gdouble        scroll_velocity;       /* exponentially smoothed px/second */
   gdouble        velocity_last_value;
   gint64         velocity_last_us;
+
+  /* SPOTIFY_SCROLL_STATS collects counters in hot callbacks and writes one
+   * summary after a gesture. No per-frame formatting or file I/O. */
+  gboolean       trace_scroll;
+  gint64         trace_started_us;
+  gint64         trace_last_adjustment_us;
+  gint64         trace_max_adjustment_gap_us;
+  gint64         trace_overscan_us;
+  gint64         trace_max_overscan_us;
+  guint          trace_adjustments;
+  guint          trace_binds;
+  guint          trace_unbinds;
+  guint          trace_peak_bound;
+  guint          trace_overscan_runs;
+  guint          trace_retry_calls;
+  guint          trace_release_calls;
+  guint          trace_hover_enters;
+  guint          trace_hover_leaves;
+  guint          trace_visible_first;
+  guint          trace_visible_last;
+  guint          trace_window_first;
+  guint          trace_window_last;
+  gboolean       trace_smooth_target;
+  gboolean       trace_report_pending;
 };
 
 /*
@@ -94,6 +118,95 @@ struct _SpotifyGtkTrackList {
 G_DEFINE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list, GTK_TYPE_BOX)
 
 static gboolean update_velocity_overscan (gpointer user_data);
+static void trace_scroll_end (SpotifyGtkTrackList *self);
+
+static void
+trace_scroll_begin (SpotifyGtkTrackList *self, gint64 now)
+{
+  if (!self->trace_scroll)
+    return;
+  /* A new gesture can arrive before the previous settle reconciliation gets
+   * its idle turn. Do not lose its counters while resetting this sample. */
+  if (self->trace_report_pending)
+    trace_scroll_end (self);
+  self->trace_report_pending = FALSE;
+  self->trace_started_us = now;
+  self->trace_last_adjustment_us = 0;
+  self->trace_max_adjustment_gap_us = 0;
+  self->trace_overscan_us = 0;
+  self->trace_max_overscan_us = 0;
+  self->trace_adjustments = 0;
+  self->trace_binds = 0;
+  self->trace_unbinds = 0;
+  self->trace_peak_bound = self->bound_rows ? self->bound_rows->len : 0;
+  self->trace_overscan_runs = 0;
+  self->trace_retry_calls = 0;
+  self->trace_release_calls = 0;
+  self->trace_hover_enters = 0;
+  self->trace_hover_leaves = 0;
+  self->trace_visible_first = self->trace_visible_last = 0;
+  self->trace_window_first = self->trace_window_last = 0;
+  self->trace_smooth_target = FALSE;
+}
+
+static void
+trace_scroll_adjustment (SpotifyGtkTrackList *self, gint64 now)
+{
+  if (!self->trace_scroll)
+    return;
+  self->trace_adjustments++;
+  if (self->trace_last_adjustment_us)
+    self->trace_max_adjustment_gap_us = MAX (
+      self->trace_max_adjustment_gap_us, now - self->trace_last_adjustment_us);
+  self->trace_last_adjustment_us = now;
+}
+
+static void
+trace_overscan_end (SpotifyGtkTrackList *self, gint64 started_us)
+{
+  if (!self->trace_scroll || !self->trace_started_us)
+    return;
+  gint64 elapsed = g_get_monotonic_time () - started_us;
+  self->trace_overscan_us += elapsed;
+  self->trace_max_overscan_us = MAX (self->trace_max_overscan_us, elapsed);
+  if (self->trace_report_pending) {
+    self->trace_report_pending = FALSE;
+    trace_scroll_end (self);
+  }
+}
+
+static void
+trace_scroll_end (SpotifyGtkTrackList *self)
+{
+  if (!self->trace_scroll || !self->trace_started_us)
+    return;
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  guint covers_shown = 0;
+  for (guint i = 0; i < self->bound_rows->len; i++)
+    covers_shown += spotifygtk_track_row_has_cover (
+      g_ptr_array_index (self->bound_rows, i));
+  g_message ("track-list-profile: duration=%.1fms model=%u bound=%u"
+             " bound-peak=%u binds=%u unbinds=%u adjustments=%u"
+             " max-adjustment-gap=%.1fms overscan-runs=%u"
+             " overscan-total=%.1fms overscan-max=%.1fms"
+             " visible=%u..%u window=%u..%u smooth-target=%s"
+             " cover-retry-calls=%u cover-release-calls=%u"
+             " covers-shown=%u hover-in=%u hover-out=%u",
+             (g_get_monotonic_time () - self->trace_started_us) / 1000.0,
+             n, self->bound_rows->len, self->trace_peak_bound,
+             self->trace_binds, self->trace_unbinds, self->trace_adjustments,
+             self->trace_max_adjustment_gap_us / 1000.0,
+             self->trace_overscan_runs, self->trace_overscan_us / 1000.0,
+             self->trace_max_overscan_us / 1000.0,
+             self->trace_visible_first, self->trace_visible_last,
+             self->trace_window_first, self->trace_window_last,
+             self->trace_smooth_target ? "yes" : "no",
+             self->trace_retry_calls, self->trace_release_calls,
+             covers_shown,
+             self->trace_hover_enters, self->trace_hover_leaves);
+  self->trace_started_us = 0;
+  self->trace_report_pending = FALSE;
+}
 
 static gboolean
 is_page_header_placeholder (const SpotifyNativeTrack *track)
@@ -136,16 +249,24 @@ update_velocity_overscan (gpointer user_data)
 {
   SpotifyGtkTrackList *self = user_data;
   self->overscan_idle_id = 0;
+  gint64 started_us = self->trace_scroll && self->trace_started_us
+    ? g_get_monotonic_time () : 0;
+  if (started_us)
+    self->trace_overscan_runs++;
 
   guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
-  if (!self->velocity_overscan || !self->vadj || n == 0)
+  if (!self->velocity_overscan || !self->vadj || n == 0) {
+    trace_overscan_end (self, started_us);
     return G_SOURCE_REMOVE;
+  }
 
   gdouble upper = gtk_adjustment_get_upper (self->vadj);
   gdouble page = gtk_adjustment_get_page_size (self->vadj);
   gdouble value = gtk_adjustment_get_value (self->vadj);
-  if (upper <= 0 || page <= 0)
+  if (upper <= 0 || page <= 0) {
+    trace_overscan_end (self, started_us);
     return G_SOURCE_REMOVE;
+  }
 
   /* An inline list's adjustment belongs to the whole compound page. Convert
    * the outer scroll position into this list's own coordinates; otherwise a
@@ -163,8 +284,10 @@ update_velocity_overscan (gpointer user_data)
   }
 
   gdouble row_extent = upper / n;
-  if (row_extent < 1.0)
+  if (row_extent < 1.0) {
+    trace_overscan_end (self, started_us);
     return G_SOURCE_REMOVE;
+  }
 
   guint visible_first = MIN ((guint) (value / row_extent), n - 1);
   guint visible_last = MIN ((guint) ((value + page - 1.0) / row_extent), n - 1);
@@ -216,9 +339,19 @@ update_velocity_overscan (gpointer user_data)
     last = MIN (last + ahead, n - 1);
   }
 
+  if (started_us) {
+    self->trace_visible_first = visible_first;
+    self->trace_visible_last = visible_last;
+    self->trace_window_first = first;
+    self->trace_window_last = last;
+    self->trace_smooth_target = smooth_active;
+  }
+
   if (self->overscan_valid && self->overscan_first == first &&
-      self->overscan_last == last)
+      self->overscan_last == last) {
+    trace_overscan_end (self, started_us);
     return G_SOURCE_REMOVE;
+  }
 
   self->overscan_valid = TRUE;
   self->overscan_first = first;
@@ -252,23 +385,23 @@ update_velocity_overscan (gpointer user_data)
       if (destination && !spotifygtk_track_row_has_cover (row)) {
         spotifygtk_track_row_set_cover_hold (row, FALSE);
         spotifygtk_track_row_retry_cover (row);
+        if (started_us) self->trace_retry_calls++;
       }
       continue;
     }
     g_object_set_data (G_OBJECT (row), "overscan-retained",
                        GUINT_TO_POINTER (retain ? 2u : 1u));
     spotifygtk_track_row_set_cover_hold (row, !retain);
-    if (destination)
+    if (destination) {
       spotifygtk_track_row_retry_cover (row);
-    else if (!retain)
+      if (started_us) self->trace_retry_calls++;
+    } else if (!retain) {
       spotifygtk_track_row_release_cover (row);
+      if (started_us) self->trace_release_calls++;
+    }
   }
 
-  if (g_getenv ("SPOTIFY_COVER_STATS"))
-    g_message ("overscan: visible=%u..%u window=%u..%u velocity=%.0fpx/s ahead=%u smooth=%s target=%.0f",
-               visible_first, visible_last, first, last,
-               self->scroll_velocity, ahead,
-               smooth_active ? "yes" : "no", smooth_target);
+  trace_overscan_end (self, started_us);
   return G_SOURCE_REMOVE;
 }
 
@@ -318,6 +451,20 @@ row_near_viewport (SpotifyGtkTrackList *self, GtkWidget *row)
       && bounds.origin.y < (view_h + margin);
 }
 
+static void
+log_cover_settle_stats (SpotifyGtkTrackList *self)
+{
+  if (!g_getenv ("SPOTIFY_COVER_STATS"))
+    return;
+  guint with = 0;
+  for (guint i = 0; i < self->bound_rows->len; i++)
+    with += spotifygtk_track_row_has_cover (
+      g_ptr_array_index (self->bound_rows, i));
+  g_message ("rows: %u of %u bound rows are showing artwork",
+             with, self->bound_rows->len);
+  spotifygtk_cover_log_stats ("scroll settled");
+}
+
 static gboolean
 on_scroll_settled (gpointer user_data)
 {
@@ -336,7 +483,9 @@ on_scroll_settled (gpointer user_data)
      * model indices as the previous animation frame. The range cache is an
      * optimisation, not proof that every row inside it still owns artwork. */
     self->overscan_valid = FALSE;
+    self->trace_report_pending = self->trace_scroll && self->trace_started_us;
     schedule_velocity_overscan (self);  /* contract back to base eight */
+    log_cover_settle_stats (self);
     return G_SOURCE_REMOVE;
   }
 
@@ -377,18 +526,10 @@ on_scroll_settled (gpointer user_data)
     }
   }
 
-  /* Reported here because settling is the natural boundary: everything a
-   * gesture asked for has resolved by now. Behind G_MESSAGES_DEBUG so it costs
-   * nothing in a normal run. */
-  if (g_getenv ("SPOTIFY_COVER_STATS")) {
-    guint with = 0;
-    for (guint i = 0; i < self->bound_rows->len; i++)
-      if (spotifygtk_track_row_has_cover (g_ptr_array_index (self->bound_rows, i)))
-        with++;
-    g_message ("rows: %u of %u bound rows are showing artwork",
-               with, self->bound_rows->len);
-    spotifygtk_cover_log_stats ("scroll settled");
-  }
+  /* Snapshot once after the gesture, never from each adjustment/overscan. */
+  log_cover_settle_stats (self);
+
+  trace_scroll_end (self);
 
   return G_SOURCE_REMOVE;
 }
@@ -397,9 +538,12 @@ static void
 on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
 {
   SpotifyGtkTrackList *self = user_data;
+  gint64 now = g_get_monotonic_time ();
+  if (!self->scrolling)
+    trace_scroll_begin (self, now);
+  trace_scroll_adjustment (self, now);
 
   if (self->velocity_overscan) {
-    gint64 now = g_get_monotonic_time ();
     gdouble value = gtk_adjustment_get_value (adj);
     if (self->velocity_last_us > 0 && now > self->velocity_last_us) {
       gdouble instantaneous = (value - self->velocity_last_value) * G_USEC_PER_SEC /
@@ -421,7 +565,7 @@ on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
    * page that contains tracks. More importantly, hold already-bound rows as
    * well as newly recycled ones: cover requests are real worker jobs now, so a
    * global "deferred" hint alone cannot stop mid-fling decoding and uploads. */
-  self->last_scroll_us = g_get_monotonic_time ();
+  self->last_scroll_us = now;
   self->scrolling = TRUE;
   spotifygtk_cover_set_deferred (TRUE);
   for (guint i = 0; i < self->bound_rows->len; i++)
@@ -597,6 +741,19 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
 /* === Factory === */
 
 static void
+on_row_hover_changed (SpotifyGtkTrackRow *row, gboolean entered,
+                      SpotifyGtkTrackList *self)
+{
+  if (self->trace_started_us) {
+    if (entered)
+      self->trace_hover_enters++;
+    else
+      self->trace_hover_leaves++;
+  }
+  (void) row;
+}
+
+static void
 on_list_item_position (GObject *object, GParamSpec *pspec, gpointer user_data)
 {
   GtkListItem         *list_item = GTK_LIST_ITEM (object);
@@ -617,6 +774,10 @@ static void
 factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
   GtkWidget *row = GTK_WIDGET (spotifygtk_track_row_new ());
+  SpotifyGtkTrackList *self = user_data;
+  if (self->trace_scroll)
+    g_signal_connect_object (row, "hover-changed",
+                             G_CALLBACK (on_row_hover_changed), self, 0);
 
   /* Right-click anywhere on the row opens the context menu. Added once per
    * pooled row widget; the handler reads whichever item is bound at click
@@ -674,6 +835,11 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
 
   if (!g_ptr_array_find (self->bound_rows, row, NULL))
     g_ptr_array_add (self->bound_rows, row);
+  if (self->trace_scroll && self->trace_started_us) {
+    self->trace_binds++;
+    self->trace_peak_bound = MAX (self->trace_peak_bound,
+                                  self->bound_rows->len);
+  }
 
   /*
    * Number from the position in the model, not from the item.
@@ -757,6 +923,8 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
   if (self->velocity_overscan)
     spotifygtk_track_row_release_cover (row);
   g_ptr_array_remove_fast (self->bound_rows, row);
+  if (self->trace_scroll && self->trace_started_us)
+    self->trace_unbinds++;
   schedule_velocity_overscan (self);
 
   (void) factory;
@@ -878,6 +1046,7 @@ spotifygtk_track_list_class_init (SpotifyGtkTrackListClass *klass)
 static void
 spotifygtk_track_list_init (SpotifyGtkTrackList *self)
 {
+  self->trace_scroll = g_getenv ("SPOTIFY_SCROLL_STATS") != NULL;
   self->show_like = TRUE;
   self->show_album = TRUE;
   self->show_cover = TRUE;
@@ -1339,6 +1508,7 @@ static void
 set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  gint64 build_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;
 
   guint existing = g_list_model_get_n_items (G_LIST_MODEL (self->store));
 
@@ -1372,7 +1542,15 @@ set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow
       : spotifygtk_track_item_new (track, items->len + 1));
   }
 
+  gint64 splice_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;
   g_list_store_splice (self->store, 0, existing, items->pdata, items->len);
+  if (self->trace_scroll)
+    g_message ("track-list-profile: replace old=%u new=%u build=%.1fms"
+               " splice=%.1fms bound=%u",
+               existing, items->len,
+               (splice_started_us - build_started_us) / 1000.0,
+               (g_get_monotonic_time () - splice_started_us) / 1000.0,
+               self->bound_rows->len);
   ensure_page_header_placeholder (self);
   self->overscan_valid = FALSE;
   schedule_velocity_overscan (self);

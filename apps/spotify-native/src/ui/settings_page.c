@@ -286,11 +286,11 @@ on_aggressive_filtering_toggled (GtkSwitch *sw, GParamSpec *pspec,
 }
 
 static void
-on_compact_mode_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
+on_detail_view_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
 {
   SpotifyGtkSettingsPage *self = user_data;
   spotifygtk_settings_set_compact_mode (self->settings,
-                                       gtk_switch_get_active (sw));
+                                        !gtk_switch_get_active (sw));
   (void) pspec;
 }
 
@@ -535,18 +535,17 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "bar. None disables media loading completely.",
                              media_dd));
 
-  GtkWidget *compact = gtk_switch_new ();
-  gtk_switch_set_active (GTK_SWITCH (compact),
-    spotifygtk_settings_get_compact_mode (self->settings));
-  g_signal_connect (compact, "notify::active",
-                    G_CALLBACK (on_compact_mode_toggled), self);
+  GtkWidget *detail_view = gtk_switch_new ();
+  gtk_switch_set_active (GTK_SWITCH (detail_view),
+    !spotifygtk_settings_get_compact_mode (self->settings));
+  g_signal_connect (detail_view, "notify::active",
+                    G_CALLBACK (on_detail_view_toggled), self);
   gtk_box_append (GTK_BOX (interface_group),
-                  build_row ("Compact album and playlist pages",
-                             "Keep the familiar short header and artwork in track rows. "
-                             "Turn off for a larger cover, release details, and a "
-                             "numbered list. Search results also use compact rows "
-                             "instead of the album/playlist shelf.",
-                             compact));
+                  build_row ("Expanded album and playlist view",
+                             "On shows a large cover, release details, and a numbered list. "
+                             "Off keeps the compact header and artwork in track rows. "
+                             "Search results follow the same view choice.",
+                             detail_view));
 
   GtkWidget *scroll_scale = gtk_scale_new_with_range (
     GTK_ORIENTATION_HORIZONTAL, 0.0, 100.0, 1.0);
