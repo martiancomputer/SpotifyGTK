@@ -151,6 +151,25 @@ test_downsample_rejects_above_nyquist (void)
   spotifygtk_resampler_free (r);
 }
 
+static void
+test_linear_mode_and_high_rate (void)
+{
+  SpotifyResampler *r = spotifygtk_resampler_new (CH);
+  spotifygtk_resampler_set_mode (r, SPOTIFY_RESAMPLER_LINEAR);
+  spotifygtk_resampler_set_rates (r, 44100, 384000);
+
+  gsize n = 4410;
+  g_autofree gint16 *in = make_sine (n, 440.0, 44100, 10000.0);
+  gint16 *out = NULL;
+  gsize got = spotifygtk_resampler_process (r, in, n, &out);
+  g_assert_cmpfloat (fabs ((gdouble) got - n * (384000.0 / 44100.0)), <, 150.0);
+  g_assert_cmpfloat (peak_of (out + MIN (got / 10, 512) * CH,
+                              got - MIN (got / 10, 512)), >, 9500.0);
+
+  g_free (out);
+  spotifygtk_resampler_free (r);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -160,5 +179,6 @@ main (int argc, char **argv)
   g_test_add_func ("/resampler/tone-level-preserved",   test_tone_level_preserved);
   g_test_add_func ("/resampler/dc-preserved",           test_dc_is_preserved);
   g_test_add_func ("/resampler/downsample-rejects-hf",  test_downsample_rejects_above_nyquist);
+  g_test_add_func ("/resampler/linear-high-rate",       test_linear_mode_and_high_rate);
   return g_test_run ();
 }

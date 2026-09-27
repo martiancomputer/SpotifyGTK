@@ -163,6 +163,33 @@ adjustment_for (SmoothScroll *ss)
     : gtk_scrolled_window_get_vadjustment (ss->scroller);
 }
 
+/* An inline list or horizontal shelf may be inside another page scroller.
+ * Only pass an outward edge event on if that ancestor can actually use it;
+ * otherwise GTK's own controller starts overshoot on the exhausted scroller.
+ * Repeated edge input can then leave its unclamped position at the limit and
+ * make the next inward gesture appear stuck. */
+static gboolean
+ancestor_can_scroll (SmoothScroll *ss, GtkOrientation axis, gdouble delta)
+{
+  for (GtkWidget *parent = gtk_widget_get_parent (GTK_WIDGET (ss->scroller));
+       parent; parent = gtk_widget_get_parent (parent)) {
+    if (!GTK_IS_SCROLLED_WINDOW (parent))
+      continue;
+    GtkAdjustment *adj = axis == GTK_ORIENTATION_HORIZONTAL
+      ? gtk_scrolled_window_get_hadjustment (GTK_SCROLLED_WINDOW (parent))
+      : gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (parent));
+    if (!adj)
+      continue;
+    gdouble lower = gtk_adjustment_get_lower (adj);
+    gdouble upper = MAX (lower, gtk_adjustment_get_upper (adj) -
+                               gtk_adjustment_get_page_size (adj));
+    gdouble value = gtk_adjustment_get_value (adj);
+    if ((delta < 0 && value > lower) || (delta > 0 && value < upper))
+      return TRUE;
+  }
+  return FALSE;
+}
+
 static gboolean
 event_over_nested_horizontal_shelf (SmoothScroll *ss,
                                     GtkEventControllerScroll *ctrl)
@@ -341,34 +368,32 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
   if (event_over_nested_horizontal_shelf (ss, ctrl))
     return GDK_EVENT_PROPAGATE;
 
+  GtkAdjustment *adj = adjustment_for (ss);
+  gdouble delta = ss->orientation == GTK_ORIENTATION_HORIZONTAL && dx != 0.0
+    ? dx : dy;
+  if (!adj || delta == 0.0)
+    return GDK_EVENT_PROPAGATE;
+
+  gdouble lower = gtk_adjustment_get_lower (adj);
+  gdouble upper = MAX (lower, gtk_adjustment_get_upper (adj) -
+                             gtk_adjustment_get_page_size (adj));
+  gdouble value = gtk_adjustment_get_value (adj);
+
 #if GTK_CHECK_VERSION (4, 8, 0)
-  /* Native touchpad motion is left alone for vertical pages. A horizontal
-   * shelf nested in a vertical page is different: GTK otherwise lets its dy
-   * travel to the parent page. Translate that gesture into the shelf's own
-   * adjustment and stop it only while the shelf can actually move. */
+  /* GTK owns touchpad gestures, including their overshoot/end sequence. If
+   * we stop only the edge event, GTK can be left with a live kinetic gesture
+   * that pins the adjustment even when the user drags the scrollbar back. */
   if (gtk_event_controller_scroll_get_unit (ctrl) != GDK_SCROLL_UNIT_WHEEL) {
-    /* A touchpad gesture owns the adjustment from this event onward.  Cancel
-     * an unfinished wheel animation immediately so its next frame cannot tug
-     * against GTK's kinetic motion and produce a one-frame reversal. */
     if (ss->tick != 0) {
-      GtkAdjustment *active_adj = adjustment_for (ss);
-      log_scroll_end (ss, "touchpad-takeover",
-                      active_adj ? gtk_adjustment_get_value (active_adj) : 0.0);
+      log_scroll_end (ss, "touchpad-takeover", value);
       gtk_widget_remove_tick_callback (GTK_WIDGET (ss->scroller), ss->tick);
       ss->tick = 0;
     }
     if (ss->orientation == GTK_ORIENTATION_HORIZONTAL) {
-      GtkAdjustment *adj = adjustment_for (ss);
-      if (adj) {
-        gdouble lower = gtk_adjustment_get_lower (adj);
-        gdouble upper = MAX (lower, gtk_adjustment_get_upper (adj) -
-                                   gtk_adjustment_get_page_size (adj));
-        gdouble delta = fabs (dx) > fabs (dy) ? dx : dy;
-        gdouble value = gtk_adjustment_get_value (adj);
-        if ((delta < 0 && value > lower) || (delta > 0 && value < upper)) {
-          set_adjustment_value (ss, adj, CLAMP (value + delta, lower, upper));
-          return GDK_EVENT_STOP;
-        }
+      gdouble motion = fabs (dx) > fabs (dy) ? dx : dy;
+      if ((motion < 0 && value > lower) || (motion > 0 && value < upper)) {
+        set_adjustment_value (ss, adj, CLAMP (value + motion, lower, upper));
+        return GDK_EVENT_STOP;
       }
     }
     return GDK_EVENT_PROPAGATE;
@@ -377,28 +402,24 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
   (void) ctrl;
 #endif
 
+  if ((delta < 0 && value <= lower) || (delta > 0 && value >= upper)) {
+    if (ss->tick) {
+      log_scroll_end (ss, "edge", value);
+      gtk_widget_remove_tick_callback (GTK_WIDGET (ss->scroller), ss->tick);
+      ss->tick = 0;
+      ss->target = ss->last_set = value;
+    }
+    /* A wheel over a horizontal shelf can continue vertically on its parent.
+     * A terminal page edge, however, should not enter GTK overshoot at all. */
+    GtkOrientation parent_axis = ss->orientation == GTK_ORIENTATION_HORIZONTAL &&
+                                 dy != 0.0 ? GTK_ORIENTATION_VERTICAL :
+                                             ss->orientation;
+    return ancestor_can_scroll (ss, parent_axis, delta)
+      ? GDK_EVENT_PROPAGATE : GDK_EVENT_STOP;
+  }
+
   /* A wheel only ever reports dy, so a horizontal target has to take it from
    * there; dx is preferred when present (tilt wheels, horizontal gestures). */
-  gdouble delta = (ss->orientation == GTK_ORIENTATION_HORIZONTAL && dx != 0.0) ? dx : dy;
-  if (delta == 0.0)
-    return GDK_EVENT_PROPAGATE;
-
-  GtkAdjustment *adj = adjustment_for (ss);
-  if (!adj)
-    return GDK_EVENT_PROPAGATE;
-
-  gdouble lower = gtk_adjustment_get_lower (adj);
-  gdouble upper = gtk_adjustment_get_upper (adj) - gtk_adjustment_get_page_size (adj);
-  if (upper < lower)
-    upper = lower;
-
-  gdouble value = gtk_adjustment_get_value (adj);
-
-  /* Already hard against the end in the direction asked for: propagate, so an
-   * enclosing scroller can take over instead of the event dying here. */
-  if ((delta < 0 && value <= lower) || (delta > 0 && value >= upper))
-    return GDK_EVENT_PROPAGATE;
-
   /* Accumulate onto an in-flight target so a flick of several notches travels
    * the whole distance instead of each notch cancelling the last. */
   gdouble base = (ss->tick != 0) ? ss->target : value;

@@ -2,7 +2,10 @@
  * output.h — Abstract audio output interface.
  *
  * Every platform/backend (PulseAudio, ALSA, PipeWire, WASAPI) hides
- * behind this one vtable-style interface. player.c and decoder.c
+ * behind this one vtable-style interface. The public write entry point accepts
+ * the current 16-bit decoder output and widens it to the selected signed PCM
+ * container before it reaches a backend; widening does not add resolution.
+ * player.c and decoder.c
  * never touch a backend directly — they call these functions, and
  * the backend is selected once at startup via runtime probing
  * (see spotifygtk_output_open()).
@@ -29,8 +32,7 @@ typedef enum {
 } AudioBackendKind;
 
 typedef struct {
-  gboolean (*open)    (SpotifyAudioOutput *self, gint sample_rate, gint channels);
-  gsize    (*write)   (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames);
+  gsize    (*write)   (SpotifyAudioOutput *self, const void *samples, gsize n_frames);
   void     (*set_volume) (SpotifyAudioOutput *self, gdouble volume_0_to_1);
   void     (*drain)   (SpotifyAudioOutput *self);
   /* Throw away audio the device still holds. Optional; NULL means the backend
@@ -43,6 +45,10 @@ struct _SpotifyAudioOutput {
   AudioBackendKind          kind;
   const AudioBackendVtable *vtable;
   gpointer                  backend_data;   /* backend-private state */
+  gint                      channels;
+  gint                      format_bits;    /* signed little-endian PCM */
+  guint8                   *pack_buffer;    /* reused for 24/32-bit widening */
+  gsize                     pack_capacity;
 };
 
 /* Probes available backends in priority order and opens the first
@@ -51,7 +57,7 @@ struct _SpotifyAudioOutput {
  *   stable:  PulseAudio -> ALSA
  * (Windows build substitutes WASAPI as the sole candidate.)
  */
-SpotifyAudioOutput *spotifygtk_output_open (gint sample_rate, gint channels);
+SpotifyAudioOutput *spotifygtk_output_open (gint sample_rate, gint channels, gint format_bits);
 
 gsize spotifygtk_output_write      (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames);
 void  spotifygtk_output_set_volume (SpotifyAudioOutput *self, gdouble volume_0_to_1);

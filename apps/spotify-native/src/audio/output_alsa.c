@@ -22,7 +22,7 @@ typedef struct {
 } AlsaData;
 
 static gsize
-alsa_write (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames)
+alsa_write (SpotifyAudioOutput *self, const void *samples, gsize n_frames)
 {
 #if HAVE_ALSA
   AlsaData *data = self->backend_data;
@@ -97,7 +97,10 @@ output_alsa_try_open (SpotifyAudioOutput *self, gint rate, gint channels)
     return FALSE;
   }
 
-  if (snd_pcm_set_params (handle, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
+  snd_pcm_format_t format = self->format_bits == 24 ? SND_PCM_FORMAT_S24_3LE :
+                            self->format_bits == 32 ? SND_PCM_FORMAT_S32_LE :
+                                                      SND_PCM_FORMAT_S16_LE;
+  if (snd_pcm_set_params (handle, format, SND_PCM_ACCESS_RW_INTERLEAVED,
                           (guint) channels, (guint) rate, 1 /* allow resample */,
                           100000 /* 100ms latency */) < 0) {
     g_message ("ALSA unavailable: set_params failed");

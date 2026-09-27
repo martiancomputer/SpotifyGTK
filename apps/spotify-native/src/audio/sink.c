@@ -45,6 +45,7 @@ typedef struct {
 
   guint64      written;        /* device frames written for this track */
   gint         stream_rate;    /* rate its PCM decoded to */
+  gint         resampler_mode;
   SpotifyResampler *resampler; /* only when stream_rate != device rate */
 } SinkTrack;
 
@@ -62,6 +63,8 @@ struct _SpotifyAudioSink {
   SpotifyAudioOutput *output;
   gint     device_rate;
   gint     device_channels;
+  gint     configured_rate; /* 0 means the source rate was selected */
+  gint     configured_bits;
 
   /* An explicit track change or seek has retired PCM already submitted to
    * the backend.  Keep that small backend buffer sounding while replacement
@@ -163,15 +166,33 @@ head_track (SpotifyAudioSink *self)
 }
 
 /*
- * Open the device once, from the first frame that reaches it.
+ * Open the device from the first frame that reaches it.
  *
- * The rate is chosen here and then kept: every later track is resampled to it
- * rather than reopening, because reopening is the gap. Caller holds the lock;
- * the open itself is done unlocked since it can block.
+ * The rate is then kept across tracks to preserve gapless playback. A changed
+ * user format is the one exception: reopen at a track boundary, never in the
+ * middle of a sounding track. Caller holds the lock; device operations are
+ * done unlocked since they can block.
  */
 static gboolean
-ensure_output (SpotifyAudioSink *self, const PcmFrame *frame, gint requested_rate)
+ensure_output (SpotifyAudioSink *self, const PcmFrame *frame,
+               gint requested_rate, gint requested_bits,
+               gboolean new_track)
 {
+  /* A settings change must not tear down a sounding track. Once its last
+   * frame has been submitted, drain the old format exactly once and reopen
+   * for the next track. Ordinary track changes keep the device open. */
+  if (self->output && new_track &&
+      (self->configured_rate != requested_rate ||
+       self->configured_bits != requested_bits)) {
+    SpotifyAudioOutput *old = self->output;
+    self->output = NULL;
+    g_mutex_unlock (&self->lock);
+    spotifygtk_output_drain (old);
+    spotifygtk_output_close (old);
+    g_mutex_lock (&self->lock);
+  }
+  if (!self->running)
+    return FALSE;
   if (self->output)
     return TRUE;
   if (self->failed)
@@ -179,9 +200,20 @@ ensure_output (SpotifyAudioSink *self, const PcmFrame *frame, gint requested_rat
 
   gint rate = (requested_rate > 0) ? requested_rate : frame->sample_rate;
   gint channels = frame->channels;
+  gint opened_rate = rate;
 
   g_mutex_unlock (&self->lock);
-  SpotifyAudioOutput *out = spotifygtk_output_open (rate, channels);
+  SpotifyAudioOutput *out = spotifygtk_output_open (rate, channels, requested_bits);
+  if (!out && requested_bits != 16) {
+    g_warning ("sink: %d-bit output unavailable; trying 16-bit PCM", requested_bits);
+    out = spotifygtk_output_open (rate, channels, 16);
+  }
+  if (!out && rate != frame->sample_rate) {
+    g_warning ("sink: %d Hz output unavailable; trying source rate %d Hz",
+               rate, frame->sample_rate);
+    opened_rate = frame->sample_rate;
+    out = spotifygtk_output_open (opened_rate, channels, 16);
+  }
   g_mutex_lock (&self->lock);
 
   if (!out) {
@@ -199,10 +231,12 @@ ensure_output (SpotifyAudioSink *self, const PcmFrame *frame, gint requested_rat
   }
 
   self->output = out;
-  self->device_rate = rate;
+  self->device_rate = opened_rate;
   self->device_channels = channels;
-  g_message ("sink: device open at %d Hz, %d channel(s) on %s; it stays open "
-             "across tracks", rate, channels,
+  self->configured_rate = requested_rate;
+  self->configured_bits = requested_bits;
+  g_message ("sink: device open at %d Hz, %d-bit, %d channel(s) on %s; it stays open "
+             "across tracks", opened_rate, out->format_bits, channels,
              spotifygtk_output_backend_name (out->kind));
   return TRUE;
 }
@@ -210,7 +244,7 @@ ensure_output (SpotifyAudioSink *self, const PcmFrame *frame, gint requested_rat
 /* Convert one frame to the device rate if it did not decode to it. Returns the
  * buffer to write and sets *out_frames; *scratch owns any allocation. */
 static const gint16 *
-to_device_rate (SinkTrack *t, gint device_rate, PcmFrame *frame,
+to_device_rate (SinkTrack *t, gint device_rate, gint resampler_mode, PcmFrame *frame,
                 gsize *out_frames, gint16 **scratch)
 {
   *scratch = NULL;
@@ -220,11 +254,15 @@ to_device_rate (SinkTrack *t, gint device_rate, PcmFrame *frame,
     return frame->samples;
   }
 
-  if (!t->resampler || t->stream_rate != frame->sample_rate) {
+  if (!t->resampler || t->stream_rate != frame->sample_rate ||
+      t->resampler_mode != resampler_mode) {
     spotifygtk_resampler_free (t->resampler);
     t->resampler = spotifygtk_resampler_new (frame->channels);
+    spotifygtk_resampler_set_mode (t->resampler,
+      resampler_mode == 1 ? SPOTIFY_RESAMPLER_LINEAR : SPOTIFY_RESAMPLER_POLYPHASE);
     spotifygtk_resampler_set_rates (t->resampler, frame->sample_rate, device_rate);
     t->stream_rate = frame->sample_rate;
+    t->resampler_mode = resampler_mode;
     g_message ("sink: track %" G_GUINT64_FORMAT " resampling %d Hz -> %d Hz to "
                "keep the device open", t->seq, frame->sample_rate, device_rate);
   }
@@ -263,8 +301,11 @@ sink_writer (gpointer user_data)
     }
 
     gint requested = spotifygtk_native_engine_control_get_output_rate (t->control);
+    gint bits = 16, resampler_mode = 0;
+    spotifygtk_native_engine_control_get_output_format (t->control,
+                                                        &bits, &resampler_mode);
     PcmFrame *frame = g_queue_peek_head (t->frames);
-    if (!ensure_output (self, frame, requested))
+    if (!ensure_output (self, frame, requested, bits, !t->started))
       continue;
 
     /* head_track may have changed while ensure_output had the lock dropped. */
@@ -290,7 +331,8 @@ sink_writer (gpointer user_data)
 
     g_autofree gint16 *scratch = NULL;
     gsize n_frames = 0;
-    const gint16 *pcm = to_device_rate (t, device_rate, frame, &n_frames, &scratch);
+    const gint16 *pcm = to_device_rate (t, device_rate, resampler_mode,
+                                      frame, &n_frames, &scratch);
 
     if (n_frames == 0) {                     /* too short to yield a block yet */
       pcm_frame_free (frame);

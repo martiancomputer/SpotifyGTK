@@ -1010,13 +1010,9 @@ spotifygtk_album_grid_release_covers (SpotifyGtkAlbumGrid *self)
 
   for (guint i = 0; i < self->bound_cards->len; i++) {
     GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
-    GtkWidget *art  = g_object_get_data (G_OBJECT (card), "art");
-    if (!art)
-      continue;
-    g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);   /* cancels in flight */
-    g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
-    gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
-    gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
+    /* Most overscan cards already show the placeholder. Avoid invalidating
+     * their GTK images (and the whole grid) on every page switch. */
+    card_release_cover (card);
   }
 }
 
@@ -1180,6 +1176,27 @@ spotifygtk_album_grid_dup_cover_id (SpotifyGtkAlbumGrid *self,
       g_list_model_get_item (G_LIST_MODEL (self->store), i);
     if (g_strcmp0 (item->uri, uri) == 0)
       return g_strdup (item->cover_id);
+  }
+  return NULL;
+}
+
+GdkTexture *
+spotifygtk_album_grid_ref_visible_cover (SpotifyGtkAlbumGrid *self,
+                                          const gchar *uri)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self), NULL);
+  if (!uri || !self->bound_cards)
+    return NULL;
+
+  for (guint i = 0; i < self->bound_cards->len; i++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+    if (g_strcmp0 (g_object_get_data (G_OBJECT (card), "album-uri"), uri) != 0 ||
+        !g_object_get_data (G_OBJECT (card), "cover-shown"))
+      continue;
+    GtkImage *art = g_object_get_data (G_OBJECT (card), "art");
+    GdkPaintable *paintable = art ? gtk_image_get_paintable (art) : NULL;
+    if (GDK_IS_TEXTURE (paintable))
+      return g_object_ref (GDK_TEXTURE (paintable));
   }
   return NULL;
 }

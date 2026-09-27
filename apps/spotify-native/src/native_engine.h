@@ -42,6 +42,8 @@ gdouble spotifygtk_native_engine_control_get_volume (SpotifyNativeEngineControl 
  * no conversion. Any other rate engages the resampler. */
 void    spotifygtk_native_engine_control_set_output_rate (SpotifyNativeEngineControl *control,
                                                           gint rate_hz);
+void    spotifygtk_native_engine_control_set_output_format (SpotifyNativeEngineControl *control,
+                                                            gint bits, gint resampler_mode);
 
 void    spotifygtk_native_engine_control_set_eq (SpotifyNativeEngineControl *control,
                                                  const gdouble *gains_db, gboolean enabled);
@@ -65,6 +67,8 @@ void     spotifygtk_native_engine_control_apply_eq (SpotifyNativeEngineControl *
                                                     gint16 *samples, gsize n_frames,
                                                     gint channels, gint rate);
 gint     spotifygtk_native_engine_control_get_output_rate (SpotifyNativeEngineControl *control);
+void     spotifygtk_native_engine_control_get_output_format (SpotifyNativeEngineControl *control,
+                                                             gint *bits, gint *resampler_mode);
 
 /* The sink slot this track occupies. Set by the engine, read by the player
  * service to work out which of its controls is the audible one. */

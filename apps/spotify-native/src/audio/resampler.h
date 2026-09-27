@@ -12,12 +12,12 @@
  * precomputed at a fixed set of sub-sample phases, and each output sample is a
  * dot product of the kernel against a window of input samples, with the phase
  * chosen by where the output falls between two input samples. This is the
- * standard high-quality approach — the alternative, linear interpolation, is
- * cheap but audibly harsh because its stopband rejection is poor.
+ * standard high-quality approach. A cheaper linear mode is also available,
+ * but it has poor stopband rejection, particularly when downsampling.
  *
- * WHEN DOWNSAMPLING the kernel cutoff moves below the output Nyquist, so the
- * band that would otherwise alias back into the audible range is filtered out
- * first. Upsampling keeps the full band.
+ * WHEN DOWNSAMPLING in polyphase mode, the kernel cutoff moves below the
+ * output Nyquist, so the band that would otherwise alias back is filtered
+ * first. Linear mode does not provide this protection.
  *
  * A NOTE ON WHETHER YOU WANT THIS AT ALL
  *
@@ -37,6 +37,11 @@ G_BEGIN_DECLS
 
 typedef struct _SpotifyResampler SpotifyResampler;
 
+typedef enum {
+  SPOTIFY_RESAMPLER_POLYPHASE,
+  SPOTIFY_RESAMPLER_LINEAR,
+} SpotifyResamplerMode;
+
 /* `channels` is the interleave width (2 for stereo) and is fixed for the
  * resampler's life; rates are set separately and may change. */
 SpotifyResampler *spotifygtk_resampler_new  (gint channels);
@@ -50,6 +55,7 @@ void              spotifygtk_resampler_free (SpotifyResampler *self);
  */
 void spotifygtk_resampler_set_rates (SpotifyResampler *self,
                                      gint in_rate, gint out_rate);
+void spotifygtk_resampler_set_mode (SpotifyResampler *self, SpotifyResamplerMode mode);
 
 /* TRUE when in_rate == out_rate, i.e. process() would only copy. Callers use
  * this to skip the conversion entirely rather than pay for a no-op. */

@@ -89,6 +89,14 @@ if get_option('tests')
   )
   test('resampler', test_resampler)
 
+  test_output_format = executable('test-output-format',
+    'test_output_format.c',
+    '../src/audio/output.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep],
+  )
+  test('output-format', test_output_format)
+
   test_login_encoding = executable('test-login-encoding',
     'test_login_encoding.c',
     '../src/spotify/protobuf_min.c',

@@ -23,12 +23,12 @@ typedef struct {
 } PulseData;
 
 static gsize
-pulse_write (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames)
+pulse_write (SpotifyAudioOutput *self, const void *samples, gsize n_frames)
 {
 #if HAVE_PULSE
   PulseData *data = self->backend_data;
   int error = 0;
-  gsize bytes = n_frames * (gsize) data->channels * sizeof (gint16);
+  gsize bytes = n_frames * (gsize) data->channels * (gsize) self->format_bits / 8;
   if (pa_simple_write (data->stream, samples, bytes, &error) < 0) {
     g_warning ("PulseAudio write failed: %s", pa_strerror (error));
     return 0;
@@ -92,7 +92,8 @@ output_pulse_try_open (SpotifyAudioOutput *self, gint rate, gint channels)
 {
 #if HAVE_PULSE
   pa_sample_spec spec = {
-    .format   = PA_SAMPLE_S16LE,
+    .format   = self->format_bits == 24 ? PA_SAMPLE_S24LE :
+                self->format_bits == 32 ? PA_SAMPLE_S32LE : PA_SAMPLE_S16LE,
     .rate     = (guint32) rate,
     .channels = (guint8) channels,
   };

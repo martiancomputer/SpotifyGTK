@@ -257,6 +257,24 @@ on_sample_rate_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_
 }
 
 static void
+on_sample_format_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_sample_format (self->settings,
+    (SpotifyGtkSampleFormat) gtk_drop_down_get_selected (dropdown));
+  (void) pspec;
+}
+
+static void
+on_resampler_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_resampler_mode (self->settings,
+    (SpotifyGtkResamplerMode) gtk_drop_down_get_selected (dropdown));
+  (void) pspec;
+}
+
+static void
 on_theme_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
 {
   SpotifyGtkSettingsPage *self = user_data;
@@ -291,6 +309,16 @@ on_detail_view_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
   SpotifyGtkSettingsPage *self = user_data;
   spotifygtk_settings_set_compact_mode (self->settings,
                                         !gtk_switch_get_active (sw));
+  (void) pspec;
+}
+
+static void
+on_page_crossfade_toggled (GtkSwitch *sw, GParamSpec *pspec,
+                           gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_page_crossfade (self->settings,
+                                          gtk_switch_get_active (sw));
   (void) pspec;
 }
 
@@ -547,6 +575,16 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "Search results follow the same view choice.",
                              detail_view));
 
+  GtkWidget *page_crossfade = gtk_switch_new ();
+  gtk_switch_set_active (GTK_SWITCH (page_crossfade),
+    spotifygtk_settings_get_page_crossfade (self->settings));
+  g_signal_connect (page_crossfade, "notify::active",
+                    G_CALLBACK (on_page_crossfade_toggled), self);
+  gtk_box_append (GTK_BOX (interface_group),
+                  build_row ("Page crossfade",
+                             "Fade between pages when navigating. Turn off for an instant switch.",
+                             page_crossfade));
+
   GtkWidget *scroll_scale = gtk_scale_new_with_range (
     GTK_ORIENTATION_HORIZONTAL, 0.0, 100.0, 1.0);
   gtk_range_set_value (
@@ -618,32 +656,44 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   /* ── Audio ─────────────────────────────────────────────────── */
   GtkWidget *audio_group = build_group ("Audio");
 
-  static const gchar * const rates[] = { "Default", "44.1 kHz", "48 kHz", "96 kHz", NULL };
+  static const gchar * const rates[] = { "Default", "44.1 kHz", "48 kHz", "96 kHz",
+                                         "192 kHz", "384 kHz", NULL };
   GtkWidget *rate_dd = build_dropdown (rates,
     (guint) spotifygtk_settings_get_sample_rate (self->settings), TRUE);
   g_signal_connect (rate_dd, "notify::selected",
                     G_CALLBACK (on_sample_rate_changed), self);
   gtk_box_append (GTK_BOX (audio_group),
                   build_row ("Sample rate",
-                             "Converts the 44.1 kHz stream to the chosen device "
-                             "rate. Default follows the stream and does no "
-                             "conversion, which is the cleanest path.",
+                             "Chooses the output rate. Default follows the source "
+                             "without app-side conversion. Higher rates do not "
+                             "add detail to a lower-rate recording; a local file "
+                             "can retain its own rate.",
                              rate_dd));
 
-  static const gchar * const formats[] = { "Native", "24-bit", NULL };
+  static const gchar * const formats[] = { "16-bit", "24-bit", "32-bit", NULL };
+  GtkWidget *format_dd = build_dropdown (formats,
+    (guint) spotifygtk_settings_get_sample_format (self->settings), TRUE);
+  g_signal_connect (format_dd, "notify::selected",
+                    G_CALLBACK (on_sample_format_changed), self);
   gtk_box_append (GTK_BOX (audio_group),
                   build_row ("Sample format",
-                             "Decoded output is 16-bit signed PCM; 24-bit "
-                             "needs a converter in the output path.",
-                             build_dropdown (formats, 0, FALSE)));
+                             "Signed PCM sent to the output device. The current "
+                             "Spotify decoder is 16-bit; selecting a wider "
+                             "container does not restore lost precision.",
+                             format_dd));
 
-  static const gchar * const resamplers[] = { "Native", NULL };
+  static const gchar * const resamplers[] = { "Polyphase (quality)",
+                                             "Linear (fast)", NULL };
+  GtkWidget *resampler_dd = build_dropdown (resamplers,
+    (guint) spotifygtk_settings_get_resampler_mode (self->settings), TRUE);
+  g_signal_connect (resampler_dd, "notify::selected",
+                    G_CALLBACK (on_resampler_changed), self);
   gtk_box_append (GTK_BOX (audio_group),
                   build_row ("Resampler",
-                             "The native polyphase resampler is used when a "
-                             "sample rate is selected; Default is a byte-exact "
-                             "passthrough.",
-                             build_dropdown (resamplers, 0, FALSE)));
+                             "Used only when the source and output rates differ. "
+                             "Polyphase rejects aliasing; linear is faster but "
+                             "less accurate. Matching rates bypass conversion.",
+                             resampler_dd));
 
   GtkWidget *eq_heading = gtk_label_new ("Equalizer");
   gtk_widget_add_css_class (eq_heading, "normal-text");

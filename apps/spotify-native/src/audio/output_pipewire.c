@@ -26,9 +26,10 @@ typedef struct {
   struct pw_thread_loop *loop;
   struct pw_stream      *stream;
 
-  gint16  *ring;
+  guint8  *ring;
   gsize    ring_head, ring_tail, ring_fill;
   gint     channels;
+  gint     bytes_per_sample;
 } PipewireData;
 
 static void
@@ -39,24 +40,24 @@ on_process (void *userdata)
   if (!b) return;
 
   struct spa_buffer *buf = b->buffer;
-  gint16 *dst = buf->datas[0].data;
+  guint8 *dst = buf->datas[0].data;
   if (!dst) { pw_stream_queue_buffer (data->stream, b); return; }
 
-  guint stride = (guint) (sizeof (gint16) * (gsize) data->channels);
+  guint stride = (guint) ((gsize) data->bytes_per_sample * (gsize) data->channels);
   guint n_frames_wanted = buf->datas[0].maxsize / stride;
 
   gsize available = data->ring_fill;
   gsize to_copy = MIN ((gsize) n_frames_wanted, available);
 
-  for (gsize i = 0; i < to_copy * (gsize) data->channels; i++) {
+  for (gsize i = 0; i < to_copy * (gsize) stride; i++) {
     dst[i] = data->ring[data->ring_head];
-    data->ring_head = (data->ring_head + 1) % (PW_RING_FRAMES * (gsize) data->channels);
+    data->ring_head = (data->ring_head + 1) % (PW_RING_FRAMES * (gsize) stride);
   }
   data->ring_fill -= to_copy;
 
   /* Underrun: pad with silence rather than glitching */
-  for (gsize i = to_copy * (gsize) data->channels; i < (gsize) n_frames_wanted * (gsize) data->channels; i++)
-    dst[i] = 0;
+  memset (dst + to_copy * (gsize) stride, 0,
+          (n_frames_wanted - to_copy) * (gsize) stride);
 
   buf->datas[0].chunk->offset = 0;
   buf->datas[0].chunk->stride = stride;
@@ -71,7 +72,7 @@ static const struct pw_stream_events STREAM_EVENTS = {
 };
 
 static gsize
-pipewire_write (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames)
+pipewire_write (SpotifyAudioOutput *self, const void *samples, gsize n_frames)
 {
   PipewireData *data = self->backend_data;
   pw_thread_loop_lock (data->loop);
@@ -80,9 +81,10 @@ pipewire_write (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames)
   gsize space = cap - data->ring_fill;
   gsize take = MIN (n_frames, space);
 
-  for (gsize i = 0; i < take * (gsize) data->channels; i++) {
-    data->ring[data->ring_tail] = samples[i];
-    data->ring_tail = (data->ring_tail + 1) % (cap * (gsize) data->channels);
+  gsize stride = (gsize) data->channels * (gsize) data->bytes_per_sample;
+  for (gsize i = 0; i < take * stride; i++) {
+    data->ring[data->ring_tail] = ((const guint8 *) samples)[i];
+    data->ring_tail = (data->ring_tail + 1) % (cap * stride);
   }
   data->ring_fill += take;
 
@@ -152,7 +154,9 @@ output_pipewire_try_open (SpotifyAudioOutput *self, gint rate, gint channels)
 
   PipewireData *data = g_new0 (PipewireData, 1);
   data->channels = channels;
-  data->ring = g_new0 (gint16, (gsize) PW_RING_FRAMES * (gsize) channels);
+  data->bytes_per_sample = self->format_bits / 8;
+  data->ring = g_new0 (guint8, (gsize) PW_RING_FRAMES * (gsize) channels *
+                      (gsize) data->bytes_per_sample);
 
   data->loop = pw_thread_loop_new ("spotifygtk-audio", NULL);
   if (!data->loop) { g_free (data->ring); g_free (data); return FALSE; }
@@ -172,7 +176,8 @@ output_pipewire_try_open (SpotifyAudioOutput *self, gint rate, gint channels)
   guint8 buffer[1024];
   struct spa_pod_builder b = SPA_POD_BUILDER_INIT (buffer, sizeof (buffer));
   struct spa_audio_info_raw info = {
-    .format   = SPA_AUDIO_FORMAT_S16,
+    .format   = self->format_bits == 24 ? SPA_AUDIO_FORMAT_S24 :
+                self->format_bits == 32 ? SPA_AUDIO_FORMAT_S32 : SPA_AUDIO_FORMAT_S16,
     .rate     = (guint32) rate,
     .channels = (guint32) channels,
   };

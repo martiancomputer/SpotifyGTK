@@ -34,6 +34,7 @@
 #include <initguid.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <mmreg.h>
 #include <objbase.h>
 #include <string.h>
 
@@ -59,6 +60,7 @@ typedef struct {
 
   UINT32   buffer_frames;
   gint     channels;
+  gint     bytes_per_sample;
   gboolean com_initialised;
   gboolean started;
 } WasapiData;
@@ -90,7 +92,7 @@ wasapi_release (WasapiData *d)
  * role snd_pcm_writei plays on ALSA.
  */
 static gsize
-wasapi_write (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames)
+wasapi_write (SpotifyAudioOutput *self, const void *samples, gsize n_frames)
 {
   WasapiData *d = self->backend_data;
   if (!d || !d->render || !d->client)
@@ -114,8 +116,9 @@ wasapi_write (SpotifyAudioOutput *self, const gint16 *samples, gsize n_frames)
     if (FAILED (IAudioRenderClient_GetBuffer (d->render, chunk, &dst)) || !dst)
       break;
 
-    memcpy (dst, samples + written * (gsize) d->channels,
-            (gsize) chunk * (gsize) d->channels * sizeof (gint16));
+    gsize stride = (gsize) d->channels * (gsize) d->bytes_per_sample;
+    memcpy (dst, (const guint8 *) samples + written * stride,
+            (gsize) chunk * stride);
 
     if (FAILED (IAudioRenderClient_ReleaseBuffer (d->render, chunk, 0)))
       break;
@@ -164,7 +167,6 @@ wasapi_close (SpotifyAudioOutput *self)
 }
 
 static const AudioBackendVtable wasapi_vtable = {
-  .open       = NULL,             /* opened by output_wasapi_try_open */
   .write      = wasapi_write,
   .set_volume = wasapi_set_volume,
   .drain      = wasapi_drain,
@@ -176,6 +178,7 @@ output_wasapi_try_open (SpotifyAudioOutput *self, gint rate, gint channels)
 {
   WasapiData *d = g_new0 (WasapiData, 1);
   d->channels = channels;
+  d->bytes_per_sample = self->format_bits / 8;
 
   /* Multithreaded apartment: this runs on the audio worker, never the UI
    * thread. RPC_E_CHANGED_MODE means the thread already joined an apartment,
@@ -213,27 +216,33 @@ output_wasapi_try_open (SpotifyAudioOutput *self, gint rate, gint channels)
     return FALSE;
   }
 
-  /* Plain interleaved 16-bit PCM — exactly what every other backend is fed, so
-   * the engine needs no Windows-specific conversion. */
-  WAVEFORMATEX fmt = { 0 };
-  fmt.wFormatTag      = WAVE_FORMAT_PCM;
-  fmt.nChannels       = (WORD) channels;
-  fmt.nSamplesPerSec  = (DWORD) rate;
-  fmt.wBitsPerSample  = 16;
-  fmt.nBlockAlign     = (WORD) (channels * 2);
-  fmt.nAvgBytesPerSec = (DWORD) rate * fmt.nBlockAlign;
-  fmt.cbSize          = 0;
+  /* WAVEFORMATEXTENSIBLE is required for a precise >16-bit PCM declaration.
+   * Keep the simple PCM header for 16-bit endpoints that only accept it. */
+  WAVEFORMATEXTENSIBLE fmt = { 0 };
+  fmt.Format.wFormatTag = self->format_bits == 16
+    ? WAVE_FORMAT_PCM : WAVE_FORMAT_EXTENSIBLE;
+  fmt.Format.nChannels = (WORD) channels;
+  fmt.Format.nSamplesPerSec = (DWORD) rate;
+  fmt.Format.wBitsPerSample = (WORD) self->format_bits;
+  fmt.Format.nBlockAlign = (WORD) (channels * d->bytes_per_sample);
+  fmt.Format.nAvgBytesPerSec = (DWORD) rate * fmt.Format.nBlockAlign;
+  fmt.Format.cbSize = self->format_bits == 16 ? 0 :
+    (WORD) (sizeof fmt - sizeof fmt.Format);
+  fmt.Samples.wValidBitsPerSample = (WORD) self->format_bits;
+  fmt.dwChannelMask = channels == 1 ? SPEAKER_FRONT_CENTER :
+                      channels == 2 ? SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT : 0;
+  fmt.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 
   DWORD flags = AUDCLNT_STREAMFLAGS_AUTOCONVERT_PCM |
                 AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
   hr = IAudioClient_Initialize (d->client, AUDCLNT_SHAREMODE_SHARED, flags,
-                                WASAPI_BUFFER_100NS, 0, &fmt, NULL);
+                                WASAPI_BUFFER_100NS, 0, &fmt.Format, NULL);
   if (FAILED (hr)) {
     /* Retry without the converter flags: a few endpoint drivers reject them,
      * in which case an exact format match may still succeed. */
     hr = IAudioClient_Initialize (d->client, AUDCLNT_SHAREMODE_SHARED, 0,
-                                  WASAPI_BUFFER_100NS, 0, &fmt, NULL);
+                                  WASAPI_BUFFER_100NS, 0, &fmt.Format, NULL);
   }
   if (FAILED (hr)) {
     g_message ("WASAPI unavailable: Initialize failed for %d Hz / %d ch (0x%lx)",

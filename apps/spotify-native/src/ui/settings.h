@@ -42,7 +42,20 @@ typedef enum {
   SPOTIFYGTK_SAMPLE_RATE_44100,
   SPOTIFYGTK_SAMPLE_RATE_48000,
   SPOTIFYGTK_SAMPLE_RATE_96000,
+  SPOTIFYGTK_SAMPLE_RATE_192000,
+  SPOTIFYGTK_SAMPLE_RATE_384000,
 } SpotifyGtkSampleRate;
+
+typedef enum {
+  SPOTIFYGTK_SAMPLE_FORMAT_16,
+  SPOTIFYGTK_SAMPLE_FORMAT_24,
+  SPOTIFYGTK_SAMPLE_FORMAT_32,
+} SpotifyGtkSampleFormat;
+
+typedef enum {
+  SPOTIFYGTK_RESAMPLER_POLYPHASE,
+  SPOTIFYGTK_RESAMPLER_LINEAR,
+} SpotifyGtkResamplerMode;
 
 /* GSK selects one renderer for the lifetime of the process. AUTOMATIC leaves
  * that choice to GTK; the other values are applied before GTK initializes and
@@ -72,6 +85,12 @@ void            spotifygtk_settings_set_theme (SpotifyGtkSettings *self,
 SpotifyGtkSampleRate spotifygtk_settings_get_sample_rate (SpotifyGtkSettings *self);
 void                 spotifygtk_settings_set_sample_rate (SpotifyGtkSettings *self,
                                                           SpotifyGtkSampleRate rate);
+SpotifyGtkSampleFormat spotifygtk_settings_get_sample_format (SpotifyGtkSettings *self);
+void spotifygtk_settings_set_sample_format (SpotifyGtkSettings *self,
+                                            SpotifyGtkSampleFormat format);
+SpotifyGtkResamplerMode spotifygtk_settings_get_resampler_mode (SpotifyGtkSettings *self);
+void spotifygtk_settings_set_resampler_mode (SpotifyGtkSettings *self,
+                                             SpotifyGtkResamplerMode mode);
 
 SpotifyGtkRenderer spotifygtk_settings_get_renderer (SpotifyGtkSettings *self);
 void               spotifygtk_settings_set_renderer (SpotifyGtkSettings *self,
@@ -86,6 +105,11 @@ void     spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
 gboolean spotifygtk_settings_get_compact_mode (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_compact_mode (SpotifyGtkSettings *self,
                                                gboolean enabled);
+
+/* Animate page navigation; enabled by default. */
+gboolean spotifygtk_settings_get_page_crossfade (SpotifyGtkSettings *self);
+void     spotifygtk_settings_set_page_crossfade (SpotifyGtkSettings *self,
+                                                 gboolean enabled);
 
 gboolean spotifygtk_settings_get_caching_enabled (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_caching_enabled (SpotifyGtkSettings *self,

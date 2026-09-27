@@ -71,9 +71,21 @@ static void
 on_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
   SpotifyGtkContextPage *self = user_data;
-  gtk_picture_set_paintable (self->expanded_cover,
-                             texture ? GDK_PAINTABLE (texture) : NULL);
-  gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), texture != NULL);
+  /* A failed full-size request must not erase a correct thumbnail preview. */
+  if (texture) {
+    gtk_picture_set_paintable (self->expanded_cover, GDK_PAINTABLE (texture));
+    gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), TRUE);
+  }
+}
+
+static void
+show_hero_preview (SpotifyGtkContextPage *self, GdkTexture *preview)
+{
+  if (self->compact || !preview ||
+      gtk_picture_get_paintable (self->expanded_cover))
+    return;
+  gtk_picture_set_paintable (self->expanded_cover, GDK_PAINTABLE (preview));
+  gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), TRUE);
 }
 
 static void
@@ -170,9 +182,11 @@ update_expanded_metadata (SpotifyGtkContextPage *self, GPtrArray *tracks)
       const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
       cover_id = track->cover_id;
     }
-  g_free (self->hero_cover_id);
-  self->hero_cover_id = g_strdup (cover_id);
-  refresh_hero_cover (self);
+  if (g_strcmp0 (self->hero_cover_id, cover_id) != 0) {
+    g_free (self->hero_cover_id);
+    self->hero_cover_id = g_strdup (cover_id);
+    refresh_hero_cover (self);
+  }
 }
 
 static void
@@ -354,10 +368,9 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   GtkWidget *cover_frame = gtk_overlay_new ();
   gtk_widget_set_size_request (cover_frame, CONTEXT_HERO_COVER_PX,
                               CONTEXT_HERO_COVER_PX);
-  GtkWidget *placeholder = gtk_image_new_from_icon_name ("audio-x-generic-symbolic");
-  gtk_image_set_pixel_size (GTK_IMAGE (placeholder), 72);
-  gtk_widget_add_css_class (placeholder, "art-large");
-  gtk_overlay_set_child (GTK_OVERLAY (cover_frame), placeholder);
+  GtkWidget *background = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class (background, "art-large");
+  gtk_overlay_set_child (GTK_OVERLAY (cover_frame), background);
   self->expanded_cover = GTK_PICTURE (gtk_picture_new ());
   gtk_picture_set_content_fit (self->expanded_cover, GTK_CONTENT_FIT_COVER);
   gtk_picture_set_can_shrink (self->expanded_cover, TRUE);
@@ -577,7 +590,8 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
                               const gchar           *uri,
                               const gchar           *title,
                               const gchar           *kind,
-                              const gchar           *cover_id)
+                              const gchar           *cover_id,
+                              GdkTexture            *preview)
 {
   g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
 
@@ -600,15 +614,18 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
       self->hero_cover_id = g_strdup (cover_id);
       refresh_hero_cover (self);
     }
+    show_hero_preview (self, preview);
     return;
   }
 
   g_free (self->context_cover_id);
   self->context_cover_id = g_strdup (cover_id);
   g_clear_pointer (&self->hero_cover_id, g_free);
+  self->hero_cover_id = g_strdup (cover_id);
   gtk_label_set_text (self->year_label, "");
   gtk_label_set_text (self->expanded_meta, "");
   refresh_hero_cover (self);
+  show_hero_preview (self, preview);
 
   if (self->in_flight) {
     self->generation++;

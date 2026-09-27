@@ -15,11 +15,14 @@ struct _SpotifyGtkSettings {
   SpotifyGtkTheme      theme;
   SpotifyGtkMediaMode  media_mode;
   SpotifyGtkSampleRate sample_rate;
+  SpotifyGtkSampleFormat sample_format;
+  SpotifyGtkResamplerMode resampler_mode;
   SpotifyGtkRenderer   renderer;
 
   gboolean eq_enabled;
   gboolean aggressive_filtering;
   gboolean compact_mode;
+  gboolean page_crossfade;
   gboolean caching_enabled;
   gboolean online_lyrics;
   guint    lyrics_font_size;
@@ -74,6 +77,10 @@ load (SpotifyGtkSettings *self)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "media-mode", NULL);
   self->sample_rate = (SpotifyGtkSampleRate)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "sample-rate", NULL);
+  self->sample_format = (SpotifyGtkSampleFormat)
+    g_key_file_get_integer (kf, SETTINGS_GROUP, "sample-format", NULL);
+  self->resampler_mode = (SpotifyGtkResamplerMode)
+    g_key_file_get_integer (kf, SETTINGS_GROUP, "resampler-mode", NULL);
   self->renderer = (SpotifyGtkRenderer)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "renderer", NULL);
 
@@ -83,6 +90,9 @@ load (SpotifyGtkSettings *self)
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "compact-mode", NULL))
     self->compact_mode =
       g_key_file_get_boolean (kf, SETTINGS_GROUP, "compact-mode", NULL);
+  if (g_key_file_has_key (kf, SETTINGS_GROUP, "page-crossfade", NULL))
+    self->page_crossfade =
+      g_key_file_get_boolean (kf, SETTINGS_GROUP, "page-crossfade", NULL);
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "caching-enabled", NULL))
     self->caching_enabled =
       g_key_file_get_boolean (kf, SETTINGS_GROUP, "caching-enabled", NULL);
@@ -143,8 +153,12 @@ load (SpotifyGtkSettings *self)
     self->theme = SPOTIFYGTK_THEME_DARK;
   if (self->media_mode > SPOTIFYGTK_MEDIA_NONE)
     self->media_mode = SPOTIFYGTK_MEDIA_FULL;
-  if (self->sample_rate > SPOTIFYGTK_SAMPLE_RATE_96000)
+  if (self->sample_rate > SPOTIFYGTK_SAMPLE_RATE_384000)
     self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
+  if (self->sample_format > SPOTIFYGTK_SAMPLE_FORMAT_32)
+    self->sample_format = SPOTIFYGTK_SAMPLE_FORMAT_16;
+  if (self->resampler_mode > SPOTIFYGTK_RESAMPLER_LINEAR)
+    self->resampler_mode = SPOTIFYGTK_RESAMPLER_POLYPHASE;
   if (self->renderer > SPOTIFYGTK_RENDERER_CAIRO)
     self->renderer = SPOTIFYGTK_RENDERER_AUTOMATIC;
 }
@@ -157,12 +171,16 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_integer (kf, SETTINGS_GROUP, "theme", self->theme);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "media-mode", self->media_mode);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "sample-rate", self->sample_rate);
+  g_key_file_set_integer (kf, SETTINGS_GROUP, "sample-format", self->sample_format);
+  g_key_file_set_integer (kf, SETTINGS_GROUP, "resampler-mode", self->resampler_mode);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "renderer", self->renderer);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "eq-enabled", self->eq_enabled);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "aggressive-filtering",
                           self->aggressive_filtering);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "compact-mode",
                           self->compact_mode);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "page-crossfade",
+                          self->page_crossfade);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "caching-enabled",
                           self->caching_enabled);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "online-lyrics",
@@ -235,6 +253,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->renderer    = SPOTIFYGTK_RENDERER_AUTOMATIC;
   self->caching_enabled = TRUE;
   self->compact_mode = TRUE;
+  self->page_crossfade = TRUE;
   self->lyrics_font_size = 19;
   self->scroll_smoothness = 50;
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
@@ -279,7 +298,9 @@ spotifygtk_settings_get_default (void)
 
 DEFINE_SETTING (theme,       SpotifyGtkTheme,      theme,       SPOTIFYGTK_THEME_DARK_PLUS)
 DEFINE_SETTING (media_mode,  SpotifyGtkMediaMode,  media_mode,  SPOTIFYGTK_MEDIA_NONE)
-DEFINE_SETTING (sample_rate, SpotifyGtkSampleRate, sample_rate, SPOTIFYGTK_SAMPLE_RATE_96000)
+DEFINE_SETTING (sample_rate, SpotifyGtkSampleRate, sample_rate, SPOTIFYGTK_SAMPLE_RATE_384000)
+DEFINE_SETTING (sample_format, SpotifyGtkSampleFormat, sample_format, SPOTIFYGTK_SAMPLE_FORMAT_32)
+DEFINE_SETTING (resampler_mode, SpotifyGtkResamplerMode, resampler_mode, SPOTIFYGTK_RESAMPLER_LINEAR)
 DEFINE_SETTING (renderer,    SpotifyGtkRenderer,   renderer,    SPOTIFYGTK_RENDERER_CAIRO)
 
 guint
@@ -338,6 +359,26 @@ spotifygtk_settings_set_compact_mode (SpotifyGtkSettings *self,
   if (self->compact_mode == enabled)
     return;
   self->compact_mode = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+gboolean
+spotifygtk_settings_get_page_crossfade (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), TRUE);
+  return self->page_crossfade;
+}
+
+void
+spotifygtk_settings_set_page_crossfade (SpotifyGtkSettings *self,
+                                         gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->page_crossfade == enabled)
+    return;
+  self->page_crossfade = enabled;
   save (self);
   g_signal_emit (self, signals[CHANGED], 0);
 }
@@ -500,6 +541,8 @@ spotifygtk_settings_sample_rate_hz (SpotifyGtkSampleRate rate)
     case SPOTIFYGTK_SAMPLE_RATE_44100: return 44100;
     case SPOTIFYGTK_SAMPLE_RATE_48000: return 48000;
     case SPOTIFYGTK_SAMPLE_RATE_96000: return 96000;
+    case SPOTIFYGTK_SAMPLE_RATE_192000: return 192000;
+    case SPOTIFYGTK_SAMPLE_RATE_384000: return 384000;
     default:                           return 0;   /* follow the stream */
   }
 }

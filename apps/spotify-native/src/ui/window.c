@@ -107,6 +107,9 @@ struct _SpotifyGtkNativeWindow {
 
   /* Pages */
   GtkStack *page_stack;
+  GPtrArray *pending_cover_releases; /* page names; freed after first new frame */
+  GdkFrameClock *cover_release_clock;
+  gulong cover_release_handler;
   GtkWidget *window_title;       /* centered header label, borrowed */
   /* Every track list wired through wire_track_list(), so a liked mark can be
    * fanned out to all of them: one track can be on screen in more than one
@@ -529,6 +532,24 @@ dup_context_cover (SpotifyGtkNativeWindow *self, const gchar *uri)
   return NULL;
 }
 
+static GdkTexture *
+ref_context_cover_preview (SpotifyGtkNativeWindow *self, const gchar *uri)
+{
+  if (!uri) return NULL;
+  SpotifyGtkAlbumGrid *grids[] = {
+    self->search_page ? spotifygtk_search_page_get_album_grid (self->search_page) : NULL,
+    self->playlists_grid,
+    self->library_page ? spotifygtk_library_page_get_album_grid (self->library_page) : NULL,
+    self->home_page ? spotifygtk_home_page_get_album_grid (self->home_page) : NULL,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (grids); i++) {
+    if (!grids[i]) continue;
+    GdkTexture *preview = spotifygtk_album_grid_ref_visible_cover (grids[i], uri);
+    if (preview) return preview;
+  }
+  return NULL;
+}
+
 /* Step Back (-1) or Forward (+1) without recording -- replaying history. */
 static void
 nav_go (SpotifyGtkNativeWindow *self, gint dir)
@@ -546,9 +567,10 @@ nav_go (SpotifyGtkNativeWindow *self, gint dir)
       spotifygtk_artist_page_show (self->artist_page, e->uri, e->title);
     else {
       g_autofree gchar *cover = dup_context_cover (self, e->uri);
+      g_autoptr(GdkTexture) preview = ref_context_cover_preview (self, e->uri);
       spotifygtk_context_page_load (self->context_page, e->uri,
                                     e->title ? e->title : "Album",
-                                    e->kind ? e->kind : "Album", cover);
+                                    e->kind ? e->kind : "Album", cover, preview);
     }
   }
   navigate_raw (self, e->page);
@@ -4827,6 +4849,58 @@ set_page_covers_loaded (SpotifyGtkNativeWindow *self, const gchar *page_name,
   }
 }
 
+/* GtkStack changes its selected child synchronously, but does not paint it
+ * until control returns to GTK. Releasing a large hidden grid in navigate_raw
+ * left the complete old frame on screen while that cleanup ran. Keep its art
+ * only through the first destination frame (or the end of a crossfade), then
+ * release it off the navigation path. */
+static void
+on_navigation_after_paint (GdkFrameClock *clock, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  (void) clock;
+
+  if (gtk_stack_get_transition_running (self->page_stack))
+    return;
+
+  const gchar *visible = gtk_stack_get_visible_child_name (self->page_stack);
+  for (guint i = 0; i < self->pending_cover_releases->len; i++) {
+    const gchar *page = g_ptr_array_index (self->pending_cover_releases, i);
+    if (g_strcmp0 (page, visible) != 0)
+      set_page_covers_loaded (self, page, FALSE);
+  }
+  g_ptr_array_set_size (self->pending_cover_releases, 0);
+  g_signal_handler_disconnect (self->cover_release_clock,
+                               self->cover_release_handler);
+  self->cover_release_handler = 0;
+  g_clear_object (&self->cover_release_clock);
+}
+
+static void
+release_page_covers_after_paint (SpotifyGtkNativeWindow *self,
+                                 const gchar *page_name)
+{
+  GdkFrameClock *clock = gtk_widget_get_frame_clock (GTK_WIDGET (self));
+  if (!clock) {
+    set_page_covers_loaded (self, page_name, FALSE);
+    return;
+  }
+
+  if (!self->pending_cover_releases)
+    self->pending_cover_releases = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < self->pending_cover_releases->len; i++)
+    if (g_strcmp0 (g_ptr_array_index (self->pending_cover_releases, i),
+                   page_name) == 0)
+      return;
+  g_ptr_array_add (self->pending_cover_releases, g_strdup (page_name));
+
+  if (!self->cover_release_handler) {
+    self->cover_release_clock = g_object_ref (clock);
+    self->cover_release_handler = g_signal_connect (
+      clock, "after-paint", G_CALLBACK (on_navigation_after_paint), self);
+  }
+}
+
 static void
 navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
 {
@@ -4835,19 +4909,8 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
     return;
   }
 
-  /*
-   * Hand back the artwork of the page being left.
-   *
-   * A GtkStack keeps its non-visible children realised and bound, so their
-   * rows and cards go on holding a reference to every cover they were showing
-   * -- and the cover cache cannot free what a widget still references. Sitting
-   * on one album page held the whole of Liked Songs' and Library's art behind
-   * it, indefinitely, because nothing new was arriving to push the cache down.
-   *
-   * Released here rather than on a timer: leaving a page is the moment its art
-   * stops being looked at, and the ids are kept so it returns when the page
-   * does.
-   */
+  /* Keep the outgoing page intact until the destination has actually painted.
+   * Releasing here stalls that paint, leaving the complete old frame visible. */
   const gchar *leaving = gtk_stack_get_visible_child_name (self->page_stack);
 #ifdef SPOTIFYGTK_VERBOSE
   SPOTIFYGTK_DEBUG ("navigation: %s -> %s", leaving ? leaving : "<none>", page_name);
@@ -4859,10 +4922,11 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
       spotifygtk_library_page_get_artist_grid (self->library_page), "library artists before leave");
   }
 #endif
-  if (leaving && g_strcmp0 (leaving, page_name) != 0)
-    set_page_covers_loaded (self, leaving, FALSE);
-
+  gboolean changed = leaving && g_strcmp0 (leaving, page_name) != 0;
+  g_autofree gchar *old_page = changed ? g_strdup (leaving) : NULL;
   gtk_stack_set_visible_child_name (self->page_stack, page_name);
+  if (old_page)
+    release_page_covers_after_paint (self, old_page);
 
   /* And ask the arriving page for its artwork back. */
   set_page_covers_loaded (self, page_name, TRUE);
@@ -4997,7 +5061,9 @@ navigate_to_context (SpotifyGtkNativeWindow *self, const gchar *uri,
   }
 
   g_autofree gchar *cover = dup_context_cover (self, uri);
-  spotifygtk_context_page_load (self->context_page, uri, title, kind, cover);
+  g_autoptr(GdkTexture) preview = ref_context_cover_preview (self, uri);
+  spotifygtk_context_page_load (self->context_page, uri, title, kind, cover,
+                                preview);
   context_refresh_action (self, uri, kind);
   navigate_raw (self, "context");
   nav_record (self, "context", uri, title, kind);
@@ -5438,13 +5504,26 @@ apply_eq_from_settings (SpotifyGtkNativeWindow *self)
     self->player,
     spotifygtk_settings_sample_rate_hz (
       spotifygtk_settings_get_sample_rate (spotifygtk_settings_get_default ())));
+  spotifygtk_player_service_set_output_format (
+    self->player,
+    16 + 8 * spotifygtk_settings_get_sample_format (s),
+    spotifygtk_settings_get_resampler_mode (s));
 }
 
 static void
 on_settings_theme_changed (SpotifyGtkSettings *settings, gpointer user_data)
 {
+  SpotifyGtkNativeWindow *self = user_data;
   apply_theme (spotifygtk_settings_get_theme (settings));
-  apply_eq_from_settings (user_data);
+  apply_eq_from_settings (self);
+  if (self->page_stack) {
+    GtkStackTransitionType transition =
+      spotifygtk_settings_get_page_crossfade (settings)
+        ? GTK_STACK_TRANSITION_TYPE_CROSSFADE
+        : GTK_STACK_TRANSITION_TYPE_NONE;
+    if (gtk_stack_get_transition_type (self->page_stack) != transition)
+      gtk_stack_set_transition_type (self->page_stack, transition);
+  }
 }
 
 /* === Construction === */
@@ -5633,7 +5712,10 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_add_css_class (content_box, "main-content");
 
   self->page_stack = GTK_STACK (gtk_stack_new ());
-  gtk_stack_set_transition_type (self->page_stack, GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+  gtk_stack_set_transition_type (self->page_stack,
+    spotifygtk_settings_get_page_crossfade (spotifygtk_settings_get_default ())
+      ? GTK_STACK_TRANSITION_TYPE_CROSSFADE
+      : GTK_STACK_TRANSITION_TYPE_NONE);
   gtk_widget_set_hexpand (GTK_WIDGET (self->page_stack), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self->page_stack), TRUE);
 
@@ -5882,6 +5964,14 @@ static void
 spotifygtk_native_window_dispose (GObject *object)
 {
   SpotifyGtkNativeWindow *self = SPOTIFYGTK_NATIVE_WINDOW (object);
+
+  if (self->cover_release_handler) {
+    g_signal_handler_disconnect (self->cover_release_clock,
+                                 self->cover_release_handler);
+    self->cover_release_handler = 0;
+  }
+  g_clear_object (&self->cover_release_clock);
+  g_clear_pointer (&self->pending_cover_releases, g_ptr_array_unref);
 
   if (self->mpris_connection && self->mpris_root_registration)
     g_dbus_connection_unregister_object (self->mpris_connection,

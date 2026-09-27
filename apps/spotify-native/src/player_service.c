@@ -19,6 +19,8 @@ struct _SpotifyNativePlayerService {
   gint volume_percent;
   gdouble  eq_gains[SPOTIFYGTK_EQ_BANDS];
   gint     output_rate;   /* 0 = follow the stream */
+  gint     output_bits;
+  gint     resampler_mode;
   gboolean eq_enabled;
   guint position_timer_id;   /* polls the engine control for playback position */
   SpotifyNativePlayerState state;
@@ -456,6 +458,8 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   spotifygtk_native_engine_control_set_eq (self->control,
                                            self->eq_gains, self->eq_enabled);
   spotifygtk_native_engine_control_set_output_rate (self->control, self->output_rate);
+  spotifygtk_native_engine_control_set_output_format (self->control,
+                                                       self->output_bits, self->resampler_mode);
   if (!self->main_context)
     self->main_context = g_main_context_ref_thread_default ();
   if (!self->main_context)
@@ -751,4 +755,16 @@ spotifygtk_player_service_set_output_rate (SpotifyNativePlayerService *self, gin
    * and reopening it mid-stream would gap the audio. */
   if (self->control)
     spotifygtk_native_engine_control_set_output_rate (self->control, self->output_rate);
+}
+
+void
+spotifygtk_player_service_set_output_format (SpotifyNativePlayerService *self,
+                                              gint bits, gint resampler_mode)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+  self->output_bits = (bits == 24 || bits == 32) ? bits : 16;
+  self->resampler_mode = resampler_mode == 1 ? 1 : 0;
+  if (self->control)
+    spotifygtk_native_engine_control_set_output_format (self->control,
+                                                         self->output_bits, self->resampler_mode);
 }

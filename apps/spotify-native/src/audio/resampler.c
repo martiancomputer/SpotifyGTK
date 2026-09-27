@@ -41,6 +41,7 @@ struct _SpotifyResampler {
   gint     in_rate;
   gint     out_rate;
   gboolean passthrough;
+  SpotifyResamplerMode mode;
 
   /* (PHASES + 1) rows so the interpolation between phase p and p+1 can read
    * one past the last without a bounds test in the inner loop. */
@@ -149,7 +150,20 @@ spotifygtk_resampler_set_rates (SpotifyResampler *self, gint in_rate, gint out_r
   memset (self->history, 0, sizeof (gint16) * (gsize) RESAMPLER_TAPS * self->channels);
   self->pos = RESAMPLER_HALF;
 
-  if (!self->passthrough)
+  if (!self->passthrough && self->mode == SPOTIFY_RESAMPLER_POLYPHASE)
+    build_kernel (self);
+}
+
+void
+spotifygtk_resampler_set_mode (SpotifyResampler *self, SpotifyResamplerMode mode)
+{
+  g_return_if_fail (self != NULL);
+  if (mode != SPOTIFY_RESAMPLER_POLYPHASE && mode != SPOTIFY_RESAMPLER_LINEAR)
+    return;
+  if (self->mode == mode)
+    return;
+  self->mode = mode;
+  if (!self->passthrough && mode == SPOTIFY_RESAMPLER_POLYPHASE)
     build_kernel (self);
 }
 
@@ -212,12 +226,17 @@ spotifygtk_resampler_process (SpotifyResampler *self,
 
     for (gint c = 0; c < ch; c++) {
       gdouble acc = 0.0;
-      for (gint t = 0; t < RESAMPLER_TAPS; t++) {
-        gint idx = base - (RESAMPLER_HALF - 1) + t;
-        if (idx < 0 || idx >= (gint) tmp_frames)
-          continue;
-        gdouble w = k0[t] + (k1[t] - k0[t]) * ph_f;
-        acc += w * (gdouble) tmp[(gsize) idx * ch + c];
+      if (self->mode == SPOTIFY_RESAMPLER_LINEAR) {
+        acc = (1.0 - frac) * tmp[(gsize) base * ch + c] +
+              frac * tmp[((gsize) base + 1) * ch + c];
+      } else {
+        for (gint t = 0; t < RESAMPLER_TAPS; t++) {
+          gint idx = base - (RESAMPLER_HALF - 1) + t;
+          if (idx < 0 || idx >= (gint) tmp_frames)
+            continue;
+          gdouble w = k0[t] + (k1[t] - k0[t]) * ph_f;
+          acc += w * (gdouble) tmp[(gsize) idx * ch + c];
+        }
       }
       /* Round rather than truncate, and clamp: a steep kernel can overshoot
        * slightly past full scale on transients, and wrapping there would be an

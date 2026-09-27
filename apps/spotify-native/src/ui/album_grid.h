@@ -77,6 +77,11 @@ void spotifygtk_album_grid_replace_tail (SpotifyGtkAlbumGrid      *self,
 gchar *spotifygtk_album_grid_dup_cover_id (SpotifyGtkAlbumGrid *self,
                                            const gchar *uri);
 
+/* Ref the cover already painted on a bound card, if present. Navigation can
+ * show this thumbnail immediately while the hero's full-size disk decode runs. */
+GdkTexture *spotifygtk_album_grid_ref_visible_cover (SpotifyGtkAlbumGrid *self,
+                                                      const gchar *uri);
+
 /* Same album/playlist menu for a compact search row as for a shelf card. */
 void spotifygtk_album_grid_present_context_menu (SpotifyGtkAlbumGrid      *self,
                                                  GtkWidget                *anchor,

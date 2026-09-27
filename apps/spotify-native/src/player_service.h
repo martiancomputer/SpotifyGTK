@@ -48,9 +48,11 @@ void     spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint6
  * creates a fresh engine control, so the value has to be re-applied rather
  * than living only in the engine. */
 void spotifygtk_player_service_set_volume (SpotifyNativePlayerService *self, gint percent);
-/* Device rate for playback; 0 follows the stream. Applies from the next
- * track, since the output device is opened once per track. */
+/* Device rate for playback; 0 follows the source. A changed format is applied
+ * at the next track boundary so the current track is not interrupted. */
 void spotifygtk_player_service_set_output_rate (SpotifyNativePlayerService *self, gint hz);
+void spotifygtk_player_service_set_output_format (SpotifyNativePlayerService *self,
+                                                  gint bits, gint resampler_mode);
 
 void spotifygtk_player_service_set_eq (SpotifyNativePlayerService *self,
                                        const gdouble *gains_db, gboolean enabled);

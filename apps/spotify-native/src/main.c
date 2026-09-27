@@ -109,6 +109,8 @@ struct _SpotifyNativeEngineControl {
   /* Desired device rate; 0 means "follow whatever the stream decoded to",
    * which is passthrough and the highest-fidelity path. */
   gint       output_rate;
+  gint       output_bits;
+  gint       resampler_mode;
 };
 
 SpotifyNativeEngineControl *
@@ -121,6 +123,7 @@ spotifygtk_native_engine_control_new (void)
   control->volume = 1.0;
   control->volume_dirty = TRUE;   /* apply once as soon as the output opens */
   control->eq = spotifygtk_eq_new ();
+  control->output_bits = 16;
   return control;
 }
 
@@ -263,6 +266,28 @@ spotifygtk_native_engine_control_get_output_rate (SpotifyNativeEngineControl *co
   gint r = control->output_rate;
   g_mutex_unlock (&control->lock);
   return r;
+}
+
+void
+spotifygtk_native_engine_control_set_output_format (SpotifyNativeEngineControl *control,
+                                                    gint bits, gint resampler_mode)
+{
+  if (!control) return;
+  g_mutex_lock (&control->lock);
+  control->output_bits = (bits == 24 || bits == 32) ? bits : 16;
+  control->resampler_mode = resampler_mode == 1 ? 1 : 0;
+  g_mutex_unlock (&control->lock);
+}
+
+void
+spotifygtk_native_engine_control_get_output_format (SpotifyNativeEngineControl *control,
+                                                    gint *bits, gint *resampler_mode)
+{
+  if (!control) return;
+  g_mutex_lock (&control->lock);
+  if (bits) *bits = control->output_bits;
+  if (resampler_mode) *resampler_mode = control->resampler_mode;
+  g_mutex_unlock (&control->lock);
 }
 
 void
@@ -759,7 +784,7 @@ decode_and_play (GBytes *ogg_bytes, gboolean complete_source,
       g_message ("[live-test] decoder opened Ogg/Vorbis: %d Hz, %d channel(s)",
                  sample_rate, channels);
       if (write_audio) {
-        output = spotifygtk_output_open (sample_rate, channels);
+        output = spotifygtk_output_open (sample_rate, channels, 16);
         if (!output) {
           g_warning ("[live-test] cannot complete PCM output proof: no audio backend opened.");
           pcm_frame_free (frame);
