@@ -37,6 +37,7 @@ void spotifygtk_library_page_set_album_saved (SpotifyGtkLibraryPage *self,
 
 /* The albums grid, so the window can wire "album-activated" to context nav. */
 SpotifyGtkAlbumGrid *spotifygtk_library_page_get_album_grid (SpotifyGtkLibraryPage *self);
+SpotifyGtkAlbumGrid *spotifygtk_library_page_get_alt_album_grid (SpotifyGtkLibraryPage *self);
 SpotifyGtkAlbumGrid *spotifygtk_library_page_get_artist_grid (SpotifyGtkLibraryPage *self);
 
 /* Copies the window's authoritative followed-artist URI set. Artist metadata

@@ -184,8 +184,21 @@ test_catalog_reconciliation (void)
   g_assert_cmpint (g_remove (second), ==, 0);
   g_assert_true (wait_for_tracks (1));
   check_encoded_imports ();
+  g_autofree gchar *moved = g_build_filename (music_dir, "renamed.wav", NULL);
+  guint renamed_from = changed_count;
+  g_assert_cmpint (g_rename (first, moved), ==, 0);
+  spotifygtk_local_catalog_refresh (catalog);
+  g_assert_true (wait_for_change (renamed_from));
+  g_autofree gchar *resolved = spotifygtk_local_catalog_dup_track_path (uri);
+  g_assert_cmpstr (resolved, ==, moved);
+  renamed_from = changed_count;
+  g_assert_cmpint (g_rename (moved, first), ==, 0);
+  spotifygtk_local_catalog_refresh (catalog);
+  g_assert_true (wait_for_change (renamed_from));
+  g_autofree gchar *restored = spotifygtk_local_catalog_dup_track_path (uri);
+  g_assert_cmpstr (restored, ==, first);
   g_autofree gchar *index = g_build_filename (
-    g_get_user_cache_dir (), "spotifygtk", "local-index-v1", NULL);
+    g_get_user_data_dir (), "spotifygtk", "local-index-v1", NULL);
   g_assert_true (g_file_test (index, G_FILE_TEST_EXISTS));
   g_assert_true (g_file_set_contents (index, "corrupt", -1, NULL));
   guint before = changed_count;
@@ -195,9 +208,14 @@ test_catalog_reconciliation (void)
   g_autofree gchar *repaired = NULL;
   g_assert_true (g_file_get_contents (index, &repaired, NULL, NULL));
   g_assert_true (g_str_has_prefix (repaired, "SGTKLOCAL1\n"));
+  /* A missing file must disappear from the playable index. Device favorites
+   * and playlist references keep the stable URI, ready if it reappears. */
+  g_assert_cmpint (g_remove (first), ==, 0);
+  g_assert_true (wait_for_tracks (0));
+  g_autofree gchar *missing = spotifygtk_local_catalog_dup_track_path (uri);
+  g_assert_null (missing);
   g_assert_true (spotifygtk_settings_remove_local_directory (settings, music_dir));
   g_assert_true (wait_for_tracks (0));
-  g_assert_cmpint (g_remove (first), ==, 0);
   g_assert_cmpint (g_remove (broken), ==, 0);
 }
 
@@ -208,10 +226,12 @@ main (int argc, char **argv)
   g_assert_nonnull (sandbox_dir);
   g_autofree gchar *config = g_build_filename (sandbox_dir, "config", NULL);
   g_autofree gchar *cache = g_build_filename (sandbox_dir, "cache", NULL);
+  g_autofree gchar *data = g_build_filename (sandbox_dir, "data", NULL);
   music_dir = g_build_filename (sandbox_dir, "music", NULL);
   g_assert_cmpint (g_mkdir_with_parents (music_dir, 0700), ==, 0);
   g_setenv ("XDG_CONFIG_HOME", config, TRUE);
   g_setenv ("XDG_CACHE_HOME", cache, TRUE);
+  g_setenv ("XDG_DATA_HOME", data, TRUE);
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/local/catalog-reconciliation", test_catalog_reconciliation);
   gint result = g_test_run ();

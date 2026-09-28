@@ -158,6 +158,20 @@ hashed_uri (const gchar *prefix, const gchar *key)
   return g_strconcat (prefix, digest, NULL);
 }
 
+/* Path hashes break every favorite and playlist reference on a rename. The
+ * filesystem identity is stable for moves within a volume, inexpensive to
+ * read during enumeration, and does not expose a path in the URI. Existing
+ * path-based URIs loaded from the old index are retained on reconciliation. */
+static gchar *
+file_identity_uri (guint64 device_id, guint64 inode, const gchar *path)
+{
+  if (!inode)
+    return hashed_uri ("local:track:", path);
+  g_autofree gchar *key = g_strdup_printf ("%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT,
+                                          device_id, inode);
+  return hashed_uri ("local:track:", key);
+}
+
 static gchar *
 normal_key (const gchar *text)
 {
@@ -300,7 +314,12 @@ probe_track (SpotifyGtkLocalSnapshot *s, const gchar *path,
   t->codec = g_strdup (codec_name);
   t->file_size = size;
   t->mtime_us = mtime_us;
-  t->display->uri = hashed_uri ("local:track:", path);
+  GStatBuf source_stat;
+  if (g_stat (path, &source_stat) == 0) {
+    t->device_id = (guint64) source_stat.st_dev;
+    t->inode = (guint64) source_stat.st_ino;
+  }
+  t->display->uri = file_identity_uri (t->device_id, t->inode, path);
   t->display->name = metadata_string_fallback (tags, fallback, "title");
   if (!t->display->name) t->display->name = g_utf8_make_valid (base, -1);
   t->display->artists = metadata_string_fallback (tags, fallback, "artist");
@@ -339,7 +358,7 @@ probe_track (SpotifyGtkLocalSnapshot *s, const gchar *path,
         "%s:%" G_GINT64_FORMAT, path, mtime_us);
       g_autofree gchar *id = hashed_uri ("local:", source_key);
       g_autofree gchar *cache_dir = g_build_filename (
-        g_get_user_cache_dir (), "spotifygtk", "local-art", NULL);
+        g_get_user_data_dir (), "spotifygtk", "local-art", NULL);
       if (g_mkdir_with_parents (cache_dir, 0700) != 0) break;
       art_path = g_build_filename (cache_dir, id + strlen ("local:"), NULL);
       if (!g_file_test (art_path, G_FILE_TEST_IS_REGULAR) &&
@@ -431,7 +450,7 @@ path_in_any_directory (const gchar *path, GPtrArray *directories)
 static gchar *
 index_path (void)
 {
-  return g_build_filename (g_get_user_cache_dir (), "spotifygtk",
+  return g_build_filename (g_get_user_data_dir (), "spotifygtk",
                            "local-index-v1", NULL);
 }
 
@@ -457,6 +476,11 @@ load_index (void)
     g_str_hash, g_str_equal, NULL, local_track_free);
   g_autofree gchar *path = index_path ();
   GStatBuf st;
+  if (g_stat (path, &st) != 0) {
+    g_free (path);
+    path = g_build_filename (g_get_user_cache_dir (), "spotifygtk",
+                             "local-index-v1", NULL);
+  }
   if (g_stat (path, &st) != 0 || st.st_size <= 0 ||
       st.st_size > LOCAL_INDEX_MAX_BYTES) return tracks;
   g_autofree gchar *data = NULL;
@@ -493,6 +517,8 @@ load_index (void)
     track->display->cover_id = index_string (keyfile, group, "cover_id", 80);
     track->file_size = g_key_file_get_uint64 (keyfile, group, "size", NULL);
     track->mtime_us = g_key_file_get_int64 (keyfile, group, "mtime", NULL);
+    track->device_id = g_key_file_get_uint64 (keyfile, group, "device", NULL);
+    track->inode = g_key_file_get_uint64 (keyfile, group, "inode", NULL);
     track->display->duration_ms = g_key_file_get_int64 (
       keyfile, group, "duration", NULL);
     track->display->release_year = g_key_file_get_integer (
@@ -520,7 +546,19 @@ load_index (void)
     }
     if (track->display->cover_id)
       track->display->cover_id_small = g_strdup (track->display->cover_id);
-    track->display->uri = hashed_uri ("local:track:", track->path);
+    track->display->uri = index_string (keyfile, group, "uri", 128);
+    if (!track->display->uri ||
+        !g_str_has_prefix (track->display->uri, "local:track:")) {
+      g_clear_pointer (&track->display->uri, g_free);
+      track->display->uri = hashed_uri ("local:track:", track->path);
+    }
+    if (!track->inode) {
+      GStatBuf file_stat;
+      if (g_stat (track->path, &file_stat) == 0) {
+        track->device_id = (guint64) file_stat.st_dev;
+        track->inode = (guint64) file_stat.st_ino;
+      }
+    }
     g_hash_table_replace (tracks, track->path, track);
   }
   return tracks;
@@ -534,6 +572,9 @@ save_index (SpotifyGtkLocalSnapshot *snapshot)
     const SpotifyGtkLocalTrack *track = g_ptr_array_index (snapshot->tracks, i);
     g_autofree gchar *group = g_strdup_printf ("track-%u", i);
     g_key_file_set_string (keyfile, group, "path", track->path);
+    g_key_file_set_string (keyfile, group, "uri", track->display->uri);
+    g_key_file_set_uint64 (keyfile, group, "device", track->device_id);
+    g_key_file_set_uint64 (keyfile, group, "inode", track->inode);
     g_key_file_set_string (keyfile, group, "title", track->display->name);
     g_key_file_set_string (keyfile, group, "artist", track->display->artists);
     g_key_file_set_string (keyfile, group, "album", track->display->album);
@@ -572,7 +613,8 @@ save_index (SpotifyGtkLocalSnapshot *snapshot)
 
 static void
 scan_directory (SpotifyGtkLocalSnapshot *s, GFile *directory, guint depth,
-                GHashTable *cached, GHashTable *art_dirs,
+                GHashTable *cached, GHashTable *by_identity,
+                GHashTable *art_dirs,
                 GCancellable *cancel)
 {
   if (depth > LOCAL_MAX_DEPTH || s->tracks->len >= LOCAL_MAX_FILES ||
@@ -600,7 +642,8 @@ scan_directory (SpotifyGtkLocalSnapshot *s, GFile *directory, guint depth,
         (type != G_FILE_TYPE_REGULAR || !supported_name (name))) continue;
     g_autoptr(GFile) child = g_file_get_child (directory, name);
     if (type == G_FILE_TYPE_DIRECTORY) {
-      scan_directory (s, child, depth + 1, cached, art_dirs, cancel);
+      scan_directory (s, child, depth + 1, cached, by_identity,
+                      art_dirs, cancel);
       continue;
     }
 #if HAVE_LOCAL_AV
@@ -610,16 +653,35 @@ scan_directory (SpotifyGtkLocalSnapshot *s, GFile *directory, guint depth,
     gint64 mtime = (gint64) g_file_info_get_attribute_uint64 (
       info, G_FILE_ATTRIBUTE_TIME_MODIFIED) * G_USEC_PER_SEC +
       g_file_info_get_attribute_uint32 (info, G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC);
+    GStatBuf file_stat;
+    if (g_stat (path, &file_stat) != 0) continue;
+    guint64 device_id = (guint64) file_stat.st_dev;
+    guint64 inode = (guint64) file_stat.st_ino;
+    g_autofree gchar *identity = g_strdup_printf (
+      "%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT, device_id, inode);
     SpotifyGtkLocalTrack *track = g_hash_table_lookup (cached, path);
     if (track && track->file_size == size && track->mtime_us == mtime &&
+        track->device_id == device_id && track->inode == inode &&
         cached_art_matches (track) &&
         (!art_dirs || !g_hash_table_contains (art_dirs, dir_path))) {
       g_hash_table_steal (cached, path);
+      g_hash_table_remove (by_identity, identity);
       if (track->art_path && track->display->cover_id)
         g_hash_table_replace (s->art_paths,
           g_strdup (track->display->cover_id), g_strdup (track->art_path));
     } else {
+      SpotifyGtkLocalTrack *moved = g_hash_table_lookup (by_identity, identity);
+      if (moved && g_strcmp0 (moved->path, path) != 0 &&
+          g_file_test (moved->path, G_FILE_TEST_EXISTS))
+        moved = NULL; /* hard link or duplicate, not a rename */
       track = probe_track (s, path, size, mtime);
+      if (track && moved) {
+        g_free (track->display->uri);
+        track->display->uri = g_strdup (moved->display->uri);
+        g_hash_table_steal (cached, moved->path);
+        g_hash_table_remove (by_identity, identity);
+        local_track_free (moved);
+      }
     }
     if (track) {
       g_ptr_array_add (s->tracks, track);
@@ -752,6 +814,19 @@ scan_worker (GTask *task, gpointer source, gpointer task_data,
     ? load_index ()
     : g_hash_table_new_full (g_str_hash, g_str_equal, NULL,
                              local_track_free);
+  g_autoptr(GHashTable) by_identity = g_hash_table_new_full (
+    g_str_hash, g_str_equal, g_free, NULL);
+  GHashTableIter identity_iter;
+  gpointer identity_value;
+  g_hash_table_iter_init (&identity_iter, cached);
+  while (g_hash_table_iter_next (&identity_iter, NULL, &identity_value)) {
+    SpotifyGtkLocalTrack *track = identity_value;
+    if (!track->inode) continue;
+    gchar *identity = g_strdup_printf (
+      "%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT,
+      track->device_id, track->inode);
+    g_hash_table_replace (by_identity, identity, track);
+  }
   if (request->dirty_dirs) {
     /* Retain indexed entries outside changed subtrees without walking or
      * probing their directories. The new snapshot owns each stolen track. */
@@ -762,6 +837,12 @@ scan_worker (GTask *task, gpointer source, gpointer task_data,
       SpotifyGtkLocalTrack *track = value;
       if (path_in_any_directory (track->path, request->dirty_dirs)) continue;
       g_hash_table_iter_steal (&iter);
+      if (track->inode) {
+        g_autofree gchar *identity = g_strdup_printf (
+          "%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT,
+          track->device_id, track->inode);
+        g_hash_table_remove (by_identity, identity);
+      }
       g_ptr_array_add (s->tracks, track);
       g_hash_table_insert (s->by_track, track->display->uri, track);
       if (track->art_path && track->display->cover_id)
@@ -784,7 +865,7 @@ scan_worker (GTask *task, gpointer source, gpointer task_data,
       }
       if (covered) continue;
       g_autoptr(GFile) dir = g_file_new_for_path (path);
-      scan_directory (s, dir, 0, cached, request->art_dirs, cancel);
+      scan_directory (s, dir, 0, cached, by_identity, request->art_dirs, cancel);
     }
   } else {
     for (guint i = 0; i < request->roots->len &&
@@ -798,7 +879,7 @@ scan_worker (GTask *task, gpointer source, gpointer task_data,
       }
       if (nested) continue;
       g_autoptr(GFile) root = g_file_new_for_path (path);
-      scan_directory (s, root, 0, cached, NULL, cancel);
+      scan_directory (s, root, 0, cached, by_identity, NULL, cancel);
     }
   }
   if (g_cancellable_is_cancelled (cancel)) {

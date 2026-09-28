@@ -757,13 +757,24 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
   self->track_id = last_colon ? g_strdup (last_colon + 1) : NULL;
 
   gtk_label_set_text (self->title_label, track->name ? track->name : "Unknown track");
-  gtk_label_set_text (self->artist_label, track->artists ? track->artists : "");
+  gboolean device_only = track->uri &&
+    g_str_has_prefix (track->uri, "local:track:");
+  gboolean playlist_overlay =
+    g_strcmp0 (track->section_detail, "On this device") == 0;
+  g_autofree gchar *artist_line = (device_only || playlist_overlay)
+    ? g_strdup_printf ("%s%sOn this device",
+                       track->artists ? track->artists : "",
+                       track->artists && *track->artists ? " · " : "")
+    : NULL;
+  gtk_label_set_text (self->artist_label, artist_line ? artist_line :
+                      track->artists ? track->artists : "");
   gtk_label_set_text (self->album_label, track->album ? track->album : "");
 
   gboolean album = track->uri && g_str_has_prefix (track->uri, "spotify:album:");
   gboolean playlist = track->uri && g_str_has_prefix (track->uri, "spotify:playlist:");
   gtk_label_set_text (GTK_LABEL (self->type_label),
-                      playlist ? "Playlist" : album ? "Album" : "Track");
+                      playlist ? "Playlist" : album ? "Album" :
+                      device_only ? "Local" : "Track");
   gtk_widget_set_visible (self->status_slot, !album && !playlist);
   gtk_widget_set_visible (GTK_WIDGET (self->album_label),
                           self->show_album && !album && !playlist);

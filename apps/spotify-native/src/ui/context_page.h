@@ -19,6 +19,7 @@
 
 #include "spotify/session.h"
 #include "track_list.h"
+#include "device_playlists.h"
 
 G_BEGIN_DECLS
 
@@ -27,9 +28,13 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkContextPage, spotifygtk_context_page,
                       SPOTIFYGTK, CONTEXT_PAGE, GtkBox)
 
 SpotifyGtkContextPage *spotifygtk_context_page_new (void);
+void spotifygtk_context_page_set_device_playlists (
+  SpotifyGtkContextPage *self, SpotifyGtkDevicePlaylists *playlists);
 
 void spotifygtk_context_page_set_session (SpotifyGtkContextPage *self,
                                           SpotifyNativeSession  *session);
+/* Drop visited Spotify metadata when the user explicitly clears Spotify cache. */
+void spotifygtk_context_page_clear_spotify_cache (SpotifyGtkContextPage *self);
 
 /* Load `uri` and render its tracks. `title` is the album/artist name shown
  * large; `kind` is the small label above it ("Album", "Artist"). Re-loading

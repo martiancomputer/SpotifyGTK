@@ -12,6 +12,19 @@
 
 #include <string.h>
 
+/* The wire layer is the last line of defence. UI menus are not an authority:
+ * queued writes and callbacks can outlive the view that created them. */
+static gboolean
+spotify_collection_uris_valid (const gchar *const *uris, guint n_uris)
+{
+  if (!uris || n_uris == 0)
+    return FALSE;
+  for (guint i = 0; i < n_uris; i++)
+    if (!uris[i] || !g_str_has_prefix (uris[i], "spotify:"))
+      return FALSE;
+  return TRUE;
+}
+
 GByteArray *
 spotifygtk_collection_build_write (const gchar        *username,
                                    const gchar        *set,
@@ -33,6 +46,10 @@ spotifygtk_collection_build_write (const gchar        *username,
   for (guint i = 0; i < n_uris; i++) {
     if (!uris[i] || !*uris[i])
       continue;
+    if (!g_str_has_prefix (uris[i], "spotify:")) {
+      g_byte_array_unref (out);
+      return NULL;
+    }
 
     g_autoptr(GByteArray) item = g_byte_array_new ();
     pb_write_bytes_field (item, 1, (const guint8 *) uris[i], strlen (uris[i]));
@@ -88,6 +105,10 @@ spotifygtk_collection_write (SpotifyMercury            *mercury,
 {
   g_return_if_fail (SPOTIFYGTK_IS_MERCURY (mercury));
   g_return_if_fail (endpoint != NULL && username != NULL);
+  if (!spotify_collection_uris_valid (uris, n_uris)) {
+    if (callback) callback (FALSE, 400, user_data);
+    return;
+  }
 
   /* added_at is seconds since the epoch, and only meaningful when adding —
    * a removal carries no timestamp. */
@@ -363,6 +384,10 @@ spotifygtk_collection_v2_write (SpotifyMercury *mercury, const gchar *username,
                                 SpotifyCollectionCallback callback, gpointer user_data)
 {
   g_return_if_fail (mercury != NULL && username != NULL);
+  if (!spotify_collection_uris_valid (uris, n_uris)) {
+    if (callback) callback (FALSE, 400, user_data);
+    return;
+  }
 
   g_autoptr(GByteArray) body =
     v2_build_write (username, set ? set : SPOTIFYGTK_COLLECTION_SET_LIKED,

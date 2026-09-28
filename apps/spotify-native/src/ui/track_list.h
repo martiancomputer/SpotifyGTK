@@ -55,6 +55,9 @@ void spotifygtk_track_list_insert_native_track (SpotifyGtkTrackList      *self,
                                                 guint                     position,
                                                 const SpotifyNativeTrack *track);
 void spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position);
+/* Index within device-only playlist entries before a visible row; -1 if the
+ * row is not device-only. Includes the virtual page header in position. */
+gint spotifygtk_track_list_device_index_at (SpotifyGtkTrackList *self, guint position);
 
 /* Release the artwork of every bound row, for a page that is no longer
  * visible. Ids are kept, so the art returns when the page does. */

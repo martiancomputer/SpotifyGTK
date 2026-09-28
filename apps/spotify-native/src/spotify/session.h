@@ -118,6 +118,9 @@ void spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
  * the process.
  */
 void spotifygtk_native_session_reconnect (SpotifyNativeSession *self);
+/* Disconnect account transport without destroying cached page models. The
+ * worker remains available for a later explicit sign-in. */
+void spotifygtk_native_session_disconnect (SpotifyNativeSession *self);
 
 /* Stop delivering already-queued request/subscription callbacks to the UI.
  * Call this before disconnecting a window from the session during teardown. */

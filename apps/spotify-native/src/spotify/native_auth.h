@@ -93,6 +93,10 @@ gboolean     native_auth_has_valid_token (NativeAuth *self);
 gboolean     native_auth_has_credentials  (NativeAuth *self);
 const gchar *native_auth_get_token       (NativeAuth *self);
 void         native_auth_refresh         (NativeAuth *self);
+/* Session workers must never launch a second browser/redirect listener. */
+void         native_auth_refresh_silent  (NativeAuth *self);
+/* Invalidate callbacks and close the browser listener without deleting tokens. */
+void         native_auth_cancel          (NativeAuth *self);
 
 /* Forget the signed-in account: clears the in-memory tokens and deletes the
  * stored token file, so neither this process nor the next run can use them. */

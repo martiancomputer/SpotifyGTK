@@ -104,8 +104,12 @@ struct _SpotifyGtkLibraryPage {
   GtkBox parent_instance;
 
   SpotifyGtkAlbumGrid  *albums;
+  SpotifyGtkAlbumGrid  *albums_primary;
+  SpotifyGtkAlbumGrid  *albums_alt;
   SpotifyGtkAlbumGrid  *artists;
   GtkWidget            *albums_status;   /* empty/error note; loading uses window overlay */
+  GtkWidget            *albums_status_primary;
+  GtkWidget            *albums_status_alt;
   GtkWidget            *artists_status;
   GtkStack             *content_stack;
   GtkSearchEntry       *filter_entry;
@@ -549,6 +553,13 @@ spotifygtk_library_page_get_album_grid (SpotifyGtkLibraryPage *self)
 }
 
 SpotifyGtkAlbumGrid *
+spotifygtk_library_page_get_alt_album_grid (SpotifyGtkLibraryPage *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self), NULL);
+  return self->albums_alt;
+}
+
+SpotifyGtkAlbumGrid *
 spotifygtk_library_page_get_artist_grid (SpotifyGtkLibraryPage *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self), NULL);
@@ -783,6 +794,31 @@ on_artist_card_needs_resolve (SpotifyGtkAlbumGrid *grid,
   (void) grid;
 }
 
+typedef struct {
+  GWeakRef page;
+  SpotifyGtkAlbumGrid *grid; /* borrowed while page lives */
+} ReleaseFadeCleanup;
+
+static gboolean
+on_release_fade_finished (gpointer data)
+{
+  ReleaseFadeCleanup *cleanup = data;
+  g_autoptr(SpotifyGtkLibraryPage) self = g_weak_ref_get (&cleanup->page);
+  if (self && cleanup->grid != self->albums) {
+    spotifygtk_album_grid_release_covers (cleanup->grid);
+    spotifygtk_album_grid_clear (cleanup->grid);
+  }
+  return G_SOURCE_REMOVE;
+}
+
+static void
+release_fade_cleanup_free (gpointer data)
+{
+  ReleaseFadeCleanup *cleanup = data;
+  g_weak_ref_clear (&cleanup->page);
+  g_free (cleanup);
+}
+
 static void
 on_view_clicked (GtkToggleButton *button, gpointer user_data)
 {
@@ -792,21 +828,41 @@ on_view_clicked (GtkToggleButton *button, gpointer user_data)
   LibraryView view = (LibraryView) GPOINTER_TO_UINT (
     g_object_get_data (G_OBJECT (button), "library-view"));
   gboolean artists = view == LIBRARY_ARTISTS;
+  gboolean changing_release = !artists && self->active_view != LIBRARY_ARTISTS &&
+                              view != self->active_view;
+  SpotifyGtkAlbumGrid *outgoing = changing_release ? self->albums : NULL;
   self->active_view = view;
 
   /* GtkStack keeps the hidden child alive, including each card's texture.
    * Switching views must relinquish those widget references; the compressed
    * disk cache is deliberately retained and makes restoration inexpensive. */
-  if (artists)
+  if (changing_release) {
+    self->albums = outgoing == self->albums_primary
+      ? self->albums_alt : self->albums_primary;
+    self->albums_status = self->albums == self->albums_primary
+      ? self->albums_status_primary : self->albums_status_alt;
+    const gchar *filter = gtk_editable_get_text (GTK_EDITABLE (self->filter_entry));
+    spotifygtk_album_grid_set_filter_text (self->albums, filter);
+    show_release_view (self);
+    gtk_stack_set_visible_child_name (self->content_stack,
+      self->albums == self->albums_primary ? "releases" : "releases-alt");
+    /* The old grid stays painted only during the fade. */
+    ReleaseFadeCleanup *cleanup = g_new0 (ReleaseFadeCleanup, 1);
+    g_weak_ref_init (&cleanup->page, self);
+    cleanup->grid = outgoing;
+    g_timeout_add_full (G_PRIORITY_LOW, 190, on_release_fade_finished,
+                        cleanup, release_fade_cleanup_free);
+  } else if (artists)
     spotifygtk_album_grid_release_covers (self->albums);
   else
     spotifygtk_album_grid_release_covers (self->artists);
-  gtk_stack_set_visible_child_name (self->content_stack,
-                                    artists ? "artists" : "releases");
-  if (artists)
-    populate_artist_cards (self);
-  else
-    show_release_view (self);
+  if (!changing_release) {
+    gtk_stack_set_visible_child_name (self->content_stack,
+      artists ? "artists" : self->albums == self->albums_primary
+        ? "releases" : "releases-alt");
+    if (artists) populate_artist_cards (self);
+    else show_release_view (self);
+  }
   spotifygtk_album_grid_reload_covers (artists ? self->artists : self->albums);
 }
 
@@ -829,6 +885,9 @@ on_filter_changed (GtkSearchEntry *entry, gpointer user_data)
   SpotifyGtkLibraryPage *self = user_data;
   const gchar *text = gtk_editable_get_text (GTK_EDITABLE (entry));
   spotifygtk_album_grid_set_filter_text (self->albums, text);
+  spotifygtk_album_grid_set_filter_text (
+    self->albums == self->albums_primary ? self->albums_alt : self->albums_primary,
+    text);
   spotifygtk_album_grid_set_filter_text (self->artists, text);
 }
 
@@ -839,6 +898,8 @@ spotifygtk_library_page_set_covers_loaded (SpotifyGtkLibraryPage *self,
   g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
   if (!loaded) {
     spotifygtk_album_grid_release_covers (self->albums);
+    spotifygtk_album_grid_release_covers (self->albums == self->albums_primary
+      ? self->albums_alt : self->albums_primary);
     spotifygtk_album_grid_release_covers (self->artists);
     return;
   }
@@ -857,6 +918,11 @@ static void
 on_albums_scrolled (GtkAdjustment *adj, gpointer user_data)
 {
   SpotifyGtkLibraryPage *self = user_data;
+  const gchar *visible = gtk_stack_get_visible_child_name (self->content_stack);
+  SpotifyGtkAlbumGrid *active = g_strcmp0 (visible, "artists") == 0
+    ? self->artists : self->albums;
+  if (adj != spotifygtk_album_grid_get_vadjustment (active))
+    return;
   gdouble value = gtk_adjustment_get_value (adj);
   gboolean revealed =
     gtk_revealer_get_reveal_child (GTK_REVEALER (self->header_revealer));
@@ -943,6 +1009,7 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   self->content_stack = GTK_STACK (gtk_stack_new ());
   gtk_stack_set_transition_type (self->content_stack,
                                  GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+  gtk_stack_set_transition_duration (self->content_stack, 160);
   /* Match the small breathing room between controls and results on Liked
    * Songs; without it the first card row touches the loading-rule edge. */
   gtk_widget_set_margin_top (GTK_WIDGET (self->content_stack), 10);
@@ -950,12 +1017,14 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
 
   GtkWidget *albums_page = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   self->albums_status = gtk_label_new ("Not signed in yet.");
+  self->albums_status_primary = self->albums_status;
   gtk_widget_add_css_class (self->albums_status, "dim-text");
   gtk_label_set_xalign (GTK_LABEL (self->albums_status), 0.0);
   gtk_widget_set_margin_start (self->albums_status, 35);
   gtk_box_append (GTK_BOX (albums_page), self->albums_status);
 
   self->albums = spotifygtk_album_grid_new_grid ();
+  self->albums_primary = self->albums;
   /*
    * The horizontal inset goes on the cards, not on this widget. A margin here
    * would push the scrollbar inward too, stacking its width on top of the
@@ -968,6 +1037,19 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_widget_set_vexpand (GTK_WIDGET (self->albums), TRUE);
   gtk_box_append (GTK_BOX (albums_page), GTK_WIDGET (self->albums));
   gtk_stack_add_named (self->content_stack, albums_page, "releases");
+
+  GtkWidget *albums_alt_page = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  self->albums_status_alt = gtk_label_new ("");
+  gtk_widget_add_css_class (self->albums_status_alt, "dim-text");
+  gtk_label_set_xalign (GTK_LABEL (self->albums_status_alt), 0.0);
+  gtk_widget_set_margin_start (self->albums_status_alt, 35);
+  gtk_widget_set_visible (self->albums_status_alt, FALSE);
+  gtk_box_append (GTK_BOX (albums_alt_page), self->albums_status_alt);
+  self->albums_alt = spotifygtk_album_grid_new_grid ();
+  spotifygtk_album_grid_set_content_margins (self->albums_alt, 35, 2);
+  gtk_widget_set_vexpand (GTK_WIDGET (self->albums_alt), TRUE);
+  gtk_box_append (GTK_BOX (albums_alt_page), GTK_WIDGET (self->albums_alt));
+  gtk_stack_add_named (self->content_stack, albums_alt_page, "releases-alt");
 
   GtkWidget *artists_page = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   self->artists_status = gtk_label_new ("");
@@ -995,6 +1077,9 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   show_release_view (self);
 
   GtkAdjustment *vadj = spotifygtk_album_grid_get_vadjustment (self->albums);
+  if (vadj)
+    g_signal_connect (vadj, "value-changed", G_CALLBACK (on_albums_scrolled), self);
+  vadj = spotifygtk_album_grid_get_vadjustment (self->albums_alt);
   if (vadj)
     g_signal_connect (vadj, "value-changed", G_CALLBACK (on_albums_scrolled), self);
   vadj = spotifygtk_album_grid_get_vadjustment (self->artists);

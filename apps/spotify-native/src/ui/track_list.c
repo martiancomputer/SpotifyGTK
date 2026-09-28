@@ -765,9 +765,6 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
   ctx->track = spotifygtk_native_track_copy (track);
   ctx->share_url = spotifygtk_track_share_url (ctx->track->uri);
   ctx->position = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (row), "row-position"));
-  gboolean local = ctx->track->uri &&
-    g_str_has_prefix (ctx->track->uri, "local:track:");
-
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
 
   /*
@@ -776,8 +773,7 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
    * "Remove" when the track is already saved.
    */
   gboolean liked = spotifygtk_track_row_get_liked (SPOTIFYGTK_TRACK_ROW (row));
-  if (!local)
-    spotifygtk_context_menu_add (menu,
+  spotifygtk_context_menu_add (menu,
                                  liked ? "Remove from Liked Songs"
                                        : "Add to Liked Songs",
                                  TRUE, NULL,
@@ -788,12 +784,12 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
    * page is in the playlist being viewed, by definition, so there is nothing
    * to check -- the entry swaps rather than being added alongside.
    */
-  /* A local URI is not a Spotify collection object. Keep shared playback
-   * actions, but never submit it to a remote playlist write. */
-  if (!local && self->playlist_uri)
+  /* The window routes local entries to device storage; the network boundary
+   * separately rejects local URIs even if a future caller gets this wrong. */
+  if (self->playlist_uri)
     spotifygtk_context_menu_add (menu, "Remove from this Playlist", TRUE, NULL,
                                  G_CALLBACK (on_menu_remove_from_playlist), NULL);
-  else if (!local)
+  else
     spotifygtk_context_menu_add (menu, "Add to Playlist…", TRUE, NULL,
                                  G_CALLBACK (on_menu_add_to_playlist), NULL);
   spotifygtk_context_menu_add (menu, "Add to Queue", TRUE, NULL,
@@ -1415,6 +1411,25 @@ spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position
       position >= g_list_model_get_n_items (G_LIST_MODEL (self->store)))
     return;
   g_list_store_remove (self->store, position);
+}
+
+gint
+spotifygtk_track_list_device_index_at (SpotifyGtkTrackList *self, guint position)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self), -1);
+  guint len = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  if (position >= len) return -1;
+  gint device_index = 0;
+  for (guint i = 0; i <= position; i++) {
+    g_autoptr(SpotifyGtkTrackItem) item =
+      g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    const SpotifyNativeTrack *track = item ? spotifygtk_track_item_get_track (item) : NULL;
+    gboolean device = track &&
+      g_strcmp0 (track->section_detail, "On this device") == 0;
+    if (i == position) return device ? device_index : -1;
+    if (device) device_index++;
+  }
+  return -1;
 }
 
 /* Release the artwork of every bound row. Touches only live bindings -- the

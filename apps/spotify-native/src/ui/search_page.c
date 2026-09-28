@@ -531,10 +531,16 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   /* The albums shelf is the distinct albums present in these very results --
    * real matches, grouped, not a second query. */
   show_message (self, NULL);
+  /* GtkListView anchors its first surviving track while a preceding virtual
+   * header changes height. Growing the album shelf before replacing the old
+   * tracks therefore moves the adjustment toward the middle of the page.
+   * Empty the old rows first, settle the header's visible structure, then
+   * publish the new rows in the same main-loop turn (no blank frame). */
+  spotifygtk_track_list_clear (self->results);
   render_albums (self, shown);
+  sync_result_layout (self);
   spotifygtk_track_list_set_native_tracks (self->results, shown);
   spotifygtk_track_list_scroll_to_top (self->results);
-  sync_result_layout (self);
   request_playlists (self, query);
 }
 

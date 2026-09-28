@@ -25,6 +25,6 @@ void spotifygtk_settings_page_set_account_profile (
   SpotifyGtkSettingsPage *self, const gchar *display_name,
   const gchar *canonical_id, const gchar *product, const gchar *avatar_id);
 
-/* Signal: "log-out" -- the user asked to sign out; the window performs it. */
+/* Signals: "log-out", "sign-in". The window owns the auth lifecycle. */
 
 G_END_DECLS

@@ -59,6 +59,29 @@ test_object_creation (void)
   g_object_unref (auth);
 }
 
+static void
+on_silent_refresh_completed (NativeAuth *auth, gboolean success, gpointer data)
+{
+  guint *calls = data;
+  g_assert_false (success);
+  (*calls)++;
+  (void) auth;
+}
+
+static void
+test_silent_refresh_without_credentials (void)
+{
+  NativeAuth *auth = native_auth_new ();
+  guint calls = 0;
+  g_signal_connect (auth, "completed",
+                    G_CALLBACK (on_silent_refresh_completed), &calls);
+  /* A session worker may only refresh what it already holds. This must fail
+   * immediately, without opening a browser listener or starting a loop. */
+  native_auth_refresh_silent (auth);
+  g_assert_cmpuint (calls, ==, 1);
+  g_object_unref (auth);
+}
+
 /* Optional live regression check for a portable bundle.  It stays skipped in
  * the normal offline test suite; setting SPOTIFYGTK_TLS_PROBE=1 exercises the
  * same libsoup/GnuTLS path used by OAuth and proves the CA database is not
@@ -95,6 +118,7 @@ main (int argc, char *argv[])
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/native-auth/constants-match-librespot", test_constants_match_librespot);
   g_test_add_func ("/native-auth/object-creation",           test_object_creation);
+  g_test_add_func ("/native-auth/silent-without-credentials", test_silent_refresh_without_credentials);
   g_test_add_func ("/native-auth/tls-probe",                 test_tls_probe);
   return g_test_run ();
 }

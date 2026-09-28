@@ -357,8 +357,8 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     if (g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
       return;
     g_autofree gchar *msg = g_strdup_printf ("Couldn't load liked songs: %s", err->message);
-    spotifygtk_track_list_clear (self->list);
-    spotifygtk_track_list_set_status (self->list, msg);
+    if (!self->all_tracks || self->all_tracks->len == 0)
+      spotifygtk_track_list_set_status (self->list, msg);
     self->retry_after = g_get_monotonic_time () + RETRY_COOLDOWN_US;
     return;
   }
@@ -721,16 +721,11 @@ spotifygtk_liked_songs_page_add_track (SpotifyGtkLikedSongsPage *self,
   g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
   g_return_if_fail (track != NULL && track->uri != NULL);
 
-  /*
-   * Nothing to insert into. An unloaded page fetches the truth when it opens,
-   * and seeding it with one row would claim the library holds only that.
-   *
-   * Keyed on all_tracks rather than `loaded`: `loaded` means "not stale", and
-   * the caller invalidates the page right after each of these, so testing it
-   * would let the first like through and silently drop every one after it.
-   */
+  /* Device-only favorites must appear even without a Spotify session. The
+   * server's rows are merged into this owned array when they arrive. */
   if (!self->all_tracks)
-    return;
+    self->all_tracks = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_track_free);
   if (find_track_index (self, track->uri) >= 0)
     return;
 
@@ -811,7 +806,8 @@ spotifygtk_liked_songs_page_refresh (SpotifyGtkLikedSongsPage *self)
 
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
-    spotifygtk_track_list_set_status (self->list, "Not signed in yet.");
+    spotifygtk_track_list_set_status (self->list,
+      self->all_tracks && self->all_tracks->len ? NULL : "No liked songs yet.");
     return;
   }
 

@@ -15,6 +15,7 @@
 
 #define CONTEXT_PAGE_LIMIT 200
 #define CONTEXT_HERO_COVER_PX 248
+#define CONTEXT_BROWSE_CACHE_LIMIT 16
 
 static void on_action_clicked (GtkButton *button, gpointer user_data);
 static gboolean align_action_to_durations (GtkWidget *w, GdkFrameClock *clock,
@@ -47,6 +48,9 @@ struct _SpotifyGtkContextPage {
   GCancellable        *cover_request;
   SpotifyGtkTrackList *list;
   SpotifyGtkLocalSnapshot *local_snapshot; /* keeps borrowed list rows alive */
+  SpotifyGtkDevicePlaylists *device_playlists; /* borrowed from window */
+  GHashTable *cached_contexts; /* visited Spotify URI -> owned track snapshot */
+  GQueue     *cache_order;     /* owned URI strings, oldest first */
 
   SpotifyNativeSession *session;
   GCancellable         *in_flight;
@@ -205,6 +209,32 @@ set_loading (SpotifyGtkContextPage *self, gboolean loading)
 }
 
 static void
+remember_context (SpotifyGtkContextPage *self, const gchar *uri,
+                  GPtrArray *tracks)
+{
+  if (!uri || !g_str_has_prefix (uri, "spotify:") || !tracks)
+    return;
+  GPtrArray *copy = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  for (guint i = 0; i < tracks->len; i++)
+    g_ptr_array_add (copy, spotifygtk_native_track_copy (
+      g_ptr_array_index (tracks, i)));
+  for (GList *node = self->cache_order->head; node; node = node->next)
+    if (g_strcmp0 (node->data, uri) == 0) {
+      g_free (node->data);
+      g_queue_delete_link (self->cache_order, node);
+      break;
+    }
+  g_queue_push_tail (self->cache_order, g_strdup (uri));
+  g_hash_table_replace (self->cached_contexts, g_strdup (uri), copy);
+  while (self->cache_order->length > CONTEXT_BROWSE_CACHE_LIMIT) {
+    gchar *oldest = g_queue_pop_head (self->cache_order);
+    g_hash_table_remove (self->cached_contexts, oldest);
+    g_free (oldest);
+  }
+}
+
+static void
 on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   SpotifyNativeSession *session = SPOTIFYGTK_NATIVE_SESSION (source);
@@ -252,21 +282,29 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
    * none. A mixed context (a playlist) will show its first track's year, which
    * is why the caller only asks for this on albums.
    */
-  update_expanded_metadata (self, tracks);
-  spotifygtk_track_list_set_native_tracks (self->list, tracks);
+  g_autoptr(GPtrArray) visible = self->current_uri &&
+    g_str_has_prefix (self->current_uri, "spotify:playlist:")
+      ? spotifygtk_device_playlists_tracks (self->device_playlists,
+                                            self->current_uri, tracks)
+      : g_ptr_array_ref (tracks);
+  /* Cache only the server sequence. The device overlay is independent and
+   * must be applied fresh when browsing this playlist while signed out. */
+  remember_context (self, self->current_uri, tracks);
+  update_expanded_metadata (self, visible);
+  spotifygtk_track_list_set_native_tracks (self->list, visible);
   /* The list may have been showing a different release while the async load
    * was pending. Reset after the model splice too, so GtkListView does not
    * restore the old item's scroll anchor into this new release. */
   spotifygtk_track_list_scroll_to_top (self->list);
-  if (tracks->len > 0 && self->compact && self->align_tick == 0 &&
+  if (visible->len > 0 && self->compact && self->align_tick == 0 &&
       gtk_widget_get_visible (self->action_btn)) {
     self->align_attempts = 0;
     self->align_tick = gtk_widget_add_tick_callback (
       GTK_WIDGET (self), align_action_to_durations, self, NULL);
   }
-  if (tracks->len == 0)
+  if (visible->len == 0)
     spotifygtk_track_list_set_status (self->list, "Nothing here.");
-  if (tracks->len == 0 && self->align_tick) {
+  if (visible->len == 0 && self->align_tick) {
     gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->align_tick);
     self->align_tick = 0;
   }
@@ -297,6 +335,11 @@ spotifygtk_context_page_dispose (GObject *object)
   g_clear_pointer (&self->current_uri, g_free);
   g_clear_pointer (&self->context_cover_id, g_free);
   g_clear_pointer (&self->hero_cover_id, g_free);
+  g_clear_pointer (&self->cached_contexts, g_hash_table_unref);
+  if (self->cache_order) {
+    g_queue_free_full (self->cache_order, g_free);
+    self->cache_order = NULL;
+  }
   g_clear_pointer (&self->current_kind, g_free);
 
   G_OBJECT_CLASS (spotifygtk_context_page_parent_class)->dispose (object);
@@ -314,6 +357,9 @@ spotifygtk_context_page_class_init (SpotifyGtkContextPageClass *klass)
 static void
 spotifygtk_context_page_init (SpotifyGtkContextPage *self)
 {
+  self->cached_contexts = g_hash_table_new_full (
+    g_str_hash, g_str_equal, g_free, (GDestroyNotify) g_ptr_array_unref);
+  self->cache_order = g_queue_new ();
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self), TRUE);
@@ -600,6 +646,20 @@ spotifygtk_context_page_set_session (SpotifyGtkContextPage *self,
 }
 
 void
+spotifygtk_context_page_clear_spotify_cache (SpotifyGtkContextPage *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
+  g_hash_table_remove_all (self->cached_contexts);
+  g_queue_clear_full (self->cache_order, g_free);
+  if (self->current_uri && g_str_has_prefix (self->current_uri, "spotify:")) {
+    spotifygtk_track_list_clear (self->list);
+    spotifygtk_track_list_set_status (self->list,
+      "Spotify cached tracks were cleared. Sign in to load this page again.");
+    g_clear_pointer (&self->current_uri, g_free);
+  }
+}
+
+void
 spotifygtk_context_page_load (SpotifyGtkContextPage *self,
                               const gchar           *uri,
                               const gchar           *title,
@@ -615,13 +675,22 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
   if (!uri || !*uri)
     return;
 
+  gboolean same_context = g_strcmp0 (uri, self->current_uri) == 0;
+  /* GtkListView keeps an anchor in its model. If the header changes size
+   * while rows from the previous context are still attached, GTK adjusts the
+   * scroll position to keep that old row in view. Detach it before changing
+   * any header label or cover; the new model is installed after the header is
+   * laid out. This avoids the apparent jump to the middle of a new album. */
+  if (!same_context)
+    spotifygtk_track_list_clear (self->list);
+
   gtk_label_set_text (self->kind_label, kind ? kind : "");
   gtk_label_set_text (self->title_label, title ? title : "");
   gtk_label_set_text (self->expanded_kind, kind ? kind : "");
   gtk_label_set_text (self->expanded_title, title ? title : "");
   /* Already showing this exactly — don't re-fetch on a repeat navigation. */
-  if (g_strcmp0 (uri, self->current_uri) == 0 && !self->in_flight &&
-      !g_str_has_prefix (uri, "local:album:")) {
+  if (same_context && !self->in_flight &&
+      !g_str_has_prefix (uri, "local:")) {
     if (cover_id && g_strcmp0 (cover_id, self->context_cover_id) != 0) {
       g_free (self->context_cover_id);
       self->context_cover_id = g_strdup (cover_id);
@@ -684,10 +753,36 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
     return;
   }
 
+  if (g_str_has_prefix (uri, "local:playlist:")) {
+    g_autoptr(GPtrArray) tracks = spotifygtk_device_playlists_tracks (
+      self->device_playlists, uri, NULL);
+    update_expanded_metadata (self, tracks);
+    spotifygtk_track_list_set_native_tracks (self->list, tracks);
+    spotifygtk_track_list_scroll_to_top (self->list);
+    spotifygtk_track_list_set_status (self->list,
+      tracks->len ? NULL : "No tracks in this device playlist yet.");
+    set_loading (self, FALSE);
+    return;
+  }
+
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
+    GPtrArray *cached = g_hash_table_lookup (self->cached_contexts, uri);
+    gboolean playlist = g_str_has_prefix (uri, "spotify:playlist:");
+    g_autoptr(GPtrArray) visible = playlist
+      ? spotifygtk_device_playlists_tracks (self->device_playlists, uri, cached)
+      : cached ? g_ptr_array_ref (cached) : NULL;
+    if (visible && (cached || visible->len > 0)) {
+      update_expanded_metadata (self, visible);
+      spotifygtk_track_list_set_native_tracks (self->list, visible);
+      spotifygtk_track_list_set_status (self->list, NULL);
+      spotifygtk_track_list_scroll_to_top (self->list);
+      set_loading (self, FALSE);
+      return;
+    }
     spotifygtk_track_list_clear (self->list);
-    spotifygtk_track_list_set_status (self->list, "Not signed in yet.");
+    spotifygtk_track_list_set_status (self->list,
+      "Sign in to open this album or playlist. Previously loaded tracks remain available.");
     g_clear_pointer (&self->current_uri, g_free);
     set_loading (self, FALSE);
     return;
@@ -706,6 +801,14 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
 
   spotifygtk_native_session_load_tracks (self->session, uri, CONTEXT_PAGE_LIMIT,
                                          self->in_flight, on_tracks_loaded, cl);
+}
+
+void
+spotifygtk_context_page_set_device_playlists (
+  SpotifyGtkContextPage *self, SpotifyGtkDevicePlaylists *playlists)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
+  self->device_playlists = playlists;
 }
 
 SpotifyGtkTrackList *

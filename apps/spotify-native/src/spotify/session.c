@@ -92,6 +92,8 @@ struct _SpotifyNativeSession {
   gchar   *username;
   gint64   bearer_expires_at;   /* monotonic; 0 = unknown */
   gboolean stopping;            /* dispose has begun; worker must not start its loop */
+  gint     auth_generation;     /* atomic; invalidates delayed sign-in callbacks */
+  gint     signed_out;          /* atomic; set before logout reaches the worker */
 };
 
 /* Re-mint this far ahead of expiry, so a request issued just under the wire
@@ -236,14 +238,17 @@ typedef struct {
   SpotifyNativeSession     *session;
   SpotifyNativeSessionState state;
   gchar                    *message;
+  gint                      auth_generation;
 } StateEvent;
 
 static gboolean
 dispatch_state (gpointer user_data)
 {
   StateEvent *event = user_data;
-  g_signal_emit (event->session, signals[STATE_CHANGED], 0,
-                 (gint) event->state, event->message);
+  if (event->auth_generation ==
+      g_atomic_int_get (&event->session->auth_generation))
+    g_signal_emit (event->session, signals[STATE_CHANGED], 0,
+                   (gint) event->state, event->message);
   g_object_unref (event->session);
   g_free (event->message);
   g_free (event);
@@ -264,6 +269,7 @@ set_state (SpotifyNativeSession *self, SpotifyNativeSessionState state,
   event->session = g_object_ref (self);
   event->state   = state;
   event->message = g_strdup (message);
+  event->auth_generation = g_atomic_int_get (&self->auth_generation);
   g_main_context_invoke (self->caller_context, dispatch_state, event);
 }
 
@@ -1727,11 +1733,59 @@ dealer_shutdown (SpotifyNativeSession *self)
   dealer_started = FALSE;
 }
 
+/* Every async stage of the AP/client-token/login5 chain carries the attempt
+ * generation. A logout or reconnect invalidates old callbacks before the
+ * worker has a chance to process them; weak refs avoid extending the session
+ * lifetime if a transport never completes a cancelled request. */
+typedef struct {
+  GWeakRef session;
+  gint generation;
+} SessionAuthStep;
+
+static SessionAuthStep *
+session_auth_step_new (SpotifyNativeSession *self)
+{
+  SessionAuthStep *step = g_new0 (SessionAuthStep, 1);
+  g_weak_ref_init (&step->session, self);
+  step->generation = g_atomic_int_get (&self->auth_generation);
+  return step;
+}
+
+static void
+session_auth_step_free (gpointer data)
+{
+  SessionAuthStep *step = data;
+  g_weak_ref_clear (&step->session);
+  g_free (step);
+}
+
+static SpotifyNativeSession *
+session_auth_step_get (SessionAuthStep *step)
+{
+  SpotifyNativeSession *self = g_weak_ref_get (&step->session);
+  if (!self) return NULL;
+  if (step->generation != g_atomic_int_get (&self->auth_generation) ||
+      g_atomic_int_get (&self->signed_out) || self->stopping) {
+    g_object_unref (self);
+    return NULL;
+  }
+  return self;
+}
+
+static SpotifyNativeSession *
+session_auth_step_take (SessionAuthStep *step)
+{
+  SpotifyNativeSession *self = session_auth_step_get (step);
+  session_auth_step_free (step);
+  return self;
+}
+
 static void
 on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
                   GError *error, gpointer user_data)
 {
-  SpotifyNativeSession *self = user_data;
+  g_autoptr(SpotifyNativeSession) self = session_auth_step_take (user_data);
+  if (!self) return;
   gboolean was_refresh = self->refreshing;
 
   self->refreshing = FALSE;
@@ -1799,12 +1853,6 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
 
   g_message ("session: ready (bearer expires in %ds)", expires_in_seconds);
   set_state (self, SPOTIFYGTK_SESSION_READY, "Signed in.");
-  if (g_getenv ("SPOTIFY_DUMP_TOKENS")) {
-    g_autofree gchar *t = g_strdup_printf ("%s\n%s\n",
-      self->bearer_token ? self->bearer_token : "", 
-      self->client_token ? self->client_token : "");
-    g_file_set_contents ("/tmp/claude-1000/-home-wrldmk2--SpotifyGTK/cc964017-47a6-4c10-b489-3031a013748f/scratchpad/tokens.txt", t, -1, NULL);
-  }
 }
 
 /* Re-mint the bearer using the AP session's reusable credentials, which are
@@ -1840,13 +1888,15 @@ start_bearer_refresh (SpotifyNativeSession *self)
   spotifygtk_login5_auth_token (self->login5_client,
                                 NATIVE_AUTH_CLIENT_ID, self->device_id,
                                 username, creds, creds_len, creds_type,
-                                ctoken, on_login5_result, self);
+                                ctoken, on_login5_result,
+                                session_auth_step_new (self));
 }
 
 static void
 on_client_token_result (const gchar *token, gpointer user_data)
 {
-  SpotifyNativeSession *self = user_data;
+  g_autoptr(SpotifyNativeSession) self = session_auth_step_take (user_data);
+  if (!self) return;
 
   if (token) {
     g_mutex_lock (&self->lock);
@@ -1880,14 +1930,16 @@ on_client_token_result (const gchar *token, gpointer user_data)
   spotifygtk_login5_auth_token (self->login5_client,
                                 NATIVE_AUTH_CLIENT_ID, self->device_id,
                                 username, creds, creds_len, creds_type,
-                                token, on_login5_result, self);
+                                token, on_login5_result,
+                                session_auth_step_new (self));
 }
 
 static void
 on_ap_login_result (gboolean success, const gchar *username,
                     GError *error, gpointer user_data)
 {
-  SpotifyNativeSession *self = user_data;
+  g_autoptr(SpotifyNativeSession) self = session_auth_step_take (user_data);
+  if (!self) return;
 
   if (!success) {
     g_autofree gchar *msg = g_strdup_printf ("AP login failed: %s",
@@ -1906,7 +1958,8 @@ on_ap_login_result (gboolean success, const gchar *username,
   spotifygtk_client_token_set_cancellable (self->client_token_client, self->cancellable);
   spotifygtk_client_token_request (self->client_token_client,
                                    NATIVE_AUTH_CLIENT_ID, self->device_id,
-                                   on_client_token_result, self);
+                                   on_client_token_result,
+                                   session_auth_step_new (self));
 }
 
 /* Spotify refuses new AP connections when a client opens them too quickly.
@@ -1925,6 +1978,8 @@ static gboolean
 run_scheduled_reconnect (gpointer user_data)
 {
   SpotifyNativeSession *self = user_data;
+  if (!self->reconnect_pending || g_atomic_int_get (&self->signed_out))
+    return G_SOURCE_REMOVE;
   self->reconnect_pending = FALSE;
   return reconnect_on_worker (self);
 }
@@ -1934,7 +1989,8 @@ on_session_ap_disconnected (SpotifyApSession *ap, GError *error,
                             gpointer user_data)
 {
   SpotifyNativeSession *self = user_data;
-  if (ap != self->ap || self->stopping || self->reconnect_pending)
+  if (ap != self->ap || self->stopping || self->reconnect_pending ||
+      g_atomic_int_get (&self->signed_out))
     return;
 
   self->reconnect_pending = TRUE;
@@ -1963,7 +2019,8 @@ on_mercury_transport_timeout (SpotifyMercury *mercury, gpointer user_data)
   gboolean is_current = mercury == self->mercury;
   g_mutex_unlock (&self->lock);
 
-  if (!is_current || self->stopping || self->reconnect_pending)
+  if (!is_current || self->stopping || self->reconnect_pending ||
+      g_atomic_int_get (&self->signed_out))
     return;
 
   self->reconnect_pending = TRUE;
@@ -1983,12 +2040,14 @@ on_mercury_transport_timeout (SpotifyMercury *mercury, gpointer user_data)
 static gboolean
 retry_ap_connect (gpointer user_data)
 {
-  SpotifyNativeSession *self = user_data;
+  g_autoptr(SpotifyNativeSession) self = session_auth_step_get (user_data);
+  if (!self) return G_SOURCE_REMOVE;
 
   if (g_cancellable_is_cancelled (self->cancellable))
     return G_SOURCE_REMOVE;
 
-  spotifygtk_ap_session_connect (self->ap, NULL, on_ap_connected, self);
+  spotifygtk_ap_session_connect (self->ap, NULL, on_ap_connected,
+                                 session_auth_step_new (self));
   return G_SOURCE_REMOVE;
 }
 
@@ -1996,10 +2055,12 @@ static void
 on_ap_connected (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   SpotifyApSession     *ap   = SPOTIFYGTK_AP_SESSION (source);
-  SpotifyNativeSession *self = user_data;
   g_autoptr(GError)     err  = NULL;
+  gboolean connected = spotifygtk_ap_session_connect_finish (ap, result, &err);
+  g_autoptr(SpotifyNativeSession) self = session_auth_step_take (user_data);
+  if (!self || ap != self->ap) return;
 
-  if (!spotifygtk_ap_session_connect_finish (ap, result, &err)) {
+  if (!connected) {
     if (self->connect_attempts < AP_CONNECT_MAX_ATTEMPTS &&
         !g_cancellable_is_cancelled (self->cancellable)) {
       self->connect_attempts++;
@@ -2014,7 +2075,9 @@ on_ap_connected (GObject *source, GAsyncResult *result, gpointer user_data)
        * to the main context, which is exactly the isolation this class exists
        * to guarantee. See the matching note in main.c. */
       GSource *retry = g_timeout_source_new (delay_ms);
-      g_source_set_callback (retry, retry_ap_connect, self, NULL);
+      g_source_set_callback (retry, retry_ap_connect,
+                             session_auth_step_new (self),
+                             session_auth_step_free);
       g_source_attach (retry, self->context);
       g_source_unref (retry);
       return;
@@ -2030,7 +2093,8 @@ on_ap_connected (GObject *source, GAsyncResult *result, gpointer user_data)
   set_state (self, SPOTIFYGTK_SESSION_CONNECTING, "Secure channel established; signing in.");
 
   spotifygtk_ap_session_login (ap, g_getenv ("SPOTIFY_USERNAME"),
-                               self->login_token, on_ap_login_result, self);
+                               self->login_token, on_ap_login_result,
+                               session_auth_step_new (self));
 }
 
 /* ── Worker thread ───────────────────────────────────────────────────────── */
@@ -2039,11 +2103,13 @@ static gboolean
 begin_signin (gpointer user_data)
 {
   SpotifyNativeSession *self = user_data;
+  if (g_atomic_int_get (&self->signed_out)) return G_SOURCE_REMOVE;
 
   self->connect_attempts = 0;
   self->ap = spotifygtk_ap_session_new ();
   spotifygtk_ap_session_set_cancellable (self->ap, self->cancellable);
-  spotifygtk_ap_session_connect (self->ap, NULL, on_ap_connected, self);
+  spotifygtk_ap_session_connect (self->ap, NULL, on_ap_connected,
+                                 session_auth_step_new (self));
 
   return G_SOURCE_REMOVE;
 }
@@ -2058,23 +2124,41 @@ begin_signin (gpointer user_data)
  * on any sign-in after the first, the cached one is more likely stale than
  * good.
  */
+typedef struct {
+  GMainLoop *loop;
+  gboolean completed;
+} TokenWait;
+
+static void
+on_login_token_completed (NativeAuth *auth, gboolean success, gpointer data)
+{
+  TokenWait *wait = data;
+  wait->completed = TRUE;
+  g_main_loop_quit (wait->loop);
+  (void) auth; (void) success;
+}
+
 static gboolean
 acquire_login_token (SpotifyNativeSession *self)
 {
   /* Token acquisition can block (it may run a browser flow), so it happens on
    * the session context rather than the caller's thread. */
   NativeAuth *auth = native_auth_new ();
+  /* A failed refresh must not fall back to an old login token already held by
+   * this session. Reusing it makes an expired-token failure look successful. */
+  g_clear_pointer (&self->login_token, g_free);
   if (!native_auth_has_valid_token (auth)) {
-    /* native_auth_refresh() handles both cases: refresh a stored-but-expired
-     * token, or fall through to the browser flow when there is none. It is
-     * async, so drive it on this thread's context via its own nested loop. */
-    GMainLoop *token_loop = g_main_loop_new (self->context, FALSE);
-    gulong handler = g_signal_connect_swapped (auth, "completed",
-                                               G_CALLBACK (g_main_loop_quit), token_loop);
-    native_auth_refresh (auth);
-    g_main_loop_run (token_loop);
+    /* The worker only refreshes existing credentials. Browser approval is
+     * owned by the UI; a second listener here could outlive logout or race a
+     * retry. Drive the async refresh on this thread's context. */
+    TokenWait wait = { .loop = g_main_loop_new (self->context, FALSE) };
+    gulong handler = g_signal_connect (auth, "completed",
+                                       G_CALLBACK (on_login_token_completed), &wait);
+    native_auth_refresh_silent (auth);
+    if (!wait.completed)
+      g_main_loop_run (wait.loop);
     g_signal_handler_disconnect (auth, handler);
-    g_main_loop_unref (token_loop);
+    g_main_loop_unref (wait.loop);
   }
 
   if (native_auth_has_valid_token (auth)) {
@@ -2090,16 +2174,22 @@ static gpointer
 session_thread (gpointer user_data)
 {
   SpotifyNativeSession *self = user_data;
+  gint initial_generation = g_atomic_int_get (&self->auth_generation);
 
   g_main_context_push_thread_default (self->context);
 
-  if (!acquire_login_token (self)) {
+  gboolean acquired = acquire_login_token (self);
+  if (initial_generation != g_atomic_int_get (&self->auth_generation) ||
+      g_atomic_int_get (&self->signed_out)) {
+    g_clear_pointer (&self->login_token, g_free);
+  } else if (!acquired) {
     fail_session (self, "could not obtain an access token for AP login");
-    g_main_context_pop_thread_default (self->context);
-    return NULL;
+  } else {
+    g_main_context_invoke (self->context, begin_signin, self);
   }
 
-  g_main_context_invoke (self->context, begin_signin, self);
+  /* Keep the worker context alive after a failed first attempt. Browser
+   * approval on a retry can then use reconnect() without a process restart. */
 
   /* Publish the loop under the lock and re-check `stopping` in the same
    * critical section. Without this, dispose() can run between "loop is
@@ -2137,9 +2227,17 @@ static gboolean
 resignin (gpointer user_data)
 {
   SpotifyNativeSession *self = user_data;
+  gint generation = g_atomic_int_get (&self->auth_generation);
 
   if (!acquire_login_token (self)) {
-    fail_session (self, "could not refresh the access token to reconnect");
+    if (generation == g_atomic_int_get (&self->auth_generation) &&
+        !g_atomic_int_get (&self->signed_out))
+      fail_session (self, "could not refresh the access token to reconnect");
+    return G_SOURCE_REMOVE;
+  }
+  if (generation != g_atomic_int_get (&self->auth_generation) ||
+      g_atomic_int_get (&self->signed_out)) {
+    g_clear_pointer (&self->login_token, g_free);
     return G_SOURCE_REMOVE;
   }
   return begin_signin (self);
@@ -2157,6 +2255,19 @@ static gboolean
 reconnect_on_worker (gpointer user_data)
 {
   SpotifyNativeSession *self = user_data;
+  if (g_atomic_int_get (&self->signed_out))
+    return G_SOURCE_REMOVE;
+  g_atomic_int_inc (&self->auth_generation);
+  if (g_cancellable_is_cancelled (self->cancellable)) {
+    g_clear_object (&self->cancellable);
+    self->cancellable = g_cancellable_new ();
+  }
+
+  g_autoptr(NativeAuth) credentials = native_auth_new ();
+  if (!native_auth_has_credentials (credentials)) {
+    set_state (self, SPOTIFYGTK_SESSION_IDLE, "Signed out");
+    return G_SOURCE_REMOVE;
+  }
 
   g_mutex_lock (&self->lock);
   SpotifyMercury *mercury = g_steal_pointer (&self->mercury);
@@ -2188,9 +2299,58 @@ spotifygtk_native_session_reconnect (SpotifyNativeSession *self)
   if (!self->context)
     return;
 
+  g_atomic_int_set (&self->signed_out, FALSE);
+  g_atomic_int_inc (&self->auth_generation);
+
   g_main_context_invoke_full (self->context, G_PRIORITY_DEFAULT,
                               reconnect_on_worker, g_object_ref (self),
                               g_object_unref);
+}
+
+static gboolean
+disconnect_on_worker (gpointer user_data)
+{
+  SpotifyNativeSession *self = user_data;
+  self->reconnect_pending = FALSE;
+  g_cancellable_cancel (self->cancellable);
+  dealer_shutdown (self);
+  g_mutex_lock (&self->lock);
+  SpotifyMercury *mercury = g_steal_pointer (&self->mercury);
+  g_mutex_unlock (&self->lock);
+  if (mercury) {
+    g_signal_handlers_disconnect_by_data (mercury, self);
+    if (!self->retired_mercury)
+      self->retired_mercury = g_ptr_array_new_with_free_func (g_object_unref);
+    g_ptr_array_add (self->retired_mercury, mercury);
+  }
+  g_clear_object (&self->ap);
+  g_clear_object (&self->client_token_client);
+  g_clear_object (&self->login5_client);
+  g_clear_object (&self->spclient);
+  g_clear_pointer (&self->login_token, g_free);
+  g_mutex_lock (&self->lock);
+  g_clear_pointer (&self->bearer_token, g_free);
+  g_clear_pointer (&self->client_token, g_free);
+  g_clear_pointer (&self->username, g_free);
+  self->bearer_expires_at = 0;
+  g_mutex_unlock (&self->lock);
+  self->refreshing = FALSE;
+  flush_pending_ops (self, FALSE);
+  collection_drain_waiters (self, NULL, "signed out");
+  set_state (self, SPOTIFYGTK_SESSION_IDLE, "Signed out");
+  return G_SOURCE_REMOVE;
+}
+
+void
+spotifygtk_native_session_disconnect (SpotifyNativeSession *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+  g_atomic_int_set (&self->signed_out, TRUE);
+  g_atomic_int_inc (&self->auth_generation);
+  if (self->context)
+    g_main_context_invoke_full (self->context, G_PRIORITY_HIGH,
+                                disconnect_on_worker, g_object_ref (self),
+                                g_object_unref);
 }
 
 typedef struct {
@@ -2288,6 +2448,8 @@ spotifygtk_native_session_start (SpotifyNativeSession *self)
 
   if (self->thread)
     return;   /* already connecting or ready */
+
+  g_atomic_int_set (&self->signed_out, FALSE);
 
   set_state (self, SPOTIFYGTK_SESSION_CONNECTING, "Connecting to Spotify…");
 

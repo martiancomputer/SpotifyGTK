@@ -22,6 +22,8 @@ typedef struct {
   gint source_bits;
   guint64 file_size;
   gint64 mtime_us;
+  guint64 device_id;
+  guint64 inode;
 } SpotifyGtkLocalTrack;
 
 typedef struct {

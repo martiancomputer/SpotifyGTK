@@ -53,7 +53,60 @@ struct _NativeAuth {
 
   SoupSession *session;
   SoupServer  *redirect_server;
+  GCancellable *token_cancel;
+  guint64 generation;
+  gboolean allow_browser;
 };
+
+/* A logout invalidates token requests owned by other NativeAuth instances too
+ * (the session worker has its own instance). Otherwise a late refresh could
+ * write a new token after the UI had signed out. */
+static gint logout_epoch;
+static GMutex token_file_lock;
+
+typedef struct {
+  NativeAuth *auth;
+  guint64 generation;
+  gint logout_epoch;
+} AuthAttempt;
+
+static AuthAttempt *
+auth_attempt_new (NativeAuth *auth)
+{
+  AuthAttempt *attempt = g_new0 (AuthAttempt, 1);
+  attempt->auth = g_object_ref (auth);
+  attempt->generation = auth->generation;
+  attempt->logout_epoch = g_atomic_int_get (&logout_epoch);
+  return attempt;
+}
+
+static void
+auth_attempt_free (gpointer data)
+{
+  AuthAttempt *attempt = data;
+  g_object_unref (attempt->auth);
+  g_free (attempt);
+}
+
+static void
+cancel_attempt (NativeAuth *self)
+{
+  self->generation++;
+  if (self->token_cancel)
+    g_cancellable_cancel (self->token_cancel);
+  g_clear_object (&self->token_cancel);
+  if (self->redirect_server) {
+    soup_server_disconnect (self->redirect_server);
+    g_clear_object (&self->redirect_server);
+  }
+}
+
+void
+native_auth_cancel (NativeAuth *self)
+{
+  g_return_if_fail (NATIVEAUTH_IS_AUTH (self));
+  cancel_attempt (self);
+}
 
 enum { SIG_COMPLETED, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -113,6 +166,9 @@ void
 native_auth_log_out (NativeAuth *self)
 {
   g_return_if_fail (NATIVEAUTH_IS_AUTH (self));
+  g_mutex_lock (&token_file_lock);
+  g_atomic_int_inc (&logout_epoch);
+  cancel_attempt (self);
 
   /* Both halves matter: clearing only the in-memory copy would leave the next
    * run signed in from disk, and deleting only the file would leave this
@@ -123,7 +179,9 @@ native_auth_log_out (NativeAuth *self)
 
   g_autofree gchar *path = token_file_path ();
   if (g_unlink (path) != 0 && errno != ENOENT)
-    g_warning ("native-auth: could not remove %s: %s", path, g_strerror (errno));
+    g_warning ("native-auth: could not remove stored credentials: %s",
+               g_strerror (errno));
+  g_mutex_unlock (&token_file_lock);
 }
 
 static void
@@ -165,10 +223,24 @@ load_tokens (NativeAuth *self)
 static void
 on_token_response (GObject *source, GAsyncResult *result, gpointer user_data)
 {
-  NativeAuth        *self = NATIVEAUTH_AUTH (user_data);
+  AuthAttempt       *attempt = user_data;
+  NativeAuth        *self = attempt->auth;
+  gint               attempt_epoch = attempt->logout_epoch;
+  g_autoptr(NativeAuth) keep_alive = g_object_ref (self);
   g_autoptr(GError)  err  = NULL;
 
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
+  if (attempt->generation != self->generation ||
+      attempt->logout_epoch != g_atomic_int_get (&logout_epoch)) {
+    g_clear_pointer (&bytes, g_bytes_unref);
+    /* A different auth object may be waiting in a nested worker loop. */
+    if (attempt->generation == self->generation)
+      g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
+    auth_attempt_free (attempt);
+    return;
+  }
+  g_clear_object (&self->token_cancel);
+  auth_attempt_free (attempt);
   if (!bytes) {
     g_warning ("native_auth: token request failed: %s", err ? err->message : "unknown");
     g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
@@ -208,18 +280,30 @@ on_token_response (GObject *source, GAsyncResult *result, gpointer user_data)
     }
 
     if (self->refresh_token) {
+      g_mutex_lock (&token_file_lock);
+      if (attempt_epoch != g_atomic_int_get (&logout_epoch)) {
+        g_mutex_unlock (&token_file_lock);
+        g_bytes_unref (bytes);
+        g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
+        return;
+      }
       g_warning ("native_auth: refresh token rejected as invalid_grant; "
-                 "discarding it and restarting the login flow");
+                 "discarding stored credentials");
       g_clear_pointer (&self->refresh_token, g_free);
       g_clear_pointer (&self->access_token, g_free);
       self->expires_at = 0;
 
       g_autofree gchar *path = token_file_path ();
       if (g_unlink (path) != 0 && errno != ENOENT)
-        g_warning ("native_auth: could not remove %s: %s", path, g_strerror (errno));
+        g_warning ("native_auth: could not remove stored credentials: %s",
+                   g_strerror (errno));
+      g_mutex_unlock (&token_file_lock);
 
       g_bytes_unref (bytes);
-      native_auth_begin (self);
+      if (self->allow_browser)
+        native_auth_begin (self);
+      else
+        g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
       return;
     }
 
@@ -244,6 +328,13 @@ on_token_response (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
+  g_mutex_lock (&token_file_lock);
+  if (attempt_epoch != g_atomic_int_get (&logout_epoch)) {
+    g_mutex_unlock (&token_file_lock);
+    g_bytes_unref (bytes);
+    g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
+    return;
+  }
   g_free (self->access_token);
   self->access_token = g_strdup (new_access);
 
@@ -256,6 +347,7 @@ on_token_response (GObject *source, GAsyncResult *result, gpointer user_data)
   self->expires_at    = g_get_real_time () / G_USEC_PER_SEC + expires_in - 60;
 
   store_tokens (self);
+  g_mutex_unlock (&token_file_lock);
   g_bytes_unref (bytes);
 
   g_signal_emit (self, signals[SIG_COMPLETED], 0, TRUE);
@@ -275,8 +367,11 @@ exchange_code (NativeAuth *self, const gchar *code)
   soup_message_set_request_body_from_bytes (msg, "application/x-www-form-urlencoded", bytes);
   g_bytes_unref (bytes);
 
-  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
-                                    on_token_response, self);
+  g_clear_object (&self->token_cancel);
+  self->token_cancel = g_cancellable_new ();
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
+                                    self->token_cancel, on_token_response,
+                                    auth_attempt_new (self));
   g_object_unref (msg);
 }
 
@@ -291,8 +386,15 @@ static void
 on_callback_request (SoupServer *server, SoupServerMessage *msg, const gchar *path,
                      GHashTable *query, gpointer user_data)
 {
-  NativeAuth *self = NATIVEAUTH_AUTH (user_data);
+  AuthAttempt *attempt = user_data;
+  NativeAuth *self = attempt->auth;
+  g_autoptr(NativeAuth) keep_alive = g_object_ref (self);
   if (g_strcmp0 (path, "/login") != 0) return;
+  if (attempt->generation != self->generation ||
+      attempt->logout_epoch != g_atomic_int_get (&logout_epoch)) {
+    soup_server_message_set_status (msg, 410, NULL);
+    return;
+  }
 
   const gchar *code  = query ? g_hash_table_lookup (query, "code")  : NULL;
   const gchar *state = query ? g_hash_table_lookup (query, "state") : NULL;
@@ -328,6 +430,8 @@ on_callback_request (SoupServer *server, SoupServerMessage *msg, const gchar *pa
 cleanup:
   soup_server_remove_handler (server, "/login");
   soup_server_disconnect (server);
+  if (self->redirect_server == server)
+    g_clear_object (&self->redirect_server);
 }
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
@@ -368,6 +472,8 @@ void
 native_auth_begin (NativeAuth *self)
 {
   g_return_if_fail (NATIVEAUTH_IS_AUTH (self));
+  self->allow_browser = TRUE;
+  cancel_attempt (self);
 
   g_free (self->code_verifier);
   g_free (self->state_nonce);
@@ -378,13 +484,15 @@ native_auth_begin (NativeAuth *self)
 
   g_autoptr(GError) err = NULL;
   self->redirect_server = soup_server_new (NULL, NULL);
-  soup_server_add_handler (self->redirect_server, "/login", on_callback_request, self, NULL);
+  soup_server_add_handler (self->redirect_server, "/login", on_callback_request,
+                           auth_attempt_new (self), auth_attempt_free);
 
   if (!soup_server_listen_local (self->redirect_server, NATIVE_AUTH_REDIRECT_PORT,
                                  SOUP_SERVER_LISTEN_IPV4_ONLY, &err)) {
     g_warning ("native_auth: could not bind OAuth listener on port %d: %s",
               NATIVE_AUTH_REDIRECT_PORT, err ? err->message : "unknown");
     g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
+    g_clear_object (&self->redirect_server);
     return;
   }
 
@@ -431,6 +539,7 @@ native_auth_refresh (NativeAuth *self)
 {
   g_return_if_fail (NATIVEAUTH_IS_AUTH (self));
   if (!self->refresh_token) { native_auth_begin (self); return; }
+  cancel_attempt (self);
 
   SoupMessage *msg = soup_message_new (SOUP_METHOD_POST, SPOTIFY_TOKEN_URL);
 
@@ -442,9 +551,23 @@ native_auth_refresh (NativeAuth *self)
   soup_message_set_request_body_from_bytes (msg, "application/x-www-form-urlencoded", bytes);
   g_bytes_unref (bytes);
 
-  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT, NULL,
-                                    on_token_response, self);
+  self->token_cancel = g_cancellable_new ();
+  soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
+                                    self->token_cancel, on_token_response,
+                                    auth_attempt_new (self));
   g_object_unref (msg);
+}
+
+void
+native_auth_refresh_silent (NativeAuth *self)
+{
+  g_return_if_fail (NATIVEAUTH_IS_AUTH (self));
+  self->allow_browser = FALSE;
+  if (!self->refresh_token) {
+    g_signal_emit (self, signals[SIG_COMPLETED], 0, FALSE);
+    return;
+  }
+  native_auth_refresh (self);
 }
 
 /* ── GObject ──────────────────────────────────────────────────────────────── */
@@ -453,6 +576,7 @@ static void
 native_auth_dispose (GObject *object)
 {
   NativeAuth *self = NATIVEAUTH_AUTH (object);
+  cancel_attempt (self);
   g_clear_object (&self->session);
   g_clear_object (&self->redirect_server);
   G_OBJECT_CLASS (native_auth_parent_class)->dispose (object);
@@ -484,6 +608,7 @@ native_auth_class_init (NativeAuthClass *klass)
 static void
 native_auth_init (NativeAuth *self)
 {
+  self->allow_browser = TRUE;
   self->session = soup_session_new_with_options ("user-agent", "spotify-native/" APP_VERSION, NULL);
   spotifygtk_soup_session_configure_tls (self->session);
 }

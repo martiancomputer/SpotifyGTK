@@ -158,6 +158,15 @@ test_empty_uris_are_skipped (void)
   g_assert_cmpuint (buf->len, ==, one_only->len);
 }
 
+static void
+test_local_uri_is_rejected (void)
+{
+  const gchar *uris[] = { URI_A, "local:track:0123456789" };
+  g_autoptr(GByteArray) body = spotifygtk_collection_build_write (
+    "bob", "collection", uris, 2, 0, FALSE);
+  g_assert_null (body);
+}
+
 
 /* ── PageRequest encoding / PageResponse decoding ─────────────────────────── */
 
@@ -309,6 +318,7 @@ main (int argc, char **argv)
   g_test_add_func ("/collection/added-at-varint",    test_added_at_is_plain_varint);
   g_test_add_func ("/collection/multiple-items",     test_multiple_items_repeat_the_tag);
   g_test_add_func ("/collection/empty-uris-skipped", test_empty_uris_are_skipped);
+  g_test_add_func ("/collection/local-uri-rejected", test_local_uri_is_rejected);
   g_test_add_func ("/collection/page-request",        test_page_request_encoding);
   g_test_add_func ("/collection/page-request-limit",  test_page_request_omits_zero_limit);
   g_test_add_func ("/collection/page-request-token",  test_page_request_carries_token);

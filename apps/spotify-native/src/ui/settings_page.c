@@ -25,6 +25,8 @@ struct _SpotifyGtkSettingsPage {
   GtkWidget          *account_name;
   GtkWidget          *account_id;
   GtkWidget          *account_plan;
+  GtkWidget          *account_sign_in;
+  GtkWidget          *account_sign_out;
   GtkWidget          *local_directories_box;
   guint               scroll_commit_source;
   guint               pending_scroll_smoothness;
@@ -35,7 +37,7 @@ G_STATIC_ASSERT (SPOTIFYGTK_SETTINGS_EQ_BANDS == SPOTIFYGTK_EQ_BANDS);
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkSettingsPage, spotifygtk_settings_page, GTK_TYPE_BOX)
 
-enum { LOG_OUT, N_SIGNALS };
+enum { LOG_OUT, SIGN_IN, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 static void on_local_directory_remove (SpotifyGtkSettingsPage *self,
@@ -66,12 +68,22 @@ spotifygtk_settings_page_class_init (SpotifyGtkSettingsPageClass *klass)
   signals[LOG_OUT] = g_signal_new ("log-out", G_TYPE_FROM_CLASS (klass),
                                    G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
                                    G_TYPE_NONE, 0);
+  signals[SIGN_IN] = g_signal_new ("sign-in", G_TYPE_FROM_CLASS (klass),
+                                   G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+                                   G_TYPE_NONE, 0);
 }
 
 static void
 on_log_out_clicked (GtkButton *button, gpointer user_data)
 {
   g_signal_emit (SPOTIFYGTK_SETTINGS_PAGE (user_data), signals[LOG_OUT], 0);
+  (void) button;
+}
+
+static void
+on_sign_in_clicked (GtkButton *button, gpointer user_data)
+{
+  g_signal_emit (SPOTIFYGTK_SETTINGS_PAGE (user_data), signals[SIGN_IN], 0);
   (void) button;
 }
 
@@ -901,13 +913,22 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   /* --- Account --- */
   GtkWidget *account_group = build_group ("Account");
 
+  GtkWidget *login = gtk_button_new_with_label ("Sign in");
+  self->account_sign_in = login;
+  gtk_widget_add_css_class (login, "pill-button");
+  g_signal_connect (login, "clicked", G_CALLBACK (on_sign_in_clicked), self);
+  gtk_box_append (GTK_BOX (account_group),
+                  build_row ("Spotify account",
+                             "Sign in without stopping local playback.", login));
+
   GtkWidget *logout = gtk_button_new_with_label ("Log out");
+  self->account_sign_out = logout;
   gtk_widget_add_css_class (logout, "pill-button");
   g_signal_connect (logout, "clicked", G_CALLBACK (on_log_out_clicked), self);
   gtk_box_append (GTK_BOX (account_group),
                   build_row ("Signed in",
                              "Forgets the stored credentials and returns to the "
-                             "sign-in screen. Playback stops.",
+                             "sign-in screen. Local playback keeps playing.",
                              logout));
 
   gtk_box_append (GTK_BOX (content), account_group);
@@ -956,6 +977,10 @@ spotifygtk_settings_page_set_account (SpotifyGtkSettingsPage *self,
     return;
   gtk_label_set_text (GTK_LABEL (self->account_name),
                       (username && *username) ? username : "Not signed in");
+  if (self->account_sign_in)
+    gtk_widget_set_visible (self->account_sign_in, !username || !*username);
+  if (self->account_sign_out)
+    gtk_widget_set_visible (self->account_sign_out, username && *username);
   if (self->account_id)
     gtk_label_set_text (GTK_LABEL (self->account_id),
                         (username && *username) ? username : "");

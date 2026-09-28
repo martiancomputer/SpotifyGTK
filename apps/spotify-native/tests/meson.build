@@ -103,6 +103,20 @@ if get_option('tests')
   )
   test('collection-write-encoding', test_collection)
 
+  test_local_favorites = executable('test-local-favorites',
+    'test_local_favorites.c', '../src/ui/local_favorites.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, json_glib_dep, soup_dep],
+  )
+  test('local-favorites', test_local_favorites)
+
+  test_device_playlists = executable('test-device-playlists',
+    'test_device_playlists.c', '../src/ui/device_playlists.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, json_glib_dep, soup_dep],
+  )
+  test('device-playlists', test_device_playlists)
+
   test_resampler = executable('test-resampler',
     'test_resampler.c',
     '../src/audio/resampler.c',

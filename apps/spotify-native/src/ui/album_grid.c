@@ -1225,7 +1225,8 @@ set_card_specs (SpotifyGtkAlbumGrid       *self,
       cards[i].title ? cards[i].title : cards[i].uri,
       cards[i].subtitle ? cards[i].subtitle : "",
       cards[i].cover_id);
-    item->pending = pending;
+    item->pending = pending &&
+      g_str_has_prefix (cards[i].uri, "spotify:playlist:");
     items[n++] = item;
   }
 

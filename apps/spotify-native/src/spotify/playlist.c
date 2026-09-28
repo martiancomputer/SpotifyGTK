@@ -359,9 +359,22 @@ spotifygtk_playlist_add_tracks (SpotifyMercury *mercury, const gchar *playlist_u
                                 gpointer user_data)
 {
   g_return_if_fail (mercury != NULL && playlist_uri != NULL);
+  if (!g_str_has_prefix (playlist_uri, "spotify:playlist:")) {
+    if (callback) callback (FALSE, 400, user_data);
+    return;
+  }
   if (n_tracks == 0) {
     if (callback) callback (TRUE, 200, user_data);
     return;
+  }
+  /* Reject the whole operation, rather than silently dropping local items:
+   * a mixed client playlist must keep its ordering in device storage. */
+  for (guint i = 0; i < n_tracks; i++) {
+    if (!track_uris || !track_uris[i] ||
+        !g_str_has_prefix (track_uris[i], "spotify:track:")) {
+      if (callback) callback (FALSE, 400, user_data);
+      return;
+    }
   }
 
   AddCtx *ctx = g_new0 (AddCtx, 1);
@@ -651,6 +664,10 @@ spotifygtk_playlist_rename (SpotifyMercury            *mercury,
 {
   g_return_if_fail (mercury != NULL);
   g_return_if_fail (playlist_uri != NULL && new_name != NULL);
+  if (!g_str_has_prefix (playlist_uri, "spotify:playlist:")) {
+    if (callback) callback (FALSE, 400, user_data);
+    return;
+  }
 
   RenameCtx *ctx = g_new0 (RenameCtx, 1);
   ctx->mercury   = g_object_ref (mercury);
@@ -804,6 +821,11 @@ spotifygtk_playlist_remove_track (SpotifyMercury            *mercury,
 {
   g_return_if_fail (mercury != NULL);
   g_return_if_fail (playlist_uri != NULL && track_uri != NULL);
+  if (!g_str_has_prefix (playlist_uri, "spotify:playlist:") ||
+      !g_str_has_prefix (track_uri, "spotify:track:")) {
+    if (callback) callback (FALSE, 400, user_data);
+    return;
+  }
 
   RemoveTrackCtx *ctx = g_new0 (RemoveTrackCtx, 1);
   ctx->mercury   = g_object_ref (mercury);
@@ -828,6 +850,10 @@ spotifygtk_playlist_remove (SpotifyMercury            *mercury,
 {
   g_return_if_fail (mercury != NULL);
   g_return_if_fail (username != NULL && playlist_uri != NULL);
+  if (!g_str_has_prefix (playlist_uri, "spotify:playlist:")) {
+    if (callback) callback (FALSE, 400, user_data);
+    return;
+  }
 
   RemoveCtx *ctx = g_new0 (RemoveCtx, 1);
   ctx->mercury   = g_object_ref (mercury);

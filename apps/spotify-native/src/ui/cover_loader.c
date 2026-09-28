@@ -1409,12 +1409,24 @@ static void
 clear_cache_thread (GTask *task, gpointer source, gpointer task_data,
                     GCancellable *cancellable)
 {
-  g_autoptr(GFile) root = g_file_new_for_path (task_data);
+  const gchar *root = task_data;
+  /* Clear only Spotify-derived entries. local-index-v1 and local-art live in
+   * the same legacy cache root; removing that directory orphaned favorites
+   * and forced an unnecessary full local rescan. Explicit names also prevent
+   * a future user-data file from being deleted by a broad recursive wipe. */
+  const gchar *const spotify_entries[] = {
+    "images", "artist-portraits", "artist-images", "artist-names-v2"
+  };
   g_autoptr(GError) error = NULL;
-  if (!delete_cache_tree (root, cancellable, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
-  else
-    g_task_return_boolean (task, TRUE);
+  for (guint i = 0; i < G_N_ELEMENTS (spotify_entries); i++) {
+    g_autofree gchar *path = g_build_filename (root, spotify_entries[i], NULL);
+    g_autoptr(GFile) file = g_file_new_for_path (path);
+    if (!delete_cache_tree (file, cancellable, &error)) {
+      g_task_return_error (task, g_steal_pointer (&error));
+      return;
+    }
+  }
+  g_task_return_boolean (task, TRUE);
   (void) source;
 }
 
