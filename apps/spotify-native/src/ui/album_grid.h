@@ -29,6 +29,14 @@ typedef gboolean (*SpotifyGtkAlbumPinQuery) (const gchar *uri, gpointer user_dat
 SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_shelf (void);
 SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_grid (void);
 
+/* Borrow the internal viewport for nested wheel routing. */
+GtkScrolledWindow *spotifygtk_album_grid_get_scroller (SpotifyGtkAlbumGrid *self);
+
+/* Search only: size whole cards to the shelf viewport and land a completed
+ * horizontal scroll on card boundaries, without side gutters or cut cards. */
+void spotifygtk_album_grid_set_full_card_shelf (SpotifyGtkAlbumGrid *self,
+                                                gboolean enabled);
+
 /*
  * Replace the cards with the distinct albums present in `tracks` (a GPtrArray
  * of SpotifyNativeTrack*), in first-seen order, up to `max_albums`. The array

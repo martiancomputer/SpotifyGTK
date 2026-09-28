@@ -41,6 +41,7 @@
 #include "cover_loader.h"
 #include "smooth_scroll.h"
 #include "spotify/track_meta.h"
+#include <math.h>
 
 #define CARD_ART_PX     176   /* on-screen card art size */
 /*
@@ -149,6 +150,10 @@ struct _SpotifyGtkAlbumGrid {
   GtkCustomFilter *filter;
   gchar       *filter_text;
   gboolean    wrap;
+  gboolean    full_card_shelf;
+  gboolean    shelf_snapping;
+  gint        shelf_width;
+  guint       shelf_columns;
 
   GtkWidget  *scroller;   /* borrowed: owned by the box */
   GtkWidget  *view;       /* borrowed: owned by the scroller */
@@ -183,12 +188,54 @@ static guint signals[N_SIGNALS];
 static void cancel_and_unref (gpointer data);
 static void on_card_cover_loaded (GdkTexture *texture, gpointer user_data);
 static gboolean card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card);
+static gboolean card_near_allocated_viewport (SpotifyGtkAlbumGrid *self,
+                                               GtkWidget *card);
 static gboolean on_grid_settled (gpointer user_data);
 
-/* A wrapped grid's width is part of its viewport state. Expanding or
- * collapsing Now Playing can change the column count without changing the
- * vertical adjustment, so the scroll handler never runs. Coalesce GTK's
- * intermediate allocations and reconcile artwork against the final geometry. */
+static gint
+shelf_card_width (SpotifyGtkAlbumGrid *self, guint position)
+{
+  if (!self->full_card_shelf || self->shelf_width <= 0 ||
+      self->shelf_columns == 0)
+    return CARD_WIDTH;
+  gint base = self->shelf_width / (gint) self->shelf_columns;
+  guint extra = self->shelf_width % (gint) self->shelf_columns;
+  return base + (position % self->shelf_columns < extra);
+}
+
+static gdouble
+shelf_card_offset (SpotifyGtkAlbumGrid *self, guint position)
+{
+  guint column = position % self->shelf_columns;
+  gint base = self->shelf_width / (gint) self->shelf_columns;
+  guint extra = self->shelf_width % (gint) self->shelf_columns;
+  return (gdouble) (position / self->shelf_columns) * self->shelf_width +
+         (gdouble) column * base + MIN (column, extra);
+}
+
+static void
+update_shelf_widths (SpotifyGtkAlbumGrid *self)
+{
+  if (!self->full_card_shelf || !self->scroller)
+    return;
+  gint width = gtk_widget_get_width (self->scroller);
+  if (width <= 0 || width == self->shelf_width)
+    return;
+  self->shelf_width = width;
+  self->shelf_columns = MAX (1u, (guint) (width / CARD_WIDTH));
+  for (guint i = 0; self->bound_cards && i < self->bound_cards->len; i++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+    gpointer encoded = g_object_get_data (G_OBJECT (card), "bound-position");
+    if (encoded)
+      gtk_widget_set_size_request (card,
+        shelf_card_width (self, GPOINTER_TO_UINT (encoded) - 1), -1);
+  }
+}
+
+/* The viewport width is artwork state on both shapes: a wrapped grid changes
+ * column count and a shelf changes which horizontal cards are visible. Neither
+ * necessarily moves its adjustment. Coalesce intermediate allocations and
+ * reconcile against the final geometry. */
 static void
 on_grid_geometry_changed (GtkWidget *widget, GParamSpec *pspec,
                           gpointer user_data)
@@ -196,6 +243,8 @@ on_grid_geometry_changed (GtkWidget *widget, GParamSpec *pspec,
   SpotifyGtkAlbumGrid *self = user_data;
   (void) widget;
   (void) pspec;
+
+  update_shelf_widths (self);
 
   self->window_valid = FALSE;
   self->last_scroll_us = g_get_monotonic_time ();
@@ -300,7 +349,7 @@ album_item_matches_filter (gpointer item, gpointer user_data)
 
 /* Re-request the cover for one card if its load was skipped while scrolling. */
 static void
-card_retry_cover (GtkWidget *card)
+card_retry_cover (GtkWidget *card, gboolean settled)
 {
   SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
     gtk_widget_get_ancestor (card, SPOTIFYGTK_TYPE_ALBUM_GRID);
@@ -309,6 +358,9 @@ card_retry_cover (GtkWidget *card)
   if (!cover_id || !art)
     return;
   if (g_object_get_data (G_OBJECT (card), "cover-shown"))
+    return;
+  if (GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (card),
+                                           "cover-failures")) >= 3)
     return;
 
   /* A map, settle and page-cover reload can all select the same card before
@@ -324,7 +376,8 @@ card_retry_cover (GtkWidget *card)
   /* GtkGridView maps its realised overscan, not merely pixels inside the
    * viewport. Mapping alone decoded several screens of 352px art on first
    * open. Cached JPEGs are cheap to revisit; live RGBA textures are not. */
-  if (grid && !card_near_viewport (grid, card)) {
+  if (grid && !(settled ? card_near_allocated_viewport (grid, card)
+                        : card_near_viewport (grid, card))) {
     schedule_grid_settle (grid); /* bounds may not exist at the first map */
     return;
   }
@@ -419,7 +472,7 @@ on_card_mapped (GtkWidget *card, gpointer user_data)
     item->resolving = TRUE;
     g_signal_emit (grid, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
   }
-  card_retry_cover (card);
+  card_retry_cover (card, FALSE);
 }
 
 static gboolean
@@ -446,11 +499,10 @@ card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
   return position >= first && position < last;
 }
 
-/* Final allocations are the source of truth after a resize. The model-space
- * estimate above is deliberately usable during GridView's provisional bind,
- * but it cannot know GTK's exact spacing and column decision. At settle time
- * every mapped card has real bounds, so retain one row beyond the viewport on
- * either side and reconcile against what GTK actually drew. */
+/* Final allocations are the source of truth after a resize. Keep half a
+ * viewport of art on each side: a reverse gesture should not immediately
+ * re-decode every card that was visible a moment ago. This remains bounded by
+ * viewport size rather than by the total number of results. */
 static gboolean
 card_near_allocated_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 {
@@ -461,8 +513,18 @@ card_near_allocated_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
   if (!gtk_widget_compute_bounds (card, self->scroller, &bounds))
     return card_near_viewport (self, card);
 
+  /* A shelf scrolls horizontally. Testing only Y considered every bound card
+   * in its single row visible, so settling a search loaded all 50 covers at
+   * once and kept their textures even after they moved off screen. */
+  if (!self->wrap) {
+    gdouble width = gtk_widget_get_width (self->scroller);
+    gdouble margin = MAX (width * 0.5, bounds.size.width);
+    return bounds.origin.x + bounds.size.width > -margin &&
+           bounds.origin.x < width + margin;
+  }
+
   gdouble height = gtk_widget_get_height (self->scroller);
-  gdouble margin = MAX (bounds.size.height, 1.0);
+  gdouble margin = MAX (height * 0.5, bounds.size.height);
   return bounds.origin.y + bounds.size.height > -margin &&
          bounds.origin.y < height + margin;
 }
@@ -475,6 +537,28 @@ on_grid_settled (gpointer user_data)
   if (g_get_monotonic_time () - self->last_scroll_us <
       (gint64) GRID_SETTLE_MS * 1000)
     return G_SOURCE_CONTINUE;
+
+  if (self->full_card_shelf && self->shelf_width > 0 &&
+      self->shelf_columns > 0 && self->vadj) {
+    gdouble smooth_target;
+    if (spotifygtk_smooth_scroll_get_target (
+          GTK_SCROLLED_WINDOW (self->scroller), &smooth_target))
+      return G_SOURCE_CONTINUE;
+
+    guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+    if (n > self->shelf_columns) {
+      gdouble value = gtk_adjustment_get_value (self->vadj);
+      guint index = MIN ((guint) llround (
+        value * self->shelf_columns / self->shelf_width),
+        n - self->shelf_columns);
+      gdouble aligned = shelf_card_offset (self, index);
+      if (fabs (aligned - value) > 0.75) {
+        self->shelf_snapping = TRUE;
+        gtk_adjustment_set_value (self->vadj, aligned);
+        self->shelf_snapping = FALSE;
+      }
+    }
+  }
 
   self->settle_id = 0;
   self->scrolling = FALSE;
@@ -493,7 +577,7 @@ on_grid_settled (gpointer user_data)
         item->resolving = TRUE;
         g_signal_emit (self, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
       }
-      card_retry_cover (card);
+      card_retry_cover (card, TRUE);
     }
   }
 
@@ -506,6 +590,8 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
 
   SpotifyGtkAlbumGrid *self = user_data;
   (void) adj;
+  if (self->shelf_snapping)
+    return;
 
   self->scrolling = TRUE;
   self->last_scroll_us = g_get_monotonic_time ();
@@ -544,7 +630,7 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
         item->resolving = TRUE;
         g_signal_emit (self, signals[CARD_NEEDS_RESOLVE], 0, item->uri);
       }
-      card_retry_cover (card);
+      card_retry_cover (card, FALSE);
     }
   }
 
@@ -569,6 +655,10 @@ static void
 on_card_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
   GtkImage *art = user_data;
+  GtkWidget *card = gtk_widget_get_ancestor (GTK_WIDGET (art), GTK_TYPE_BUTTON);
+  if (card)
+    /* The request is complete even when it produced no texture. */
+    g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);
   if (!texture) {
     /*
      * Keep the placeholder and ask for a retry.
@@ -579,16 +669,23 @@ on_card_cover_loaded (GdkTexture *texture, gpointer user_data)
      * something happened to move the list. Arming it here means the retry
      * does not depend on the user scrolling.
      */
-    SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
-      gtk_widget_get_ancestor (GTK_WIDGET (art), SPOTIFYGTK_TYPE_ALBUM_GRID);
-    if (grid && !grid->settle_id)
-      grid->settle_id = g_timeout_add (GRID_SETTLE_MS, on_grid_settled, grid);
+    guint failures = card ? GPOINTER_TO_UINT (
+      g_object_get_data (G_OBJECT (card), "cover-failures")) : 0;
+    if (card)
+      g_object_set_data (G_OBJECT (card), "cover-failures",
+                         GUINT_TO_POINTER (failures + 1));
+    /* Retry a transient failure, but never spin forever on unavailable art. */
+    if (card && failures < 2) {
+      SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
+        gtk_widget_get_ancestor (card, SPOTIFYGTK_TYPE_ALBUM_GRID);
+      if (grid && !grid->settle_id)
+        grid->settle_id = g_timeout_add (GRID_SETTLE_MS, on_grid_settled, grid);
+    }
     return;
   }
 
   gtk_image_set_from_paintable (art, GDK_PAINTABLE (texture));
 
-  GtkWidget *card = gtk_widget_get_ancestor (GTK_WIDGET (art), GTK_TYPE_BUTTON);
   if (card)
     g_object_set_data (G_OBJECT (card), "cover-shown", GINT_TO_POINTER (1));
 }
@@ -832,6 +929,8 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
 
   card_apply_item (self, card, item);
   guint position = gtk_list_item_get_position (list_item);
+  if (!self->wrap && position != GTK_INVALID_LIST_POSITION)
+    gtk_widget_set_size_request (card, shelf_card_width (self, position), -1);
   g_object_set_data (G_OBJECT (card), "bound-position",
                      position == GTK_INVALID_LIST_POSITION
                        ? NULL : GUINT_TO_POINTER (position + 1));
@@ -875,6 +974,7 @@ card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem
   gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
 
   g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
+  g_object_set_data (G_OBJECT (card), "cover-failures", NULL);
   g_object_set_data_full (G_OBJECT (card), "cover-id",
                           g_strdup (item->cover_id), g_free);
 
@@ -1046,7 +1146,7 @@ spotifygtk_album_grid_reload_covers (SpotifyGtkAlbumGrid *self)
     return;
 
   for (guint i = 0; i < self->bound_cards->len; i++)
-    card_retry_cover (g_ptr_array_index (self->bound_cards, i));
+    card_retry_cover (g_ptr_array_index (self->bound_cards, i), TRUE);
 }
 
 gboolean
@@ -1072,6 +1172,10 @@ void
 spotifygtk_album_grid_clear (SpotifyGtkAlbumGrid *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  if (self->full_card_shelf && self->vadj) {
+    spotifygtk_smooth_scroll_cancel (GTK_SCROLLED_WINDOW (self->scroller));
+    gtk_adjustment_set_value (self->vadj, gtk_adjustment_get_lower (self->vadj));
+  }
   g_list_store_remove_all (self->store);
 }
 
@@ -1128,6 +1232,11 @@ set_card_specs (SpotifyGtkAlbumGrid       *self,
   g_list_store_splice (self->store, 0,
                        g_list_model_get_n_items (G_LIST_MODEL (self->store)),
                        items, n);
+
+  if (self->full_card_shelf && self->vadj) {
+    spotifygtk_smooth_scroll_cancel (GTK_SCROLLED_WINDOW (self->scroller));
+    gtk_adjustment_set_value (self->vadj, gtk_adjustment_get_lower (self->vadj));
+  }
 
   for (guint i = 0; i < n; i++)
     g_object_unref (items[i]);
@@ -1447,15 +1556,12 @@ album_grid_new (gboolean wrap)
   self->scroller = scroller;
   self->view     = view;
 
-  /* Width changes alter a grid's column count; height changes alter its row
-   * count. Neither necessarily moves the adjustment, so observe geometry
-   * directly instead of waiting for a synthetic scroll. */
-  if (wrap) {
-    g_signal_connect (scroller, "notify::width",
-                      G_CALLBACK (on_grid_geometry_changed), self);
-    g_signal_connect (scroller, "notify::height",
-                      G_CALLBACK (on_grid_geometry_changed), self);
-  }
+  /* Observe geometry on both layouts, including the horizontal shelf after
+   * a sidebar resize or the first provisional ListView allocation. */
+  g_signal_connect (scroller, "notify::width",
+                    G_CALLBACK (on_grid_geometry_changed), self);
+  g_signal_connect (scroller, "notify::height",
+                    G_CALLBACK (on_grid_geometry_changed), self);
 
   self->bound_cards = g_ptr_array_new ();
   self->vadj = wrap
@@ -1545,4 +1651,26 @@ SpotifyGtkAlbumGrid *
 spotifygtk_album_grid_new_grid (void)
 {
   return album_grid_new (TRUE);
+}
+
+GtkScrolledWindow *
+spotifygtk_album_grid_get_scroller (SpotifyGtkAlbumGrid *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self), NULL);
+  return GTK_SCROLLED_WINDOW (self->scroller);
+}
+
+void
+spotifygtk_album_grid_set_full_card_shelf (SpotifyGtkAlbumGrid *self,
+                                           gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (!self->wrap);
+  self->full_card_shelf = !!enabled;
+  if (enabled)
+    gtk_widget_add_css_class (self->view, "search-album-shelf");
+  else
+    gtk_widget_remove_css_class (self->view, "search-album-shelf");
+  self->shelf_width = 0;
+  update_shelf_widths (self);
 }

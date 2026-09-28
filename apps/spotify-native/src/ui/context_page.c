@@ -249,6 +249,10 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
    */
   update_expanded_metadata (self, tracks);
   spotifygtk_track_list_set_native_tracks (self->list, tracks);
+  /* The list may have been showing a different release while the async load
+   * was pending. Reset after the model splice too, so GtkListView does not
+   * restore the old item's scroll anchor into this new release. */
+  spotifygtk_track_list_scroll_to_top (self->list);
   if (tracks->len > 0 && self->compact && self->align_tick == 0 &&
       gtk_widget_get_visible (self->action_btn)) {
     self->align_attempts = 0;
@@ -646,6 +650,7 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
   }
 
   spotifygtk_track_list_clear (self->list);
+  spotifygtk_track_list_scroll_to_top (self->list);
   spotifygtk_track_list_set_status (self->list, NULL);
   set_loading (self, TRUE);
 

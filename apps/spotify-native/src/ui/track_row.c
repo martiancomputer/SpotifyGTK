@@ -54,6 +54,7 @@ struct _SpotifyGtkTrackRow {
   /* Now-playing equaliser: three bars beside the duration. */
   GtkWidget *eq_area;
   guint      eq_tick_id;
+  gint64     eq_last_draw_us;
 
   /* Cancelled when the row is reused or destroyed, so a slow cover cannot
    * land on a row that now shows a different track. */
@@ -178,9 +179,13 @@ eq_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 {
   SpotifyGtkTrackRow *self = user_data;
 
-  /* Frame-clock driven, so it runs at the monitor's rate and GTK throttles
-   * it automatically when the row is not being drawn. */
+  /* The tiny equaliser does not need monitor-rate redraws. Every queue_draw
+   * requests another frame, and a track can have live rows on several pages. */
   gint64 us = gdk_frame_clock_get_frame_time (clock);
+  if (!gtk_widget_get_mapped (widget) ||
+      (self->eq_last_draw_us && us - self->eq_last_draw_us < 50000))
+    return G_SOURCE_CONTINUE;
+  self->eq_last_draw_us = us;
   gdouble *seconds = g_object_get_data (G_OBJECT (self->eq_area), "eq-seconds");
   if (seconds)
     *seconds = (gdouble) us / (gdouble) G_USEC_PER_SEC;
@@ -191,19 +196,40 @@ eq_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 }
 
 static void
+eq_stop_tick (SpotifyGtkTrackRow *self)
+{
+  if (self->eq_tick_id == 0)
+    return;
+  gtk_widget_remove_tick_callback (self->eq_area, self->eq_tick_id);
+  self->eq_tick_id = 0;
+  self->eq_last_draw_us = 0;
+}
+
+static void
+on_eq_mapped (GtkWidget *widget, gpointer user_data)
+{
+  SpotifyGtkTrackRow *self = user_data;
+  if (self->is_playing && !self->is_paused && self->eq_tick_id == 0)
+    self->eq_tick_id = gtk_widget_add_tick_callback (widget, eq_tick, self, NULL);
+}
+
+static void
+on_eq_unmapped (GtkWidget *widget, gpointer user_data)
+{
+  eq_stop_tick (user_data);
+  (void) widget;
+}
+
+static void
 eq_set_running (SpotifyGtkTrackRow *self, gboolean running)
 {
-  if (running && self->eq_tick_id == 0) {
+  if (running && self->eq_tick_id == 0 &&
+      gtk_widget_get_mapped (self->eq_area)) {
+    self->eq_last_draw_us = 0;
     self->eq_tick_id = gtk_widget_add_tick_callback (GTK_WIDGET (self->eq_area),
                                                      eq_tick, self, NULL);
-  } else if (!running && self->eq_tick_id != 0) {
-    /* Stop outright rather than leaving a callback running for a row that is
-     * no longer playing -- with a long list that would be one animation per
-     * row forever. */
-    gtk_widget_remove_tick_callback (GTK_WIDGET (self->eq_area), self->eq_tick_id);
-    self->eq_tick_id = 0;
-  }
-  gtk_widget_set_visible (self->eq_area, running);
+  } else if (!running)
+    eq_stop_tick (self);
 }
 
 static void
@@ -555,6 +581,8 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   /* Equaliser, immediately right of the duration. Hidden unless this row is
    * the one playing. */
   self->eq_area = gtk_drawing_area_new ();
+  g_signal_connect (self->eq_area, "map", G_CALLBACK (on_eq_mapped), self);
+  g_signal_connect (self->eq_area, "unmap", G_CALLBACK (on_eq_unmapped), self);
   gtk_widget_set_size_request (self->eq_area, EQ_WIDTH, EQ_HEIGHT);
   gtk_widget_set_valign (self->eq_area, GTK_ALIGN_CENTER);
   gtk_widget_set_visible (self->eq_area, FALSE);

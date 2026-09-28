@@ -15,14 +15,16 @@
  * a wheel step and visually indistinguishable from the exact landing point. */
 #define SMOOTH_SCROLL_STOP_EPSILON 8.0
 #define SMOOTH_SCROLL_STALL_FRAMES 3
-/* GtkListView adjusts its value by a few pixels while recycled rows above the
- * viewport are remeasured.  That is viewport anchoring, not another input
- * device taking ownership.  A wheel notch is 118px, so corrections below half
- * a notch are safely distinguishable from a scrollbar drag/default wheel. */
-#define SMOOTH_SCROLL_ANCHOR_TOLERANCE 59.0
+/* GtkListView can make small anchor corrections as recycled rows are measured.
+ * A larger change is a new page/layout or direct scroll takeover, not a row
+ * rounding correction. Treating up to half a wheel notch as an anchor let an
+ * old wheel target chase page-load adjustments and visibly oscillate. */
+#define SMOOTH_SCROLL_ANCHOR_TOLERANCE 12.0
 
 typedef struct {
   GtkScrolledWindow *scroller;      /* borrowed; owns this via set_data */
+  GWeakRef           nested_horizontal;
+  gboolean           nested_hover;
   GtkOrientation     orientation;
   guint              tick;
   gdouble            target;
@@ -72,6 +74,7 @@ static void
 smooth_scroll_free (gpointer data)
 {
   SmoothScroll *ss = data;
+  g_weak_ref_clear (&ss->nested_horizontal);
   if (ss->observed_adjustment) {
     if (ss->value_handler)
       g_signal_handler_disconnect (ss->observed_adjustment, ss->value_handler);
@@ -190,6 +193,75 @@ ancestor_can_scroll (SmoothScroll *ss, GtkOrientation axis, gdouble delta)
   return FALSE;
 }
 
+static GtkScrolledWindow *
+registered_horizontal_shelf_at_event (SmoothScroll *ss,
+                                      GtkEventControllerScroll *ctrl)
+{
+  if (ss->orientation != GTK_ORIENTATION_VERTICAL)
+    return NULL;
+  /* Search registers its shelf explicitly. Route input from the parent capture
+   * controller using the shelf's allocated rectangle, regardless of which
+   * GtkListView section-header child GTK picked as the event target. */
+  GtkScrolledWindow *nested = g_weak_ref_get (&ss->nested_horizontal);
+  if (!nested)
+    return NULL;
+  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (nested);
+  if (!hadj || !gtk_widget_get_mapped (GTK_WIDGET (nested)) ||
+      gtk_adjustment_get_upper (hadj) <= gtk_adjustment_get_page_size (hadj)) {
+    g_object_unref (nested);
+    return NULL;
+  }
+
+  /* Pointer enter/leave comes from GTK's actual hit testing, so it remains
+   * reliable when a section header intercepts the scroll event itself. */
+  if (ss->nested_hover)
+    return nested;
+
+  GdkEvent *event = gtk_event_controller_get_current_event (GTK_EVENT_CONTROLLER (ctrl));
+  GtkNative *native = gtk_widget_get_native (GTK_WIDGET (ss->scroller));
+  gdouble x, y, tx, ty;
+  if (!event || !native || !gdk_event_get_position (event, &x, &y)) {
+    g_object_unref (nested);
+    return NULL;
+  }
+  gtk_native_get_surface_transform (native, &tx, &ty);
+  graphene_rect_t bounds;
+  gboolean inside = gtk_widget_compute_bounds (GTK_WIDGET (nested),
+                                                GTK_WIDGET (native), &bounds) &&
+    x + tx >= bounds.origin.x && x + tx < bounds.origin.x + bounds.size.width &&
+    y + ty >= bounds.origin.y && y + ty < bounds.origin.y + bounds.size.height;
+  if (inside)
+    return nested;
+  g_object_unref (nested);
+
+  return NULL;
+}
+
+static void
+on_nested_enter (GtkEventControllerMotion *motion, gdouble x, gdouble y,
+                 gpointer user_data)
+{
+  GtkScrolledWindow *parent = user_data;
+  SmoothScroll *ss = g_object_get_data (G_OBJECT (parent),
+                                        "spotifygtk-smooth-scroll");
+  if (ss)
+    ss->nested_hover = TRUE;
+  (void) motion;
+  (void) x;
+  (void) y;
+}
+
+static void
+on_nested_leave (GtkEventControllerMotion *motion, gpointer user_data)
+{
+  GtkScrolledWindow *parent = user_data;
+  SmoothScroll *ss = g_object_get_data (G_OBJECT (parent),
+                                        "spotifygtk-smooth-scroll");
+  if (ss)
+    ss->nested_hover = FALSE;
+  (void) motion;
+}
+
 static gboolean
 event_over_nested_horizontal_shelf (SmoothScroll *ss,
                                     GtkEventControllerScroll *ctrl)
@@ -202,6 +274,7 @@ event_over_nested_horizontal_shelf (SmoothScroll *ss,
   if (!event || !native || !gdk_event_get_position (event, &x, &y))
     return FALSE;
   gtk_native_get_surface_transform (native, &tx, &ty);
+
   GtkWidget *picked = gtk_widget_pick (GTK_WIDGET (native), x + tx, y + ty,
                                       GTK_PICK_DEFAULT);
   for (GtkWidget *w = picked; w && w != GTK_WIDGET (ss->scroller);
@@ -363,9 +436,21 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
 {
   SmoothScroll *ss = user_data;
 
+  GtkScrolledWindow *nested = registered_horizontal_shelf_at_event (ss, ctrl);
+  gboolean nested_at_edge = nested != NULL;
+  if (nested) {
+    SmoothScroll *child = g_object_get_data (G_OBJECT (nested),
+                                             "spotifygtk-smooth-scroll");
+    gboolean handled = child && on_scroll (ctrl, dx, dy, child);
+    g_object_unref (nested);
+    if (handled)
+      return GDK_EVENT_STOP;
+    /* The shelf reached an edge; the parent can take this gesture. */
+  }
+
   /* Capture runs from the parent toward the leaf. Give an embedded album
    * shelf first refusal before the page's wheel animation claims the event. */
-  if (event_over_nested_horizontal_shelf (ss, ctrl))
+  if (!nested_at_edge && event_over_nested_horizontal_shelf (ss, ctrl))
     return GDK_EVENT_PROPAGATE;
 
   GtkAdjustment *adj = adjustment_for (ss);
@@ -468,6 +553,7 @@ spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
   ss->scroller    = scroller;
   ss->orientation = orientation;
   ss->trace       = g_getenv ("SPOTIFY_SCROLL_STATS") != NULL;
+  g_weak_ref_init (&ss->nested_horizontal, NULL);
 
   /* Tied to the widget's lifetime: the tick callback is removed with the
    * widget, and this frees with it, so there is nothing to unregister. */
@@ -510,6 +596,27 @@ spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
   gtk_widget_add_controller (GTK_WIDGET (scroller), wheel);
 }
 
+void
+spotifygtk_smooth_scroll_set_nested_horizontal (GtkScrolledWindow *parent,
+                                                GtkScrolledWindow *child)
+{
+  g_return_if_fail (GTK_IS_SCROLLED_WINDOW (parent));
+  g_return_if_fail (GTK_IS_SCROLLED_WINDOW (child));
+  SmoothScroll *ss = g_object_get_data (G_OBJECT (parent),
+                                        "spotifygtk-smooth-scroll");
+  g_return_if_fail (ss != NULL);
+  g_weak_ref_set (&ss->nested_horizontal, child);
+  ss->nested_hover = FALSE;
+
+  GtkEventController *motion = gtk_event_controller_motion_new ();
+  gtk_event_controller_set_propagation_phase (motion, GTK_PHASE_CAPTURE);
+  g_signal_connect_object (motion, "enter", G_CALLBACK (on_nested_enter),
+                           parent, 0);
+  g_signal_connect_object (motion, "leave", G_CALLBACK (on_nested_leave),
+                           parent, 0);
+  gtk_widget_add_controller (GTK_WIDGET (child), motion);
+}
+
 gboolean
 spotifygtk_smooth_scroll_get_target (GtkScrolledWindow *scroller,
                                      gdouble           *target)
@@ -524,4 +631,20 @@ spotifygtk_smooth_scroll_get_target (GtkScrolledWindow *scroller,
   if (target)
     *target = ss->target;
   return TRUE;
+}
+
+void
+spotifygtk_smooth_scroll_cancel (GtkScrolledWindow *scroller)
+{
+  g_return_if_fail (GTK_IS_SCROLLED_WINDOW (scroller));
+  SmoothScroll *ss = g_object_get_data (G_OBJECT (scroller),
+                                        "spotifygtk-smooth-scroll");
+  if (!ss || !ss->tick)
+    return;
+  GtkAdjustment *adj = adjustment_for (ss);
+  gdouble value = adj ? gtk_adjustment_get_value (adj) : 0.0;
+  log_scroll_end (ss, "navigation", value);
+  gtk_widget_remove_tick_callback (GTK_WIDGET (scroller), ss->tick);
+  ss->tick = 0;
+  ss->target = ss->last_set = value;
 }

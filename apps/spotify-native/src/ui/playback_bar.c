@@ -17,6 +17,7 @@
 #include "cover_loader.h"
 #include "context_menu.h"
 #include "spotify/track_meta.h"
+#include <stdlib.h>
 
 /* Side columns are fixed and equal so the transport controls sit in the
  * true centre of the window regardless of how long the track name is. */
@@ -57,6 +58,11 @@ struct _SpotifyGtkPlaybackBar {
   gboolean is_playing;
   gint64   position_ms;
   gint64   duration_ms;
+  gint64   position_report_us;
+  gint64   last_report_ms;
+  gint64   shown_second;
+  gint64   last_progress_tick_us;
+  guint    progress_tick_id;
 
   /* Seek: a drag emits many value-changed signals, so the actual seek is
    * committed once the user pauses (debounced). While seeking — and for a
@@ -64,6 +70,7 @@ struct _SpotifyGtkPlaybackBar {
    * ignored so they don't yank the slider back. */
   gboolean user_seeking;
   gint64   seek_target_ms;
+  gint64   seek_deadline_us;
   guint    seek_commit_id;
   guint    seek_release_id;
 };
@@ -242,6 +249,48 @@ on_volume_changed (GtkRange *range, gpointer user_data)
 }
 
 static gchar *format_time (gint64 ms);
+static void on_seek_changed (GtkRange *range, gpointer user_data);
+
+static void
+show_progress (SpotifyGtkPlaybackBar *self, gint64 position_ms)
+{
+  position_ms = CLAMP (position_ms, (gint64) 0,
+                       MAX (self->duration_ms, (gint64) 0));
+  gint64 second = position_ms / 1000;
+  if (self->shown_second != second) {
+    g_autofree gchar *elapsed = format_time (position_ms);
+    gtk_label_set_text (self->elapsed_label, elapsed);
+    self->shown_second = second;
+  }
+
+  gdouble fraction = self->duration_ms > 0
+    ? (gdouble) position_ms / (gdouble) self->duration_ms : 0.0;
+  g_signal_handlers_block_by_func (self->progress_scale, on_seek_changed, self);
+  gtk_range_set_value (GTK_RANGE (self->progress_scale), fraction);
+  g_signal_handlers_unblock_by_func (self->progress_scale, on_seek_changed, self);
+}
+
+static gboolean
+progress_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
+{
+  SpotifyGtkPlaybackBar *self = user_data;
+  if (!self->is_playing || !self->duration_ms || self->user_seeking ||
+      !self->position_report_us)
+    return G_SOURCE_CONTINUE;
+
+  gint64 now_us = gdk_frame_clock_get_frame_time (clock);
+  if (now_us - self->last_progress_tick_us < 33000)
+    return G_SOURCE_CONTINUE;
+  self->last_progress_tick_us = now_us;
+  gint64 elapsed_ms = MAX ((gint64) 0, (now_us - self->position_report_us) / 1000);
+  /* Extrapolate only between source reports. A stalled decoder must not make
+   * the UI run arbitrarily far ahead of the audio. Both the label and thumb
+   * use this single position, eliminating their quarter-second step/trail. */
+  elapsed_ms = MIN (elapsed_ms, (gint64) 350);
+  show_progress (self, self->position_ms + elapsed_ms);
+  (void) widget;
+  return G_SOURCE_CONTINUE;
+}
 
 /* Grace window after committing a seek: position reports are ignored for this
  * long so the slider does not snap back to the old position before the engine
@@ -254,8 +303,16 @@ static gboolean
 clear_user_seeking (gpointer user_data)
 {
   SpotifyGtkPlaybackBar *self = user_data;
+  if (llabs (self->last_report_ms - self->seek_target_ms) > 1200 &&
+      g_get_monotonic_time () < self->seek_deadline_us) {
+    self->seek_release_id = g_timeout_add (100, clear_user_seeking, self);
+    return G_SOURCE_REMOVE;
+  }
   self->user_seeking = FALSE;
   self->seek_release_id = 0;
+  self->position_ms = self->last_report_ms;
+  self->position_report_us = g_get_monotonic_time ();
+  show_progress (self, self->position_ms);
   return G_SOURCE_REMOVE;
 }
 
@@ -277,6 +334,7 @@ commit_seek (gpointer user_data)
 
   /* Keep ignoring position reports briefly so the engine can reach the new
    * spot before the slider is handed back to it. */
+  self->seek_deadline_us = g_get_monotonic_time () + 3000000;
   g_clear_handle_id (&self->seek_release_id, g_source_remove);
   self->seek_release_id = g_timeout_add (SEEK_RELEASE_GRACE_MS, clear_user_seeking, self);
   return G_SOURCE_REMOVE;
@@ -292,6 +350,7 @@ on_seek_changed (GtkRange *range, gpointer user_data)
     return;
 
   self->user_seeking = TRUE;
+  g_clear_handle_id (&self->seek_release_id, g_source_remove);
 
   /* Show where the drag is pointing immediately, even though the seek itself
    * is only committed once movement settles. */
@@ -301,6 +360,7 @@ on_seek_changed (GtkRange *range, gpointer user_data)
              self->seek_target_ms);
   g_autofree gchar *elapsed = format_time (dragged);
   gtk_label_set_text (self->elapsed_label, elapsed);
+  self->shown_second = dragged / 1000;
 
   g_clear_handle_id (&self->seek_commit_id, g_source_remove);
   self->seek_commit_id = g_timeout_add (SEEK_COMMIT_DELAY_MS, commit_seek, self);
@@ -314,6 +374,8 @@ spotifygtk_playback_bar_dispose (GObject *object)
   SpotifyGtkPlaybackBar *self = SPOTIFYGTK_PLAYBACK_BAR (object);
   g_clear_handle_id (&self->seek_commit_id, g_source_remove);
   g_clear_handle_id (&self->seek_release_id, g_source_remove);
+  if (self->progress_tick_id)
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->progress_tick_id);
   g_clear_pointer (&self->share_url, g_free);
   G_OBJECT_CLASS (spotifygtk_playback_bar_parent_class)->dispose (object);
 }
@@ -632,6 +694,11 @@ spotifygtk_playback_bar_set_track (SpotifyGtkPlaybackBar *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
 
+  /* A new track invalidates a pending seek on the previous one. */
+  g_clear_handle_id (&self->seek_commit_id, g_source_remove);
+  g_clear_handle_id (&self->seek_release_id, g_source_remove);
+  self->user_seeking = FALSE;
+
   gtk_label_set_text (self->track_label, track_name ? track_name : "Nothing playing");
   gtk_label_set_text (self->artist_label, artist ? artist : "");
 
@@ -667,7 +734,17 @@ spotifygtk_playback_bar_set_playing (SpotifyGtkPlaybackBar *self, gboolean is_pl
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
 
-  self->is_playing = is_playing;
+  if (self->is_playing != is_playing) {
+    self->is_playing = is_playing;
+    self->position_report_us = g_get_monotonic_time ();
+    if (is_playing && !self->progress_tick_id)
+      self->progress_tick_id = gtk_widget_add_tick_callback (
+        GTK_WIDGET (self), progress_tick, self, NULL);
+    else if (!is_playing && self->progress_tick_id) {
+      gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->progress_tick_id);
+      self->progress_tick_id = 0;
+    }
+  }
   gtk_button_set_icon_name (self->play_btn,
                             is_playing ? "media-playback-pause-symbolic"
                                        : "media-playback-start-symbolic");
@@ -685,25 +762,23 @@ spotifygtk_playback_bar_set_progress (SpotifyGtkPlaybackBar *self,
    * grace window just after committing a seek) the position report is ignored
    * so it can't yank the slider away from the user or back to the old spot. */
   self->duration_ms = duration_ms;
-  if (self->user_seeking)
-    return;
+  self->last_report_ms = position_ms;
+  if (self->user_seeking) {
+    /* The first position near the committed target is the engine's seek
+     * acknowledgement. Use it immediately instead of waiting out a fixed
+     * 900 ms grace period and then one more polling interval. */
+    if (self->seek_commit_id ||
+        llabs (position_ms - self->seek_target_ms) > 1200)
+      return;
+    g_clear_handle_id (&self->seek_release_id, g_source_remove);
+    self->user_seeking = FALSE;
+  }
 
   self->position_ms = position_ms;
-
-  g_autofree gchar *elapsed = format_time (position_ms);
+  self->position_report_us = g_get_monotonic_time ();
   g_autofree gchar *total   = format_time (duration_ms);
-  gtk_label_set_text (self->elapsed_label, elapsed);
   gtk_label_set_text (self->duration_label, total);
-
-  if (duration_ms > 0) {
-    gdouble fraction = (gdouble) position_ms / (gdouble) duration_ms;
-
-    /* Block the handler: this is a display update, and letting it run would
-     * emit "seek" as though the user had dragged the slider. */
-    g_signal_handlers_block_by_func (self->progress_scale, on_seek_changed, self);
-    gtk_range_set_value (GTK_RANGE (self->progress_scale), CLAMP (fraction, 0.0, 1.0));
-    g_signal_handlers_unblock_by_func (self->progress_scale, on_seek_changed, self);
-  }
+  show_progress (self, position_ms);
 }
 
 void

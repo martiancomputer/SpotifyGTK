@@ -254,6 +254,12 @@ spotifygtk_home_page_init (SpotifyGtkHomePage *self)
   gtk_box_append (GTK_BOX (self->liked_section),
                   build_section_header ("From your Liked Songs", NULL));
   self->albums = spotifygtk_album_grid_new_shelf ();
+  /* The outer page captures wheel events before the shelf can see them.
+   * Route gestures over this shelf to its horizontal adjustment, just as
+   * Search does for its embedded album row. */
+  spotifygtk_smooth_scroll_set_nested_horizontal (
+    GTK_SCROLLED_WINDOW (scroller),
+    spotifygtk_album_grid_get_scroller (self->albums));
   gtk_box_append (GTK_BOX (self->liked_section), GTK_WIDGET (self->albums));
   gtk_widget_set_visible (self->liked_section, FALSE);   /* until the load lands */
   gtk_box_append (GTK_BOX (content), self->liked_section);

@@ -31,9 +31,12 @@ struct _SpotifyGtkTrackList {
   GtkLabel    *status;
   GtkListView *list;
   GListStore  *store;
-  GtkWidget   *page_header; /* owned; GTK's one section header scrolls with rows */
+  GtkWidget   *page_header; /* owned; first virtual item scrolls with rows */
+  gdouble      page_header_height; /* last allocation, even after header unbind */
 
   gboolean numbered;
+  gint row_margin_start;
+  gint row_margin_end;
   gboolean show_type;
   gboolean show_album;
   gboolean show_cover;
@@ -65,6 +68,7 @@ struct _SpotifyGtkTrackList {
   gboolean       velocity_overscan;
   guint          overscan_idle_id;
   gboolean       overscan_valid;
+  gboolean       overscan_reconcile; /* bindings changed within the same range */
   guint          overscan_first;
   guint          overscan_last;
   gdouble        scroll_velocity;       /* exponentially smoothed px/second */
@@ -111,13 +115,36 @@ struct _SpotifyGtkTrackList {
 
 #define OVERSCAN_BASE_AHEAD 8
 #define OVERSCAN_MAX_AHEAD  32
-#define OVERSCAN_TRAILING   4
+/* Keep a viewport of recently passed covers warm. Reversing direction used
+ * to request/decode them again immediately after they were released, causing
+ * the pronounced bottom-to-top hitch despite a smooth downward pass. Row
+ * covers are 96px; twelve extra retained textures are a small fixed cost. */
+#define OVERSCAN_TRAILING   16
 #define OVERSCAN_HORIZON_S  0.12
 #define PAGE_HEADER_PLACEHOLDER_URI "spotifygtk:page-header"
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list, GTK_TYPE_BOX)
 
 static gboolean update_velocity_overscan (gpointer user_data);
+
+/* Model-position estimates are useful for prefetch but must never evict a
+ * texture from a row GTK is actually showing. Keep this check to mapped rows
+ * and one row of slack so it remains cheap even with ListView's large pool. */
+static gboolean
+row_in_allocated_viewport (SpotifyGtkTrackList *self, GtkWidget *row)
+{
+  GtkWidget *viewport = self->viewport_scroller ? self->viewport_scroller
+                                                : self->scroller;
+  if (!viewport || !gtk_widget_get_mapped (row))
+    return FALSE;
+
+  graphene_rect_t bounds;
+  if (!gtk_widget_compute_bounds (row, viewport, &bounds))
+    return FALSE;
+  gdouble margin = MAX (bounds.size.height, 1.0);
+  return bounds.origin.y + bounds.size.height > -margin &&
+         bounds.origin.y < gtk_widget_get_height (viewport) + margin;
+}
 static void trace_scroll_end (SpotifyGtkTrackList *self);
 
 static void
@@ -225,6 +252,15 @@ ensure_page_header_placeholder (SpotifyGtkTrackList *self)
   g_list_store_append (self->store, item);
 }
 
+/* A page header occupies the first virtual item. Keep its sentinel at
+ * position zero for the list's entire lifetime so model replacement does not
+ * remove the entry or leave a new scroll anchor behind. */
+static guint
+header_prefix_len (SpotifyGtkTrackList *self)
+{
+  return self->page_header ? 1u : 0u;
+}
+
 static void
 schedule_velocity_overscan (SpotifyGtkTrackList *self)
 {
@@ -254,7 +290,9 @@ update_velocity_overscan (gpointer user_data)
   if (started_us)
     self->trace_overscan_runs++;
 
-  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  guint prefix = header_prefix_len (self);
+  guint count = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  guint n = count > prefix ? count - prefix : 0;
   if (!self->velocity_overscan || !self->vadj || n == 0) {
     trace_overscan_end (self, started_us);
     return G_SOURCE_REMOVE;
@@ -280,6 +318,23 @@ update_velocity_overscan (gpointer user_data)
       list_origin = bounds.origin.y + value;
       upper = bounds.size.height;
       value = MAX (0.0, value - list_origin);
+    }
+  }
+
+  /* GtkListView's upper bound includes the section header, but the model
+   * count contains only tracks. Dividing that larger height by the number of
+   * tracks drifts the estimated position several rows behind by the bottom
+   * of Search, releasing covers while their rows are still visible. */
+  if (self->page_header) {
+    gdouble header_height = gtk_widget_get_height (self->page_header);
+    if (header_height > 0.0)
+      self->page_header_height = header_height;
+    else
+      header_height = self->page_header_height;
+    if (header_height > 0.0 && upper > header_height) {
+      upper -= header_height;
+      value = MAX (0.0, value - header_height);
+      list_origin += header_height;
     }
   }
 
@@ -314,6 +369,8 @@ update_velocity_overscan (gpointer user_data)
       GTK_SCROLLED_WINDOW (viewport), &smooth_target);
   if (smooth_active && self->viewport_scroller)
     smooth_target = MAX (0.0, smooth_target - list_origin);
+  else if (smooth_active && self->page_header)
+    smooth_target = MAX (0.0, smooth_target - self->page_header_height);
   if (smooth_active) {
     gdouble target_delta = smooth_target - value;
     destination_first = MIN ((guint) (smooth_target / row_extent), n - 1);
@@ -340,22 +397,24 @@ update_velocity_overscan (gpointer user_data)
   }
 
   if (started_us) {
-    self->trace_visible_first = visible_first;
-    self->trace_visible_last = visible_last;
-    self->trace_window_first = first;
-    self->trace_window_last = last;
+    self->trace_visible_first = visible_first + prefix;
+    self->trace_visible_last = visible_last + prefix;
+    self->trace_window_first = first + prefix;
+    self->trace_window_last = last + prefix;
     self->trace_smooth_target = smooth_active;
   }
 
-  if (self->overscan_valid && self->overscan_first == first &&
-      self->overscan_last == last) {
+  if (self->overscan_valid && !self->overscan_reconcile &&
+      self->overscan_first == first + prefix &&
+      self->overscan_last == last + prefix) {
     trace_overscan_end (self, started_us);
     return G_SOURCE_REMOVE;
   }
 
   self->overscan_valid = TRUE;
-  self->overscan_first = first;
-  self->overscan_last = last;
+  self->overscan_reconcile = FALSE;
+  self->overscan_first = first + prefix;
+  self->overscan_last = last + prefix;
 
   /* Every request has a row owner and therefore a cancellable. GtkListView
    * binds around 200 rows here, comfortably covering the maximum window; do
@@ -369,10 +428,12 @@ update_velocity_overscan (gpointer user_data)
      * viewport until it leaves, but never start a decode merely because a
      * transient row passed under the viewport. New work belongs exclusively
      * to the landing window computed above. */
-    gboolean current_and_shown = smooth_active &&
-      position >= visible_first && position <= visible_last &&
+    gboolean allocated = !destination &&
+      row_in_allocated_viewport (self, GTK_WIDGET (row));
+    gboolean load_visible = allocated && !smooth_active;
+    gboolean current_and_shown = allocated &&
       spotifygtk_track_row_has_cover (row);
-    gboolean retain = destination || current_and_shown;
+    gboolean retain = destination || load_visible || current_and_shown;
     guint previous = GPOINTER_TO_UINT (
       g_object_get_data (G_OBJECT (row), "overscan-retained"));
     if (previous == (retain ? 2u : 1u)) {
@@ -382,7 +443,7 @@ update_velocity_overscan (gpointer user_data)
        * this row settled forever even though it had no texture. A forced
        * settle reconciliation reaches this branch; retry_cover() is safe and
        * cheap because TrackRow now knows whether a request is genuinely live. */
-      if (destination && !spotifygtk_track_row_has_cover (row)) {
+      if ((destination || load_visible) && !spotifygtk_track_row_has_cover (row)) {
         spotifygtk_track_row_set_cover_hold (row, FALSE);
         spotifygtk_track_row_retry_cover (row);
         if (started_us) self->trace_retry_calls++;
@@ -392,7 +453,7 @@ update_velocity_overscan (gpointer user_data)
     g_object_set_data (G_OBJECT (row), "overscan-retained",
                        GUINT_TO_POINTER (retain ? 2u : 1u));
     spotifygtk_track_row_set_cover_hold (row, !retain);
-    if (destination) {
+    if (destination || load_visible) {
       spotifygtk_track_row_retry_cover (row);
       if (started_us) self->trace_retry_calls++;
     } else if (!retain) {
@@ -573,6 +634,19 @@ on_vadj_changed (GtkAdjustment *adj, gpointer user_data)
       SPOTIFYGTK_TRACK_ROW (g_ptr_array_index (self->bound_rows, i)), TRUE);
   if (!self->settle_id)
     self->settle_id = g_timeout_add (50, on_scroll_settled, self);
+}
+
+static void
+on_vadj_geometry (GtkAdjustment *adj, GParamSpec *pspec, gpointer user_data)
+{
+  SpotifyGtkTrackList *self = user_data;
+  /* Content/header measurement and window resize can change which bound rows
+   * are visible without moving the adjustment. Do not leave the old artwork
+   * window cached until the user scrolls again. */
+  self->overscan_reconcile = TRUE;
+  schedule_velocity_overscan (self);
+  (void) adj;
+  (void) pspec;
 }
 
 enum { TRACK_ACTIVATED, CONTEXT_ACTIVATED, CONTEXT_MENU,
@@ -763,11 +837,27 @@ on_list_item_position (GObject *object, GParamSpec *pspec, gpointer user_data)
 
   if (self->numbered && SPOTIFYGTK_IS_TRACK_ROW (child))
     spotifygtk_track_row_set_number (SPOTIFYGTK_TRACK_ROW (child),
-                                     (gint) gtk_list_item_get_position (list_item) + 1);
+      (gint) gtk_list_item_get_position (list_item) + 1 -
+      (gint) header_prefix_len (self));
   if (SPOTIFYGTK_IS_TRACK_ROW (child))
     g_object_set_data (G_OBJECT (child), "row-position",
                        GUINT_TO_POINTER (gtk_list_item_get_position (list_item)));
-  schedule_velocity_overscan (self);
+  /* A position notification can precede bind, while the widget still holds
+   * the previous track. Starting a cover request here would fetch that stale
+   * image and immediately cancel it on bind, especially when scrolling up.
+   * Bind and the adjustment pass will handle the new item. */
+}
+
+static void
+on_track_row_mapped (GtkWidget *row, gpointer user_data)
+{
+  SpotifyGtkTrackList *self = user_data;
+  /* A row outside the approximate model window can still be on screen after
+   * a header/viewport resize. Repair just that row, not all ~200 bindings. */
+  if (self->velocity_overscan && row_in_allocated_viewport (self, row)) {
+    spotifygtk_track_row_set_cover_hold (SPOTIFYGTK_TRACK_ROW (row), FALSE);
+    spotifygtk_track_row_retry_cover (SPOTIFYGTK_TRACK_ROW (row));
+  }
 }
 
 static void
@@ -775,6 +865,9 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
 {
   GtkWidget *row = GTK_WIDGET (spotifygtk_track_row_new ());
   SpotifyGtkTrackList *self = user_data;
+  gtk_widget_set_margin_start (row, self->row_margin_start);
+  gtk_widget_set_margin_end (row, self->row_margin_end);
+  g_signal_connect (row, "map", G_CALLBACK (on_track_row_mapped), self);
   if (self->trace_scroll)
     g_signal_connect_object (row, "hover-changed",
                              G_CALLBACK (on_row_hover_changed), self, 0);
@@ -797,6 +890,11 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
                     G_CALLBACK (on_list_item_position), user_data);
 
   gtk_list_item_set_child (list_item, row);
+  /* The empty-page sentinel needs no painted row, but recycled list items
+   * need to regain this same widget on their next real binding. Keep one
+   * owned reference while it is temporarily detached from the list item. */
+  g_object_set_data_full (G_OBJECT (list_item), "track-row",
+                          g_object_ref (row), g_object_unref);
   (void) factory;
 }
 
@@ -824,14 +922,31 @@ static void
 factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
   SpotifyGtkTrackList *self = user_data;
-  SpotifyGtkTrackRow  *row  = SPOTIFYGTK_TRACK_ROW (gtk_list_item_get_child (list_item));
+  SpotifyGtkTrackRow  *row  = g_object_get_data (G_OBJECT (list_item), "track-row");
   SpotifyGtkTrackItem *item = gtk_list_item_get_item (list_item);
 
   if (is_page_header_placeholder (spotifygtk_track_item_get_track (item))) {
-    gtk_widget_set_visible (GTK_WIDGET (row), FALSE);
+    /* An empty list item plus a separate GtkListHeader left a painted strip
+     * below the Search entry, and the header's own bind cycle re-anchored the
+     * viewport. Make the header the first real item instead. Its allocation
+     * is the only allocation for this sentinel; no spare row is painted. */
+    /* Only the entry/buttons inside the header may take focus. Focusing the
+     * synthetic item itself draws a page-wide blue row outline. These flags
+     * belong to pooled items, so restore them on the normal binding below. */
+    gtk_list_item_set_focusable (list_item, FALSE);
+    gtk_list_item_set_activatable (list_item, FALSE);
+    gtk_list_item_set_selectable (list_item, FALSE);
+    gtk_list_item_set_child (list_item, self->page_header);
+    GtkWidget *header_row = gtk_widget_get_parent (self->page_header);
+    if (header_row)
+      gtk_widget_add_css_class (header_row, "page-header-row");
     return;
   }
-  gtk_widget_set_visible (GTK_WIDGET (row), TRUE);
+  gtk_list_item_set_focusable (list_item, TRUE);
+  gtk_list_item_set_activatable (list_item, TRUE);
+  gtk_list_item_set_selectable (list_item, TRUE);
+  if (gtk_list_item_get_child (list_item) != GTK_WIDGET (row))
+    gtk_list_item_set_child (list_item, GTK_WIDGET (row));
 
   if (!g_ptr_array_find (self->bound_rows, row, NULL))
     g_ptr_array_add (self->bound_rows, row);
@@ -865,7 +980,8 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   spotifygtk_track_row_set_show_album (row, self->show_album);
   spotifygtk_track_row_set_show_type (row, self->show_type);
   spotifygtk_track_row_set_number (row,
-    self->numbered ? (gint) gtk_list_item_get_position (list_item) + 1 : 0);
+    self->numbered ? (gint) position + 1 -
+                     (gint) header_prefix_len (self) : 0);
 
   /* Kept whether or not the list is numbered: the playlist removal needs the
    * row, and it is position-based. */
@@ -899,7 +1015,9 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     g_object_set_data (G_OBJECT (row), "play-connected", GINT_TO_POINTER (1));
   }
 
-  schedule_velocity_overscan (self);
+  /* The adjustment update owns the range pass. New rows inside that range
+   * have already been allowed through set_native_track above; forcing another
+   * pass per bind caused heavy upward-scroll churn. */
 
   (void) factory;
 }
@@ -908,11 +1026,16 @@ static void
 factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
   SpotifyGtkTrackList *self = user_data;
-  SpotifyGtkTrackRow  *row  = SPOTIFYGTK_TRACK_ROW (gtk_list_item_get_child (list_item));
+  SpotifyGtkTrackRow  *row  = g_object_get_data (G_OBJECT (list_item), "track-row");
   SpotifyGtkTrackItem *item = gtk_list_item_get_item (list_item);
 
-  if (item && is_page_header_placeholder (spotifygtk_track_item_get_track (item)))
+  if (item && is_page_header_placeholder (spotifygtk_track_item_get_track (item))) {
+    GtkWidget *header_row = gtk_widget_get_parent (self->page_header);
+    if (header_row)
+      gtk_widget_remove_css_class (header_row, "page-header-row");
+    gtk_list_item_set_child (list_item, NULL);
     return;
+  }
 
   gulong changed = GPOINTER_TO_SIZE (g_object_get_data (G_OBJECT (row), "changed-handler"));
   if (changed && item)
@@ -925,28 +1048,11 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
   g_ptr_array_remove_fast (self->bound_rows, row);
   if (self->trace_scroll && self->trace_started_us)
     self->trace_unbinds++;
-  schedule_velocity_overscan (self);
+  /* The scroll adjustment and model splice already schedule the window pass.
+   * An unbound row has relinquished its art, so there is nothing to repair
+   * here; an idle per unbind only adds work during rapid reverse scrolling. */
 
   (void) factory;
-}
-
-static void
-header_bind (GtkListItemFactory *factory, GtkListHeader *header,
-             gpointer user_data)
-{
-  SpotifyGtkTrackList *self = user_data;
-  if (self->page_header)
-    gtk_list_header_set_child (header, self->page_header);
-  (void) factory;
-}
-
-static void
-header_unbind (GtkListItemFactory *factory, GtkListHeader *header,
-               gpointer user_data)
-{
-  gtk_list_header_set_child (header, NULL);
-  (void) factory;
-  (void) user_data;
 }
 
 /* === Activation === */
@@ -980,13 +1086,14 @@ spotifygtk_track_list_dispose (GObject *object)
   if (self->vadj)
     g_signal_handlers_disconnect_by_func (self->vadj,
                                           G_CALLBACK (on_vadj_changed), self);
+  if (self->vadj)
+    g_signal_handlers_disconnect_by_func (self->vadj,
+                                          G_CALLBACK (on_vadj_geometry), self);
   self->vadj = NULL;
   self->viewport_scroller = NULL;
   spotifygtk_cover_set_deferred (FALSE);
   g_clear_pointer (&self->bound_rows, g_ptr_array_unref);
 
-  if (self->list)
-    gtk_list_view_set_header_factory (self->list, NULL);
   g_clear_object (&self->page_header);
 
   g_clear_object (&self->store);
@@ -1072,6 +1179,12 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
   self->vadj = gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller));
   if (self->vadj)
     g_signal_connect (self->vadj, "value-changed", G_CALLBACK (on_vadj_changed), self);
+  if (self->vadj) {
+    g_signal_connect (self->vadj, "notify::upper",
+                      G_CALLBACK (on_vadj_geometry), self);
+    g_signal_connect (self->vadj, "notify::page-size",
+                      G_CALLBACK (on_vadj_geometry), self);
+  }
   gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
 
   self->store = g_list_store_new (SPOTIFYGTK_TYPE_TRACK_ITEM);
@@ -1112,11 +1225,6 @@ spotifygtk_track_list_set_page_header (SpotifyGtkTrackList *self,
   g_return_if_fail (gtk_widget_get_parent (header) == NULL);
 
   self->page_header = g_object_ref_sink (header);
-  GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
-  g_signal_connect (factory, "bind", G_CALLBACK (header_bind), self);
-  g_signal_connect (factory, "unbind", G_CALLBACK (header_unbind), self);
-  gtk_list_view_set_header_factory (self->list, factory);
-  g_object_unref (factory);
   ensure_page_header_placeholder (self);
 }
 
@@ -1143,6 +1251,25 @@ spotifygtk_track_list_set_content_margins (SpotifyGtkTrackList *self,
   gtk_widget_set_margin_end (GTK_WIDGET (self->list), end);
   gtk_widget_set_margin_start (GTK_WIDGET (self->status), start);
   gtk_widget_set_margin_end (GTK_WIDGET (self->status), end);
+}
+
+void
+spotifygtk_track_list_set_row_margins (SpotifyGtkTrackList *self,
+                                      gint start, gint end)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  /* The header's horizontal scroller must receive the full pane width. The
+   * rows, not the ListView allocation, provide their own inset below. */
+  gtk_widget_set_hexpand (GTK_WIDGET (self->list), TRUE);
+  self->row_margin_start = MAX (start, 0);
+  self->row_margin_end = MAX (end, 0);
+  gtk_widget_set_margin_start (GTK_WIDGET (self->status), self->row_margin_start);
+  gtk_widget_set_margin_end (GTK_WIDGET (self->status), self->row_margin_end);
+  for (guint i = 0; i < self->bound_rows->len; i++) {
+    GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
+    gtk_widget_set_margin_start (row, self->row_margin_start);
+    gtk_widget_set_margin_end (row, self->row_margin_end);
+  }
 }
 
 /*
@@ -1264,7 +1391,7 @@ spotifygtk_track_list_insert_native_track (SpotifyGtkTrackList      *self,
   g_return_if_fail (track != NULL);
 
   guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
-  position = MIN (position, n);
+  position = MIN (position + header_prefix_len (self), n);
 
   /* The number is set from the position on bind, so the value passed here is
    * only a placeholder. */
@@ -1279,7 +1406,8 @@ spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
 
-  if (position >= g_list_model_get_n_items (G_LIST_MODEL (self->store)))
+  if (position < header_prefix_len (self) ||
+      position >= g_list_model_get_n_items (G_LIST_MODEL (self->store)))
     return;
   g_list_store_remove (self->store, position);
 }
@@ -1352,8 +1480,10 @@ spotifygtk_track_list_reload_covers (SpotifyGtkTrackList *self)
     GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
     guint position = GPOINTER_TO_UINT (
       g_object_get_data (G_OBJECT (row), "row-position"));
-    if (self->velocity_overscan ? position_in_overscan (self, position)
-                                : row_near_viewport (self, row))
+    if (self->velocity_overscan ?
+        (position_in_overscan (self, position) ||
+         row_in_allocated_viewport (self, row)) :
+        row_near_viewport (self, row))
       spotifygtk_track_row_retry_cover (SPOTIFYGTK_TRACK_ROW (row));
   }
 }
@@ -1394,13 +1524,38 @@ spotifygtk_track_list_new (void)
   return g_object_new (SPOTIFYGTK_TYPE_TRACK_LIST, NULL);
 }
 
+GtkScrolledWindow *
+spotifygtk_track_list_get_scroller (SpotifyGtkTrackList *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self), NULL);
+  return GTK_SCROLLED_WINDOW (self->scroller);
+}
+
 void
 spotifygtk_track_list_clear (SpotifyGtkTrackList *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
   self->overscan_valid = FALSE;
-  g_list_store_remove_all (self->store);
   ensure_page_header_placeholder (self);
+  guint prefix = header_prefix_len (self);
+  guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  if (n > prefix)
+    g_list_store_splice (self->store, prefix, n - prefix, NULL, 0);
+}
+
+void
+spotifygtk_track_list_scroll_to_top (SpotifyGtkTrackList *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  spotifygtk_smooth_scroll_cancel (GTK_SCROLLED_WINDOW (self->scroller));
+  /* scroll_to(0) only promises to bring the item into view and can keep a
+   * deferred target until this page is mapped again. That late target was
+   * the apparent recenter after returning to Search/album pages. The stable
+   * first item now survives model replacement, so reset the adjustment
+   * directly with no queued GTK scroll request. */
+  if (self->vadj)
+    gtk_adjustment_set_value (self->vadj,
+                              gtk_adjustment_get_lower (self->vadj));
 }
 
 void
@@ -1459,11 +1614,20 @@ spotifygtk_track_list_set_external_viewport (SpotifyGtkTrackList *self,
   if (self->vadj)
     g_signal_handlers_disconnect_by_func (self->vadj,
                                           G_CALLBACK (on_vadj_changed), self);
+  if (self->vadj)
+    g_signal_handlers_disconnect_by_func (self->vadj,
+                                          G_CALLBACK (on_vadj_geometry), self);
   self->viewport_scroller = GTK_WIDGET (scroller);
   self->vadj = next;
   if (self->vadj)
     g_signal_connect (self->vadj, "value-changed",
                       G_CALLBACK (on_vadj_changed), self);
+  if (self->vadj) {
+    g_signal_connect (self->vadj, "notify::upper",
+                      G_CALLBACK (on_vadj_geometry), self);
+    g_signal_connect (self->vadj, "notify::page-size",
+                      G_CALLBACK (on_vadj_geometry), self);
+  }
   self->overscan_valid = FALSE;
   schedule_velocity_overscan (self);
 }
@@ -1510,11 +1674,13 @@ set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
   gint64 build_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;
 
-  guint existing = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  ensure_page_header_placeholder (self);
+  guint prefix = header_prefix_len (self);
+  guint existing = g_list_model_get_n_items (G_LIST_MODEL (self->store)) - prefix;
 
   if (!tracks || tracks->len == 0) {
-    g_list_store_remove_all (self->store);
-    ensure_page_header_placeholder (self);
+    if (existing > 0)
+      g_list_store_splice (self->store, prefix, existing, NULL, 0);
     spotifygtk_track_list_set_status (self, "Nothing here yet.");
     return;
   }
@@ -1543,7 +1709,7 @@ set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow
   }
 
   gint64 splice_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;
-  g_list_store_splice (self->store, 0, existing, items->pdata, items->len);
+  g_list_store_splice (self->store, prefix, existing, items->pdata, items->len);
   if (self->trace_scroll)
     g_message ("track-list-profile: replace old=%u new=%u build=%.1fms"
                " splice=%.1fms bound=%u",
@@ -1551,7 +1717,6 @@ set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow
                (splice_started_us - build_started_us) / 1000.0,
                (g_get_monotonic_time () - splice_started_us) / 1000.0,
                self->bound_rows->len);
-  ensure_page_header_placeholder (self);
   self->overscan_valid = FALSE;
   schedule_velocity_overscan (self);
 
@@ -1623,6 +1788,10 @@ spotifygtk_track_list_set_search_contexts (SpotifyGtkTrackList *self,
     if (is_context_result (track))
       g_hash_table_insert (old_contexts, track->uri, item);
   }
+  /* Keep the same sentinel object at the start when Search inserts/removes
+   * album or playlist results. Replacing it would unbind the page header. */
+  if (self->page_header && previous->len > 0)
+    g_ptr_array_add (desired, g_object_ref (g_ptr_array_index (previous, 0)));
   for (guint i = 0; contexts && i < contexts->len; i++) {
     const SpotifyNativeTrack *context = g_ptr_array_index (contexts, i);
     if (is_context_result (context))
@@ -1655,11 +1824,6 @@ spotifygtk_track_list_set_search_contexts (SpotifyGtkTrackList *self,
       g_ptr_array_add (desired, context_item (context, old_contexts));
     }
   }
-  if (desired->len == 0 && self->page_header) {
-    SpotifyNativeTrack placeholder = { .uri = PAGE_HEADER_PLACEHOLDER_URI };
-    g_ptr_array_add (desired, spotifygtk_track_item_new (&placeholder, 0));
-  }
-
   /* Preserve common prefix/suffix widgets when optional results arrive.
    * The song list must not flash or reload its covers for a playlist suffix. */
   guint prefix = 0, suffix = 0;

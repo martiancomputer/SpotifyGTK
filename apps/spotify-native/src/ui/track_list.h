@@ -70,6 +70,8 @@ void spotifygtk_track_list_set_velocity_overscan (SpotifyGtkTrackList *self,
                                                   gboolean             enabled);
 
 SpotifyGtkTrackList *spotifygtk_track_list_new (void);
+/* Borrow the list's scroll viewport for nested scroll routing. */
+GtkScrolledWindow *spotifygtk_track_list_get_scroller (SpotifyGtkTrackList *self);
 /* Own a page header as the list's single scrollable GTK section header.
  * The widget must be unparented when passed and is used for this list's life. */
 void spotifygtk_track_list_set_page_header (SpotifyGtkTrackList *self,
@@ -108,6 +110,8 @@ void spotifygtk_track_list_set_show_cover (SpotifyGtkTrackList *self,
 void spotifygtk_track_list_set_status (SpotifyGtkTrackList *self, const gchar *message);
 
 void spotifygtk_track_list_clear (SpotifyGtkTrackList *self);
+/* Reset a reused detail page before and after replacing its track model. */
+void spotifygtk_track_list_scroll_to_top (SpotifyGtkTrackList *self);
 
 /* Number rows 1..n rather than showing per-row art. */
 /* Size to content and let an outer scroller do the scrolling, for a list that
@@ -143,6 +147,11 @@ void spotifygtk_track_list_set_top_inset (SpotifyGtkTrackList *self, gint px);
 void spotifygtk_track_list_set_content_margins (SpotifyGtkTrackList *self,
                                                 gint                 start,
                                                 gint                 end);
+
+/* Keep a section header full-width while insetting only its track rows.
+ * Search uses this so its album shelf clips at the pane edge, as in b2e74f2. */
+void spotifygtk_track_list_set_row_margins (SpotifyGtkTrackList *self,
+                                            gint start, gint end);
 
 /* Mark whichever row matches `uri` as the current track. Pass NULL to clear.
  * `playing` false with a non-NULL uri means paused: the row keeps its

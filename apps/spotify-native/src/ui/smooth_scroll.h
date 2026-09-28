@@ -33,11 +33,20 @@ G_BEGIN_DECLS
 void spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
                                       GtkOrientation     orientation);
 
+/* Give an embedded horizontal shelf first refusal of wheel events inside its
+ * bounds. The child is weakly held; the parent keeps scrolling elsewhere. */
+void spotifygtk_smooth_scroll_set_nested_horizontal (
+  GtkScrolledWindow *parent, GtkScrolledWindow *child);
+
 /* Return the destination of an active wheel animation.  Consumers such as a
  * virtualised list can use this to prepare the rows the viewport is moving
  * toward instead of trying to reconstruct intent from eased adjustment
  * updates.  FALSE means GTK (touchpad, scrollbar, keyboard) owns the motion. */
 gboolean spotifygtk_smooth_scroll_get_target (GtkScrolledWindow *scroller,
                                               gdouble           *target);
+
+/* Drop an in-flight wheel target before programmatic navigation changes the
+ * contents of a scroller. Does not otherwise move its adjustment. */
+void spotifygtk_smooth_scroll_cancel (GtkScrolledWindow *scroller);
 
 G_END_DECLS

@@ -4924,6 +4924,12 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
 #endif
   gboolean changed = leaving && g_strcmp0 (leaving, page_name) != 0;
   g_autofree gchar *old_page = changed ? g_strdup (leaving) : NULL;
+  /* A focused card or a recycled row on the outgoing page can ask GTK to
+   * reveal its focus successor after the context list is repopulated. That
+   * implicit scroll races the new page's top reset. */
+  if (g_strcmp0 (page_name, "context") == 0 ||
+      g_strcmp0 (page_name, "search") == 0)
+    gtk_root_set_focus (GTK_ROOT (self), NULL);
   gtk_stack_set_visible_child_name (self->page_stack, page_name);
   if (old_page)
     release_page_covers_after_paint (self, old_page);
@@ -5161,6 +5167,14 @@ static const gchar *theme_body =
    * empty. Nothing in this UI wants a filled list surface. */
   "list, list > row, scrolledwindow, scrolledwindow > viewport, viewport, .view"
   "  { background-color: transparent; background-image: none; }"
+  /* A horizontal ListView paints its own row surface above and beside the
+   * card buttons. Search shows that surface as hairlines at both clip edges. */
+  "listview.search-album-shelf, listview.search-album-shelf > row"
+  "  { background: transparent; border: none; box-shadow: none;"
+  "    padding: 0; margin: 0; outline: none; }"
+  "listview > row.page-header-row"
+  "  { background: transparent; border: none; box-shadow: none;"
+  "    padding: 0; margin: 0; outline: none; }"
   "scrolledwindow undershoot.top, scrolledwindow undershoot.bottom"
   "  { background: none; }"
   ".now-playing-panel { background-color: @bg_panel;"
@@ -5342,6 +5356,9 @@ static const gchar *theme_body =
   ".destructive-hover:hover label { color: #ffffff; }"
 
   "scrollbar { background-color: transparent; border: none; }"
+  "scrollbar.search-page-scrollbar,"
+  "scrollbar.search-page-scrollbar trough"
+  "  { background: transparent; border: none; box-shadow: none; padding: 0; }"
   "scrollbar slider { background-color: @trough; border-radius: 6px;"
   "  min-width: 8px; margin: 2px; }"
   "scrollbar slider:hover { background-color: @scroll_hover; }";

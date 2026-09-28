@@ -207,6 +207,7 @@ typedef struct {
   GtkWidget         *label;
   guint              tick_id;
   gint64             start_us;
+  gint64             last_update_us;
 } Marquee;
 
 static gboolean marquee_tick (GtkWidget *widget, GdkFrameClock *clock,
@@ -218,6 +219,7 @@ marquee_start (Marquee *m)
   if (!m || m->tick_id || !m->label || !gtk_widget_get_mapped (m->label))
     return;
   m->start_us = 0;
+  m->last_update_us = 0;
   m->tick_id = gtk_widget_add_tick_callback (m->label, marquee_tick, m, NULL);
 }
 
@@ -238,10 +240,26 @@ on_marquee_mapped (GtkWidget *widget, gpointer user_data)
   marquee_start (user_data);
 }
 
+static void
+on_marquee_unmapped (GtkWidget *widget, gpointer user_data)
+{
+  Marquee *m = user_data;
+  if (m->tick_id) {
+    gtk_widget_remove_tick_callback (widget, m->tick_id);
+    m->tick_id = 0;
+  }
+  m->last_update_us = 0;
+}
+
 static gboolean
 marquee_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
 {
   Marquee *m = user_data;
+  gint64 now = gdk_frame_clock_get_frame_time (clock);
+  if (!gtk_widget_get_mapped (widget) ||
+      (m->last_update_us && now - m->last_update_us < 50000))
+    return G_SOURCE_CONTINUE;
+  m->last_update_us = now;
   GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment (m->scroller);
   gdouble span = gtk_adjustment_get_upper (hadj) - gtk_adjustment_get_page_size (hadj);
 
@@ -257,7 +275,6 @@ marquee_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   gdouble travel = span / speed;
   gdouble cycle  = 2.0 * (pause + travel);
 
-  gint64 now = gdk_frame_clock_get_frame_time (clock);
   if (m->start_us == 0)
     m->start_us = now;
   gdouble t = fmod ((now - m->start_us) / (gdouble) G_USEC_PER_SEC, cycle);
@@ -269,7 +286,8 @@ marquee_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   else if (t < 2.0 * pause + travel)  v = span;
   else                                v = span - (t - (2.0 * pause + travel)) / travel * span;
 
-  gtk_adjustment_set_value (hadj, v);
+  if (fabs (gtk_adjustment_get_value (hadj) - v) >= 0.5)
+    gtk_adjustment_set_value (hadj, v);
   (void) widget;
   return G_SOURCE_CONTINUE;
 }
@@ -300,6 +318,7 @@ build_marquee (GtkLabel **out_label, const gchar *css)
   m->label = label;
   g_object_set_data (G_OBJECT (label), "marquee", m);
   g_signal_connect (label, "map", G_CALLBACK (on_marquee_mapped), m);
+  g_signal_connect (label, "unmap", G_CALLBACK (on_marquee_unmapped), m);
   g_signal_connect (label, "notify::label",
                     G_CALLBACK (on_marquee_geometry_or_text), m);
   g_signal_connect (scroller, "notify::width",
