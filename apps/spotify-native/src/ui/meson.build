@@ -29,6 +29,7 @@ ui_sources = ui_resources + files(
   'search_page.c',
   'liked_songs_page.c',
   'library_page.c',
+  'local_catalog.c',
   'context_page.c',
   'artist_page.c',
 )

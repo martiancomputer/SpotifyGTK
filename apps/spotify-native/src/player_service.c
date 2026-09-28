@@ -1,6 +1,7 @@
 #include "player_service.h"
 
 #include "audio/sink.h"
+#include "audio/local_playback.h"
 
 #include <string.h>
 #include "native_engine.h"
@@ -13,6 +14,8 @@ struct _SpotifyNativePlayerService {
   SpotifyNativeEngineControl *control;
   GMainContext *main_context;
   gchar *track_uri;
+  gchar *local_path;
+  SpotifyGtkLocalPathResolver local_path_resolver;
   gchar *pending_uri;   /* track requested while another was still playing */
   gchar *retry_uri;     /* a failed track, being given one second chance */
   gboolean unavailable; /* set when the server has no file for this track */
@@ -299,9 +302,13 @@ run_engine_thread (GTask *task, gpointer source_object, gpointer task_data,
                    GCancellable *cancellable)
 {
   SpotifyNativePlayerService *self = source_object;
-  gboolean ok = spotifygtk_native_engine_run (cancellable, engine_progress,
-                                               source_object, self->control,
-                                               self->track_uri);
+  gboolean ok = self->local_path
+    ? spotifygtk_local_playback_run (self->local_path, cancellable,
+                                    engine_progress, source_object,
+                                    self->control)
+    : spotifygtk_native_engine_run (cancellable, engine_progress,
+                                    source_object, self->control,
+                                    self->track_uri);
   if (g_cancellable_is_cancelled (cancellable))
     g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Playback stopped");
   else if (ok)
@@ -321,6 +328,7 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
   g_clear_object (&self->task);
   g_clear_pointer (&self->control, spotifygtk_native_engine_control_free);
   g_clear_object (&self->cancellable);
+  g_clear_pointer (&self->local_path, g_free);
 
   /* A track queued by start_uri() while this one was still running. Start it
    * before reporting IDLE/ERROR, so the UI never flashes "stopped" for a
@@ -367,7 +375,9 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  if (!ok && self->track_uri && g_strcmp0 (self->retry_uri, self->track_uri) != 0) {
+  if (!ok && self->track_uri &&
+      !g_str_has_prefix (self->track_uri, "local:track:") &&
+      g_strcmp0 (self->retry_uri, self->track_uri) != 0) {
     g_autofree gchar *again = g_strdup (self->track_uri);
     g_autoptr(GError) retry_err = NULL;
 
@@ -436,6 +446,19 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
     return TRUE;
   }
 
+  if (track_uri && g_str_has_prefix (track_uri, "local:track:")) {
+    gchar *path = self->local_path_resolver
+      ? self->local_path_resolver (track_uri) : NULL;
+    if (!path) {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                           "The local file is no longer available.");
+      return FALSE;
+    }
+    g_free (self->local_path);
+    self->local_path = path;
+  } else {
+    g_clear_pointer (&self->local_path, g_free);
+  }
   g_free (self->track_uri);
   self->track_uri = g_strdup (track_uri);
   self->cancellable = g_cancellable_new ();
@@ -480,6 +503,14 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   start_position_timer (self);
   (void) error;
   return TRUE;
+}
+
+void
+spotifygtk_player_service_set_local_path_resolver (
+  SpotifyNativePlayerService *self, SpotifyGtkLocalPathResolver resolver)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+  self->local_path_resolver = resolver;
 }
 
 void
@@ -658,6 +689,7 @@ spotifygtk_player_service_dispose (GObject *object)
   g_clear_object (&self->task);
   g_clear_object (&self->cancellable);
   g_clear_pointer (&self->track_uri, g_free);
+  g_clear_pointer (&self->local_path, g_free);
   g_clear_pointer (&self->pending_uri, g_free);
   g_clear_pointer (&self->retry_uri, g_free);
   g_clear_pointer (&self->pending_seek_uri, g_free);

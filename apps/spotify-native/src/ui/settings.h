@@ -74,6 +74,17 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkSettings, spotifygtk_settings,
 /* Shared instance; loads from disk on first use. */
 SpotifyGtkSettings *spotifygtk_settings_get_default (void);
 
+/* Borrowed, immutable-until-the-next-setting-change directory list. Callers
+ * needing it across an async task must copy each path before dispatch. */
+const GPtrArray *spotifygtk_settings_get_local_directories (SpotifyGtkSettings *self);
+gboolean spotifygtk_settings_add_local_directory (SpotifyGtkSettings *self,
+                                                   const gchar *path);
+gboolean spotifygtk_settings_remove_local_directory (SpotifyGtkSettings *self,
+                                                      const gchar *path);
+gboolean spotifygtk_settings_get_local_files_enabled (SpotifyGtkSettings *self);
+void spotifygtk_settings_set_local_files_enabled (SpotifyGtkSettings *self,
+                                                  gboolean enabled);
+
 SpotifyGtkMediaMode spotifygtk_settings_get_media_mode (SpotifyGtkSettings *self);
 void                spotifygtk_settings_set_media_mode (SpotifyGtkSettings *self,
                                                         SpotifyGtkMediaMode mode);

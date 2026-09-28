@@ -10,6 +10,7 @@
 #include "context_page.h"
 #include "cover_loader.h"
 #include "settings.h"
+#include "local_catalog.h"
 #include "../log_file.h"
 
 #define CONTEXT_PAGE_LIMIT 200
@@ -45,6 +46,7 @@ struct _SpotifyGtkContextPage {
   GtkWidget           *expanded_action_btn;
   GCancellable        *cover_request;
   SpotifyGtkTrackList *list;
+  SpotifyGtkLocalSnapshot *local_snapshot; /* keeps borrowed list rows alive */
 
   SpotifyNativeSession *session;
   GCancellable         *in_flight;
@@ -158,7 +160,8 @@ update_expanded_metadata (SpotifyGtkContextPage *self, GPtrArray *tracks)
     else if (g_strcmp0 (artist, track->artists) != 0) multiple = TRUE;
     total_ms += MAX (track->duration_ms, 0);
   }
-  if (year > 0 && g_str_has_prefix (self->current_uri, "spotify:album:")) {
+  if (year > 0 && (g_str_has_prefix (self->current_uri, "spotify:album:") ||
+                   g_str_has_prefix (self->current_uri, "local:album:"))) {
     g_autofree gchar *text = g_strdup_printf ("%d", year);
     gtk_label_set_text (self->year_label, text);
   }
@@ -167,7 +170,8 @@ update_expanded_metadata (SpotifyGtkContextPage *self, GPtrArray *tracks)
   guint hours = (guint) (total_ms / 3600000);
   guint minutes = (guint) ((total_ms / 60000) % 60);
   g_autofree gchar *meta = year > 0 &&
-    g_str_has_prefix (self->current_uri, "spotify:album:")
+    (g_str_has_prefix (self->current_uri, "spotify:album:") ||
+     g_str_has_prefix (self->current_uri, "local:album:"))
     ? g_strdup_printf ("%d · %s · %u tracks · %u hr %u min",
                        year, credit, tracks->len, hours, minutes)
     : g_strdup_printf ("%s · %u tracks · %u hr %u min",
@@ -177,7 +181,8 @@ update_expanded_metadata (SpotifyGtkContextPage *self, GPtrArray *tracks)
   /* An album's tracks carry its cover. A playlist's tracks do not: use the
    * cover known by the card/navigation source, never the first song's art. */
   const gchar *cover_id = self->context_cover_id;
-  if (!cover_id && g_str_has_prefix (self->current_uri, "spotify:album:"))
+  if (!cover_id && (g_str_has_prefix (self->current_uri, "spotify:album:") ||
+                    g_str_has_prefix (self->current_uri, "local:album:")))
     for (guint i = 0; i < tracks->len && !cover_id; i++) {
       const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
       cover_id = track->cover_id;
@@ -283,6 +288,11 @@ spotifygtk_context_page_dispose (GObject *object)
     g_cancellable_cancel (self->cover_request);
   g_clear_object (&self->cover_request);
   g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
+  /* The list's borrowed rows must be removed before their snapshot. */
+  if (self->local_snapshot)
+    spotifygtk_track_list_clear (self->list);
+  spotifygtk_local_snapshot_unref (self->local_snapshot);
+  self->local_snapshot = NULL;
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_uri, g_free);
   g_clear_pointer (&self->context_cover_id, g_free);
@@ -610,7 +620,8 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
   gtk_label_set_text (self->expanded_kind, kind ? kind : "");
   gtk_label_set_text (self->expanded_title, title ? title : "");
   /* Already showing this exactly — don't re-fetch on a repeat navigation. */
-  if (g_strcmp0 (uri, self->current_uri) == 0 && !self->in_flight) {
+  if (g_strcmp0 (uri, self->current_uri) == 0 && !self->in_flight &&
+      !g_str_has_prefix (uri, "local:album:")) {
     if (cover_id && g_strcmp0 (cover_id, self->context_cover_id) != 0) {
       g_free (self->context_cover_id);
       self->context_cover_id = g_strdup (cover_id);
@@ -637,8 +648,41 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
     g_clear_object (&self->in_flight);
   }
 
+  if (self->local_snapshot) {
+    spotifygtk_track_list_clear (self->list);
+    spotifygtk_local_snapshot_unref (self->local_snapshot);
+    self->local_snapshot = NULL;
+  }
+
   g_free (self->current_uri);
   self->current_uri = g_strdup (uri);
+
+  if (g_str_has_prefix (uri, "local:album:")) {
+    SpotifyGtkLocalSnapshot *snapshot = spotifygtk_local_catalog_ref_snapshot ();
+    const SpotifyGtkLocalAlbum *album =
+      spotifygtk_local_snapshot_find_album (snapshot, uri);
+    if (!album) {
+      spotifygtk_local_snapshot_unref (snapshot);
+      spotifygtk_track_list_clear (self->list);
+      spotifygtk_track_list_set_status (self->list,
+                                        "This local album is no longer available.");
+      set_loading (self, FALSE);
+      return;
+    }
+    self->local_snapshot = snapshot;
+    g_autoptr(GPtrArray) tracks = g_ptr_array_new ();
+    for (guint i = 0; i < album->tracks->len; i++) {
+      const SpotifyGtkLocalTrack *track = g_ptr_array_index (album->tracks, i);
+      g_ptr_array_add (tracks, track->display);
+    }
+    update_expanded_metadata (self, tracks);
+    spotifygtk_track_list_set_borrowed_native_tracks (self->list, tracks);
+    spotifygtk_track_list_scroll_to_top (self->list);
+    if (tracks->len == 0)
+      spotifygtk_track_list_set_status (self->list, "No playable local tracks.");
+    set_loading (self, FALSE);
+    return;
+  }
 
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {

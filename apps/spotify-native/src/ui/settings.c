@@ -25,6 +25,7 @@ struct _SpotifyGtkSettings {
   gboolean page_crossfade;
   gboolean caching_enabled;
   gboolean online_lyrics;
+  gboolean local_files_enabled;
   guint    lyrics_font_size;
   guint    scroll_smoothness;
   gboolean shuffle;
@@ -34,6 +35,7 @@ struct _SpotifyGtkSettings {
   gchar *path;
 
   GPtrArray *pins;   /* SpotifyGtkPin* */
+  GPtrArray *local_directories; /* absolute UTF-8 paths, gchar* */
   GHashTable *unavailable;   /* track uri -> seen; the server had no file */
 };
 
@@ -50,13 +52,28 @@ pin_free (gpointer data)
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkSettings, spotifygtk_settings, G_TYPE_OBJECT)
 
-enum { CHANGED, N_SIGNALS };
+enum { CHANGED, LOCAL_FILES_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+static void
+spotifygtk_settings_finalize (GObject *object)
+{
+  SpotifyGtkSettings *self = SPOTIFYGTK_SETTINGS (object);
+  g_clear_pointer (&self->path, g_free);
+  g_clear_pointer (&self->pins, g_ptr_array_unref);
+  g_clear_pointer (&self->local_directories, g_ptr_array_unref);
+  g_clear_pointer (&self->unavailable, g_hash_table_unref);
+  G_OBJECT_CLASS (spotifygtk_settings_parent_class)->finalize (object);
+}
 
 static void
 spotifygtk_settings_class_init (SpotifyGtkSettingsClass *klass)
 {
+  G_OBJECT_CLASS (klass)->finalize = spotifygtk_settings_finalize;
   signals[CHANGED] = g_signal_new ("changed",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 0);
+  signals[LOCAL_FILES_CHANGED] = g_signal_new ("local-files-changed",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 0);
 }
@@ -99,6 +116,24 @@ load (SpotifyGtkSettings *self)
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "online-lyrics", NULL))
     self->online_lyrics =
       g_key_file_get_boolean (kf, SETTINGS_GROUP, "online-lyrics", NULL);
+  if (g_key_file_has_key (kf, SETTINGS_GROUP, "local-files-enabled", NULL))
+    self->local_files_enabled =
+      g_key_file_get_boolean (kf, SETTINGS_GROUP, "local-files-enabled", NULL);
+  gsize n_local = 0;
+  g_auto(GStrv) local_paths = g_key_file_get_string_list (
+    kf, SETTINGS_GROUP, "local-directories", &n_local, NULL);
+  for (gsize i = 0; local_paths && i < n_local && i < 128; i++) {
+    if (!g_path_is_absolute (local_paths[i]) ||
+        !g_utf8_validate (local_paths[i], -1, NULL))
+      continue;
+    g_autofree gchar *canonical = g_canonicalize_filename (local_paths[i], NULL);
+    gboolean duplicate = FALSE;
+    for (guint j = 0; j < self->local_directories->len; j++)
+      duplicate |= g_strcmp0 (canonical,
+                              g_ptr_array_index (self->local_directories, j)) == 0;
+    if (!duplicate)
+      g_ptr_array_add (self->local_directories, g_steal_pointer (&canonical));
+  }
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "lyrics-font-size", NULL)) {
     gint size = g_key_file_get_integer (kf, SETTINGS_GROUP,
                                         "lyrics-font-size", NULL);
@@ -185,6 +220,12 @@ save (SpotifyGtkSettings *self)
                           self->caching_enabled);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "online-lyrics",
                           self->online_lyrics);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "local-files-enabled",
+                          self->local_files_enabled);
+  if (self->local_directories->len > 0)
+    g_key_file_set_string_list (kf, SETTINGS_GROUP, "local-directories",
+      (const gchar *const *) self->local_directories->pdata,
+      self->local_directories->len);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "lyrics-font-size",
                           (gint) self->lyrics_font_size);
   /* Drop the retired concurrency workaround when rewriting an older file. */
@@ -252,11 +293,13 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->sample_rate = SPOTIFYGTK_SAMPLE_RATE_DEFAULT;
   self->renderer    = SPOTIFYGTK_RENDERER_AUTOMATIC;
   self->caching_enabled = TRUE;
+  self->local_files_enabled = TRUE;
   self->compact_mode = TRUE;
   self->page_crossfade = TRUE;
   self->lyrics_font_size = 19;
   self->scroll_smoothness = 50;
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
+  self->local_directories = g_ptr_array_new_with_free_func (g_free);
   self->unavailable = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
   self->path = g_build_filename (g_get_user_config_dir (),
@@ -273,6 +316,75 @@ spotifygtk_settings_get_default (void)
     instance = g_object_new (SPOTIFYGTK_TYPE_SETTINGS, NULL);
 
   return instance;
+}
+
+const GPtrArray *
+spotifygtk_settings_get_local_directories (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), NULL);
+  return self->local_directories;
+}
+
+gboolean
+spotifygtk_settings_get_local_files_enabled (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  return self->local_files_enabled;
+}
+
+void
+spotifygtk_settings_set_local_files_enabled (SpotifyGtkSettings *self,
+                                             gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->local_files_enabled == enabled)
+    return;
+  self->local_files_enabled = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+  g_signal_emit (self, signals[LOCAL_FILES_CHANGED], 0);
+}
+
+gboolean
+spotifygtk_settings_add_local_directory (SpotifyGtkSettings *self,
+                                          const gchar *path)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  if (!path || !g_path_is_absolute (path) ||
+      !g_utf8_validate (path, -1, NULL))
+    return FALSE;
+  g_autofree gchar *canonical = g_canonicalize_filename (path, NULL);
+  if (!g_file_test (canonical, G_FILE_TEST_IS_DIR) ||
+      self->local_directories->len >= 128)
+    return FALSE;
+  for (guint i = 0; i < self->local_directories->len; i++)
+    if (g_strcmp0 (canonical, g_ptr_array_index (self->local_directories, i)) == 0)
+      return FALSE;
+  g_ptr_array_add (self->local_directories, g_steal_pointer (&canonical));
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+  g_signal_emit (self, signals[LOCAL_FILES_CHANGED], 0);
+  return TRUE;
+}
+
+gboolean
+spotifygtk_settings_remove_local_directory (SpotifyGtkSettings *self,
+                                             const gchar *path)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  if (!path)
+    return FALSE;
+  for (guint i = 0; i < self->local_directories->len; i++) {
+    if (g_strcmp0 (path, g_ptr_array_index (self->local_directories, i)) != 0)
+      continue;
+    g_ptr_array_remove_index (self->local_directories, i);
+    save (self);
+    g_signal_emit (self, signals[CHANGED], 0);
+    g_signal_emit (self, signals[LOCAL_FILES_CHANGED], 0);
+    return TRUE;
+  }
+  return FALSE;
 }
 
 /* Each setter stores, persists, then announces — in that order, so a handler

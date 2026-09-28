@@ -32,6 +32,28 @@ if get_option('tests')
   )
   test('settings', test_settings)
 
+  if have_local_av
+    test_local_catalog = executable('test-local-catalog',
+      'test_local_catalog.c',
+      '../src/ui/local_catalog.c',
+      '../src/ui/settings.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep,
+                     avformat_dep, avcodec_dep,
+                     avutil_dep, swresample_dep],
+    )
+    test('local-catalog', test_local_catalog)
+
+    test_local_playback = executable('test-local-playback',
+      'test_local_playback.c',
+      '../src/audio/local_playback.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [glib_dep, gio_dep, avformat_dep, avcodec_dep,
+                     avutil_dep, swresample_dep],
+    )
+    test('local-playback', test_local_playback)
+  endif
+
   test_track_meta = executable('test-track-meta',
     'test_track_meta.c',
     '../src/spotify/protobuf_min.c',

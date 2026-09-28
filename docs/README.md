@@ -262,6 +262,23 @@ bar consistent. Library resolves saved album URIs in batches and separates
 albums, EPs, singles and followed artists. Artist names use a small persistent
 metadata index.
 
+Local Files adds a separate Library filter; All interleaves saved releases and
+local albums by their saved/modified date. Settings accepts multiple music
+folders. A single background catalog worker enumerates them recursively,
+keeps directory monitors for changes, and writes a checksummed, atomically
+replaced metadata index. Local album cards use the existing virtualized
+`SpotifyGtkAlbumGrid`, and album tracks borrow immutable catalog snapshots in
+the existing `SpotifyGtkTrackList`; the model is cleared before a snapshot is
+released. Artwork remains compressed on disk and enters the shared cover
+loader only for visible requests. A local-only login-gate option opens Library
+without a Spotify session. This requires FFmpeg's C libraries (`libavformat`,
+`libavcodec`, `libavutil`, `libswresample`); builds without them disable the
+local-file controls. FLAC, Opus, PCM WAV and AAC files are supported. Local
+tracks cannot be written to Spotify Liked Songs or playlists. The local decode
+adapter currently converts source audio to the existing stereo 16-bit PCM
+pipeline, including high-resolution sources; 24/32-bit device containers do
+not make this bit-perfect high-resolution playback.
+
 The playlist rootlist interleaves folder markers and playlist URIs. Markers are
 filtered first. A playlist card initially knows its URI; its head supplies the
 name and a one-track context supplies a cover. Resolution is driven by the
@@ -393,7 +410,7 @@ an explicit `GSK_RENDERER` environment value takes precedence.
 | Lyrics → Font size | `lyrics-font-size` | 19, 20, 22, 24, 26, 28 px (default 19) | Sizes the current timed lyric line, scales neighboring lines, and sizes plain-text lyrics. It does not change lyrics loading. | Immediately and retained across launches. |
 | Search Settings → Aggressive Filtering | `aggressive-filtering` | Off/On | Changes local search matching/ranking so exact artist/title matches are promoted while weaker matches remain available. It does not change Spotify's server-side context result. | Immediately on the next filter/search update. |
 | Audio → Sample rate | `sample-rate` | Default, 44.1, 48, 96, 192, 384 kHz | Chooses the output rate. Default follows the source; another rate activates the selected resampler. Upsampling does not add information to a lower-rate recording. | Persisted immediately; changed output format is applied at the next track boundary. |
-| Audio → Sample format | `sample-format` | 16, 24, 32-bit signed PCM | Selects the output container on PipeWire, PulseAudio, ALSA, or WASAPI. The current Spotify decoder supplies 16-bit samples; widening them does not create extra precision. A future local-file decoder will also need an upstream wide-PCM path to preserve high-resolution source samples. | Persisted immediately; changed output format is applied at the next track boundary. |
+| Audio → Sample format | `sample-format` | 16, 24, 32-bit signed PCM | Selects the output container on PipeWire, PulseAudio, ALSA, or WASAPI. Both the Spotify decoder and the local-file adapter currently supply 16-bit samples internally; widening them does not create extra precision. | Persisted immediately; changed output format is applied at the next track boundary. |
 | Audio → Resampler | `resampler-mode` | Polyphase (default), Linear (fast) | Chooses conversion when source and output rates differ. Polyphase band-limits when downsampling; linear is cheaper but can alias. Equal rates bypass both. | Persisted immediately; used by the next resampled track. |
 | Audio → Equalizer enabled | `eq-enabled` | Off/On | Enables the 15-band RBJ peaking-biquad cascade in the audio worker. Disabled or flat is a byte-exact no-op. | Immediately for live audio. |
 | Audio → Equalizer bands | `eq-gains` | 15 bands, −12 to +12 dB | Stores the gain curve from 25 Hz through 16 kHz. The UI uses a draggable response curve rather than fifteen independent slider strips. | Immediately and persisted per band. |

@@ -79,6 +79,17 @@ ogg_dep        = dependency('ogg',           version: '>= 1.3')
 vorbis_dep     = dependency('vorbis',        version: '>= 1.3')
 vorbisfile_dep = dependency('vorbisfile',    version: '>= 1.3')
 
+# The local-file path uses FFmpeg's C demux/decoder APIs for FLAC, Opus, WAV
+# and AAC, converting decoded blocks to the existing bounded 16-bit PCM sink.
+# Keep it optional so existing builds (including Windows packaging) continue
+# to work when these development libraries have not been installed.
+avformat_dep = dependency('libavformat', required: false)
+avcodec_dep = dependency('libavcodec', required: false)
+avutil_dep = dependency('libavutil', required: false)
+swresample_dep = dependency('libswresample', required: false)
+have_local_av = avformat_dep.found() and avcodec_dep.found() and \
+                avutil_dep.found() and swresample_dep.found()
+
 # Crypto -- AES-CTR for CDN audio decrypt (cdn.c). The Shannon cipher
 # itself (AP transport encryption) is hand-rolled, no library needed.
 openssl_dep    = dependency('openssl',       version: '>= 3.0', required: false)
@@ -89,6 +100,9 @@ all_deps = [
 ]
 if openssl_dep.found()
   all_deps += openssl_dep
+endif
+if have_local_av
+  all_deps += [avformat_dep, avcodec_dep, avutil_dep, swresample_dep]
 endif
 if enable_gui
   all_deps += [jpeg_dep, png_dep]
@@ -168,6 +182,7 @@ conf.set10('HAVE_PIPEWIRE', have_pipewire)
 conf.set10('HAVE_PULSE',    have_pulse)
 conf.set10('HAVE_ALSA',     alsa_dep.found())
 conf.set10('HAVE_WASAPI',   is_windows)
+conf.set10('HAVE_LOCAL_AV', have_local_av)
 configure_file(output: 'config.h', configuration: conf)
 config_inc = include_directories('.')
 
@@ -187,5 +202,6 @@ summary({
   'PulseAudio'              : have_pulse,
   'ALSA'                    : alsa_dep.found(),
   'OpenSSL (CDN decrypt)'   : openssl_dep.found(),
+  'Local files (FFmpeg C)'  : have_local_av,
   'GTK4 native shell'       : gtk4_dep.found(),
 }, section: 'Audio backends')

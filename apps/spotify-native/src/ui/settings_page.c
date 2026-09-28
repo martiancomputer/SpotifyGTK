@@ -7,6 +7,7 @@
  * nothing is worse than one that says it cannot.
  */
 
+#include "config.h"
 #include "settings_page.h"
 
 #include <glib/gstdio.h>
@@ -24,6 +25,7 @@ struct _SpotifyGtkSettingsPage {
   GtkWidget          *account_name;
   GtkWidget          *account_id;
   GtkWidget          *account_plan;
+  GtkWidget          *local_directories_box;
   guint               scroll_commit_source;
   guint               pending_scroll_smoothness;
 };
@@ -35,6 +37,9 @@ G_DEFINE_FINAL_TYPE (SpotifyGtkSettingsPage, spotifygtk_settings_page, GTK_TYPE_
 
 enum { LOG_OUT, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+static void on_local_directory_remove (SpotifyGtkSettingsPage *self,
+                                       GtkButton *button);
 
 static void
 spotifygtk_settings_page_dispose (GObject *object)
@@ -68,6 +73,80 @@ on_log_out_clicked (GtkButton *button, gpointer user_data)
 {
   g_signal_emit (SPOTIFYGTK_SETTINGS_PAGE (user_data), signals[LOG_OUT], 0);
   (void) button;
+}
+
+static void
+refresh_local_directories (SpotifyGtkSettingsPage *self)
+{
+  GtkWidget *child;
+  while ((child = gtk_widget_get_first_child (self->local_directories_box)))
+    gtk_box_remove (GTK_BOX (self->local_directories_box), child);
+  const GPtrArray *dirs = spotifygtk_settings_get_local_directories (self->settings);
+  for (guint i = 0; dirs && i < dirs->len; i++) {
+    const gchar *path = g_ptr_array_index ((GPtrArray *) dirs, i);
+    GtkWidget *row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *label = gtk_label_new (path);
+    gtk_label_set_xalign (GTK_LABEL (label), 0.0);
+    gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_widget_set_hexpand (label, TRUE);
+    gtk_widget_set_tooltip_text (label, path);
+    gtk_box_append (GTK_BOX (row), label);
+    GtkWidget *remove = gtk_button_new_with_label ("Remove");
+    g_object_set_data_full (G_OBJECT (remove), "local-path", g_strdup (path), g_free);
+    g_signal_connect_swapped (remove, "clicked",
+                              G_CALLBACK (on_local_directory_remove), self);
+    gtk_box_append (GTK_BOX (row), remove);
+    gtk_box_append (GTK_BOX (self->local_directories_box), row);
+  }
+}
+
+static void
+on_local_directory_remove (SpotifyGtkSettingsPage *self, GtkButton *button)
+{
+  const gchar *path = g_object_get_data (G_OBJECT (button), "local-path");
+  spotifygtk_settings_remove_local_directory (self->settings, path);
+  refresh_local_directories (self);
+}
+
+typedef struct { GWeakRef page; } LocalFolderChoice;
+
+static void
+on_local_folder_chosen (GObject *source, GAsyncResult *result, gpointer data)
+{
+  LocalFolderChoice *choice = data;
+  g_autoptr(SpotifyGtkSettingsPage) self = g_weak_ref_get (&choice->page);
+  g_weak_ref_clear (&choice->page);
+  g_free (choice);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GFile) folder = gtk_file_dialog_select_folder_finish (
+    GTK_FILE_DIALOG (source), result, &error);
+  if (!self || !folder) return;
+  g_autofree gchar *path = g_file_get_path (folder);
+  if (path && spotifygtk_settings_add_local_directory (self->settings, path))
+    refresh_local_directories (self);
+}
+
+static void
+on_local_directory_add (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (button));
+  if (!GTK_IS_WINDOW (root)) return;
+  g_autoptr(GtkFileDialog) dialog = gtk_file_dialog_new ();
+  gtk_file_dialog_set_title (dialog, "Choose a music folder");
+  LocalFolderChoice *choice = g_new0 (LocalFolderChoice, 1);
+  g_weak_ref_init (&choice->page, self);
+  gtk_file_dialog_select_folder (dialog, GTK_WINDOW (root), NULL,
+                                 on_local_folder_chosen, choice);
+}
+
+static void
+on_local_files_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_local_files_enabled (self->settings,
+                                                gtk_switch_get_active (sw));
+  (void) pspec;
 }
 
 static void
@@ -652,6 +731,37 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "kept at the bottom.",
                              aggressive));
   gtk_box_append (GTK_BOX (content), search_group);
+
+  /* Local folders are scanned off the GTK thread and rendered through the
+   * ordinary Library album grid. Keep this near the Library-related controls,
+   * not among output-device choices. */
+  GtkWidget *local_group = build_group ("Local Files");
+#if !HAVE_LOCAL_AV
+  gtk_widget_set_sensitive (local_group, FALSE);
+  gtk_widget_set_tooltip_text (local_group,
+    "Local files require a build with FFmpeg development libraries.");
+#endif
+  GtkWidget *local_enabled = gtk_switch_new ();
+  gtk_switch_set_active (GTK_SWITCH (local_enabled),
+    spotifygtk_settings_get_local_files_enabled (self->settings));
+  g_signal_connect (local_enabled, "notify::active",
+                    G_CALLBACK (on_local_files_toggled), self);
+  gtk_box_append (GTK_BOX (local_group),
+    build_row ("Show local files",
+               "Include music from the selected folders in Library. Scanning "
+               "runs in the background.", local_enabled));
+  GtkWidget *add_folder = gtk_button_new_with_label ("Add folder");
+  g_signal_connect (add_folder, "clicked",
+                    G_CALLBACK (on_local_directory_add), self);
+  gtk_box_append (GTK_BOX (local_group),
+    build_row ("Music folders", "Subfolders are included automatically.",
+               add_folder));
+  self->local_directories_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_margin_start (self->local_directories_box, 16);
+  gtk_widget_set_margin_end (self->local_directories_box, 16);
+  gtk_box_append (GTK_BOX (local_group), self->local_directories_box);
+  refresh_local_directories (self);
+  gtk_box_append (GTK_BOX (content), local_group);
 
   /* ── Audio ─────────────────────────────────────────────────── */
   GtkWidget *audio_group = build_group ("Audio");

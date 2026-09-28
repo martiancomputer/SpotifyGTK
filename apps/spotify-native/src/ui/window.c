@@ -19,6 +19,7 @@
  * └────────────────────────────────────────────────────────────────┘
  */
 
+#include "config.h"
 #include "window.h"
 #include "cover_loader.h"
 #include "sidebar.h"
@@ -29,6 +30,7 @@
 #include "search_page.h"
 #include "liked_songs_page.h"
 #include "library_page.h"
+#include "local_catalog.h"
 #include "settings_page.h"
 #include "spotify/native_auth.h"
 #include "settings.h"
@@ -96,6 +98,7 @@ struct _SpotifyGtkNativeWindow {
   GtkWidget  *menu_btn;        /* app header controls, disabled while gated */
   GtkWidget  *login_button;
   GtkLabel   *login_status;
+  gboolean    offline_local_mode;
   NativeAuth *auth;
 
   /* Header navigation, browser-style. `nav_history` holds NavEntry* in visit
@@ -4431,10 +4434,14 @@ broadcast_playing_uri (SpotifyGtkNativeWindow *self)
   /* Spotify Connect needs the same news: a device registered as active while
    * reporting nothing playing gets dropped. */
   if (self->session)
-    spotifygtk_native_session_report_playback (self->session, uri,
-                                               self->play_context_uri,
-                                               self->last_position_ms,
-                                               is_playing,
+    spotifygtk_native_session_report_playback (
+                                               self->session,
+                                               uri && g_str_has_prefix (uri, "spotify:") ? uri : NULL,
+                                               uri && g_str_has_prefix (uri, "spotify:")
+                                                 ? self->play_context_uri : NULL,
+                                               uri && g_str_has_prefix (uri, "spotify:")
+                                                 ? self->last_position_ms : 0,
+                                               uri && g_str_has_prefix (uri, "spotify:") && is_playing,
                                                self->smart_shuffle ? 2 :
                                                self->shuffle ? 1 : 0);
 
@@ -4578,10 +4585,24 @@ on_login_clicked (GtkButton *button, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
 
+  self->offline_local_mode = FALSE;
+
   gtk_widget_set_sensitive (GTK_WIDGET (button), FALSE);
   gtk_label_set_text (self->login_status,
                       "Waiting for you to approve access in your browser…");
   native_auth_begin (self->auth);
+}
+
+static void
+on_use_local_files_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  self->offline_local_mode = TRUE;
+  gtk_widget_set_visible (self->login_gate, FALSE);
+  if (self->menu_btn) gtk_widget_set_sensitive (self->menu_btn, TRUE);
+  nav_update_buttons (self);
+  navigate_to_page (self, "library");
+  (void) button;
 }
 
 static void
@@ -4638,6 +4659,18 @@ build_login_gate (SpotifyGtkNativeWindow *self)
                     G_CALLBACK (on_login_clicked), self);
   gtk_box_append (GTK_BOX (centre), self->login_button);
 
+  GtkWidget *local_button = gtk_button_new_with_label ("Continue with local files");
+#if !HAVE_LOCAL_AV
+  gtk_widget_set_sensitive (local_button, FALSE);
+  gtk_widget_set_tooltip_text (local_button,
+    "This build does not include local audio decoding.");
+#endif
+  gtk_widget_add_css_class (local_button, "flat");
+  gtk_widget_set_halign (local_button, GTK_ALIGN_CENTER);
+  g_signal_connect (local_button, "clicked",
+                    G_CALLBACK (on_use_local_files_clicked), self);
+  gtk_box_append (GTK_BOX (centre), local_button);
+
   self->login_status = GTK_LABEL (gtk_label_new (""));
   gtk_widget_add_css_class (GTK_WIDGET (self->login_status), "dim-text");
   gtk_label_set_justify (self->login_status, GTK_JUSTIFY_CENTER);
@@ -4691,6 +4724,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
   g_message ("session: %s", message ? message : "");
 
   if (state == SPOTIFYGTK_SESSION_READY) {
+    self->offline_local_mode = FALSE;
     /* Pages that gave up with "Not signed in yet" can load for real now. */
     spotifygtk_search_page_set_session (self->search_page, session);
     spotifygtk_liked_songs_page_set_session (self->liked_page, session);
@@ -4761,8 +4795,9 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     /* A stored token that the server refuses is indistinguishable, from here,
      * from having no token at all — put the gate back so there is a way out
      * other than restarting. */
-    spotifygtk_native_window_show_login_gate (
-      self, message && *message ? message : "Could not sign in.");
+    if (!self->offline_local_mode)
+      spotifygtk_native_window_show_login_gate (
+        self, message && *message ? message : "Could not sign in.");
     set_loading_source (self, session, FALSE);
   }
 }
@@ -5623,6 +5658,8 @@ spotifygtk_native_window_constructed (GObject *object)
 
   /* Create core services */
   self->player = spotifygtk_player_service_new ();
+  spotifygtk_player_service_set_local_path_resolver (
+    self->player, spotifygtk_local_catalog_dup_track_path);
   self->session = spotifygtk_native_session_new ();
   self->loading_sources = g_hash_table_new (g_direct_hash, g_direct_equal);
 

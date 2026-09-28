@@ -13,6 +13,7 @@
 
 #include "library_page.h"
 #include "album_grid.h"
+#include "local_catalog.h"
 #include "../log_file.h"
 #include "../spotify/collection.h"
 
@@ -90,10 +91,12 @@ artist_name_cache_store (const gchar *uri, const gchar *name)
 }
 
 typedef enum {
-  LIBRARY_ALBUMS = 0,
+  LIBRARY_ALL = 0,
+  LIBRARY_ALBUMS,
   LIBRARY_EPS,
   LIBRARY_SINGLES,
   LIBRARY_ARTISTS,
+  LIBRARY_LOCAL,
   N_LIBRARY_VIEWS
 } LibraryView;
 
@@ -109,6 +112,7 @@ struct _SpotifyGtkLibraryPage {
   GtkWidget            *view_buttons[N_LIBRARY_VIEWS];
   LibraryView           active_view;
   GPtrArray            *saved_releases; /* SpotifyNativeRelease*, owned */
+  SpotifyGtkLocalSnapshot *local_snapshot; /* referenced; immutable until swap */
   GPtrArray            *saved_album_uris; /* gchar*, gathered across pages */
   GHashTable           *saved_album_dates; /* album URI -> added_at */
   GPtrArray            *followed_artist_uris; /* gchar*, copied from window */
@@ -154,6 +158,8 @@ spotifygtk_library_page_dispose (GObject *object)
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
+  spotifygtk_local_snapshot_unref (self->local_snapshot);
+  self->local_snapshot = NULL;
   g_clear_pointer (&self->followed_artist_uris, g_ptr_array_unref);
   self->session = NULL;
   G_OBJECT_CLASS (spotifygtk_library_page_parent_class)->dispose (object);
@@ -220,6 +226,10 @@ static gboolean
 release_in_view (const SpotifyNativeRelease *release, LibraryView view)
 {
   switch (view) {
+    case LIBRARY_ALL:
+      return TRUE;
+    case LIBRARY_LOCAL:
+      return FALSE;
     case LIBRARY_EPS:
       return release->type == SPOTIFY_ALBUM_TYPE_EP;
     case LIBRARY_SINGLES:
@@ -257,41 +267,88 @@ sort_releases_by_date_added (SpotifyGtkLibraryPage *self)
                               self->saved_album_dates);
 }
 
+typedef struct {
+  const SpotifyNativeRelease *release;
+  const SpotifyGtkLocalAlbum *local;
+  gint64 date;
+} LibraryCardEntry;
+
+static gint
+library_card_compare (gconstpointer a, gconstpointer b)
+{
+  const LibraryCardEntry *left = a;
+  const LibraryCardEntry *right = b;
+  if (left->date != right->date)
+    return left->date > right->date ? -1 : 1;
+  const gchar *left_name = left->local ? left->local->title : left->release->name;
+  const gchar *right_name = right->local ? right->local->title : right->release->name;
+  return g_strcmp0 (left_name, right_name);
+}
+
 static void
 show_release_view (SpotifyGtkLibraryPage *self)
 {
-  if (!self->saved_releases || self->active_view == LIBRARY_ARTISTS)
+  if (self->active_view == LIBRARY_ARTISTS)
     return;
 
-  guint count = 0;
-  for (guint i = 0; i < self->saved_releases->len; i++)
-    if (release_in_view (g_ptr_array_index (self->saved_releases, i),
-                         self->active_view))
-      count++;
-
-  g_autofree SpotifyGtkCardSpec *specs = g_new0 (SpotifyGtkCardSpec,
-                                                 MAX (count, 1));
-  g_autoptr(GPtrArray) subs = g_ptr_array_new_with_free_func (g_free);
-  guint out = 0;
-  for (guint i = 0; i < self->saved_releases->len; i++) {
-    const SpotifyNativeRelease *release = g_ptr_array_index (self->saved_releases, i);
+  GArray *entries = g_array_new (FALSE, FALSE, sizeof (LibraryCardEntry));
+  for (guint i = 0; self->saved_releases &&
+                    i < self->saved_releases->len; i++) {
+    const SpotifyNativeRelease *release =
+      g_ptr_array_index (self->saved_releases, i);
     if (!release_in_view (release, self->active_view))
       continue;
-    gchar *sub = release->year > 0 ? g_strdup_printf ("%d", release->year)
+    LibraryCardEntry entry = { .release = release,
+      .date = self->saved_album_dates ? GPOINTER_TO_INT (
+        g_hash_table_lookup (self->saved_album_dates, release->uri)) : 0 };
+    g_array_append_val (entries, entry);
+  }
+  if (self->active_view == LIBRARY_ALL ||
+      self->active_view == LIBRARY_LOCAL) {
+    const GPtrArray *albums = spotifygtk_local_snapshot_albums (
+      self->local_snapshot);
+    for (guint i = 0; albums && i < albums->len; i++) {
+      const SpotifyGtkLocalAlbum *album = g_ptr_array_index (
+        (GPtrArray *) albums, i);
+      LibraryCardEntry entry = { .local = album,
+                          .date = album->added_at / G_USEC_PER_SEC };
+      g_array_append_val (entries, entry);
+    }
+  }
+
+  /* Sort once before the grid's batched model replacement. */
+  g_array_sort (entries, library_card_compare);
+
+  g_autofree SpotifyGtkCardSpec *specs = g_new0 (SpotifyGtkCardSpec,
+                                                 MAX (entries->len, 1));
+  g_autoptr(GPtrArray) subs = g_ptr_array_new_with_free_func (g_free);
+  guint out = 0;
+  for (guint i = 0; i < entries->len; i++) {
+    LibraryCardEntry *entry = &g_array_index (entries, LibraryCardEntry, i);
+    const SpotifyGtkLocalAlbum *local = entry->local;
+    const SpotifyNativeRelease *release = entry->release;
+    gint year = local ? local->year : release->year;
+    gchar *sub = year > 0 ? g_strdup_printf ("%d", year)
                                    : g_strdup ("");
     g_ptr_array_add (subs, sub);
-    specs[out].uri      = release->uri;
-    specs[out].title    = release->name ? release->name : "Unknown release";
+    specs[out].uri      = local ? local->uri : release->uri;
+    specs[out].title    = local ? local->title :
+                          release->name ? release->name : "Unknown release";
     specs[out].subtitle = sub;
-    specs[out].cover_id = release->cover_id;
+    specs[out].cover_id = local ? local->cover_id : release->cover_id;
     out++;
   }
   spotifygtk_album_grid_set_cards (self->albums, specs, out);
+  g_array_unref (entries);
 
   const gchar *empty = self->active_view == LIBRARY_EPS
     ? "No saved EPs yet."
     : self->active_view == LIBRARY_SINGLES
       ? "No saved singles yet."
+      : self->active_view == LIBRARY_ALL
+        ? "No saved or local releases yet."
+      : self->active_view == LIBRARY_LOCAL
+        ? "No local albums yet. Add a music folder in Settings."
       : "No saved albums yet.";
   gtk_widget_set_visible (self->albums_status, out == 0);
   gtk_label_set_text (GTK_LABEL (self->albums_status), out == 0 ? empty : "");
@@ -754,6 +811,19 @@ on_view_clicked (GtkToggleButton *button, gpointer user_data)
 }
 
 static void
+on_local_catalog_changed (SpotifyGtkLocalCatalog *catalog, gpointer user_data)
+{
+  SpotifyGtkLibraryPage *self = user_data;
+  SpotifyGtkLocalSnapshot *next = spotifygtk_local_catalog_ref_snapshot ();
+  SpotifyGtkLocalSnapshot *old = self->local_snapshot;
+  self->local_snapshot = next;
+  if (self->active_view == LIBRARY_ALL || self->active_view == LIBRARY_LOCAL)
+    show_release_view (self);
+  spotifygtk_local_snapshot_unref (old);
+  (void) catalog;
+}
+
+static void
 on_filter_changed (GtkSearchEntry *entry, gpointer user_data)
 {
   SpotifyGtkLibraryPage *self = user_data;
@@ -845,7 +915,9 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   GtkWidget *view_group = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_add_css_class (view_group, "linked");
   gtk_widget_set_valign (view_group, GTK_ALIGN_CENTER);
-  const gchar *view_names[] = { "Albums", "EPs", "Singles", "Artists" };
+  const gchar *view_names[] = {
+    "All", "Albums", "EPs", "Singles", "Artists", "Local Files"
+  };
   for (guint i = 0; i < N_LIBRARY_VIEWS; i++) {
     GtkWidget *button = gtk_toggle_button_new_with_label (view_names[i]);
     gtk_widget_add_css_class (button, "flat");
@@ -913,8 +985,14 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_stack_add_named (self->content_stack, artists_page, "artists");
   gtk_stack_set_visible_child_name (self->content_stack, "releases");
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->content_stack));
-  self->active_view = LIBRARY_ALBUMS;
+  self->active_view = LIBRARY_ALL;
   gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->view_buttons[0]), TRUE);
+
+  SpotifyGtkLocalCatalog *catalog = spotifygtk_local_catalog_get_default ();
+  self->local_snapshot = spotifygtk_local_catalog_ref_snapshot ();
+  g_signal_connect_object (catalog, "changed",
+                           G_CALLBACK (on_local_catalog_changed), self, 0);
+  show_release_view (self);
 
   GtkAdjustment *vadj = spotifygtk_album_grid_get_vadjustment (self->albums);
   if (vadj)

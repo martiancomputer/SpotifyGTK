@@ -21,6 +21,11 @@ typedef enum {
 } SpotifyNativePlayerState;
 
 SpotifyNativePlayerService *spotifygtk_player_service_new (void);
+/* Resolver runs synchronously on the UI thread when a local URI is queued.
+ * Return a newly allocated path; the service keeps it stable for its worker. */
+typedef gchar *(*SpotifyGtkLocalPathResolver) (const gchar *track_uri);
+void spotifygtk_player_service_set_local_path_resolver (
+  SpotifyNativePlayerService *self, SpotifyGtkLocalPathResolver resolver);
 gboolean spotifygtk_player_service_start (SpotifyNativePlayerService *self, GError **error);
 gboolean spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
                                               const gchar *track_uri,

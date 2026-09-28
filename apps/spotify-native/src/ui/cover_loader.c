@@ -19,6 +19,7 @@
 #include <libsoup/soup.h>
 
 #include "settings.h"
+#include "local_catalog.h"
 #include "../log_file.h"
 #include "../log_verbose.h"
 
@@ -65,6 +66,10 @@ decode_jpeg_c (const guchar *data, gsize len, gint target_px,
   jpeg_create_decompress (&jpeg);
   jpeg_mem_src (&jpeg, data, (unsigned long) len);
   if (jpeg_read_header (&jpeg, TRUE) != JPEG_HEADER_OK) {
+    jpeg_destroy_decompress (&jpeg);
+    return NULL;
+  }
+  if (jpeg.image_width > 8192 || jpeg.image_height > 8192) {
     jpeg_destroy_decompress (&jpeg);
     return NULL;
   }
@@ -814,6 +819,32 @@ typedef struct {
   gboolean playback;
 } FetchClosure;
 
+static GBytes *
+read_local_cover_bounded (const gchar *path)
+{
+  if (!path) return NULL;
+  g_autoptr(GFile) file = g_file_new_for_path (path);
+  g_autoptr(GFileInputStream) stream = g_file_read (file, NULL, NULL);
+  if (!stream) return NULL;
+  GByteArray *bytes = g_byte_array_new ();
+  guchar chunk[65536];
+  while (TRUE) {
+    gssize n = g_input_stream_read (G_INPUT_STREAM (stream), chunk,
+                                    sizeof chunk, NULL, NULL);
+    if (n < 0 || bytes->len + n > 8 * 1024 * 1024) {
+      g_byte_array_unref (bytes);
+      return NULL;
+    }
+    if (n == 0) break;
+    g_byte_array_append (bytes, chunk, n);
+  }
+  if (bytes->len == 0) {
+    g_byte_array_unref (bytes);
+    return NULL;
+  }
+  return g_byte_array_free_to_bytes (bytes);
+}
+
 /* Runs on a worker thread: decode the JPEG at the target size and build a
  * texture. Doing this here rather than in the soup callback is what keeps a
  * scroll smooth -- decoding on the main thread blocked a frame per cover, so
@@ -830,15 +861,24 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
    * since this is already the thread that pays for the decode. */
   if (!bytes) {
     const gchar *path = g_object_get_data (G_OBJECT (task), "disk-path");
-    gchar *data = NULL;
-    gsize  len  = 0;
-    if (!path || !g_file_get_contents (path, &data, &len, NULL) || len == 0) {
-      g_free (data);
-      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                               "cover not readable from the disk cache");
-      return;
+    if (g_object_get_data (G_OBJECT (task), "local-source")) {
+      from_disk = read_local_cover_bounded (path);
+      if (!from_disk) {
+        g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                 "local artwork is unreadable or exceeds the safe size limit");
+        return;
+      }
+    } else {
+      gchar *data = NULL;
+      gsize  len  = 0;
+      if (!path || !g_file_get_contents (path, &data, &len, NULL) || len == 0) {
+        g_free (data);
+        g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                                 "cover not readable from the disk cache");
+        return;
+      }
+      from_disk = g_bytes_new_take (data, len);
     }
-    from_disk = g_bytes_new_take (data, len);
     bytes = from_disk;
   }
 
@@ -982,7 +1022,10 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
    * both faster than the CDN and one less entry in a queue whose filling is
    * what stalls artwork later in a session.
    */
-  g_autofree gchar *disk = caching_enabled () ? disk_cache_path (cover_id) : NULL;
+  gboolean local = g_str_has_prefix (cover_id, "local:");
+  g_autofree gchar *disk = local
+    ? spotifygtk_local_catalog_dup_art_path (cover_id)
+    : caching_enabled () ? disk_cache_path (cover_id) : NULL;
   if (disk && g_file_test (disk, G_FILE_TEST_EXISTS)) {
     cover_stats.disk_hits++;
     GTask *task = g_task_new (NULL, NULL, on_cover_decoded, g_strdup (cache_key));
@@ -992,6 +1035,8 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
     g_object_set_data_full (G_OBJECT (task), "decode-start-us",
                             decode_start, g_free);
     g_object_set_data (G_OBJECT (task), "disk-source", GINT_TO_POINTER (1));
+    if (local)
+      g_object_set_data (G_OBJECT (task), "local-source", GINT_TO_POINTER (1));
     g_object_set_data (G_OBJECT (task), "target-px", GINT_TO_POINTER (target_px));
     g_object_set_data_full (G_OBJECT (task), "disk-path", g_steal_pointer (&disk), g_free);
     g_task_run_in_thread (task, decode_in_thread);
@@ -1000,7 +1045,7 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
     return;
   }
 
-  g_autofree gchar *url = spotifygtk_cover_build_url (cover_id);
+  g_autofree gchar *url = local ? NULL : spotifygtk_cover_build_url (cover_id);
   if (!url) {
     cover_active--;
     complete_waiters (cache_key, NULL);
@@ -1243,8 +1288,9 @@ cover_load_internal (const gchar          *cover_id,
     return;
   }
 
-  g_autofree gchar *url = spotifygtk_cover_build_url (cover_id);
-  if (!url) {
+  gboolean local = g_str_has_prefix (cover_id, "local:");
+  g_autofree gchar *url = local ? NULL : spotifygtk_cover_build_url (cover_id);
+  if (!local && !url) {
     g_warning ("cover: refusing malformed image id");
     callback (NULL, user_data);
     pending_request_free (req);

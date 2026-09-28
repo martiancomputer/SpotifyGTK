@@ -765,6 +765,8 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
   ctx->track = spotifygtk_native_track_copy (track);
   ctx->share_url = spotifygtk_track_share_url (ctx->track->uri);
   ctx->position = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (row), "row-position"));
+  gboolean local = ctx->track->uri &&
+    g_str_has_prefix (ctx->track->uri, "local:track:");
 
   SpotifyGtkContextMenu *menu = spotifygtk_context_menu_new ();
 
@@ -774,21 +776,24 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
    * "Remove" when the track is already saved.
    */
   gboolean liked = spotifygtk_track_row_get_liked (SPOTIFYGTK_TRACK_ROW (row));
-  spotifygtk_context_menu_add (menu,
-                               liked ? "Remove from Liked Songs"
-                                     : "Add to Liked Songs",
-                               TRUE, NULL,
-                               liked ? G_CALLBACK (on_menu_remove_from_liked)
-                                     : G_CALLBACK (on_menu_add_to_liked), NULL);
+  if (!local)
+    spotifygtk_context_menu_add (menu,
+                                 liked ? "Remove from Liked Songs"
+                                       : "Add to Liked Songs",
+                                 TRUE, NULL,
+                                 liked ? G_CALLBACK (on_menu_remove_from_liked)
+                                       : G_CALLBACK (on_menu_add_to_liked), NULL);
   /*
    * Inside a playlist the useful verb is the opposite one. Every row on this
    * page is in the playlist being viewed, by definition, so there is nothing
    * to check -- the entry swaps rather than being added alongside.
    */
-  if (self->playlist_uri)
+  /* A local URI is not a Spotify collection object. Keep shared playback
+   * actions, but never submit it to a remote playlist write. */
+  if (!local && self->playlist_uri)
     spotifygtk_context_menu_add (menu, "Remove from this Playlist", TRUE, NULL,
                                  G_CALLBACK (on_menu_remove_from_playlist), NULL);
-  else
+  else if (!local)
     spotifygtk_context_menu_add (menu, "Add to Playlist…", TRUE, NULL,
                                  G_CALLBACK (on_menu_add_to_playlist), NULL);
   spotifygtk_context_menu_add (menu, "Add to Queue", TRUE, NULL,
