@@ -5404,13 +5404,12 @@ static const gchar *palette_white =
   "@define-color scroll_hover #b8b8b8;@define-color pill_hover #dcdcdc;"
   "@define-color art_bg #e6e6e6;     @define-color art_glyph #bcbcbc;";
 
-/* Dark+ keeps the main canvas AMOLED black, then uses a restrained charcoal
- * hierarchy so cards, hover states and popovers remain distinct instead of
- * disappearing into one flat surface. The original Dark palette above stays
- * exactly as shipped. */
+/* Dark+ uses the same light-center/dark-surround hierarchy as Dark, with a
+ * near-black canvas and AMOLED-black side panels and chrome. Cards, hover
+ * states and popovers remain distinct from both surfaces. */
 static const gchar *palette_dark_plus =
-  "@define-color bg_chrome #000000;  @define-color bg_panel #080808;"
-  "@define-color bg_content #000000; @define-color bg_card #121212;"
+  "@define-color bg_chrome #000000;  @define-color bg_panel #000000;"
+  "@define-color bg_content #080808; @define-color bg_card #121212;"
   "@define-color bg_hover #1a1a1a;   @define-color bg_hover_row #161616;"
   "@define-color bg_selected #202020;@define-color bg_selected_row #202020;"
   "@define-color border #242424;"
