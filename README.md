@@ -126,6 +126,38 @@ Smart Shuffle is Connect-aware: official clients can enable it, SpotifyGTK
 fetches and interleaves song-radio recommendations, and disabling it restores
 the original sequential queue rather than leaving recommendations behind.
 
+Local files can be added from Settings when the app is built with FFmpeg
+development libraries. The background scanner reads FLAC, Opus, WAV, M4A and
+AAC files from the selected folders, uses their tags and embedded artwork, and
+shows local albums alongside saved Spotify releases in Library. Local track
+identities survive renames and moves on the same filesystem. Files that go
+missing are omitted from playback until they return.
+
+Liked Songs combines Spotify likes with a separate, persistent set of local
+favorites. Device-only playlists can contain local and Spotify tracks, and
+local tracks can also be added to a Spotify playlist as a device-only overlay.
+Their order is retained on this device; local entries are never uploaded to
+Spotify. Local and Spotify tracks can share the client queue. Explicit queue
+additions remain in place when Smart Shuffle changes the Spotify context, and
+Smart Shuffle is unavailable for contexts containing local tracks. A Spotify
+sequence interrupted by local playback resumes afterward.
+
+Previously loaded Spotify album and playlist tracks can remain browsable from
+the in-memory session cache after sign-out. Trying to play a Spotify track
+while signed out displays a dismissible sign-in banner and leaves local
+playback and the queue alone. You can sign in again without restarting or
+stopping local playback. Sign-out offers the choice to clear Spotify's cached
+media and metadata or keep them; local artwork, indexes, favorites and
+device-only playlists are kept either way.
+
+Settings include compact or expanded album and playlist pages, a page
+crossfade switch, and adjustable mouse-wheel smoothness. Audio output can be
+set to Default, 44.1, 48, 96, 192 or 384 kHz, with 16, 24 or 32-bit PCM
+containers and either a polyphase or linear resampler. Spotify's current
+decoder produces 16-bit audio, so a wider output container does not restore
+precision already lost in decoding. Local `.lrc` lyrics work without a
+network lookup; optional LRCLIB lookup is off by default.
+
 The interface includes a slim app-wide loading indicator and selectable GTK
 renderers—Automatic, Vulkan, OpenGL and Cairo—from Settings. Renderer changes
 take effect after restarting the app; an explicit `GSK_RENDERER` environment
@@ -169,6 +201,11 @@ file they came from — see `THIRD_PARTY_LICENSES`.
 Run the tests with `meson test -C build --print-errorlogs`. Development
 switches, the roadmap and the design principles are in
 [research/internals.md](research/internals.md).
+
+If you run into a bug, lag, or other unexpected behavior, please [open an
+issue](https://github.com/martiancomputer/SpotifyGTK/issues). Include steps to
+reproduce it, your operating system and build profile, and any relevant logs
+after checking them for account details or other private information.
 
 ---
 
