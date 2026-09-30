@@ -8,6 +8,7 @@
 #include "log_file.h"
 #include "ui/cover_loader.h"
 #include "ui/settings.h"
+#include "ui/frame_stats.h"
 
 static gboolean
 stats_tick (gpointer data)
@@ -23,6 +24,7 @@ log_active_renderer (GtkWidget *widget, gpointer user_data)
   GskRenderer *renderer = gtk_native_get_renderer (GTK_NATIVE (widget));
   g_message ("renderer: active=%s",
              renderer ? G_OBJECT_TYPE_NAME (renderer) : "unavailable");
+  spotifygtk_frame_stats_attach (widget);
   (void) user_data;
 }
 

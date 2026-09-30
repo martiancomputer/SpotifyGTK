@@ -569,13 +569,8 @@ spotifygtk_ap_session_connect_finish (SpotifyApSession *self, GAsyncResult *resu
  * the header started), then verify the MAC before dispatching to a
  * handler.
  *
- * The header read is async (so this doesn't block waiting for the
- * *next* packet to arrive at all); the payload+MAC read is a
- * synchronous read_all once the header tells us how many bytes to
- * expect, since by that point the data is either already buffered or
- * arriving imminently as part of the same logical packet -- avoids
- * threading a second GAsyncResult through for what's normally a tiny,
- * already-in-flight read. */
+ * Both reads must accumulate TCP fragments asynchronously. A short read is
+ * not EOF, and receiving a header does not guarantee its body is buffered. */
 
 static void start_next_read (SpotifyApSession *self);
 
@@ -589,63 +584,84 @@ emit_disconnected_once (SpotifyApSession *self, GError *error)
 }
 
 static void
+on_payload_read (GObject *source, GAsyncResult *result, gpointer user_data);
+
+typedef struct {
+  SpotifyApSession *self;
+  GSocketConnection *connection;
+  guint8 header[3];
+  guint8 *body;
+  guint16 length;
+} PacketRead;
+
+static void
+packet_read_free (PacketRead *read)
+{
+  g_free (read->body);
+  g_object_unref (read->connection);
+  g_object_unref (read->self);
+  g_free (read);
+}
+
+static gboolean
+packet_read_finish (PacketRead *read, GObject *source, GAsyncResult *result,
+                    gsize expected)
+{
+  g_autoptr(GError) err = NULL;
+  gsize received = 0;
+  gboolean ok = g_input_stream_read_all_finish (G_INPUT_STREAM (source), result,
+                                                &received, &err);
+  SpotifyApSession *self = read->self;
+  /* A callback from an explicitly closed/replaced connection must not tear
+   * down a newer session or dispatch an old packet into it. */
+  if (!self->connected || self->connection != read->connection)
+    return FALSE;
+  if (ok && received == expected)
+    return TRUE;
+  self->header_read_pending = FALSE;
+  if (!err)
+    err = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CLOSED,
+                               "AP connection closed during packet read");
+  g_message ("ap.c: receive loop stopped: %s", err->message);
+  spotifygtk_ap_session_disconnect (self);
+  emit_disconnected_once (self, err);
+  return FALSE;
+}
+
+static void
 on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
 {
-  SpotifyApSession *self = user_data;
-  g_autoptr(GError) err = NULL;
-
-  self->header_read_pending = FALSE;
-
-  GBytes *header_bytes = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &err);
-  if (!header_bytes || g_bytes_get_size (header_bytes) < 3) {
-    g_autoptr(GError) close_err = NULL;
-    if (err) {
-      g_warning ("ap.c: receive loop header read failed: %s", err->message);
-      close_err = g_error_copy (err);
-    } else {
-      g_message ("ap.c: AP connection closed by remote end");
-      close_err = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CLOSED,
-                                       "AP connection closed by remote end");
-    }
-    g_clear_pointer (&header_bytes, g_bytes_unref);
-    spotifygtk_ap_session_disconnect (self);
-    emit_disconnected_once (self, close_err);
-    g_object_unref (self);  /* matches the ref taken in start_next_read() */
-    return;  /* loop stops -- no automatic reconnect at this layer */
-  }
-
-  shannon_nonce_u32 (&self->recv_cipher, self->recv_nonce);
-
-  gsize hlen = 0;
-  const guint8 *hdata = g_bytes_get_data (header_bytes, &hlen);
-  guint8 header[3];
-  memcpy (header, hdata, 3);
-  g_bytes_unref (header_bytes);
-
-  shannon_decrypt (&self->recv_cipher, header, 3);
-
-  ApCommandId cmd     = (ApCommandId) header[0];
-  guint16     pay_len = (guint16) ((header[1] << 8) | header[2]);
-
-  GInputStream *in = g_io_stream_get_input_stream (G_IO_STREAM (self->connection));
-
-  g_autofree guint8 *payload_and_mac = g_malloc ((gsize) pay_len + 4);
-  if (!g_input_stream_read_all (in, payload_and_mac, (gsize) pay_len + 4,
-                                NULL, self->cancellable, &err)) {
-    g_warning ("ap.c: receive loop payload read failed: %s", err ? err->message : "unknown");
-    spotifygtk_ap_session_disconnect (self);
-    g_autoptr(GError) payload_err = err ? g_error_copy (err) :
-      g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "receive loop payload read failed");
-    emit_disconnected_once (self, payload_err);
-    g_object_unref (self);
+  PacketRead *read = user_data;
+  SpotifyApSession *self = read->self;
+  if (!packet_read_finish (read, source, result, sizeof read->header)) {
+    packet_read_free (read);
     return;
   }
+  shannon_nonce_u32 (&self->recv_cipher, self->recv_nonce);
+  shannon_decrypt (&self->recv_cipher, read->header, sizeof read->header);
+  read->length = (guint16) ((read->header[1] << 8) | read->header[2]);
+  read->body = g_malloc ((gsize) read->length + 4);
+  g_input_stream_read_all_async (G_INPUT_STREAM (source), read->body,
+                                 (gsize) read->length + 4, G_PRIORITY_DEFAULT,
+                                 self->cancellable, on_payload_read, read);
+}
 
-  guint8 *payload_ptr = payload_and_mac;
+static void
+on_payload_read (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  PacketRead *read = user_data;
+  SpotifyApSession *self = read->self;
+  if (!packet_read_finish (read, source, result, (gsize) read->length + 4)) {
+    packet_read_free (read);
+    return;
+  }
+  ApCommandId cmd = (ApCommandId) read->header[0];
+  guint16 pay_len = read->length;
+  guint8 *payload_ptr = read->body;
   if (pay_len > 0)
     shannon_decrypt (&self->recv_cipher, payload_ptr, pay_len);
 
-  const guint8 *expected_mac = payload_and_mac + pay_len;
+  const guint8 *expected_mac = read->body + pay_len;
   if (!shannon_check_mac (&self->recv_cipher, expected_mac, 4)) {
     g_warning ("ap.c: MAC verification failed on incoming packet (cmd=0x%02x) -- "
               "dropping connection, this should never happen on a correct wire", cmd);
@@ -653,7 +669,7 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
     g_autoptr(GError) mac_err = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
                                              "MAC verification failed on incoming packet (cmd=0x%02x)", cmd);
     emit_disconnected_once (self, mac_err);
-    g_object_unref (self);
+    packet_read_free (read);
     return;
   }
 
@@ -687,15 +703,14 @@ on_header_read (GObject *source, GAsyncResult *result, gpointer user_data)
     }
   }
 
-  self->recv_nonce++;
+  if (self->connected && self->connection == read->connection) {
+    self->recv_nonce++;
+    self->header_read_pending = FALSE;
+    start_next_read (self);
+  }
 
-  /* start_next_read() below takes its own fresh ref for the next
-   * iteration; drop the one this callback was holding regardless of
-   * which order these two happen in (single-threaded GMainLoop
-   * context, so there's no window where the refcount could hit zero
-   * between them even if it did matter). */
-  start_next_read (self);
-  g_object_unref (self);
+  /* The next packet owns a separate reference and buffer. */
+  packet_read_free (read);
 }
 
 static void
@@ -704,16 +719,16 @@ start_next_read (SpotifyApSession *self)
   if (!self->connected || !self->connection || self->header_read_pending)
     return;
 
-  /* Ref held across the async gap -- released in on_header_read() on
-   * every exit path. Without this, disposing the session while a
-   * read is in flight would leave the callback firing on a freed
-   * object. */
-  g_object_ref (self);
+  /* Retain the session, connection and buffers across both async reads. */
+  PacketRead *read = g_new0 (PacketRead, 1);
+  read->self = g_object_ref (self);
+  read->connection = g_object_ref (self->connection);
   self->header_read_pending = TRUE;
 
   GInputStream *in = g_io_stream_get_input_stream (G_IO_STREAM (self->connection));
-  g_input_stream_read_bytes_async (in, 3, G_PRIORITY_DEFAULT, self->cancellable,
-                                   on_header_read, self);
+  g_input_stream_read_all_async (in, read->header, sizeof read->header,
+                                 G_PRIORITY_DEFAULT, self->cancellable,
+                                 on_header_read, read);
 }
 
 void
@@ -972,6 +987,7 @@ spotifygtk_ap_session_disconnect (SpotifyApSession *self)
   }
   self->connected = FALSE;
   self->logged_in = FALSE;
+  self->header_read_pending = FALSE;
 }
 
 gboolean

@@ -881,6 +881,10 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_widget_add_controller (card, GTK_EVENT_CONTROLLER (secondary));
 
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  /* The button owns activation and its context menu. Its display-only
+   * artwork and labels should not churn descendant hover states as cards
+   * move beneath a stationary pointer. */
+  gtk_widget_set_can_target (box, FALSE);
   gtk_widget_set_margin_start (box, 8);
   gtk_widget_set_margin_end (box, 8);
   gtk_widget_set_margin_top (box, 8);
@@ -911,6 +915,8 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   g_object_set_data (G_OBJECT (card), "sub",   sub);
 
   gtk_button_set_child (GTK_BUTTON (card), box);
+  /* GtkNoSelection is intentional: opening a card is not selecting it. */
+  gtk_list_item_set_selectable (list_item, FALSE);
   gtk_list_item_set_child (list_item, card);
   (void) factory;
 }

@@ -24,6 +24,7 @@
 #include "cover_loader.h"
 #include "sidebar.h"
 #include "playback_bar.h"
+#include "page_stack.h"
 #include "now_playing_panel.h"
 #include "../audio/sink.h"
 #include "home_page.h"
@@ -5399,6 +5400,8 @@ on_navigation_after_paint (GdkFrameClock *clock, gpointer user_data)
   if (gtk_stack_get_transition_running (self->page_stack))
     return;
 
+  spotifygtk_page_stack_hide_inactive (self->page_stack);
+
   const gchar *visible = gtk_stack_get_visible_child_name (self->page_stack);
   for (guint i = 0; i < self->pending_cover_releases->len; i++) {
     const gchar *page = g_ptr_array_index (self->pending_cover_releases, i);
@@ -5418,6 +5421,7 @@ release_page_covers_after_paint (SpotifyGtkNativeWindow *self,
 {
   GdkFrameClock *clock = gtk_widget_get_frame_clock (GTK_WIDGET (self));
   if (!clock) {
+    spotifygtk_page_stack_hide_inactive (self->page_stack);
     set_page_covers_loaded (self, page_name, FALSE);
     return;
   }
@@ -5466,7 +5470,7 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
   if (g_strcmp0 (page_name, "context") == 0 ||
       g_strcmp0 (page_name, "search") == 0)
     gtk_root_set_focus (GTK_ROOT (self), NULL);
-  gtk_stack_set_visible_child_name (self->page_stack, page_name);
+  spotifygtk_page_stack_show (self->page_stack, page_name);
   if (old_page)
     release_page_covers_after_paint (self, old_page);
 
@@ -6368,6 +6372,9 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->settings_page), "settings");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->context_page), "context");
   gtk_stack_add_named (self->page_stack, GTK_WIDGET (self->artist_page), "artist");
+  /* GtkStack only unmaps its inactive children; their CSS nodes otherwise
+   * remain visible and participate in every animated frame's validation. */
+  spotifygtk_page_stack_hide_inactive (self->page_stack);
 
   /* Every track list — search results, liked songs, and an opened album or
    * artist — routes activation, queueing and album/artist navigation through

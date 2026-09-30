@@ -13,6 +13,8 @@ ui_resources = gnome.compile_resources(
 ui_sources = ui_resources + files(
   'context_menu.c',
   'window.c',
+  'page_stack.c',
+  'frame_stats.c',
   'sidebar.c',
   'playback_bar.c',
   'now_playing_panel.c',

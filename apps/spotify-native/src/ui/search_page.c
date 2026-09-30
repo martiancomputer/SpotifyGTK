@@ -146,6 +146,9 @@ show_message (SpotifyGtkSearchPage *self, const gchar *text)
   gtk_widget_set_visible (GTK_WIDGET (self->message), text && *text);
 }
 
+static gint
+search_scrollbar_top (SpotifyGtkSearchPage *self, GtkAdjustment *adj);
+
 static void
 update_scrollbar_visibility (SpotifyGtkSearchPage *self)
 {
@@ -157,9 +160,12 @@ update_scrollbar_visibility (SpotifyGtkSearchPage *self)
   gboolean scrollable = self->header_extent > 0 &&
     gtk_adjustment_get_upper (adj) > gtk_adjustment_get_page_size (adj) + 1 &&
     self->header_extent - gtk_adjustment_get_value (adj) < height;
-  gtk_widget_set_visible (self->scrollbar, scrollable);
-  self->scrollbar_top = -1;
-  gtk_widget_queue_allocate (self->scroll_overlay);
+  gboolean changed = gtk_widget_get_visible (self->scrollbar) != scrollable;
+  if (changed)
+    gtk_widget_set_visible (self->scrollbar, scrollable);
+  if (scrollable && (changed ||
+      search_scrollbar_top (self, adj) != self->scrollbar_top))
+    gtk_widget_queue_allocate (self->scroll_overlay);
 }
 
 static gint
@@ -759,6 +765,8 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   gtk_overlay_add_overlay (GTK_OVERLAY (self->scroll_overlay), self->scrollbar);
   gtk_overlay_set_measure_overlay (GTK_OVERLAY (self->scroll_overlay),
                                    self->scrollbar, FALSE);
+  gtk_overlay_set_clip_overlay (GTK_OVERLAY (self->scroll_overlay),
+                                self->scrollbar, TRUE);
   gtk_widget_set_visible (self->scrollbar, FALSE);
   gtk_box_append (GTK_BOX (self), self->scroll_overlay);
 

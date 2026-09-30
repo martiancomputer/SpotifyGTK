@@ -1,4 +1,34 @@
 if get_option('tests')
+  if enable_gui
+    test_track_row_pointer = executable('test-track-row-pointer',
+      'test_track_row_pointer.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [gtk4_dep, adw_check, json_glib_dep, m_dep],
+    )
+    test('track-row-pointer-routing', test_track_row_pointer, timeout: 10)
+    test_smooth_scroll = executable('test-smooth-scroll',
+      'test_smooth_scroll.c', '../src/ui/settings.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [gtk4_dep, gio_dep, m_dep],
+    )
+    test('smooth-scroll-coordinates', test_smooth_scroll, timeout: 10)
+    test_page_stack = executable('test-page-stack',
+      'test_page_stack.c', '../src/ui/page_stack.c',
+      include_directories: [include_directories('../src')],
+      dependencies: [gtk4_dep],
+    )
+    test('page-stack-visibility', test_page_stack, timeout: 10)
+  endif
+  test_ap_framing = executable('test-ap-framing',
+    'test_ap_framing.c',
+    '../src/spotify/apresolve.c', '../src/spotify/dh.c',
+    '../src/spotify/handshake_crypto.c', '../src/spotify/protobuf_min.c',
+    '../src/spotify/shannon.c', '../src/log_file.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: openssl_dep.found() ? [glib_dep, gio_dep, soup_dep, json_glib_dep, openssl_dep] : [glib_dep, gio_dep, soup_dep, json_glib_dep],
+  )
+  test('ap-packet-framing', test_ap_framing, timeout: 10)
+
   test_shannon = executable('test-shannon',
     'test_shannon.c',
     '../src/spotify/shannon.c',

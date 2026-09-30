@@ -90,6 +90,14 @@ smooth_scroll_free (gpointer data)
 static void
 set_adjustment_value (SmoothScroll *ss, GtkAdjustment *adj, gdouble value)
 {
+  /* GtkListBase stores adjustment positions as integers, then configures
+   * the adjustment from that integer anchor during allocation. Fractional
+   * wheel writes therefore generate a second value-changed every frame.
+   * Match its coordinate precision before notifying the view. Other
+   * scrollable widgets retain their subpixel motion. */
+  GtkWidget *child = gtk_scrolled_window_get_child (ss->scroller);
+  if (GTK_IS_LIST_VIEW (child) || GTK_IS_GRID_VIEW (child))
+    value = round (value);
   ss->writing_adjustment = TRUE;
   gtk_adjustment_set_value (adj, value);
   ss->writing_adjustment = FALSE;

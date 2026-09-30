@@ -453,6 +453,7 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   self->show_artists = TRUE;
 
   self->section_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_can_target (self->section_row, FALSE);
   gtk_widget_set_margin_start (self->section_row, 8);
   gtk_widget_set_margin_end (self->section_row, 8);
   gtk_widget_set_margin_top (self->section_row, 18);
@@ -479,6 +480,11 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
 
   /* Track number / album art / playing indicator */
   GtkWidget *cover_slot = gtk_overlay_new ();
+  /* These subtrees are display-only. Picking their labels/images adds hover
+   * states at every nesting level, propagating CSS invalidation through the
+   * virtual list's sibling rows. Route pointer input to the row instead;
+   * the action overlay remains a separate, interactive target. */
+  gtk_widget_set_can_target (cover_slot, FALSE);
   gtk_widget_set_size_request (cover_slot, ROW_COVER_PX, ROW_COVER_PX);
   gtk_widget_set_overflow (cover_slot, GTK_OVERFLOW_HIDDEN);
 
@@ -500,6 +506,7 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
 
   /* Track info */
   GtkWidget *info = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+  gtk_widget_set_can_target (info, FALSE);
   gtk_widget_set_hexpand (info, TRUE);
 
   self->title_label = GTK_LABEL (gtk_label_new ("Track"));
@@ -548,6 +555,7 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
    * them in place keeps that column straight whichever row is playing.
    */
   self->status_slot = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_can_target (self->status_slot, FALSE);
   gtk_widget_set_size_request (self->status_slot, ROW_STATUS_WIDTH, -1);
   gtk_widget_set_halign (self->status_slot, GTK_ALIGN_END);
   gtk_widget_set_margin_end (self->status_slot, ROW_STATUS_MARGIN_END);

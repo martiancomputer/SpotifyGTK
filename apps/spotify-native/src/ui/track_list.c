@@ -945,7 +945,11 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   }
   gtk_list_item_set_focusable (list_item, TRUE);
   gtk_list_item_set_activatable (list_item, TRUE);
-  gtk_list_item_set_selectable (list_item, TRUE);
+  /* This view uses GtkNoSelection. In single-click mode GTK otherwise
+   * attempts selection on hover and moves its selection tracker even when
+   * the model rejects selection. Activation and keyboard focus are separate
+   * capabilities and must remain enabled. */
+  gtk_list_item_set_selectable (list_item, FALSE);
   if (gtk_list_item_get_child (list_item) != GTK_WIDGET (row))
     gtk_list_item_set_child (list_item, GTK_WIDGET (row));
 
