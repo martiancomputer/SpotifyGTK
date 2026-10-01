@@ -689,9 +689,9 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   self->aggressive = spotifygtk_settings_get_aggressive_filtering (settings);
   g_signal_connect (settings, "changed", G_CALLBACK (on_settings_changed), self);
 
-  /* The title, horizontal album shelf and tracks share one virtualised
-   * vertical adjustment. The header is its first list item, so nothing can
-   * scroll underneath a separate stationary rack. */
+  /* The horizontal album shelf and tracks share one virtualised vertical
+   * adjustment. The shelf header is its first list item, so neither section
+   * can scroll underneath the other. */
   self->results = spotifygtk_track_list_new ();
   /* Inset only track rows, leaving the shelf's horizontal viewport flush
    * with the page edges. The external vertical bar does not reserve width. */
@@ -707,13 +707,22 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
 
   GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
   gtk_widget_set_hexpand (header, TRUE);
-  gtk_widget_set_margin_top (header, 24);
+  /* Search controls stay fixed like the other collection pages. Only the
+   * shelf and tracks belong to the virtual page header/list item, sharing a
+   * single vertical adjustment. Keeping the entry out of GtkListView avoids
+   * restyling it on every scroll and leaves its focus position stable. */
+  gtk_widget_set_size_request (header, -1, 1);
+  gtk_widget_set_margin_top (header, 2);
   gtk_widget_set_margin_bottom (header, 10);
+  GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_set_hexpand (controls, TRUE);
+  gtk_widget_set_margin_top (controls, 24);
+  gtk_widget_set_margin_bottom (controls, 10);
 
   GtkWidget *title = gtk_label_new ("Search");
   gtk_widget_add_css_class (title, "title-text");
   gtk_label_set_xalign (GTK_LABEL (title), 0.5);
-  gtk_box_append (GTK_BOX (header), title);
+  gtk_box_append (GTK_BOX (controls), title);
 
   self->entry = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
   gtk_widget_set_size_request (GTK_WIDGET (self->entry), 460, -1);
@@ -721,12 +730,13 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   gtk_search_entry_set_placeholder_text (self->entry, "Songs, artists, albums");
   g_signal_connect (self->entry, "search-changed", G_CALLBACK (on_search_changed), self);
   g_signal_connect (self->entry, "activate", G_CALLBACK (on_search_activate), self);
-  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->entry));
+  gtk_box_append (GTK_BOX (controls), GTK_WIDGET (self->entry));
 
   self->message = GTK_LABEL (gtk_label_new (NULL));
   gtk_widget_add_css_class (GTK_WIDGET (self->message), "dim-label");
   gtk_widget_set_visible (GTK_WIDGET (self->message), FALSE);
-  gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->message));
+  gtk_box_append (GTK_BOX (controls), GTK_WIDGET (self->message));
+  gtk_box_append (GTK_BOX (self), controls);
 
   self->albums_section = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_margin_top (self->albums_section, 8);

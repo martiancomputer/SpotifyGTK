@@ -338,11 +338,16 @@ update_velocity_overscan (gpointer user_data)
     }
   }
 
-  gdouble row_extent = upper / n;
-  if (row_extent < 1.0) {
-    trace_overscan_end (self, started_us);
-    return G_SOURCE_REMOVE;
-  }
+  gdouble measured_extent = upper / n;
+  /* GtkListView can publish the model before measuring its rows. For a frame
+   * its adjustment then reports only one viewport of height, so dividing by
+   * the full model yields a fictitious 2-3px row. Treating that provisional
+   * geometry as real selected hundreds of bound Search rows for artwork and
+   * filled the cover queue. A track's 40px cover slot alone is taller than
+   * this floor. Retain a useful first viewport while GTK finishes measuring;
+   * the next adjustment-geometry notification reconciles the final range. */
+  gboolean geometry_trusted = measured_extent >= 40.0;
+  gdouble row_extent = MAX (measured_extent, 40.0);
 
   guint visible_first = MIN ((guint) (value / row_extent), n - 1);
   guint visible_last = MIN ((guint) ((value + page - 1.0) / row_extent), n - 1);
@@ -428,7 +433,7 @@ update_velocity_overscan (gpointer user_data)
      * viewport until it leaves, but never start a decode merely because a
      * transient row passed under the viewport. New work belongs exclusively
      * to the landing window computed above. */
-    gboolean allocated = !destination &&
+    gboolean allocated = geometry_trusted && !destination &&
       row_in_allocated_viewport (self, GTK_WIDGET (row));
     gboolean load_visible = allocated && !smooth_active;
     gboolean current_and_shown = allocated &&
