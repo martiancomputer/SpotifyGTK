@@ -69,6 +69,7 @@ void spotifygtk_playlist_add_tracks (SpotifyMercury            *mercury,
 typedef struct {
   gchar *uri;
   gchar *name;
+  gint64 added_at; /* rootlist item timestamp, seconds; 0 when unavailable */
 } SpotifyPlaylistEntry;
 
 /*

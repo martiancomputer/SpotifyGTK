@@ -6,14 +6,14 @@
  * path everything else uses. Those are genuinely albums the user has saved
  * tracks from, so the grid is real library data, not filler.
  *
- * Playlists used to be a footer here, saying they were unavailable. That cost
- * the grid a permanent row of albums to display one sentence, so it now lives
- * on its own page (see window.c) and this page is albums only.
+ * The optional unified view reuses the same virtualized card grid for saved
+ * releases, local albums, and playlist cards. No nested scroller is added.
  */
 
 #include "library_page.h"
 #include "album_grid.h"
 #include "local_catalog.h"
+#include "settings.h"
 #include "../log_file.h"
 #include "../spotify/collection.h"
 
@@ -97,6 +97,7 @@ typedef enum {
   LIBRARY_SINGLES,
   LIBRARY_ARTISTS,
   LIBRARY_LOCAL,
+  LIBRARY_PLAYLISTS,
   N_LIBRARY_VIEWS
 } LibraryView;
 
@@ -116,6 +117,8 @@ struct _SpotifyGtkLibraryPage {
   GtkWidget            *view_buttons[N_LIBRARY_VIEWS];
   LibraryView           active_view;
   GPtrArray            *saved_releases; /* SpotifyNativeRelease*, owned */
+  GPtrArray            *playlists; /* owned playlist card snapshots */
+  gboolean              separate_playlists;
   SpotifyGtkLocalSnapshot *local_snapshot; /* referenced; immutable until swap */
   GPtrArray            *saved_album_uris; /* gchar*, gathered across pages */
   GHashTable           *saved_album_dates; /* album URI -> added_at */
@@ -127,6 +130,7 @@ struct _SpotifyGtkLibraryPage {
    * failure album_grid.c's add_card comment describes. */
   guint                 generation;
   GtkWidget            *header_revealer; /* title + heading, folds away on scroll */
+  GtkWidget            *new_playlist_button;
   SpotifyNativeSession *session;         /* not owned */
   GCancellable         *load_cancel;
   guint                 load_timeout_id;
@@ -137,7 +141,7 @@ struct _SpotifyGtkLibraryPage {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkLibraryPage, spotifygtk_library_page, GTK_TYPE_BOX)
 
-enum { LOADING_CHANGED, N_SIGNALS };
+enum { LOADING_CHANGED, NEW_PLAYLIST_REQUESTED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 static void
@@ -162,6 +166,7 @@ spotifygtk_library_page_dispose (GObject *object)
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
+  g_clear_pointer (&self->playlists, g_ptr_array_unref);
   spotifygtk_local_snapshot_unref (self->local_snapshot);
   self->local_snapshot = NULL;
   g_clear_pointer (&self->followed_artist_uris, g_ptr_array_unref);
@@ -176,6 +181,17 @@ spotifygtk_library_page_class_init (SpotifyGtkLibraryPageClass *klass)
   signals[LOADING_CHANGED] = g_signal_new ("loading-changed",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
+  signals[NEW_PLAYLIST_REQUESTED] = g_signal_new ("new-playlist-requested",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 0);
+}
+
+static void
+on_new_playlist_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkLibraryPage *self = user_data;
+  g_signal_emit (self, signals[NEW_PLAYLIST_REQUESTED], 0);
+  (void) button;
 }
 
 /* === Loading saved albums === */
@@ -233,6 +249,7 @@ release_in_view (const SpotifyNativeRelease *release, LibraryView view)
     case LIBRARY_ALL:
       return TRUE;
     case LIBRARY_LOCAL:
+    case LIBRARY_PLAYLISTS:
       return FALSE;
     case LIBRARY_EPS:
       return release->type == SPOTIFY_ALBUM_TYPE_EP;
@@ -274,8 +291,20 @@ sort_releases_by_date_added (SpotifyGtkLibraryPage *self)
 typedef struct {
   const SpotifyNativeRelease *release;
   const SpotifyGtkLocalAlbum *local;
+  const SpotifyGtkCardSpec *playlist;
   gint64 date;
 } LibraryCardEntry;
+
+static void
+library_playlist_free (gpointer data)
+{
+  SpotifyGtkCardSpec *card = data;
+  g_free ((gchar *) card->uri);
+  g_free ((gchar *) card->title);
+  g_free ((gchar *) card->subtitle);
+  g_free ((gchar *) card->cover_id);
+  g_free (card);
+}
 
 static gint
 library_card_compare (gconstpointer a, gconstpointer b)
@@ -284,8 +313,10 @@ library_card_compare (gconstpointer a, gconstpointer b)
   const LibraryCardEntry *right = b;
   if (left->date != right->date)
     return left->date > right->date ? -1 : 1;
-  const gchar *left_name = left->local ? left->local->title : left->release->name;
-  const gchar *right_name = right->local ? right->local->title : right->release->name;
+  const gchar *left_name = left->playlist ? left->playlist->title :
+    left->local ? left->local->title : left->release->name;
+  const gchar *right_name = right->playlist ? right->playlist->title :
+    right->local ? right->local->title : right->release->name;
   return g_strcmp0 (left_name, right_name);
 }
 
@@ -319,6 +350,17 @@ show_release_view (SpotifyGtkLibraryPage *self)
       g_array_append_val (entries, entry);
     }
   }
+  if (!self->separate_playlists &&
+      (self->active_view == LIBRARY_ALL ||
+       self->active_view == LIBRARY_PLAYLISTS)) {
+    for (guint i = 0; self->playlists && i < self->playlists->len; i++) {
+      const SpotifyGtkCardSpec *playlist = g_ptr_array_index (self->playlists, i);
+      LibraryCardEntry entry = { .playlist = playlist,
+                                 .date = playlist->added_at > 0
+                                   ? playlist->added_at : -(gint64) i - 1 };
+      g_array_append_val (entries, entry);
+    }
+  }
 
   /* Sort once before the grid's batched model replacement. */
   g_array_sort (entries, library_card_compare);
@@ -331,18 +373,20 @@ show_release_view (SpotifyGtkLibraryPage *self)
     LibraryCardEntry *entry = &g_array_index (entries, LibraryCardEntry, i);
     const SpotifyGtkLocalAlbum *local = entry->local;
     const SpotifyNativeRelease *release = entry->release;
-    gint year = local ? local->year : release->year;
-    gchar *sub = year > 0 ? g_strdup_printf ("%d", year)
-                                   : g_strdup ("");
+    const SpotifyGtkCardSpec *playlist = entry->playlist;
+    gint year = playlist ? 0 : local ? local->year : release->year;
+    gchar *sub = playlist ? g_strdup (playlist->subtitle) :
+      year > 0 ? g_strdup_printf ("%d", year) : g_strdup ("");
     g_ptr_array_add (subs, sub);
-    specs[out].uri      = local ? local->uri : release->uri;
-    specs[out].title    = local ? local->title :
+    specs[out].uri      = playlist ? playlist->uri : local ? local->uri : release->uri;
+    specs[out].title    = playlist ? playlist->title : local ? local->title :
                           release->name ? release->name : "Unknown release";
     specs[out].subtitle = sub;
-    specs[out].cover_id = local ? local->cover_id : release->cover_id;
+    specs[out].cover_id = playlist ? playlist->cover_id :
+                          local ? local->cover_id : release->cover_id;
     out++;
   }
-  spotifygtk_album_grid_set_cards (self->albums, specs, out);
+  spotifygtk_album_grid_set_pending_cards (self->albums, specs, out);
   g_array_unref (entries);
 
   const gchar *empty = self->active_view == LIBRARY_EPS
@@ -353,9 +397,53 @@ show_release_view (SpotifyGtkLibraryPage *self)
         ? "No saved or local releases yet."
       : self->active_view == LIBRARY_LOCAL
         ? "No local albums yet. Add a music folder in Settings."
+      : self->active_view == LIBRARY_PLAYLISTS
+        ? "No playlists yet."
       : "No saved albums yet.";
   gtk_widget_set_visible (self->albums_status, out == 0);
   gtk_label_set_text (GTK_LABEL (self->albums_status), out == 0 ? empty : "");
+}
+
+void
+spotifygtk_library_page_set_playlists (SpotifyGtkLibraryPage *self,
+                                        const SpotifyGtkCardSpec *cards,
+                                        guint n_cards)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
+  g_autoptr(GPtrArray) next = g_ptr_array_new_with_free_func (library_playlist_free);
+  for (guint i = 0; cards && i < n_cards; i++) {
+    if (!cards[i].uri) continue;
+    SpotifyGtkCardSpec *card = g_new0 (SpotifyGtkCardSpec, 1);
+    card->uri = g_strdup (cards[i].uri);
+    card->title = g_strdup (cards[i].title);
+    card->subtitle = g_strdup (cards[i].subtitle);
+    card->cover_id = g_strdup (cards[i].cover_id);
+    card->added_at = cards[i].added_at;
+    g_ptr_array_add (next, card);
+  }
+  g_clear_pointer (&self->playlists, g_ptr_array_unref);
+  self->playlists = g_steal_pointer (&next);
+  if (!self->separate_playlists &&
+      (self->active_view == LIBRARY_ALL ||
+       self->active_view == LIBRARY_PLAYLISTS))
+    show_release_view (self);
+}
+
+static void
+on_library_settings_changed (SpotifyGtkSettings *settings,
+                             SpotifyGtkLibraryPage *self)
+{
+  gboolean separate = spotifygtk_settings_get_show_playlists_separately (settings);
+  if (separate == self->separate_playlists)
+    return;
+  self->separate_playlists = separate;
+  gtk_widget_set_visible (self->view_buttons[LIBRARY_PLAYLISTS], !separate);
+  gtk_widget_set_visible (self->new_playlist_button, !separate);
+  if (separate && self->active_view == LIBRARY_PLAYLISTS)
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (
+      self->view_buttons[LIBRARY_ALL]), TRUE);
+  else if (self->active_view == LIBRARY_ALL)
+    show_release_view (self);
 }
 
 static void
@@ -950,10 +1038,18 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_widget_set_margin_end (header, 35);
   gtk_widget_set_margin_top (header, 24);
 
+  GtkWidget *title_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *title = gtk_label_new ("Library");
   gtk_widget_add_css_class (title, "title-text");
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
-  gtk_box_append (GTK_BOX (header), title);
+  gtk_widget_set_hexpand (title, TRUE);
+  gtk_box_append (GTK_BOX (title_row), title);
+  self->new_playlist_button = gtk_button_new_with_label ("New device playlist");
+  gtk_widget_add_css_class (self->new_playlist_button, "dialog-secondary");
+  g_signal_connect (self->new_playlist_button, "clicked",
+                    G_CALLBACK (on_new_playlist_clicked), self);
+  gtk_box_append (GTK_BOX (title_row), self->new_playlist_button);
+  gtk_box_append (GTK_BOX (header), title_row);
 
   /* Match the sort controls elsewhere: caption plus a linked segmented group,
    * pushed to the right edge of the content area. */
@@ -982,7 +1078,7 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_widget_add_css_class (view_group, "linked");
   gtk_widget_set_valign (view_group, GTK_ALIGN_CENTER);
   const gchar *view_names[] = {
-    "All", "Albums", "EPs", "Singles", "Artists", "Local Files"
+    "All", "Albums", "EPs", "Singles", "Artists", "Local Files", "Playlists"
   };
   for (guint i = 0; i < N_LIBRARY_VIEWS; i++) {
     GtkWidget *button = gtk_toggle_button_new_with_label (view_names[i]);
@@ -1068,6 +1164,15 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_stack_set_visible_child_name (self->content_stack, "releases");
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->content_stack));
   self->active_view = LIBRARY_ALL;
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  self->separate_playlists =
+    spotifygtk_settings_get_show_playlists_separately (settings);
+  gtk_widget_set_visible (self->view_buttons[LIBRARY_PLAYLISTS],
+                          !self->separate_playlists);
+  gtk_widget_set_visible (self->new_playlist_button,
+                          !self->separate_playlists);
+  g_signal_connect_object (settings, "changed",
+                           G_CALLBACK (on_library_settings_changed), self, 0);
   gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->view_buttons[0]), TRUE);
 
   SpotifyGtkLocalCatalog *catalog = spotifygtk_local_catalog_get_default ();

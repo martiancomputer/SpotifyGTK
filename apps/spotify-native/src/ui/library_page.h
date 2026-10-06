@@ -1,11 +1,8 @@
 /*
  * library_page.h — Library page.
  *
- * The playlist list needs spclient's rootlist endpoint, which returns
- * playlist4_external protobuf rather than the JSON the rest of the catalog
- * path uses. Until that parser exists this page says so, rather than
- * falling back to api.spotify.com — see the README status table for why
- * that path is unusable.
+ * Saved releases, local albums, and optionally playlists share one virtualized
+ * card grid. The window owns the rootlist request and supplies playlist cards.
  */
 
 #pragma once
@@ -27,6 +24,12 @@ SpotifyGtkLibraryPage *spotifygtk_library_page_new (void);
 void spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
                                           SpotifyNativeSession  *session);
 void spotifygtk_library_page_refresh (SpotifyGtkLibraryPage *self);
+
+/* The window supplies the rootlist/device-playlist snapshot. The page copies
+ * it, so the rootlist callback may release its temporary entries immediately. */
+void spotifygtk_library_page_set_playlists (SpotifyGtkLibraryPage *self,
+                                             const SpotifyGtkCardSpec *cards,
+                                             guint n_cards);
 
 /* Reflect one confirmed album collection write without rebuilding the whole
  * saved-album catalogue. Saving resolves only that album's metadata; removing
@@ -52,6 +55,7 @@ void spotifygtk_library_page_set_covers_loaded (SpotifyGtkLibraryPage *self,
 
 /* Signals:
  * - loading-changed (gboolean loading)
+ * - new-playlist-requested ()
  */
 
 G_END_DECLS

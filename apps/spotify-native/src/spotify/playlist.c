@@ -17,6 +17,8 @@
  * parses cleanly and finds nothing. */
 #define PL_LISTITEMS_ITEMS 3
 #define PL_ITEM_URI        1
+#define PL_ITEM_ATTRIBUTES 2
+#define PL_ITEM_TIMESTAMP  2
 #define PL_ADD_FROM_INDEX  1
 #define PL_ADD_ITEMS       2
 #define PL_ADD_ADD_LAST    4
@@ -447,6 +449,19 @@ on_rootlist_read (MercuryResponse *response, gpointer user_data)
           continue;
         SpotifyPlaylistEntry e = { 0 };
         e.uri = g_strndup ((const gchar *) u, ul);
+        const guint8 *attributes = NULL; gsize attributes_len = 0;
+        guint64 stamp = 0;
+        if (pb_find_bytes_field (fd, fl, PL_ITEM_ATTRIBUTES,
+                                 &attributes, &attributes_len) &&
+            pb_find_varint_field (attributes, attributes_len,
+                                  PL_ITEM_TIMESTAMP, &stamp)) {
+          /* Existing playlist4 data uses milliseconds; accept seconds too.
+           * Zero/implausible dates stay undated rather than sorting first. */
+          if (stamp > 1000000000000000ULL) stamp /= 1000000;
+          else if (stamp > 1000000000000ULL) stamp /= 1000;
+          if (stamp >= 946684800ULL && stamp <= G_MAXINT64)
+            e.added_at = (gint64) stamp;
+        }
         g_array_append_val (out, e);
       }
     }

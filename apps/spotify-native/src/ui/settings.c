@@ -22,6 +22,7 @@ struct _SpotifyGtkSettings {
   gboolean eq_enabled;
   gboolean aggressive_filtering;
   gboolean compact_mode;
+  gboolean show_playlists_separately;
   gboolean page_crossfade;
   gboolean caching_enabled;
   gboolean online_lyrics;
@@ -107,6 +108,9 @@ load (SpotifyGtkSettings *self)
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "compact-mode", NULL))
     self->compact_mode =
       g_key_file_get_boolean (kf, SETTINGS_GROUP, "compact-mode", NULL);
+  if (g_key_file_has_key (kf, SETTINGS_GROUP, "show-playlists-separately", NULL))
+    self->show_playlists_separately = g_key_file_get_boolean (
+      kf, SETTINGS_GROUP, "show-playlists-separately", NULL);
   if (g_key_file_has_key (kf, SETTINGS_GROUP, "page-crossfade", NULL))
     self->page_crossfade =
       g_key_file_get_boolean (kf, SETTINGS_GROUP, "page-crossfade", NULL);
@@ -214,6 +218,8 @@ save (SpotifyGtkSettings *self)
                           self->aggressive_filtering);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "compact-mode",
                           self->compact_mode);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "show-playlists-separately",
+                          self->show_playlists_separately);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "page-crossfade",
                           self->page_crossfade);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "caching-enabled",
@@ -295,6 +301,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->caching_enabled = TRUE;
   self->local_files_enabled = TRUE;
   self->compact_mode = TRUE;
+  self->show_playlists_separately = TRUE;
   self->page_crossfade = TRUE;
   self->lyrics_font_size = 19;
   self->scroll_smoothness = 50;
@@ -471,6 +478,26 @@ spotifygtk_settings_set_compact_mode (SpotifyGtkSettings *self,
   if (self->compact_mode == enabled)
     return;
   self->compact_mode = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+gboolean
+spotifygtk_settings_get_show_playlists_separately (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), TRUE);
+  return self->show_playlists_separately;
+}
+
+void
+spotifygtk_settings_set_show_playlists_separately (SpotifyGtkSettings *self,
+                                                    gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->show_playlists_separately == enabled)
+    return;
+  self->show_playlists_separately = enabled;
   save (self);
   g_signal_emit (self, signals[CHANGED], 0);
 }

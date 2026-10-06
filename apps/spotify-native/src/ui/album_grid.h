@@ -63,6 +63,7 @@ typedef struct {
   const gchar *title;
   const gchar *subtitle;
   const gchar *cover_id;
+  gint64 added_at; /* optional seconds since epoch; Library sorts dated cards */
 } SpotifyGtkCardSpec;
 
 /*

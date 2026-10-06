@@ -1659,6 +1659,16 @@ on_list_track_activated (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
     self->repeat);
 }
 
+static void
+on_context_play_requested (SpotifyGtkContextPage *page, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  SpotifyGtkTrackList *list = spotifygtk_context_page_get_list (page);
+  g_autoptr(GPtrArray) tracks = spotifygtk_track_list_snapshot (list);
+  if (tracks && tracks->len > 0)
+    on_list_track_activated (list, g_ptr_array_index (tracks, 0), self);
+}
+
 
 
 
@@ -2293,12 +2303,11 @@ on_shuffle_mode_changed (SpotifyGtkPlaybackBar *bar, guint mode,
   SpotifyGtkNativeWindow *self = user_data;
   (void) bar;
 
-  SpotifyGtkShuffleMode shuffle_mode = MIN (mode, SPOTIFYGTK_SHUFFLE_SMART);
-  if (shuffle_mode == SPOTIFYGTK_SHUFFLE_SMART &&
-      play_context_has_local_tracks (self)) {
-    shuffle_mode = SPOTIFYGTK_SHUFFLE_NORMAL;
+  SpotifyGtkShuffleMode requested = MIN (mode, SPOTIFYGTK_SHUFFLE_SMART);
+  SpotifyGtkShuffleMode shuffle_mode = spotifygtk_shuffle_mode_for_context (
+    requested, play_context_has_local_tracks (self));
+  if (shuffle_mode != requested)
     spotifygtk_playback_bar_set_modes (bar, shuffle_mode, self->repeat);
-  }
   gboolean was_smart = self->smart_shuffle;
   self->shuffle = shuffle_mode != SPOTIFYGTK_SHUFFLE_OFF;
   self->smart_shuffle = shuffle_mode == SPOTIFYGTK_SHUFFLE_SMART;
@@ -2403,6 +2412,7 @@ on_list_remove_from_liked (SpotifyGtkTrackList *list, gpointer track_ptr, gpoint
  */
 typedef struct {
   GWeakRef                window;
+  GWeakRef                grid;
   gchar                  *uri;
   gchar                  *name;      /* from the playlist head */
   guint                   generation;
@@ -2413,6 +2423,7 @@ playlist_card_free (gpointer data)
 {
   PlaylistCard *c = data;
   g_weak_ref_clear (&c->window);
+  g_weak_ref_clear (&c->grid);
   g_free (c->uri);
   g_free (c->name);
   g_free (c);
@@ -2437,10 +2448,11 @@ on_playlist_cover_tracks (GObject *source, GAsyncResult *result, gpointer user_d
   g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
     SPOTIFYGTK_NATIVE_SESSION (source), result, &err);
   g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&c->window);
+  g_autoptr(SpotifyGtkAlbumGrid) grid = g_weak_ref_get (&c->grid);
 
   /* A reload started while this was in flight owns the grid now; anything from
    * the previous pass would append duplicates. */
-  if (!self || !self->playlists_grid ||
+  if (!self || !grid ||
       c->generation != self->playlists_generation) {
     playlist_card_free (c);
     return;
@@ -2452,7 +2464,7 @@ on_playlist_cover_tracks (GObject *source, GAsyncResult *result, gpointer user_d
     if (t) cover = t->cover_id;
   }
 
-  spotifygtk_album_grid_resolve_card (self->playlists_grid, c->uri,
+  spotifygtk_album_grid_resolve_card (grid, c->uri,
                                       c->name ? c->name : c->uri, "Playlist", cover);
   playlist_card_free (c);
 }
@@ -2463,8 +2475,9 @@ on_playlist_card_name (MercuryResponse *response, gpointer user_data)
 {
   PlaylistCard *c = user_data;
   g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&c->window);
+  g_autoptr(SpotifyGtkAlbumGrid) grid = g_weak_ref_get (&c->grid);
 
-  if (!self || !self->playlists_grid ||
+  if (!self || !grid ||
       c->generation != self->playlists_generation) {
     playlist_card_free (c);
     return;
@@ -2588,6 +2601,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
       .uri = entries[i].uri,
       .title = entries[i].name ? entries[i].name : "Playlist",
       .subtitle = "Playlist",
+      .added_at = entries[i].added_at,
     };
   }
   for (guint i = 0; i < device->len; i++) {
@@ -2604,6 +2618,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
       .uri = info->uri, .title = info->name,
       .subtitle = info->overlay ? "Spotify playlist · device entries" :
                   "On this device", .cover_id = info->cover_id,
+      .added_at = info->added_at,
     };
   }
 
@@ -2611,6 +2626,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
    * appending each entry makes GridView revalidate its layout N times before
    * the first frame and can leave that work running until a resize. */
   spotifygtk_album_grid_set_pending_cards (self->playlists_grid, cards, added);
+  spotifygtk_library_page_set_playlists (self->library_page, cards, added);
 
   if (added == 0)
     set_playlists_status (self, ok ? "No playlists yet." :
@@ -2635,6 +2651,7 @@ on_playlist_card_needs_resolve (SpotifyGtkAlbumGrid *grid, const gchar *uri,
 
   PlaylistCard *c = g_new0 (PlaylistCard, 1);
   g_weak_ref_init (&c->window, self);
+  g_weak_ref_init (&c->grid, grid);
   c->uri        = g_strdup (uri);
   c->generation = self->playlists_generation;
 
@@ -2670,10 +2687,12 @@ reload_playlists (SpotifyGtkNativeWindow *self)
         .uri = info->uri, .title = info->name,
         .subtitle = info->overlay ? "Spotify playlist · device entries" :
                     "On this device", .cover_id = info->cover_id,
+        .added_at = info->added_at,
       };
     }
     if (self->playlists_grid)
       spotifygtk_album_grid_set_cards (self->playlists_grid, cards, device->len);
+    spotifygtk_library_page_set_playlists (self->library_page, cards, device->len);
     set_playlists_status (self, device->len ? NULL : "No device playlists yet.");
     return;
   }
@@ -3262,7 +3281,11 @@ on_album_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
   SpotifyGtkNativeWindow *self = user_data;
   if (!uri || !*uri)
     return;
-  navigate_to_context (self, uri, name && *name ? name : "Album", "Album");
+  gboolean playlist = g_str_has_prefix (uri, "spotify:playlist:") ||
+                      g_str_has_prefix (uri, "local:playlist:");
+  navigate_to_context (self, uri, name && *name ? name :
+                       playlist ? "Playlist" : "Album",
+                       playlist ? "Playlist" : "Album");
   (void) grid;
 }
 
@@ -3728,7 +3751,8 @@ on_playlist_removed (gboolean ok, gint32 status, gpointer user_data)
   }
   /* The grid is now a list short; the next visit rebuilds it. */
   self->playlists_loaded = FALSE;
-  navigate_raw (self, "playlists");
+  navigate_raw (self, spotifygtk_settings_get_show_playlists_separately (
+    spotifygtk_settings_get_default ()) ? "playlists" : "library");
 }
 
 static void
@@ -3740,7 +3764,8 @@ on_context_action (const gchar *uri, const gchar *kind, gpointer user_data)
   if (uri && g_str_has_prefix (uri, "local:playlist:")) {
     if (spotifygtk_device_playlists_delete (self->device_playlists, uri)) {
       self->playlists_loaded = FALSE;
-      navigate_raw (self, "playlists");
+      navigate_raw (self, spotifygtk_settings_get_show_playlists_separately (
+        spotifygtk_settings_get_default ()) ? "playlists" : "library");
     }
     return;
   }
@@ -4143,10 +4168,13 @@ mpris_set_property (GDBusConnection *connection, const gchar *sender,
   }
   if (g_str_equal (property_name, "Shuffle")) {
     gboolean enabled = g_variant_get_boolean (value);
+    gboolean was_smart = self->smart_shuffle;
     self->shuffle = enabled;
     self->smart_shuffle = FALSE;
-    self->server_order = FALSE;
-    rebuild_order (self, self->context_index);
+    if (!was_smart || !smart_queue_restore (self)) {
+      self->server_order = FALSE;
+      rebuild_order (self, self->context_index);
+    }
     spotifygtk_settings_set_shuffle (spotifygtk_settings_get_default (), enabled);
     spotifygtk_playback_bar_set_modes (self->playback_bar,
       enabled ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF, self->repeat);
@@ -4438,6 +4466,13 @@ on_new_device_playlist (GtkButton *button, gpointer user_data)
 {
   show_playlist_name_dialog (user_data, NULL, NULL);
   (void) button;
+}
+
+static void
+on_library_new_playlist (SpotifyGtkLibraryPage *page, gpointer user_data)
+{
+  show_playlist_name_dialog (user_data, NULL, NULL);
+  (void) page;
 }
 
 /*
@@ -5481,8 +5516,12 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
    * startup; each page no-ops refresh once it holds data. */
   if (g_strcmp0 (page_name, "liked") == 0)
     spotifygtk_liked_songs_page_refresh (self->liked_page);
-  if (g_strcmp0 (page_name, "library") == 0)
+  if (g_strcmp0 (page_name, "library") == 0) {
     spotifygtk_library_page_refresh (self->library_page);
+    if (!spotifygtk_settings_get_show_playlists_separately (
+          spotifygtk_settings_get_default ()) && !self->playlists_loaded)
+      reload_playlists (self);
+  }
   /*
    * Only if it has nothing yet. Reloading on every visit cleared the grid and
    * rebuilt it from two requests per playlist, so the page visibly emptied and
@@ -5895,6 +5934,9 @@ static const gchar *theme_body =
   ".pick-row:hover { background-color: @bg_hover; }"
   ".track-unavailable { opacity: 0.42; }"
   ".destructive-hover:hover { background-color: @destructive; color: #ffffff; }"
+  ".context-play { background-color: @fg_strong; color: @bg_content;"
+  "  border-radius: 8px; font-weight: 700; padding: 5px 16px; }"
+  ".context-play:hover { opacity: 0.85; }"
   ".destructive-hover:hover label { color: #ffffff; }"
 
   "scrollbar { background-color: transparent; border: none; }"
@@ -6074,6 +6116,14 @@ on_settings_theme_changed (SpotifyGtkSettings *settings, gpointer user_data)
   SpotifyGtkNativeWindow *self = user_data;
   apply_theme (spotifygtk_settings_get_theme (settings));
   apply_eq_from_settings (self);
+  if (self->sidebar) {
+    gboolean separate = spotifygtk_settings_get_show_playlists_separately (settings);
+    spotifygtk_sidebar_set_playlists_visible (self->sidebar, separate);
+    if (!separate && self->page_stack &&
+        g_strcmp0 (gtk_stack_get_visible_child_name (self->page_stack),
+                   "playlists") == 0)
+      navigate_to_page (self, "library");
+  }
   if (self->page_stack) {
     GtkStackTransitionType transition =
       spotifygtk_settings_get_page_crossfade (settings)
@@ -6242,6 +6292,9 @@ spotifygtk_native_window_constructed (GObject *object)
 
   /* Sidebar (270px) */
   self->sidebar = spotifygtk_sidebar_new ();
+  spotifygtk_sidebar_set_playlists_visible (
+    self->sidebar, spotifygtk_settings_get_show_playlists_separately (
+      spotifygtk_settings_get_default ()));
   gtk_widget_set_size_request (GTK_WIDGET (self->sidebar), 270, -1);
   gtk_widget_add_css_class (GTK_WIDGET (self->sidebar), "sidebar");
   g_signal_connect (self->sidebar, "page-activated",
@@ -6295,6 +6348,8 @@ spotifygtk_native_window_constructed (GObject *object)
   self->library_page = spotifygtk_library_page_new ();
   g_signal_connect (self->library_page, "loading-changed",
                     G_CALLBACK (on_page_loading_changed), self);
+  g_signal_connect (self->library_page, "new-playlist-requested",
+                    G_CALLBACK (on_library_new_playlist), self);
   self->settings_page = spotifygtk_settings_page_new ();
   g_signal_connect_swapped (self->settings_page, "log-out",
                             G_CALLBACK (spotifygtk_native_window_log_out), self);
@@ -6306,6 +6361,8 @@ spotifygtk_native_window_constructed (GObject *object)
                                                self->device_playlists);
   g_signal_connect (self->context_page, "loading-changed",
                     G_CALLBACK (on_page_loading_changed), self);
+  g_signal_connect (self->context_page, "play-requested",
+                    G_CALLBACK (on_context_play_requested), self);
   self->artist_page  = spotifygtk_artist_page_new ();
   g_signal_connect (self->artist_page, "loading-changed",
                     G_CALLBACK (on_page_loading_changed), self);
@@ -6392,6 +6449,12 @@ spotifygtk_native_window_constructed (GObject *object)
   wire_album_grid (self, spotifygtk_home_page_get_album_grid (self->home_page));
   wire_album_grid (self, spotifygtk_library_page_get_album_grid (self->library_page));
   wire_album_grid (self, spotifygtk_library_page_get_alt_album_grid (self->library_page));
+  g_signal_connect (spotifygtk_library_page_get_album_grid (self->library_page),
+                    "card-needs-resolve",
+                    G_CALLBACK (on_playlist_card_needs_resolve), self);
+  g_signal_connect (spotifygtk_library_page_get_alt_album_grid (self->library_page),
+                    "card-needs-resolve",
+                    G_CALLBACK (on_playlist_card_needs_resolve), self);
   {
     SpotifyGtkAlbumGrid *artists =
       spotifygtk_library_page_get_artist_grid (self->library_page);

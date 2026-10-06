@@ -11,6 +11,7 @@ typedef struct {
   gchar *uri;
   gchar *name; /* NULL for a Spotify playlist overlay */
   gchar *display_name; /* cached, device-only label for an overlay */
+  gint64 added_at;
   GPtrArray *tracks; /* owned SpotifyNativeTrack, ordered */
 } DevicePlaylist;
 
@@ -43,6 +44,7 @@ playlist_new (const gchar *uri, const gchar *name)
   DevicePlaylist *list = g_new0 (DevicePlaylist, 1);
   list->uri = g_strdup (uri);
   list->name = g_strdup (name);
+  list->added_at = g_get_real_time () / G_USEC_PER_SEC;
   list->tracks = g_ptr_array_new_with_free_func (
     (GDestroyNotify) spotifygtk_native_track_free);
   return list;
@@ -124,6 +126,7 @@ save_playlists (gpointer data)
       g_key_file_set_string (key, group, "name", list->name);
     if (list->display_name)
       g_key_file_set_string (key, group, "display-name", list->display_name);
+    g_key_file_set_int64 (key, group, "added-at", list->added_at);
     g_key_file_set_integer (key, group, "count", list->tracks->len);
     for (guint j = 0; j < list->tracks->len; j++) {
       SpotifyNativeTrack *track = g_ptr_array_index (list->tracks, j);
@@ -199,6 +202,9 @@ spotifygtk_device_playlists_new (void)
     gint count = g_key_file_get_integer (key, group, "count", NULL);
     if (count < 0 || (guint) count > MAX_PLAYLIST_ENTRIES - entries) continue;
     DevicePlaylist *list = playlist_new (uri, name);
+    gint64 added_at = g_key_file_get_int64 (key, group, "added-at", NULL);
+    if (added_at > 0) list->added_at = added_at;
+    else list->added_at = 0; /* old files have no trustworthy creation time */
     if (!name && display_name)
       list->display_name = g_strdup (display_name);
     for (gint j = 0; j < count; j++) {
@@ -395,6 +401,7 @@ spotifygtk_device_playlists_list (SpotifyGtkDevicePlaylists *self)
     info->name = g_strdup (list->name ? list->name :
       list->display_name ? list->display_name : "Spotify playlist with device tracks");
     info->overlay = !list->name;
+    info->added_at = list->added_at;
     if (list->tracks->len)
       info->cover_id = g_strdup (((SpotifyNativeTrack *)
         g_ptr_array_index (list->tracks, 0))->cover_id);

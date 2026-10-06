@@ -73,8 +73,13 @@ test_mixed_playlist_and_overlay (void)
   spotifygtk_device_playlists_set_overlay_name (store, spotify_list, "Remote with local");
   g_autoptr(GPtrArray) listed = spotifygtk_device_playlists_list (store);
   gboolean found_overlay = FALSE;
+  gint64 created_at = 0;
   for (guint i = 0; i < listed->len; i++) {
     SpotifyGtkDevicePlaylistInfo *info = g_ptr_array_index (listed, i);
+    if (g_strcmp0 (info->uri, uri) == 0) {
+      created_at = info->added_at;
+      g_assert_cmpint (created_at, >, 0);
+    }
     if (g_strcmp0 (info->uri, spotify_list) == 0) {
       g_assert_true (info->overlay);
       g_assert_cmpstr (info->name, ==, "Remote with local");
@@ -82,6 +87,7 @@ test_mixed_playlist_and_overlay (void)
     }
   }
   g_assert_true (found_overlay);
+  g_assert_cmpint (created_at, >, 0);
   g_autoptr(GPtrArray) server = g_ptr_array_new ();
   g_ptr_array_add (server, &remote);
   g_autoptr(GPtrArray) visible = spotifygtk_device_playlists_tracks (
@@ -104,6 +110,8 @@ test_mixed_playlist_and_overlay (void)
   found_overlay = FALSE;
   for (guint i = 0; i < offline_listed->len; i++) {
     SpotifyGtkDevicePlaylistInfo *info = g_ptr_array_index (offline_listed, i);
+    if (g_strcmp0 (info->uri, uri) == 0)
+      g_assert_cmpint (info->added_at, ==, created_at);
     if (g_strcmp0 (info->uri, spotify_list) == 0) {
       g_assert_true (info->overlay);
       g_assert_cmpstr (info->name, ==, "Remote with local");

@@ -14,7 +14,9 @@
 #include "../log_file.h"
 
 #define CONTEXT_PAGE_LIMIT 200
-#define CONTEXT_HERO_COVER_PX 248
+/* With the existing 24px top inset and 16px header gap, this places the
+ * album divider level with (but separate from) the sidebar divider. */
+#define CONTEXT_HERO_COVER_PX 266
 #define CONTEXT_BROWSE_CACHE_LIMIT 16
 
 static void on_action_clicked (GtkButton *button, gpointer user_data);
@@ -45,6 +47,7 @@ struct _SpotifyGtkContextPage {
   GtkLabel            *expanded_meta;
   GtkPicture          *expanded_cover;
   GtkWidget           *expanded_action_btn;
+  GtkWidget           *expanded_play_btn;
   GCancellable        *cover_request;
   SpotifyGtkTrackList *list;
   SpotifyGtkLocalSnapshot *local_snapshot; /* keeps borrowed list rows alive */
@@ -65,7 +68,7 @@ struct _SpotifyGtkContextPage {
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkContextPage, spotifygtk_context_page, GTK_TYPE_BOX)
 
-enum { LOADING_CHANGED, N_SIGNALS };
+enum { LOADING_CHANGED, PLAY_REQUESTED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 typedef struct {
@@ -110,7 +113,7 @@ refresh_hero_cover (SpotifyGtkContextPage *self)
 
   self->cover_request = g_cancellable_new ();
   spotifygtk_cover_load (self->hero_cover_id,
-                         260 * MAX (1, gtk_widget_get_scale_factor (GTK_WIDGET (self))),
+                         320 * MAX (1, gtk_widget_get_scale_factor (GTK_WIDGET (self))),
                          self->cover_request, on_cover_loaded, self);
 }
 
@@ -352,6 +355,17 @@ spotifygtk_context_page_class_init (SpotifyGtkContextPageClass *klass)
   signals[LOADING_CHANGED] = g_signal_new ("loading-changed",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
+  signals[PLAY_REQUESTED] = g_signal_new ("play-requested",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 0);
+}
+
+static void
+on_expanded_play_clicked (GtkButton *button, gpointer user_data)
+{
+  SpotifyGtkContextPage *self = user_data;
+  g_signal_emit (self, signals[PLAY_REQUESTED], 0);
+  (void) button;
 }
 
 static void
@@ -455,6 +469,12 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
    * The metadata yields its width first, so neither long credits nor a narrow
    * window can push the cover or the action out of the page. */
   GtkWidget *meta_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 16);
+  self->expanded_play_btn = gtk_button_new_with_label ("Play");
+  gtk_widget_add_css_class (self->expanded_play_btn, "context-play");
+  gtk_widget_set_valign (self->expanded_play_btn, GTK_ALIGN_CENTER);
+  g_signal_connect (self->expanded_play_btn, "clicked",
+                    G_CALLBACK (on_expanded_play_clicked), self);
+  gtk_box_append (GTK_BOX (meta_row), self->expanded_play_btn);
   self->expanded_action_btn = gtk_button_new_with_label ("");
   gtk_widget_add_css_class (self->expanded_action_btn, "flat");
   gtk_widget_set_halign (self->expanded_action_btn, GTK_ALIGN_START);

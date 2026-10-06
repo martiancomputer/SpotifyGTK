@@ -79,6 +79,7 @@ void spotifygtk_context_page_set_playing_uri (SpotifyGtkContextPage *self,
 
 /* Signals:
  * - loading-changed (gboolean loading)
+ * - play-requested () — play the first track in the visible context
  */
 
 G_END_DECLS

@@ -374,3 +374,13 @@ spotifygtk_sidebar_clear_pinned (SpotifyGtkSidebar *self)
   while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->pinned_list))))
     gtk_list_box_remove (self->pinned_list, child);
 }
+
+void
+spotifygtk_sidebar_set_playlists_visible (SpotifyGtkSidebar *self,
+                                           gboolean visible)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SIDEBAR (self));
+  GtkListBoxRow *row = gtk_list_box_get_row_at_index (self->nav_list, 4);
+  if (row)
+    gtk_widget_set_visible (GTK_WIDGET (row), visible);
+}

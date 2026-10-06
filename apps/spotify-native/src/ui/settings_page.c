@@ -404,6 +404,16 @@ on_detail_view_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
 }
 
 static void
+on_separate_playlists_toggled (GtkSwitch *sw, GParamSpec *pspec,
+                               gpointer user_data)
+{
+  SpotifyGtkSettingsPage *self = user_data;
+  spotifygtk_settings_set_show_playlists_separately (
+    self->settings, gtk_switch_get_active (sw));
+  (void) pspec;
+}
+
+static void
 on_page_crossfade_toggled (GtkSwitch *sw, GParamSpec *pspec,
                            gpointer user_data)
 {
@@ -665,6 +675,17 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "Off keeps the compact header and artwork in track rows. "
                              "Search results follow the same view choice.",
                              detail_view));
+
+  GtkWidget *separate_playlists = gtk_switch_new ();
+  gtk_switch_set_active (GTK_SWITCH (separate_playlists),
+    spotifygtk_settings_get_show_playlists_separately (self->settings));
+  g_signal_connect (separate_playlists, "notify::active",
+                    G_CALLBACK (on_separate_playlists_toggled), self);
+  gtk_box_append (GTK_BOX (interface_group),
+                  build_row ("Show playlists separately",
+                             "On keeps Playlists in the sidebar. Off includes them "
+                             "in Library's All and Playlists filters.",
+                             separate_playlists));
 
   GtkWidget *page_crossfade = gtk_switch_new ();
   gtk_switch_set_active (GTK_SWITCH (page_crossfade),

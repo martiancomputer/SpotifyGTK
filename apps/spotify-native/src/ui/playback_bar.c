@@ -158,6 +158,14 @@ apply_shuffle_visual (SpotifyGtkPlaybackBar *self)
                                                        "Enable shuffle");
 }
 
+SpotifyGtkShuffleMode
+spotifygtk_shuffle_mode_for_context (SpotifyGtkShuffleMode requested,
+                                     gboolean has_local_tracks)
+{
+  return requested == SPOTIFYGTK_SHUFFLE_SMART && has_local_tracks
+           ? SPOTIFYGTK_SHUFFLE_OFF : requested;
+}
+
 static void
 on_shuffle_clicked (GtkButton *button, gpointer user_data)
 {

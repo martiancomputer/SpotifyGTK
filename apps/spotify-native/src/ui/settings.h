@@ -117,6 +117,10 @@ gboolean spotifygtk_settings_get_compact_mode (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_compact_mode (SpotifyGtkSettings *self,
                                                gboolean enabled);
 
+gboolean spotifygtk_settings_get_show_playlists_separately (SpotifyGtkSettings *self);
+void spotifygtk_settings_set_show_playlists_separately (SpotifyGtkSettings *self,
+                                                        gboolean enabled);
+
 /* Animate page navigation; enabled by default. */
 gboolean spotifygtk_settings_get_page_crossfade (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_page_crossfade (SpotifyGtkSettings *self,

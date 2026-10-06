@@ -10,6 +10,7 @@ typedef struct {
   gchar *name;
   gchar *cover_id;
   gboolean overlay;
+  gint64 added_at; /* seconds since epoch for device-created playlists */
 } SpotifyGtkDevicePlaylistInfo;
 
 SpotifyGtkDevicePlaylists *spotifygtk_device_playlists_new (void);

@@ -34,6 +34,12 @@ typedef enum {
   SPOTIFYGTK_SHUFFLE_SMART,
 } SpotifyGtkShuffleMode;
 
+/* Smart Shuffle cannot enhance a context containing device-only tracks.
+ * Resolve its requested state to Off so a click from Normal can still turn
+ * shuffle off instead of getting stuck in a Normal -> Smart -> Normal loop. */
+SpotifyGtkShuffleMode spotifygtk_shuffle_mode_for_context (
+  SpotifyGtkShuffleMode requested, gboolean has_local_tracks);
+
 #define SPOTIFYGTK_TYPE_PLAYBACK_BAR (spotifygtk_playback_bar_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifyGtkPlaybackBar, spotifygtk_playback_bar,
                       SPOTIFYGTK, PLAYBACK_BAR, GtkBox)

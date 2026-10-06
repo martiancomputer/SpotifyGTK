@@ -1,5 +1,11 @@
 if get_option('tests')
   if enable_gui
+    test_shuffle_toggle = executable('test-shuffle-toggle',
+      'test_shuffle_toggle.c', '../src/ui/playback_bar.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [gtk4_dep, adw_check, gio_dep, m_dep],
+    )
+    test('shuffle-toggle', test_shuffle_toggle, timeout: 10)
     test_track_row_pointer = executable('test-track-row-pointer',
       'test_track_row_pointer.c',
       include_directories: [config_inc, include_directories('../src')],
