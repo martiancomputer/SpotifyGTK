@@ -1,4 +1,12 @@
 if get_option('tests')
+  test_spclient_compression = executable('test-spclient-compression',
+    'test_spclient_compression.c',
+    '../src/spotify/protobuf_min.c', '../src/spotify/track_meta.c',
+    '../src/log_file.c',
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
+  )
+  test('spclient-response-compression', test_spclient_compression, timeout: 30)
   if enable_gui
     test_shuffle_toggle = executable('test-shuffle-toggle',
       'test_shuffle_toggle.c', '../src/ui/playback_bar.c',

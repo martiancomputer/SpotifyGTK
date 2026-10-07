@@ -41,6 +41,38 @@ struct _SpotifySpclient {
 
 G_DEFINE_FINAL_TYPE (SpotifySpclient, spotifygtk_spclient, G_TYPE_OBJECT)
 
+static void
+use_gzip_response (SoupSession *session, SoupMessage *message, gpointer user_data)
+{
+  /* libsoup 3.8's zstd decoder treats the first frame boundary as EOF.
+   * Spotify sends concatenated frames (often 64 KiB each), so otherwise a
+   * successful large response silently reaches our parsers truncated.
+   * Keep compression and automatic decoding, but negotiate the verified gzip
+   * path for every message, including redirects/requeues on these sessions.
+   * Do not compare decoded body size with the compressed Content-Length.
+   * https://github.com/GNOME/libsoup/blob/3.8.0/libsoup/content-decoder/soup-zstd-decompressor.c
+   */
+  soup_message_headers_replace (soup_message_get_request_headers (message),
+                                "Accept-Encoding", "gzip");
+}
+
+static void
+configure_catalogue_session (SoupSession *session)
+{
+  g_signal_connect (session, "request-queued",
+                    G_CALLBACK (use_gzip_response), NULL);
+  spotifygtk_soup_session_configure_tls (session);
+}
+
+static SoupSession *
+new_pathfinder_session (void)
+{
+  SoupSession *session = soup_session_new_with_options (
+    "user-agent", PATHFINDER_UA, NULL);
+  configure_catalogue_session (session);
+  return session;
+}
+
 typedef struct {
   SpclientStorageCallback callback;
   gpointer                user_data;
@@ -493,7 +525,7 @@ spotifygtk_spclient_init (SpotifySpclient *self)
     "max-conns-per-host", conns,
     "max-conns", MAX (conns, 24),
     NULL);
-  spotifygtk_soup_session_configure_tls (self->session);
+  configure_catalogue_session (self->session);
   g_message ("spclient: session using %u connections per host", conns);
 }
 
@@ -509,6 +541,7 @@ void spotifygtk_spclient_set_cancellable (SpotifySpclient *self, GCancellable *c
 /* ── Batched display metadata ────────────────────────────────────────────── */
 
 typedef struct {
+  SoupMessage           *message;
   SpclientBatchCallback callback;
   gpointer              user_data;
 } BatchRequestClosure;
@@ -529,12 +562,24 @@ on_batch_response (GObject *source, GAsyncResult *result, gpointer user_data)
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
   if (!bytes) {
     if (cl->callback) cl->callback (NULL, 0, err, cl->user_data);
+    g_object_unref (cl->message);
     g_free (cl);
     return;
   }
 
   gsize         len  = 0;
   const guint8 *data = g_bytes_get_data (bytes, &len);
+
+  guint status = soup_message_get_status (cl->message);
+  if (status != SOUP_STATUS_OK) {
+    g_autoptr(GError) http_error = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+      "extended-metadata returned HTTP %u (%zu response bytes)", status, len);
+    if (cl->callback) cl->callback (NULL, 0, http_error, cl->user_data);
+    g_bytes_unref (bytes);
+    g_object_unref (cl->message);
+    g_free (cl);
+    return;
+  }
 
   GArray *out = g_array_new (FALSE, TRUE, sizeof (SpclientTrackInfo));
 
@@ -598,8 +643,9 @@ on_batch_response (GObject *source, GAsyncResult *result, gpointer user_data)
   }
 
   if (out->len == 0) {
-    GError *empty = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED,
-      "extended-metadata batch response contained no parseable tracks");
+    GError *empty = g_error_new (G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+      "extended-metadata HTTP %u response contained no parseable tracks "
+      "(%zu decoded bytes)", status, len);
     g_warning ("spclient: %s", empty->message);
     if (cl->callback) cl->callback (NULL, 0, empty, cl->user_data);
     g_error_free (empty);
@@ -617,6 +663,7 @@ on_batch_response (GObject *source, GAsyncResult *result, gpointer user_data)
   g_array_free (out, TRUE);
 
   g_bytes_unref (bytes);
+  g_object_unref (cl->message);
   g_free (cl);
 }
 
@@ -684,6 +731,7 @@ spotifygtk_spclient_get_tracks_metadata (SpotifySpclient      *self,
   g_bytes_unref (body_bytes);
 
   BatchRequestClosure *cl = g_new0 (BatchRequestClosure, 1);
+  cl->message = g_object_ref (msg);
   cl->callback  = callback;
   cl->user_data = user_data;
 
@@ -695,6 +743,7 @@ spotifygtk_spclient_get_tracks_metadata (SpotifySpclient      *self,
 /* ── Context resolution ──────────────────────────────────────────────────── */
 
 typedef struct {
+  SoupMessage           *message;
   SpclientContextCallback callback;
   gpointer                user_data;
 } ContextRequestClosure;
@@ -770,12 +819,24 @@ on_context_response (GObject *source, GAsyncResult *result, gpointer user_data)
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
   if (!bytes) {
     if (cl->callback) cl->callback (NULL, err, cl->user_data);
+    g_object_unref (cl->message);
     g_free (cl);
     return;
   }
 
   gsize        len  = 0;
   const gchar *body = g_bytes_get_data (bytes, &len);
+
+  guint status = soup_message_get_status (cl->message);
+  if (status != SOUP_STATUS_OK) {
+    g_autoptr(GError) http_error = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+      "context-resolve returned HTTP %u (%zu response bytes)", status, len);
+    if (cl->callback) cl->callback (NULL, http_error, cl->user_data);
+    g_bytes_unref (bytes);
+    g_object_unref (cl->message);
+    g_free (cl);
+    return;
+  }
 
   /* An empty body is a documented outcome, not a parse failure:
    * librespot's get_context treats it as SpClientError::NoData. */
@@ -785,6 +846,7 @@ on_context_response (GObject *source, GAsyncResult *result, gpointer user_data)
     if (cl->callback) cl->callback (NULL, no_data, cl->user_data);
     g_error_free (no_data);
     g_bytes_unref (bytes);
+    g_object_unref (cl->message);
     g_free (cl);
     return;
   }
@@ -793,16 +855,15 @@ on_context_response (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError) parse_err = NULL;
 
   if (!json_parser_load_from_data (parser, body, (gssize) len, &parse_err)) {
-    /* Surface a snippet: an auth failure here arrives as an HTML or
-     * plain-text error page, and "invalid JSON" alone would hide that. */
-    g_autofree gchar *snippet = g_strndup (body, MIN (len, 200));
+    /* Never copy authenticated response contents into logs or UI errors. */
     GError *bad = g_error_new (G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-      "context-resolve response was not JSON (%s): %s",
-      parse_err->message, snippet);
+      "context-resolve HTTP %u response was not valid JSON "
+      "(%zu decoded bytes)", status, len);
     g_warning ("spclient: %s", bad->message);
     if (cl->callback) cl->callback (NULL, bad, cl->user_data);
     g_error_free (bad);
     g_bytes_unref (bytes);
+    g_object_unref (cl->message);
     g_free (cl);
     return;
   }
@@ -812,6 +873,7 @@ on_context_response (GObject *source, GAsyncResult *result, gpointer user_data)
     cl->callback (root ? json_node_copy (root) : NULL, NULL, cl->user_data);
 
   g_bytes_unref (bytes);
+  g_object_unref (cl->message);
   g_free (cl);
 }
 
@@ -837,6 +899,7 @@ request_context_resolve (SpotifySpclient *self, const gchar *context_uri,
     soup_message_headers_replace (headers, "Client-Token", client_token);
 
   ContextRequestClosure *cl = g_new0 (ContextRequestClosure, 1);
+  cl->message = g_object_ref (msg);
   cl->callback = callback;
   cl->user_data = user_data;
   soup_session_send_and_read_async (self->session, msg, G_PRIORITY_DEFAULT,
@@ -1047,10 +1110,7 @@ search_context_request_page (SearchContextClosure *cl, guint page_index)
     soup_message_headers_replace (headers, "Client-Token", cl->client_token);
 
   if (!cl->spclient->gql_session)
-    cl->spclient->gql_session = soup_session_new_with_options (
-      "user-agent", PATHFINDER_UA, NULL);
-  if (cl->spclient->gql_session)
-    spotifygtk_soup_session_configure_tls (cl->spclient->gql_session);
+    cl->spclient->gql_session = new_pathfinder_session ();
   soup_session_send_and_read_async (
     cl->spclient->gql_session, page_cl->message, G_PRIORITY_DEFAULT,
     cl->spclient->cancellable, on_search_context_page, page_cl);
@@ -1192,9 +1252,7 @@ spotifygtk_spclient_search_playlists (SpotifySpclient *self,
   if (client_token && *client_token)
     soup_message_headers_replace (headers, "Client-Token", client_token);
   if (!self->gql_session) {
-    self->gql_session = soup_session_new_with_options (
-      "user-agent", PATHFINDER_UA, NULL);
-    spotifygtk_soup_session_configure_tls (self->gql_session);
+    self->gql_session = new_pathfinder_session ();
   }
   soup_session_send_and_read_async (self->gql_session, request->message,
     G_PRIORITY_DEFAULT, cancellable, on_playlist_search, request);
@@ -1810,9 +1868,7 @@ spotifygtk_spclient_get_artist_header (SpotifySpclient        *self,
   cl->user_data = user_data;
 
   if (!self->gql_session)
-    self->gql_session = soup_session_new_with_options ("user-agent", PATHFINDER_UA, NULL);
-  if (self->gql_session)
-    spotifygtk_soup_session_configure_tls (self->gql_session);
+    self->gql_session = new_pathfinder_session ();
 
   soup_session_send_and_read_async (self->gql_session, msg, G_PRIORITY_DEFAULT,
                                     self->cancellable, on_artist_header_response, cl);
