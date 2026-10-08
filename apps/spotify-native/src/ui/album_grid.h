@@ -28,9 +28,17 @@ typedef gboolean (*SpotifyGtkAlbumPinQuery) (const gchar *uri, gpointer user_dat
 /* A horizontal, scrolling shelf (Home/Search) or a wrapping grid (Library). */
 SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_shelf (void);
 SpotifyGtkAlbumGrid *spotifygtk_album_grid_new_grid (void);
+/* Home-only: unframed artwork cards, same bounded shelf model and loader. */
+void spotifygtk_album_grid_set_home_style (SpotifyGtkAlbumGrid *self);
 
 /* Borrow the internal viewport for nested wheel routing. */
 GtkScrolledWindow *spotifygtk_album_grid_get_scroller (SpotifyGtkAlbumGrid *self);
+/* Home has multiple shelves in one vertical viewport. Keep artwork ownership
+ * bounded to nearby shelves as well as horizontally visible cards. */
+void spotifygtk_album_grid_set_outer_viewport (SpotifyGtkAlbumGrid *self,
+                                               GtkScrolledWindow *outer);
+/* Home-only: keep lightweight card data but release an inactive shelf's rows. */
+void spotifygtk_album_grid_suspend_outer_view (SpotifyGtkAlbumGrid *self);
 
 /* Search only: size whole cards to the shelf viewport and land a completed
  * horizontal scroll on card boundaries, without side gutters or cut cards. */

@@ -25,6 +25,8 @@ struct _SpotifyGtkSettingsPage {
   GtkWidget          *account_name;
   GtkWidget          *account_id;
   GtkWidget          *account_plan;
+  GtkWidget          *account_status;
+  guint               account_generation;
   GtkWidget          *account_sign_in;
   GtkWidget          *account_sign_out;
   GtkWidget          *local_directories_box;
@@ -161,11 +163,17 @@ on_local_files_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
   (void) pspec;
 }
 
+typedef struct { GWeakRef page; guint generation; } AccountAvatarLoad;
+
 static void
 on_account_avatar_loaded (GdkTexture *texture, gpointer user_data)
 {
-  SpotifyGtkSettingsPage *self = user_data;
-  if (self->account_avatar) {
+  AccountAvatarLoad *load = user_data;
+  g_autoptr(SpotifyGtkSettingsPage) self = g_weak_ref_get (&load->page);
+  guint generation = load->generation;
+  g_weak_ref_clear (&load->page);
+  g_free (load);
+  if (self && self->account_avatar && generation == self->account_generation) {
     adw_avatar_set_custom_image (self->account_avatar,
                                  texture ? GDK_PAINTABLE (texture) : NULL);
     gtk_widget_set_visible (GTK_WIDGET (self->account_avatar), texture != NULL);
@@ -584,7 +592,7 @@ build_equalizer (SpotifyGtkSettingsPage *self)
   gtk_box_append (GTK_BOX (head), on_label);
 
   GtkWidget *reset = gtk_button_new_with_label ("Reset");
-  gtk_widget_add_css_class (reset, "pill-button");
+  gtk_widget_add_css_class (reset, "settings-action");
   g_signal_connect (reset, "clicked", G_CALLBACK (on_eq_reset_clicked), self);
   gtk_box_append (GTK_BOX (head), reset);
   gtk_box_append (GTK_BOX (box), head);
@@ -765,6 +773,16 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              aggressive));
   gtk_box_append (GTK_BOX (content), search_group);
 
+  GtkWidget *home_group = build_group ("Home");
+  GtkWidget *customize_home = gtk_button_new_with_label ("Customize Home");
+  gtk_widget_add_css_class (customize_home, "settings-action");
+  gtk_widget_set_sensitive (customize_home, FALSE);
+  gtk_widget_set_tooltip_text (customize_home, "Home customization is planned, but not available yet.");
+  gtk_box_append (GTK_BOX (home_group), build_row (
+    "Home layout", "Customization is coming later. The new dashboard uses your personalised feed.",
+    customize_home));
+  gtk_box_append (GTK_BOX (content), home_group);
+
   /* Local folders are scanned off the GTK thread and rendered through the
    * ordinary Library album grid. Keep this near the Library-related controls,
    * not among output-device choices. */
@@ -878,7 +896,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              cache_switch));
 
   GtkWidget *clear_cache = gtk_button_new_with_label ("Clear cache");
-  gtk_widget_add_css_class (clear_cache, "pill-button");
+  gtk_widget_add_css_class (clear_cache, "settings-action");
   g_signal_connect (clear_cache, "clicked",
                     G_CALLBACK (on_clear_cache_clicked), self);
   gtk_box_append (GTK_BOX (perf_group),
@@ -889,13 +907,11 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
 
   gtk_box_append (GTK_BOX (content), perf_group);
 
-  /* ── User ──────────────────────────────────────────────────── */
-  GtkWidget *user_group = build_group ("User");
+  /* ── Account ───────────────────────────────────────────────── */
+  GtkWidget *account_group = build_group ("Account");
 
   /*
-   * Who is signed in, above the button that signs them out -- which is the
-   * one place it matters, since this client can hold either of two accounts
-   * and the log-out button gives no clue which it is about to forget.
+   * Keep the identity, session state and matching account action together.
    *
    * The profile endpoint supplies the display name, canonical id, product
    * tier and avatar. Keep the canonical id visible as the unambiguous account
@@ -915,6 +931,9 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   gtk_widget_set_valign (identity, GTK_ALIGN_CENTER);
   gtk_widget_set_hexpand (identity, TRUE);
   gtk_widget_set_margin_end (identity, 18);
+  gtk_widget_set_margin_start (identity, 16);
+  gtk_widget_set_margin_top (identity, 16);
+  gtk_widget_set_margin_bottom (identity, 16);
   self->account_name = gtk_label_new ("Not signed in");
   gtk_widget_add_css_class (self->account_name, "section-heading");
   gtk_label_set_xalign (GTK_LABEL (self->account_name), 0.0);
@@ -927,31 +946,30 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   gtk_box_append (GTK_BOX (identity), self->account_name);
   gtk_box_append (GTK_BOX (identity), self->account_plan);
   gtk_box_append (GTK_BOX (identity), self->account_id);
+  self->account_status = gtk_label_new ("Sign in without stopping local playback.");
+  gtk_widget_add_css_class (self->account_status, "dim-text");
+  gtk_label_set_xalign (GTK_LABEL (self->account_status), 0.0);
+  gtk_label_set_wrap (GTK_LABEL (self->account_status), TRUE);
+  gtk_box_append (GTK_BOX (identity), self->account_status);
   gtk_box_append (GTK_BOX (account_card), identity);
-  gtk_box_append (GTK_BOX (user_group), account_card);
-  gtk_box_append (GTK_BOX (content), user_group);
-
-  /* --- Account --- */
-  GtkWidget *account_group = build_group ("Account");
+  GtkWidget *account_actions = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_valign (account_actions, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_end (account_actions, 16);
 
   GtkWidget *login = gtk_button_new_with_label ("Sign in");
   self->account_sign_in = login;
-  gtk_widget_add_css_class (login, "pill-button");
+  gtk_widget_add_css_class (login, "settings-action");
   g_signal_connect (login, "clicked", G_CALLBACK (on_sign_in_clicked), self);
-  gtk_box_append (GTK_BOX (account_group),
-                  build_row ("Spotify account",
-                             "Sign in without stopping local playback.", login));
+  gtk_box_append (GTK_BOX (account_actions), login);
 
   GtkWidget *logout = gtk_button_new_with_label ("Log out");
   self->account_sign_out = logout;
-  gtk_widget_add_css_class (logout, "pill-button");
+  gtk_widget_add_css_class (logout, "settings-action");
+  gtk_widget_set_visible (logout, FALSE);
   g_signal_connect (logout, "clicked", G_CALLBACK (on_log_out_clicked), self);
-  gtk_box_append (GTK_BOX (account_group),
-                  build_row ("Signed in",
-                             "Forgets the stored credentials and returns to the "
-                             "sign-in screen. Local playback keeps playing.",
-                             logout));
-
+  gtk_box_append (GTK_BOX (account_actions), logout);
+  gtk_box_append (GTK_BOX (account_card), account_actions);
+  gtk_box_append (GTK_BOX (account_group), account_card);
   gtk_box_append (GTK_BOX (content), account_group);
 
   /* --- About --- */
@@ -996,6 +1014,7 @@ spotifygtk_settings_page_set_account (SpotifyGtkSettingsPage *self,
   g_return_if_fail (SPOTIFYGTK_IS_SETTINGS_PAGE (self));
   if (!self->account_name)
     return;
+  self->account_generation++;
   gtk_label_set_text (GTK_LABEL (self->account_name),
                       (username && *username) ? username : "Not signed in");
   if (self->account_sign_in)
@@ -1005,6 +1024,13 @@ spotifygtk_settings_page_set_account (SpotifyGtkSettingsPage *self,
   if (self->account_id)
     gtk_label_set_text (GTK_LABEL (self->account_id),
                         (username && *username) ? username : "");
+  gtk_label_set_text (GTK_LABEL (self->account_status), username && *username
+    ? "Signed in" : "Sign in without stopping local playback.");
+  if (!username || !*username) {
+    gtk_widget_set_visible (self->account_plan, FALSE);
+    adw_avatar_set_custom_image (self->account_avatar, NULL);
+    gtk_widget_set_visible (GTK_WIDGET (self->account_avatar), FALSE);
+  }
 }
 
 void
@@ -1014,6 +1040,7 @@ spotifygtk_settings_page_set_account_profile (
 {
   g_return_if_fail (SPOTIFYGTK_IS_SETTINGS_PAGE (self));
   const gchar *name = display_name && *display_name ? display_name : canonical_id;
+  self->account_generation++;
   gtk_label_set_text (GTK_LABEL (self->account_name), name ? name : "Not signed in");
   gtk_label_set_text (GTK_LABEL (self->account_id), canonical_id ? canonical_id : "");
   g_autofree gchar *plan = product && *product
@@ -1025,7 +1052,10 @@ spotifygtk_settings_page_set_account_profile (
                           g_strcmp0 (canonical_id, name) != 0);
   adw_avatar_set_custom_image (self->account_avatar, NULL);
   gtk_widget_set_visible (GTK_WIDGET (self->account_avatar), FALSE);
-  spotifygtk_cover_load (avatar_id, 224, NULL, on_account_avatar_loaded, self);
+  AccountAvatarLoad *load = g_new0 (AccountAvatarLoad, 1);
+  g_weak_ref_init (&load->page, self);
+  load->generation = self->account_generation;
+  spotifygtk_cover_load (avatar_id, 224, NULL, on_account_avatar_loaded, load);
 }
 
 SpotifyGtkSettingsPage *

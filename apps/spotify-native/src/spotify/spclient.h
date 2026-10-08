@@ -26,6 +26,9 @@
 
 G_BEGIN_DECLS
 
+/* Personalised Home, using the authenticated catalogue transport. */
+gchar *spotifygtk_spclient_build_home_body (const gchar *timezone);
+
 /* Fallback host librespot itself uses when apresolve is unavailable
  * or not implemented -- see file header. */
 #define SPCLIENT_FALLBACK_HOST "spclient.wg.spotify.com:443"
@@ -131,6 +134,14 @@ void spotifygtk_spclient_get_user_profile (SpotifySpclient *self,
                                            const gchar *client_token,
                                            SpclientUserProfileCallback callback,
                                            gpointer user_data);
+
+void spotifygtk_spclient_get_home (SpotifySpclient *self,
+                                    const gchar *timezone,
+                                    const gchar *bearer_token,
+                                    const gchar *client_token,
+                                    GCancellable *cancellable,
+                                    SpclientContextCallback callback,
+                                    gpointer user_data);
 
 SpotifySpclient *spotifygtk_spclient_new (void);
 void spotifygtk_spclient_set_cancellable (SpotifySpclient *, GCancellable *);

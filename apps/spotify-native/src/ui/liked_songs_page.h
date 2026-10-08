@@ -19,6 +19,7 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkLikedSongsPage, spotifygtk_liked_songs_page,
                       SPOTIFYGTK, LIKED_SONGS_PAGE, GtkBox)
 
 SpotifyGtkLikedSongsPage *spotifygtk_liked_songs_page_new (void);
+void spotifygtk_liked_songs_page_show_recent (SpotifyGtkLikedSongsPage *self);
 
 void spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
                                               SpotifyNativeSession     *session);
@@ -26,6 +27,10 @@ void spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
  * longer lists. See the implementation for why this is needed. */
 void spotifygtk_liked_songs_page_set_liked_filter (SpotifyGtkLikedSongsPage *self,
                                                    GHashTable *liked_uris);
+/* Collection-v2 dates, separate from metadata and device favorites. Values
+ * are borrowed gint64 pointers; this function copies them. */
+void spotifygtk_liked_songs_page_update_dates (SpotifyGtkLikedSongsPage *self,
+                                              GHashTable *dates, gboolean complete);
 
 /* Force the next refresh to refetch, after the collection has changed. Also
  * drops the session's cached listing, without which the refetch is served from
@@ -39,9 +44,8 @@ void spotifygtk_liked_songs_page_invalidate (SpotifyGtkLikedSongsPage *self);
  * change survives a filter keystroke or a re-sort. Adding puts the track at
  * the top, which is where the server will have it under the default ordering.
  *
- * No-ops on a page that has never loaded: it will fetch the truth when opened,
- * and a page holding one row would misrepresent the library. Being merely
- * stale is not a reason to skip -- the caller invalidates after every one.
+ * Local favorites may seed the page before any session exists. Their stored
+ * like dates determine placement when server rows subsequently arrive.
  */
 void spotifygtk_liked_songs_page_add_track (SpotifyGtkLikedSongsPage *self,
                                             const SpotifyNativeTrack *track);

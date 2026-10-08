@@ -10,6 +10,7 @@
 #include <libsoup/soup.h>
 #include "settings.h"
 #include "spotify/track_meta.h"
+#include "spotify/home_feed.h"
 
 /* Decode target for the panel cover. The displayed size now follows the panel
  * width, so this is just "big enough for the widest the panel can get" (the
@@ -25,6 +26,7 @@ struct _SpotifyGtkNowPlayingPanel {
   GtkPicture *album_pic;    /* the cover, scaled to fill */
   GtkLabel *track_label;
   GtkLabel *artist_label;
+  SpotifyNativeTrack *navigation_track;
   GtkLabel *queue_heading;    /* "Next Up"; hidden when the queue is empty */
   GtkListBox *queue_list;
   GtkStack   *content_stack;
@@ -113,7 +115,7 @@ lyrics_request_current (LyricsRequest *request,
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkNowPlayingPanel, spotifygtk_now_playing_panel, GTK_TYPE_BOX)
 
-enum { COLLAPSE_REQUESTED, N_SIGNALS };
+enum { COLLAPSE_REQUESTED, CONTEXT_REQUESTED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 static void on_lyrics_setting_changed (SpotifyGtkSettings *settings,
                                        gpointer user_data);
@@ -163,6 +165,7 @@ spotifygtk_now_playing_panel_dispose (GObject *object)
   g_clear_pointer (&self->lyrics_title, g_free);
   g_clear_pointer (&self->lyrics_artist, g_free);
   g_clear_pointer (&self->lyrics_album, g_free);
+  g_clear_pointer (&self->navigation_track, spotifygtk_native_track_free);
   G_OBJECT_CLASS (spotifygtk_now_playing_panel_parent_class)->dispose (object);
 }
 
@@ -175,6 +178,28 @@ spotifygtk_now_playing_panel_class_init (SpotifyGtkNowPlayingPanelClass *klass)
   signals[COLLAPSE_REQUESTED] = g_signal_new ("collapse-requested",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 0);
+  signals[CONTEXT_REQUESTED] = g_signal_new ("context-requested",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+}
+
+static gboolean
+on_metadata_link (GtkLabel *label, const gchar *link, gpointer data)
+{
+  SpotifyGtkNowPlayingPanel *self = data;
+  const SpotifyNativeTrack *track = self->navigation_track;
+  if (!track || (!g_str_equal (link, "artist") && !g_str_equal (link, "album")))
+    return TRUE;
+  gboolean artist = g_str_equal (link, "artist");
+  const gchar *uri = artist ? track->artist_uri : track->album_uri;
+  if (!uri) return TRUE;
+  const gchar *sep = track->artists ? strstr (track->artists, ", ") : NULL;
+  g_autofree gchar *primary = artist && track->artists
+    ? (sep ? g_strndup (track->artists, sep - track->artists) : g_strdup (track->artists)) : NULL;
+  g_signal_emit (self, signals[CONTEXT_REQUESTED], 0, uri,
+    artist ? primary : track->album, artist ? "Artist" : "Album");
+  (void) label;
+  return TRUE;
 }
 
 /* Collapsing hides the artwork and track info, leaving the header and the
@@ -489,6 +514,9 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
    * reads as a ticker; two would just look restless. */
   self->artist_label = GTK_LABEL (gtk_label_new ("Artist • Album"));
   gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "dim-text");
+  gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "now-playing-metadata");
+  g_signal_connect (self->artist_label, "activate-link",
+                    G_CALLBACK (on_metadata_link), self);
   gtk_label_set_xalign (self->artist_label, 0.0);
   gtk_label_set_ellipsize (self->artist_label, PANGO_ELLIPSIZE_END);
   gtk_box_append (GTK_BOX (info), GTK_WIDGET (self->artist_label));
@@ -666,6 +694,32 @@ spotifygtk_now_playing_panel_set_track (SpotifyGtkNowPlayingPanel *self,
                                                 artist ? artist : "",
                                                 album ? album : "");
   gtk_label_set_text (self->artist_label, subtitle);
+  g_clear_pointer (&self->navigation_track, spotifygtk_native_track_free);
+}
+
+void
+spotifygtk_now_playing_panel_set_navigation_track (SpotifyGtkNowPlayingPanel *self,
+                                                  const SpotifyNativeTrack *track)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NOW_PLAYING_PANEL (self));
+  g_clear_pointer (&self->navigation_track, spotifygtk_native_track_free);
+  if (!track) return;
+  self->navigation_track = spotifygtk_native_track_copy (track);
+  gboolean artist = track->artist_uri &&
+    g_str_has_prefix (track->artist_uri, "spotify:artist:") &&
+    spotifygtk_home_uri_supported (track->artist_uri);
+  gboolean album = track->album_uri &&
+    ((g_str_has_prefix (track->album_uri, "spotify:album:") &&
+      spotifygtk_home_uri_supported (track->album_uri)) ||
+     g_str_has_prefix (track->album_uri, "local:album:"));
+  if (!artist) g_clear_pointer (&self->navigation_track->artist_uri, g_free);
+  if (!album) g_clear_pointer (&self->navigation_track->album_uri, g_free);
+  g_autofree gchar *a = g_markup_escape_text (track->artists ?: "", -1);
+  g_autofree gchar *b = g_markup_escape_text (track->album ?: "", -1);
+  g_autofree gchar *artist_text = artist ? g_strdup_printf ("<a href=\"artist\">%s</a>", a) : g_strdup (a);
+  g_autofree gchar *album_text = album ? g_strdup_printf ("<a href=\"album\">%s</a>", b) : g_strdup (b);
+  g_autofree gchar *markup = g_strdup_printf ("%s • %s", artist_text, album_text);
+  gtk_label_set_markup (self->artist_label, markup);
 }
 
 void

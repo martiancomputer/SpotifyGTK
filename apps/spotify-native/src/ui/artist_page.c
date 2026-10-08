@@ -113,6 +113,7 @@ struct _SpotifyGtkArtistPage {
   GtkLabel            *year_label;
   GtkWidget           *follow_btn;
   GtkWidget           *title_row;   /* right edge kept level with the hero */
+  guint                title_align_tick, title_align_frames;
   GtkWidget           *scroller;
   SpotifyGtkArtistFollowFunc follow_fn;
   gpointer                   follow_data;
@@ -269,8 +270,37 @@ align_title_to_hero (GtkWidget *widget, GParamSpec *pspec, gpointer data)
     ? gtk_widget_get_width (vsb) : 0;
 
   gint want = gutter + CONTENT_MARGIN_END;
+  graphene_rect_t bounds;
+  if (self->hero_art && gtk_widget_compute_bounds (GTK_WIDGET (self->hero_art),
+                                                  GTK_WIDGET (self), &bounds) &&
+      bounds.size.width > 0)
+    want = MAX (0, (gint) ceil (gtk_widget_get_width (GTK_WIDGET (self)) -
+                               bounds.origin.x - bounds.size.width));
   if (gtk_widget_get_margin_end (self->title_row) != want)
     gtk_widget_set_margin_end (self->title_row, want);
+}
+
+static gboolean
+align_title_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
+{
+  SpotifyGtkArtistPage *self = data;
+  align_title_to_hero (widget, NULL, self);
+  if (++self->title_align_frames < 3) return G_SOURCE_CONTINUE;
+  self->title_align_tick = 0;
+  (void) clock;
+  return G_SOURCE_REMOVE;
+}
+
+static void
+queue_title_alignment (gpointer object, gpointer data)
+{
+  SpotifyGtkArtistPage *self = data;
+  if (!self->title_align_tick && gtk_widget_get_mapped (GTK_WIDGET (self))) {
+    self->title_align_frames = 0;
+    self->title_align_tick = gtk_widget_add_tick_callback (
+      GTK_WIDGET (self), align_title_tick, self, NULL);
+  }
+  (void) object;
 }
 
 static void
@@ -678,6 +708,10 @@ static void
 spotifygtk_artist_page_dispose (GObject *object)
 {
   SpotifyGtkArtistPage *self = SPOTIFYGTK_ARTIST_PAGE (object);
+  if (self->title_align_tick) {
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->title_align_tick);
+    self->title_align_tick = 0;
+  }
 
   if (self->scroller) {
     GtkWidget *vsb = gtk_scrolled_window_get_vscrollbar (
@@ -925,6 +959,9 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
                       G_CALLBACK (align_title_to_hero), self);
   }
   align_title_to_hero (scroller, NULL, self);
+  g_signal_connect (self, "map", G_CALLBACK (queue_title_alignment), self);
+  g_signal_connect (gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller)),
+                    "changed", G_CALLBACK (queue_title_alignment), self);
 }
 
 SpotifyGtkArtistPage *

@@ -8,11 +8,27 @@
 #define MAX_PLAYLIST_DATA_BYTES (24 * 1024 * 1024)
 
 typedef struct {
+  gchar *after_uri;
+  guint occurrence;
+  guint position;
+  gboolean pinned;
+} OverlayAnchor;
+
+static void
+anchor_free (gpointer data)
+{
+  OverlayAnchor *anchor = data;
+  g_free (anchor->after_uri);
+  g_free (anchor);
+}
+
+typedef struct {
   gchar *uri;
   gchar *name; /* NULL for a Spotify playlist overlay */
   gchar *display_name; /* cached, device-only label for an overlay */
   gint64 added_at;
   GPtrArray *tracks; /* owned SpotifyNativeTrack, ordered */
+  GPtrArray *anchors; /* one bounded device-only ordering anchor per track */
 } DevicePlaylist;
 
 struct _SpotifyGtkDevicePlaylists {
@@ -35,6 +51,7 @@ playlist_free (gpointer data)
   g_free (list->name);
   g_free (list->display_name);
   g_ptr_array_unref (list->tracks);
+  g_ptr_array_unref (list->anchors);
   g_free (list);
 }
 
@@ -47,6 +64,7 @@ playlist_new (const gchar *uri, const gchar *name)
   list->added_at = g_get_real_time () / G_USEC_PER_SEC;
   list->tracks = g_ptr_array_new_with_free_func (
     (GDestroyNotify) spotifygtk_native_track_free);
+  list->anchors = g_ptr_array_new_with_free_func (anchor_free);
   return list;
 }
 
@@ -137,6 +155,12 @@ save_playlists (gpointer data)
       g_key_file_set_string (key, entry, "album", track->album ? track->album : "");
       g_key_file_set_string (key, entry, "cover", track->cover_id ? track->cover_id : "");
       g_key_file_set_int64 (key, entry, "duration", track->duration_ms);
+      OverlayAnchor *anchor = g_ptr_array_index (list->anchors, j);
+      if (anchor->pinned) {
+        g_key_file_set_string (key, entry, "after-uri", anchor->after_uri ?: "");
+        g_key_file_set_integer (key, entry, "after-occurrence", anchor->occurrence);
+        g_key_file_set_integer (key, entry, "position", anchor->position);
+      }
     }
     index++;
   }
@@ -228,6 +252,20 @@ spotifygtk_device_playlists_new (void)
         continue;
       }
       g_ptr_array_add (list->tracks, track);
+      OverlayAnchor *anchor = g_new0 (OverlayAnchor, 1);
+      g_autofree gchar *after = g_key_file_get_string (key, entry, "after-uri", NULL);
+      gint position = g_key_file_get_integer (key, entry, "position", NULL);
+      gint occurrence = g_key_file_get_integer (key, entry, "after-occurrence", NULL);
+      if (after && (!*after || (g_str_has_prefix (after, "spotify:track:") &&
+                               strlen (after) <= 128)) &&
+          position >= 0 && position <= MAX_PLAYLIST_ENTRIES &&
+          occurrence >= 0 && occurrence < MAX_PLAYLIST_ENTRIES) {
+        anchor->pinned = TRUE;
+        anchor->after_uri = g_strdup (after);
+        anchor->position = position;
+        anchor->occurrence = occurrence;
+      }
+      g_ptr_array_add (list->anchors, anchor);
       entries++;
     }
     g_hash_table_replace (self->lists, g_strdup (uri), list);
@@ -332,6 +370,7 @@ spotifygtk_device_playlists_add (SpotifyGtkDevicePlaylists *self,
   if (list->tracks->len >= MAX_PLAYLIST_ENTRIES)
     return FALSE;
   g_ptr_array_add (list->tracks, spotifygtk_native_track_copy (track));
+  g_ptr_array_add (list->anchors, g_new0 (OverlayAnchor, 1));
   self->entry_count++;
   schedule_save (self);
   return TRUE;
@@ -351,6 +390,7 @@ spotifygtk_device_playlists_remove (SpotifyGtkDevicePlaylists *self,
     if (g_strcmp0 (track->uri, track_uri) != 0) continue;
     if (seen++ != occurrence) continue;
     g_ptr_array_remove_index (list->tracks, i);
+    g_ptr_array_remove_index (list->anchors, i);
     self->entry_count--;
     schedule_save (self);
     return TRUE;
@@ -369,6 +409,7 @@ spotifygtk_device_playlists_remove_at (SpotifyGtkDevicePlaylists *self,
   const SpotifyNativeTrack *track = g_ptr_array_index (list->tracks, index);
   if (g_strcmp0 (track->uri, expected_uri) != 0) return FALSE;
   g_ptr_array_remove_index (list->tracks, index);
+  g_ptr_array_remove_index (list->anchors, index);
   self->entry_count--;
   schedule_save (self);
   return TRUE;
@@ -410,6 +451,16 @@ spotifygtk_device_playlists_list (SpotifyGtkDevicePlaylists *self)
   return out;
 }
 
+typedef struct { guint at, index; } Placement;
+
+static gint
+compare_placement (gconstpointer a, gconstpointer b)
+{
+  const Placement *pa = a, *pb = b;
+  if (pa->at != pb->at) return (pa->at > pb->at) - (pa->at < pb->at);
+  return (pa->index > pb->index) - (pa->index < pb->index);
+}
+
 GPtrArray *
 spotifygtk_device_playlists_tracks (SpotifyGtkDevicePlaylists *self,
                                     const gchar *playlist_uri,
@@ -419,16 +470,52 @@ spotifygtk_device_playlists_tracks (SpotifyGtkDevicePlaylists *self,
     (GDestroyNotify) spotifygtk_native_track_free);
   DevicePlaylist *list = self && playlist_uri
     ? g_hash_table_lookup (self->lists, playlist_uri) : NULL;
-  for (guint i = 0; server_tracks && i < server_tracks->len; i++)
-    g_ptr_array_add (out, spotifygtk_native_track_copy (
-      g_ptr_array_index (server_tracks, i)));
-  if (list)
-    for (guint i = 0; i < list->tracks->len; i++) {
-      SpotifyNativeTrack *track = spotifygtk_native_track_copy (
-        g_ptr_array_index (list->tracks, i));
+  guint n = server_tracks ? server_tracks->len : 0;
+  g_autoptr(GHashTable) occurrences = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  g_autoptr(GHashTable) positions = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  const gchar *tail = ""; guint tail_occurrence = 0;
+  for (guint i = 0; i < n; i++) {
+    const SpotifyNativeTrack *t = g_ptr_array_index (server_tracks, i);
+    guint occurrence = GPOINTER_TO_UINT (g_hash_table_lookup (occurrences, t->uri));
+    g_autofree gchar *key = g_strdup_printf ("%s#%u", t->uri, occurrence);
+    g_hash_table_insert (positions, g_steal_pointer (&key), GUINT_TO_POINTER (i + 1));
+    g_hash_table_replace (occurrences, g_strdup (t->uri), GUINT_TO_POINTER (occurrence + 1));
+    tail = t->uri; tail_occurrence = occurrence;
+  }
+  g_autoptr(GArray) placements = g_array_new (FALSE, FALSE, sizeof (Placement));
+  for (guint i = 0; list && i < list->tracks->len; i++) {
+    OverlayAnchor *anchor = g_ptr_array_index (list->anchors, i);
+    if (!list->name && server_tracks && !anchor->pinned) {
+      /* Pin once against the real server sequence, not an offline empty view.
+       * Appending Spotify songs later no longer moves this local insertion. */
+      anchor->pinned = TRUE;
+      anchor->after_uri = g_strdup (tail);
+      anchor->occurrence = tail_occurrence;
+      anchor->position = n;
+      schedule_save (self);
+    }
+    guint at = n;
+    if (!list->name && anchor->pinned && server_tracks) {
+      g_autofree gchar *key = g_strdup_printf ("%s#%u", anchor->after_uri, anchor->occurrence);
+      gpointer position = g_hash_table_lookup (positions, key);
+      at = !*anchor->after_uri ? 0 : position
+        ? GPOINTER_TO_UINT (position) : MIN (anchor->position, n);
+    }
+    Placement placement = { at, i };
+    g_array_append_val (placements, placement);
+  }
+  g_array_sort (placements, compare_placement);
+  guint next = 0;
+  for (guint i = 0; i <= n; i++) {
+    while (next < placements->len && g_array_index (placements, Placement, next).at == i) {
+      guint index = g_array_index (placements, Placement, next++).index;
+      SpotifyNativeTrack *track = spotifygtk_native_track_copy (g_ptr_array_index (list->tracks, index));
+      track->device_index = index + 1;
       g_free (track->section_detail);
       track->section_detail = g_strdup ("On this device");
       g_ptr_array_add (out, track);
     }
+    if (i < n) g_ptr_array_add (out, spotifygtk_native_track_copy (g_ptr_array_index (server_tracks, i)));
+  }
   return out;
 }

@@ -30,6 +30,9 @@ void spotifygtk_now_playing_panel_set_track (SpotifyGtkNowPlayingPanel *self,
                                              const gchar *album);
 void spotifygtk_now_playing_panel_set_album_art (SpotifyGtkNowPlayingPanel *self,
                                                  const gchar *image_path);
+/* Emits context-requested (uri, title, kind) for internal artist/album links. */
+void spotifygtk_now_playing_panel_set_navigation_track (SpotifyGtkNowPlayingPanel *self,
+                                                       const SpotifyNativeTrack *track);
 void spotifygtk_now_playing_panel_set_playing (SpotifyGtkNowPlayingPanel *self,
                                                gboolean is_playing);
 void spotifygtk_now_playing_panel_set_progress (SpotifyGtkNowPlayingPanel *self,

@@ -11,6 +11,7 @@
 #include "../spotify/catalog_cache.h"
 #include "../spotify/catalog_snapshot.h"
 #include "cover_loader.h"
+#include "artwork_viewer.h"
 #include "settings.h"
 #include "local_catalog.h"
 #include "../log_file.h"
@@ -97,6 +98,14 @@ show_hero_preview (SpotifyGtkContextPage *self, GdkTexture *preview)
     return;
   gtk_picture_set_paintable (self->expanded_cover, GDK_PAINTABLE (preview));
   gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), TRUE);
+}
+
+static void
+on_hero_clicked (GtkButton *button, SpotifyGtkContextPage *self)
+{
+  spotifygtk_artwork_viewer_present (GTK_WIDGET (self), self->hero_cover_id,
+                                     gtk_label_get_text (self->expanded_title));
+  (void) button;
 }
 
 static void
@@ -190,12 +199,18 @@ update_expanded_metadata (SpotifyGtkContextPage *self, GPtrArray *tracks)
   /* An album's tracks carry its cover. A playlist's tracks do not: use the
    * cover known by the card/navigation source, never the first song's art. */
   const gchar *cover_id = self->context_cover_id;
-  if (!cover_id && (g_str_has_prefix (self->current_uri, "spotify:album:") ||
-                    g_str_has_prefix (self->current_uri, "local:album:")))
-    for (guint i = 0; i < tracks->len && !cover_id; i++) {
+  if (g_str_has_prefix (self->current_uri, "spotify:album:") ||
+      g_str_has_prefix (self->current_uri, "local:album:")) {
+    /* Navigation cards intentionally use shelf-size images. Album metadata
+     * keeps the largest source: use that for the hero and expanded viewer,
+     * not the smaller source inherited from the clicked Home/Library card. */
+    const gchar *largest = NULL;
+    for (guint i = 0; i < tracks->len && !largest; i++) {
       const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
-      cover_id = track->cover_id;
+      if (track->cover_id && *track->cover_id) largest = track->cover_id;
     }
+    if (largest) cover_id = largest;
+  }
   if (g_strcmp0 (self->hero_cover_id, cover_id) != 0) {
     g_free (self->hero_cover_id);
     self->hero_cover_id = g_strdup (cover_id);
@@ -453,7 +468,12 @@ spotifygtk_context_page_init (SpotifyGtkContextPage *self)
   gtk_widget_add_css_class (GTK_WIDGET (self->expanded_cover), "art-large");
   gtk_widget_set_visible (GTK_WIDGET (self->expanded_cover), FALSE);
   gtk_overlay_add_overlay (GTK_OVERLAY (cover_frame), GTK_WIDGET (self->expanded_cover));
-  gtk_box_append (GTK_BOX (hero), cover_frame);
+  GtkWidget *cover_button = gtk_button_new ();
+  gtk_widget_add_css_class (cover_button, "artwork-open");
+  gtk_widget_set_tooltip_text (cover_button, "View artwork");
+  gtk_button_set_child (GTK_BUTTON (cover_button), cover_frame);
+  g_signal_connect (cover_button, "clicked", G_CALLBACK (on_hero_clicked), self);
+  gtk_box_append (GTK_BOX (hero), cover_button);
   GtkWidget *hero_text = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
   gtk_widget_set_hexpand (hero_text, TRUE);
   gtk_widget_set_valign (hero_text, GTK_ALIGN_CENTER);
@@ -724,9 +744,13 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
     if (cover_id && g_strcmp0 (cover_id, self->context_cover_id) != 0) {
       g_free (self->context_cover_id);
       self->context_cover_id = g_strdup (cover_id);
-      g_free (self->hero_cover_id);
-      self->hero_cover_id = g_strdup (cover_id);
-      refresh_hero_cover (self);
+      /* A repeated navigation from a small shelf card must not downgrade
+       * the album's already-resolved full-size metadata artwork. */
+      if (!self->hero_cover_id || !g_str_has_prefix (uri, "spotify:album:")) {
+        g_free (self->hero_cover_id);
+        self->hero_cover_id = g_strdup (cover_id);
+        refresh_hero_cover (self);
+      }
     }
     show_hero_preview (self, preview);
     return;

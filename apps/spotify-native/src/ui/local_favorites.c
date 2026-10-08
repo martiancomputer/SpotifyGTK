@@ -79,6 +79,7 @@ save_favorites (gpointer data)
     g_key_file_set_string (key, group, "album", t->album ? t->album : "");
     g_key_file_set_string (key, group, "cover", t->cover_id ? t->cover_id : "");
     g_key_file_set_int64 (key, group, "duration", t->duration_ms);
+    g_key_file_set_int64 (key, group, "liked-at", t->liked_at);
   }
   gsize length = 0;
   gchar *contents = g_key_file_to_data (key, &length, NULL);
@@ -134,6 +135,8 @@ spotifygtk_local_favorites_new (void)
     track->album = g_key_file_get_string (key, groups[i], "album", NULL);
     track->cover_id = g_key_file_get_string (key, groups[i], "cover", NULL);
     track->duration_ms = g_key_file_get_int64 (key, groups[i], "duration", NULL);
+    track->liked_at = MAX ((gint64) 0,
+      g_key_file_get_int64 (key, groups[i], "liked-at", NULL));
     if (!track->name || strlen (track->name) > 4096 ||
         !track->artists || strlen (track->artists) > 4096 ||
         !track->album || strlen (track->album) > 4096 ||
@@ -186,8 +189,12 @@ spotifygtk_local_favorites_set (SpotifyGtkLocalFavorites *self,
     if (!g_hash_table_contains (self->tracks, track->uri) &&
         g_hash_table_size (self->tracks) >= MAX_LOCAL_FAVORITES)
       return FALSE;
-    g_hash_table_replace (self->tracks, g_strdup (track->uri),
-                          spotifygtk_native_track_copy (track));
+    const SpotifyNativeTrack *old = g_hash_table_lookup (self->tracks, track->uri);
+    SpotifyNativeTrack *copy = spotifygtk_native_track_copy (track);
+    /* Metadata refreshes are not new likes. Legacy entries remain undated:
+     * inventing today's date would put old favorites above today's songs. */
+    copy->liked_at = old ? old->liked_at : g_get_real_time () / G_USEC_PER_SEC;
+    g_hash_table_replace (self->tracks, g_strdup (track->uri), copy);
   } else {
     g_hash_table_remove (self->tracks, track->uri);
   }

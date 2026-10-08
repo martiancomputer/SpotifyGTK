@@ -122,6 +122,17 @@ deduplicates recommendations up to a 200-track target. Playlist, album, Liked
 Songs and artist contexts retain their natural order and ordinary shuffle
 behavior.
 
+Home displays Spotify's personalised music feed in a responsive dashboard:
+compact "Jump back in" tiles with separate play actions, a new-release or
+recommendation shelf, and shortcuts to your rotation, local collection and
+recently liked songs. Remaining music shelves retain Spotify's supplied order.
+Albums, artists, playlists and tracks open through the existing navigation and
+playback controls. Home customization is reserved in Settings but is not yet
+available. Bounded, account-scoped snapshots provide
+cached names and artwork while refreshing; a failed refresh leaves the last
+loaded feed visible with a Retry action. Only music sections are displayed;
+podcast, video, promotion and other unsupported sections are omitted.
+
 Smart Shuffle is Connect-aware: official clients can enable it, SpotifyGTK
 fetches and interleaves song-radio recommendations, and disabling it restores
 the original sequential queue rather than leaving recommendations behind.

@@ -251,6 +251,77 @@ test_alert_cancel_response (void)
   gtk_window_destroy (GTK_WINDOW (parent));
 }
 
+static void
+test_real_backdrop_events (void)
+{
+  /* Opt-in integration test under Xvfb: unlike emitting GestureClick signals,
+   * this exercises GtkWindowHandle's actual competing drag gesture. */
+  if (!g_getenv ("SPOTIFYGTK_TEST_REAL_POINTER")) {
+    g_test_skip ("Run under Xvfb with SPOTIFYGTK_TEST_REAL_POINTER=1 and xdotool");
+    return;
+  }
+  GtkWidget *window = adw_application_window_new (NULL);
+  spotifygtk_dialog_host_bind (ADW_APPLICATION_WINDOW (window));
+  gtk_window_set_title (GTK_WINDOW (window), "SpotifyGTK backdrop integration fixture");
+  gtk_window_set_default_size (GTK_WINDOW (window), 800, 600);
+  GtkWidget *background = gtk_button_new_with_label ("Background action");
+  guint actions = 0;
+  g_signal_connect (background, "clicked", G_CALLBACK (background_clicked), &actions);
+  adw_application_window_set_content (ADW_APPLICATION_WINDOW (window), background);
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  gchar *search[] = { "xdotool", "search", "--name", "^SpotifyGTK backdrop integration fixture$", NULL };
+  g_autofree gchar *ids = NULL;
+  gint status;
+  g_assert_true (g_spawn_sync (NULL, search, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+                              &ids, NULL, &status, NULL));
+  g_assert_cmpint (status, ==, 0);
+  g_strstrip (ids);
+  for (guint custom = 0; custom < 2; custom++) {
+    Cancellation cancel = {0};
+    g_autoptr(AdwDialog) dialog = g_object_ref_sink (custom
+      ? ADW_DIALOG (spotifygtk_playlist_create_dialog_new (TRUE))
+      : ADW_DIALOG (adw_alert_dialog_new ("Rename fixture", "Backdrop must cancel.")));
+    spotifygtk_dialog_prepare (dialog);
+    if (custom) adw_dialog_present (dialog, window);
+    else {
+      adw_alert_dialog_add_responses (ADW_ALERT_DIALOG (dialog), "cancel", "Cancel", "save", "Save", NULL);
+      adw_alert_dialog_set_close_response (ADW_ALERT_DIALOG (dialog), "cancel");
+      adw_alert_dialog_choose (ADW_ALERT_DIALOG (dialog), window, NULL, alert_chosen, &cancel);
+    }
+    settle ();
+    GtkWidget *surface = adw_dialog_get_child (dialog);
+    for (GtkWidget *p = gtk_widget_get_parent (surface); p; p = gtk_widget_get_parent (p))
+      if (g_str_equal (gtk_widget_get_css_name (p), "sheet")) { surface = p; break; }
+    graphene_rect_t rect;
+    g_assert_true (gtk_widget_compute_bounds (surface, window, &rect));
+    g_autofree gchar *inside_x = g_strdup_printf ("%d", (gint) (rect.origin.x + rect.size.width / 2));
+    g_autofree gchar *inside_y = g_strdup_printf ("%d", (gint) (rect.origin.y + 5));
+    g_test_message ("%s sheet bounds: %.0f,%.0f %.0fx%.0f", custom ? "wizard" : "alert",
+                    rect.origin.x, rect.origin.y, rect.size.width, rect.size.height);
+    g_assert_false (is_backdrop (ADW_APPLICATION_WINDOW (window), atoi (inside_x), atoi (inside_y)));
+    gchar *inside[] = { "xdotool", "mousemove", "--window", ids, inside_x, inside_y, "click", "1", NULL };
+    g_assert_true (g_spawn_sync (NULL, inside, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+                                NULL, NULL, &status, NULL));
+    g_assert_cmpint (status, ==, 0);
+    settle ();
+    g_assert_true (adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (window)) == dialog);
+    gchar *outside[] = { "xdotool", "mousemove", "--window", ids, "50", "50", "click", "1", NULL };
+    g_assert_true (g_spawn_sync (NULL, outside, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+                                NULL, NULL, &status, NULL));
+    g_assert_cmpint (status, ==, 0);
+    settle ();
+    g_assert_null (adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (window)));
+    g_assert_cmpuint (actions, ==, 0);
+    if (!custom) {
+      g_assert_cmpuint (cancel.count, ==, 1);
+      g_assert_cmpstr (cancel.response, ==, "cancel");
+      g_free (cancel.response);
+    }
+  }
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -271,5 +342,6 @@ main (int argc, char **argv)
   g_test_add_func ("/playlist-create/present-keyboard-close", test_present_keyboard_and_close);
   g_test_add_func ("/playlist-create/embedded-dismissal", test_embedded_dismissal);
   g_test_add_func ("/playlist-create/alert-cancel-response", test_alert_cancel_response);
+  g_test_add_func ("/playlist-create/real-backdrop-events", test_real_backdrop_events);
   return g_test_run ();
 }

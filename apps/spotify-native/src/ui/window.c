@@ -540,11 +540,15 @@ dup_context_cover (SpotifyGtkNativeWindow *self, const gchar *uri)
     self->search_page ? spotifygtk_search_page_get_album_grid (self->search_page) : NULL,
     self->playlists_grid,
     self->library_page ? spotifygtk_library_page_get_album_grid (self->library_page) : NULL,
-    self->home_page ? spotifygtk_home_page_get_album_grid (self->home_page) : NULL,
   };
   for (guint i = 0; i < G_N_ELEMENTS (grids); i++) {
     if (!grids[i]) continue;
     gchar *cover = spotifygtk_album_grid_dup_cover_id (grids[i], uri);
+    if (cover) return cover;
+  }
+  GPtrArray *home_grids = self->home_page ? spotifygtk_home_page_get_grids (self->home_page) : NULL;
+  for (guint i = 0; home_grids && i < home_grids->len; i++) {
+    gchar *cover = spotifygtk_album_grid_dup_cover_id (g_ptr_array_index (home_grids, i), uri);
     if (cover) return cover;
   }
   GPtrArray *pins = spotifygtk_settings_get_pins (spotifygtk_settings_get_default ());
@@ -564,11 +568,15 @@ ref_context_cover_preview (SpotifyGtkNativeWindow *self, const gchar *uri)
     self->search_page ? spotifygtk_search_page_get_album_grid (self->search_page) : NULL,
     self->playlists_grid,
     self->library_page ? spotifygtk_library_page_get_album_grid (self->library_page) : NULL,
-    self->home_page ? spotifygtk_home_page_get_album_grid (self->home_page) : NULL,
   };
   for (guint i = 0; i < G_N_ELEMENTS (grids); i++) {
     if (!grids[i]) continue;
     GdkTexture *preview = spotifygtk_album_grid_ref_visible_cover (grids[i], uri);
+    if (preview) return preview;
+  }
+  GPtrArray *home_grids = self->home_page ? spotifygtk_home_page_get_grids (self->home_page) : NULL;
+  for (guint i = 0; home_grids && i < home_grids->len; i++) {
+    GdkTexture *preview = spotifygtk_album_grid_ref_visible_cover (g_ptr_array_index (home_grids, i), uri);
     if (preview) return preview;
   }
   return NULL;
@@ -1867,6 +1875,7 @@ typedef struct {
   guint generation;
   gchar *next;
   GPtrArray *uris; /* owned strings; callback may run off the UI thread */
+  GHashTable *dates;
 } LikedPageResult;
 
 typedef struct {
@@ -1885,6 +1894,9 @@ liked_page_to_ui (gpointer data)
   for (guint i = 0; i < r->uris->len; i++)
     g_hash_table_add (self->liked_building ? self->liked_building : self->liked_uris,
                       g_strdup (g_ptr_array_index (r->uris, i)));
+
+  spotifygtk_liked_songs_page_update_dates (self->liked_page, r->dates,
+                                           !r->next || !*r->next);
 
   /* The set was filled as the page arrived; only what is on screen needs
    * repainting. Fanning every URI out to every list is what made a large
@@ -1931,6 +1943,7 @@ liked_page_to_ui (gpointer data)
 done:
   g_weak_ref_clear (&r->window);
   g_ptr_array_unref (r->uris);
+  g_hash_table_unref (r->dates);
   g_free (r->next);
   g_free (r);
   return G_SOURCE_REMOVE;
@@ -1960,11 +1973,14 @@ on_liked_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
   r->generation = read->generation;
   r->next   = g_strdup (next_token);
   r->uris = g_ptr_array_new_with_free_func (g_free);
+  r->dates = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
 
   for (guint i = 0; i < n_items; i++) {
     if (!items[i].uri || items[i].is_removed)
       continue;
     g_ptr_array_add (r->uris, g_strdup (items[i].uri));
+    gint64 *date = g_new (gint64, 1); *date = items[i].added_at;
+    g_hash_table_replace (r->dates, g_strdup (items[i].uri), date);
   }
   g_weak_ref_clear (&read->window);
   g_free (read);
@@ -2220,8 +2236,11 @@ list_set_liked (SpotifyGtkNativeWindow *self, gpointer track_ptr, gboolean liked
    * genuine change from elsewhere, or the next sign-in.
    */
   if (self->liked_page) {
-    if (liked)
-      spotifygtk_liked_songs_page_add_track (self->liked_page, track);
+    if (liked) {
+      SpotifyNativeTrack dated = *track;
+      dated.liked_at = g_get_real_time () / G_USEC_PER_SEC;
+      spotifygtk_liked_songs_page_add_track (self->liked_page, &dated);
+    }
     else
       spotifygtk_liked_songs_page_remove_track (self->liked_page, track->uri);
   }
@@ -3357,6 +3376,14 @@ on_list_go_to_artist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer us
 /* An album card was clicked, on any page's shelf or grid. Same destination as
  * the row menu's "Go to Album": the album URI handed to the context page. */
 static void
+on_panel_context_requested (SpotifyGtkNowPlayingPanel *panel, const gchar *uri,
+                            const gchar *title, const gchar *kind, gpointer data)
+{
+  navigate_to_context (data, uri, title ?: kind, kind);
+  (void) panel;
+}
+
+static void
 on_album_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
                     const gchar *name, gpointer user_data)
 {
@@ -3545,6 +3572,166 @@ wire_album_grid (SpotifyGtkNativeWindow *self, SpotifyGtkAlbumGrid *grid)
     return;
   g_signal_connect (grid, "album-activated", G_CALLBACK (on_album_activated), self);
   wire_album_grid_common (self, grid);
+}
+
+typedef struct { GWeakRef window; guint generation; } HomeTrackLoad;
+
+static void
+on_home_track_loaded (GObject *source, GAsyncResult *result, gpointer data)
+{
+  HomeTrackLoad *load = data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
+  guint generation = load->generation;
+  g_weak_ref_clear (&load->window); g_free (load);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  if (!self || self->context_generation != generation ||
+      g_strcmp0 (gtk_stack_get_visible_child_name (self->page_stack), "home") != 0)
+    return;
+  if (!native_auth_has_credentials (self->auth) ||
+      spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
+    show_sign_in_banner (self, "Sign in to play Spotify tracks.");
+    return;
+  }
+  if (tracks && tracks->len) {
+    interrupted_context_clear (self);
+    play_search_track_radio (self, g_ptr_array_index (tracks, 0));
+  } else
+    show_sign_in_banner (self, "Couldn't load this track. Please try again.");
+}
+
+static void
+on_home_card_activated (SpotifyGtkAlbumGrid *grid, const gchar *uri,
+                        const gchar *name, gpointer data)
+{
+  SpotifyGtkNativeWindow *self = data;
+  if (!spotifygtk_home_uri_supported (uri)) return;
+  if (g_str_equal (uri, "spotify:collection:tracks") || g_str_has_suffix (uri, ":collection")) {
+    navigate_raw (self, "liked");
+    nav_record (self, "liked", NULL, NULL, NULL);
+  } else if (g_str_has_prefix (uri, "spotify:artist:"))
+    on_artist_card_activated (grid, uri, name, self);
+  else if (g_str_has_prefix (uri, "spotify:track:")) {
+    if (!native_auth_has_credentials (self->auth) ||
+        spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
+      show_sign_in_banner (self, "Sign in to play Spotify tracks.");
+      return;
+    }
+    HomeTrackLoad *load = g_new0 (HomeTrackLoad, 1);
+    g_weak_ref_init (&load->window, self);
+    load->generation = ++self->context_generation;
+    spotifygtk_native_session_load_track_uris (self->session, &uri, 1, NULL,
+                                               on_home_track_loaded, load);
+  } else
+    on_album_activated (grid, uri, name, self);
+}
+
+static void
+on_home_grid_added (SpotifyGtkHomePage *page, SpotifyGtkAlbumGrid *grid, gpointer data)
+{
+  SpotifyGtkNativeWindow *self = data;
+  g_signal_connect (grid, "album-activated", G_CALLBACK (on_home_card_activated), self);
+  wire_album_grid_common (self, grid);
+  (void) page;
+}
+
+typedef struct {
+  GWeakRef window;
+  guint generation, account_generation;
+  gchar *uri;
+} HomePlaybackLoad;
+
+static void
+home_play_tracks (SpotifyGtkNativeWindow *self, GPtrArray *tracks, const gchar *uri)
+{
+  if (!tracks || !tracks->len) {
+    show_sign_in_banner (self, "No playable tracks were found. Please try again.");
+    return;
+  }
+  interrupted_context_clear (self);
+  self->smart_generation++;
+  smart_saved_queue_clear (self);
+  self->smart_shuffle = self->server_order = FALSE;
+  g_clear_pointer (&self->play_context, g_ptr_array_unref);
+  self->play_context = g_ptr_array_ref (tracks);
+  g_free (self->play_context_uri);
+  self->play_context_uri = g_strdup (uri);
+  self->context_index = 0;
+  rebuild_order (self, 0);
+  spotifygtk_playback_bar_set_modes (self->playback_bar,
+    self->shuffle ? SPOTIFYGTK_SHUFFLE_NORMAL : SPOTIFYGTK_SHUFFLE_OFF, self->repeat);
+  play_context_at (self, 0, FALSE);
+}
+
+static void
+on_home_play_loaded (GObject *source, GAsyncResult *result, gpointer data)
+{
+  HomePlaybackLoad *load = data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  if (self && load->generation == self->context_generation &&
+      load->account_generation == self->account_generation &&
+      g_strcmp0 (gtk_stack_get_visible_child_name (self->page_stack), "home") == 0 &&
+      native_auth_has_credentials (self->auth) &&
+      spotifygtk_native_session_get_state (self->session) == SPOTIFYGTK_SESSION_READY) {
+    if (tracks && tracks->len) {
+      g_autoptr(GPtrArray) mixed = g_str_has_prefix (load->uri, "spotify:playlist:")
+        ? spotifygtk_device_playlists_tracks (self->device_playlists, load->uri, tracks) : NULL;
+      home_play_tracks (self, mixed ?: tracks, load->uri);
+    } else show_sign_in_banner (self, "Couldn't load this selection. Please try again.");
+  }
+  g_weak_ref_clear (&load->window); g_free (load->uri); g_free (load);
+}
+
+static void
+on_home_context_requested (SpotifyGtkHomePage *page, const gchar *uri,
+                            const gchar *title, gboolean play, gpointer data)
+{
+  SpotifyGtkNativeWindow *self = data;
+  if (!spotifygtk_home_uri_supported (uri)) return;
+  if (!play || g_str_has_prefix (uri, "spotify:track:")) {
+    on_home_card_activated (NULL, uri, title, self);
+    return;
+  }
+  if (!native_auth_has_credentials (self->auth) ||
+      spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
+    show_sign_in_banner (self, "Sign in to play Spotify tracks.");
+    return; /* never replace the queue or interrupt local playback on failure */
+  }
+  gboolean liked = g_str_equal (uri, "spotify:collection:tracks") || g_str_has_suffix (uri, ":collection");
+  g_autofree gchar *context = liked ? spotifygtk_native_session_dup_collection_uri (self->session) : g_strdup (uri);
+  if (!context) return;
+  self->context_generation++;
+  if (liked) {
+    g_autoptr(GPtrArray) tracks = spotifygtk_track_list_snapshot (
+      spotifygtk_liked_songs_page_get_list (self->liked_page));
+    if (tracks && tracks->len) { home_play_tracks (self, tracks, context); return; }
+  }
+  HomePlaybackLoad *load = g_new0 (HomePlaybackLoad, 1);
+  g_weak_ref_init (&load->window, self);
+  load->generation = self->context_generation;
+  load->account_generation = self->account_generation;
+  load->uri = g_steal_pointer (&context);
+  spotifygtk_native_session_load_tracks (self->session, load->uri, 5000, NULL,
+                                          on_home_play_loaded, load);
+  (void) page;
+}
+
+static void
+on_home_destination (SpotifyGtkHomePage *page, const gchar *destination, gpointer data)
+{
+  SpotifyGtkNativeWindow *self = data;
+  if (g_str_equal (destination, "local")) {
+    spotifygtk_library_page_show_local (self->library_page);
+    navigate_to_page (self, "library");
+  } else if (g_str_equal (destination, "library") || g_str_equal (destination, "liked")) {
+    if (g_str_equal (destination, "liked")) spotifygtk_liked_songs_page_show_recent (self->liked_page);
+    navigate_to_page (self, destination);
+  }
+  (void) page;
 }
 
 /* Connect the window to one page's inner list: activation drives play +
@@ -5364,6 +5551,7 @@ on_logout_choice (GObject *source, GAsyncResult *result, gpointer user_data)
     spotifygtk_player_service_stop (self->player);
 
   native_auth_log_out (self->auth);
+  spotifygtk_home_page_set_session (self->home_page, NULL);
   spotifygtk_native_session_disconnect (self->session);
   spotifygtk_context_page_set_session (self->context_page, NULL);
   spotifygtk_context_page_set_action (self->context_page, "", FALSE, FALSE);
@@ -5379,6 +5567,7 @@ on_logout_choice (GObject *source, GAsyncResult *result, gpointer user_data)
   nav_update_buttons (self);
 
   if (g_strcmp0 (choice, "clear") == 0) {
+    spotifygtk_home_page_clear_cache (self->home_page);
     spotifygtk_context_page_clear_spotify_cache (self->context_page);
     spotifygtk_cache_clear_async (NULL, on_logout_cache_cleared, NULL);
   }
@@ -5514,6 +5703,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
       gtk_widget_set_sensitive (self->menu_btn, TRUE);
     nav_update_buttons (self);   /* re-enable per actual history position */
   } else if (state == SPOTIFYGTK_SESSION_FAILED) {
+    spotifygtk_home_page_set_session (self->home_page, NULL);
     /* A stored token that the server refuses is indistinguishable, from here,
      * from having no token at all — put the gate back so there is a way out
      * other than restarting. */
@@ -5608,6 +5798,8 @@ set_page_covers_loaded (SpotifyGtkNativeWindow *self, const gchar *page_name,
     else        spotifygtk_album_grid_release_covers (self->playlists_grid);
   } else if (g_strcmp0 (page_name, "library") == 0 && self->library_page) {
     spotifygtk_library_page_set_covers_loaded (self->library_page, loaded);
+  } else if (g_strcmp0 (page_name, "home") == 0 && self->home_page) {
+    spotifygtk_home_page_set_covers_loaded (self->home_page, loaded);
   }
 }
 
@@ -5765,6 +5957,7 @@ show_now_playing (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track)
     track->uri && self->liked_uris &&
     g_hash_table_contains (self->liked_uris, track->uri));
   spotifygtk_now_playing_panel_set_track (self->now_playing_panel, name, artists, album);
+  spotifygtk_now_playing_panel_set_navigation_track (self->now_playing_panel, track);
   spotifygtk_now_playing_panel_set_lyrics_track (self->now_playing_panel, track);
 
   spotifygtk_playback_bar_set_cover (self->playback_bar, track->cover_id);
@@ -6021,6 +6214,39 @@ static const gchar *theme_body =
   "  color: @fg; font-size: 12px; font-weight: 600;"
   "  padding: 4px 14px; min-height: 0; }"
   ".pill-button:hover { background-color: @pill_hover; }"
+  ".settings-action { background-color: @bg_selected; border-radius: 8px;"
+  "  color: @fg; font-size: 12px; font-weight: 600; padding: 8px 16px; }"
+  ".settings-action:hover { background-color: @pill_hover; }"
+  ".now-playing-metadata link { color: @fg_dim; text-decoration: none; }"
+  ".now-playing-metadata link:hover { color: @fg; text-decoration: underline; }"
+
+  /* Home-specific surfaces; never alter Search or Library's card geometry. */
+  ".home-dashboard .title-text { font-size: 28px; }"
+  ".home-dashboard .home-card-title { color: @fg_strong; font-size: 13px; font-weight: 700; }"
+  ".home-card-subtitle { color: @fg_dim; font-size: 11px; font-weight: 400; }"
+  ".home-quick-grid flowboxchild { padding: 0; margin: 0; background: transparent; }"
+  ".home-quick-tile { background: @bg_card; border-radius: 10px; }"
+  ".home-quick-open { background: transparent; padding: 3px; border-radius: 10px; box-shadow: none; }"
+  ".home-quick-open:hover { background: @bg_hover; }"
+  ".home-quick-art { background: @art_bg; color: @art_glyph; border-radius: 5px; }"
+  ".home-quick-play { background: transparent; color: @fg_dim; padding: 8px;"
+  " min-width: 20px; min-height: 20px; margin: 0 8px; border-radius: 6px; box-shadow: none; }"
+  ".home-quick-play:hover { color: @fg_strong; background: @bg_hover; }"
+  ".home-text-action, .home-eyebrow { background: transparent; color: @fg_dim;"
+  " box-shadow: none; padding: 0; min-height: 22px; border-radius: 4px; font-size: 12px; }"
+  ".home-text-action:hover, .home-eyebrow:hover { color: @fg_strong; }"
+  ".home-eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 1px; }"
+  ".home-rotation-tile { background: @bg_card; border-radius: 12px; padding: 12px; box-shadow: none; }"
+  ".home-rotation-tile:hover { background: @bg_hover; }"
+  ".home-rotation-icon { border-radius: 9px; }"
+  ".home-repeat-icon { background: #274152; color: #4ed4df; }"
+  ".home-local-icon { background: #29483c; color: #7df2ab; }"
+  ".home-liked-icon { background: #4e324c; color: #e4b9db; }"
+  ".home-shelf .media-card { background: transparent; border-radius: 6px; }"
+  ".home-shelf .media-card:hover { background: @bg_hover; }"
+  ".home-shelf .art-large { border-radius: 6px; }"
+  ".home-dialog-row { background: @bg_card; padding: 10px 12px; border-radius: 8px; }"
+  ".home-dialog-row:hover { background: @bg_hover; }"
 
   /* ── Transport ─────────────────────────────────────────────── */
   /* min-width/height must match the widget size request, or GTK button
@@ -6108,6 +6334,10 @@ static const gchar *theme_body =
   " .spotifygtk-dialog .playlist-wizard-actions button:hover"
   "  { background-color: @bg_hover; color: @fg_strong; }"
   ".spotifygtk-dialog button:disabled { color: @fg_dimmer; }"
+  ".artwork-open, .artwork-open:hover, .artwork-open:active"
+  " { background: transparent; padding: 0; border: 0; box-shadow: none; min-width: 0; min-height: 0; }"
+  ".artwork-viewer sheet { background: transparent; border: 0; border-radius: 0;"
+  " padding: 0; box-shadow: none; outline: none; }"
   ".dialog-title { font-size: 15px; font-weight: 700; color: @fg_strong; }"
   /*
    * A dialog's primary action is white, not green.
@@ -6663,7 +6893,9 @@ spotifygtk_native_window_constructed (GObject *object)
   spotifygtk_artist_page_set_list_wire (self->artist_page, wire_track_list_for, self);
 
   wire_album_grid (self, spotifygtk_search_page_get_album_grid (self->search_page));
-  wire_album_grid (self, spotifygtk_home_page_get_album_grid (self->home_page));
+  g_signal_connect (self->home_page, "grid-added", G_CALLBACK (on_home_grid_added), self);
+  g_signal_connect (self->home_page, "context-requested", G_CALLBACK (on_home_context_requested), self);
+  g_signal_connect (self->home_page, "destination-requested", G_CALLBACK (on_home_destination), self);
   wire_album_grid (self, spotifygtk_library_page_get_album_grid (self->library_page));
   wire_album_grid (self, spotifygtk_library_page_get_alt_album_grid (self->library_page));
   g_signal_connect (spotifygtk_library_page_get_album_grid (self->library_page),
@@ -6687,6 +6919,8 @@ spotifygtk_native_window_constructed (GObject *object)
 
   /* Now Playing panel (300px) */
   self->now_playing_panel = spotifygtk_now_playing_panel_new ();
+  g_signal_connect (self->now_playing_panel, "context-requested",
+                    G_CALLBACK (on_panel_context_requested), self);
   g_signal_connect_swapped (self->now_playing_panel, "collapse-requested",
                             G_CALLBACK (spotifygtk_native_window_collapse_queue), self);
   gtk_widget_set_size_request (GTK_WIDGET (self->now_playing_panel), 300, -1);

@@ -1,4 +1,5 @@
 spotify_proto_sources = files(
+  'home_feed.c',
   'catalog_cache.c',
   'catalog_snapshot.c',
   'shannon.c',

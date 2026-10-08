@@ -341,6 +341,60 @@ test_invalid_json_is_private (void)
   fixture_clear (&f);
 }
 
+static void
+test_home_transport (gconstpointer data)
+{
+  guint mode = GPOINTER_TO_UINT (data);
+  Fixture f = {0};
+  GBytes *body;
+  if (mode == 1) {
+    g_autoptr(GString) large = g_string_sized_new (5 * 1024 * 1024);
+    for (guint i = 0; i < 5 * 1024 * 1024; i++) g_string_append_c (large, 'x');
+    body = g_bytes_new (large->str, large->len);
+  } else if (mode == 2)
+    body = g_bytes_new_static ("private-response-marker", 23);
+  else if (mode == 5) {
+    g_autoptr(GString) deep = g_string_new (NULL);
+    for (guint i = 0; i < 70; i++) g_string_append_c (deep, '[');
+    g_string_append_c (deep, '0');
+    for (guint i = 0; i < 70; i++) g_string_append_c (deep, ']');
+    body = g_bytes_new (deep->str, deep->len);
+  } else body = json_body ();
+  fixture_init (&f, body, "application/json", mode == 4 ? 503 : 200);
+  f.redirect = mode == 3;
+  g_autoptr(SpotifySpclient) client = spotifygtk_spclient_new ();
+  g_autoptr(GCancellable) cancel = g_cancellable_new ();
+  if (mode == 6) g_cancellable_cancel (cancel);
+  spotifygtk_spclient_get_home (client, "UTC", NULL, NULL, cancel, context_done, &f);
+  fixture_wait (&f);
+  g_assert_cmpuint (f.requests, ==, mode == 6 ? 0 : 1);
+  if (!mode) {
+    g_assert_no_error (f.error);
+    g_assert_nonnull (f.context);
+    g_assert_cmpstr (json_object_get_string_member (json_node_get_object (f.context), "tail"), ==, "complete");
+  } else {
+    g_assert_nonnull (f.error);
+    g_assert_null (f.context);
+    g_assert_null (strstr (f.error->message, "private-response-marker"));
+    if (mode == 6) g_assert_error (f.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  }
+  fixture_clear (&f);
+}
+
+static void
+test_home_body (void)
+{
+  g_autofree gchar *body = spotifygtk_spclient_build_home_body ("UTC");
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  g_assert_true (json_parser_load_from_data (parser, body, -1, NULL));
+  JsonObject *root = json_node_get_object (json_parser_get_root (parser));
+  g_assert_cmpstr (json_object_get_string_member (root, "operationName"), ==, "home");
+  JsonObject *variables = json_object_get_object_member (root, "variables");
+  g_assert_cmpstr (json_object_get_string_member (variables, "sp_t"), ==, "");
+  g_assert_cmpint (json_object_get_int_member (variables, "sectionItemsLimit"), ==, 10);
+  g_assert_cmpstr (json_object_get_string_member (variables, "homeEndUserIntegration"), ==, "INTEGRATION_DESKTOP");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -355,5 +409,11 @@ main (int argc, char **argv)
   g_test_add_data_func ("/spclient/compression/metadata-cancellation", GUINT_TO_POINTER (0), test_cancelled);
   g_test_add_data_func ("/spclient/compression/context-cancellation", GUINT_TO_POINTER (1), test_cancelled);
   g_test_add_func ("/spclient/compression/private-json-error", test_invalid_json_is_private);
+  g_test_add_func ("/spclient/home/request-body", test_home_body);
+  const gchar *modes[] = { "gzip", "size-limit", "invalid-json", "no-redirect", "http-error", "depth-limit", "cancelled" };
+  for (guint i = 0; i < G_N_ELEMENTS (modes); i++) {
+    g_autofree gchar *path = g_strconcat ("/spclient/home/", modes[i], NULL);
+    g_test_add_data_func (path, GUINT_TO_POINTER (i), test_home_transport);
+  }
   return g_test_run ();
 }

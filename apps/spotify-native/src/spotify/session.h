@@ -40,6 +40,7 @@
 #include <glib-object.h>
 #include "mercury.h"
 #include "spclient.h"
+#include "home_feed.h"
 
 G_BEGIN_DECLS
 
@@ -59,6 +60,8 @@ typedef struct {
   gchar   *artists;      /* ", "-joined */
   gchar   *album;
   gint64   duration_ms;
+  gint64   liked_at;     /* seconds since epoch; 0 if not known */
+  guint    device_index; /* playlist storage index + 1; 0 for server rows */
   gboolean is_explicit;
   gchar   *cover_id;       /* hex Image.file_id, widest variant; NULL if no art */
   /* Narrowest variant of the same art. A row thumbnail is 96px; fetching the
@@ -131,6 +134,15 @@ SpotifyNativeSessionState spotifygtk_native_session_get_state (SpotifyNativeSess
 /* Canonical username from APWelcome. NULL until the session is READY.
  * Returns a copy — the worker thread owns the original. */
 gchar *spotifygtk_native_session_dup_username (SpotifyNativeSession *self);
+
+void spotifygtk_native_session_load_home (SpotifyNativeSession *self,
+                                          GCancellable *cancellable,
+                                          GAsyncReadyCallback callback,
+                                          gpointer user_data);
+SpotifyHomeFeed *spotifygtk_native_session_load_home_finish (
+  SpotifyNativeSession *self, GAsyncResult *result, GError **error);
+/* Bounded, display-only cached Home for immediate startup/offline browsing. */
+SpotifyHomeFeed *spotifygtk_native_session_get_cached_home (SpotifyNativeSession *self);
 
 typedef void (*SpotifyNativeUserProfileFunc) (const gchar *display_name,
                                               const gchar *canonical_id,

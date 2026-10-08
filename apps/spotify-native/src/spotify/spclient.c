@@ -68,7 +68,7 @@ static SoupSession *
 new_pathfinder_session (void)
 {
   SoupSession *session = soup_session_new_with_options (
-    "user-agent", PATHFINDER_UA, NULL);
+    "user-agent", PATHFINDER_UA, "timeout", 30, NULL);
   configure_catalogue_session (session);
   return session;
 }
@@ -1152,6 +1152,149 @@ typedef struct {
   SpclientContextCallback callback;
   gpointer user_data;
 } PlaylistSearch;
+
+/* Home carries card metadata, never full playlist contents. Limit the transfer
+ * before buffering/parsing, rather than trusting a Content-Length header. */
+typedef struct {
+  SoupMessage *message;
+  GInputStream *stream;
+  GByteArray *body;
+  GCancellable *cancel;
+  SpclientContextCallback callback;
+  gpointer user_data;
+} HomeRequest;
+
+static void
+home_request_done (HomeRequest *request, JsonNode *answer, GError *error)
+{
+  request->callback (answer, error, request->user_data);
+  if (request->stream)
+    g_input_stream_close_async (request->stream, G_PRIORITY_DEFAULT, NULL, NULL, NULL);
+  g_clear_object (&request->stream);
+  g_clear_object (&request->message);
+  g_clear_object (&request->cancel);
+  g_byte_array_unref (request->body);
+  g_free (request);
+}
+
+static void home_read_next (HomeRequest *request);
+
+static void
+on_home_bytes (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  HomeRequest *request = user_data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) chunk = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &error);
+  if (!chunk) { home_request_done (request, NULL, error); return; }
+  gsize n;
+  const guint8 *data = g_bytes_get_data (chunk, &n);
+  if (n > 4 * 1024 * 1024 - request->body->len) {
+    g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Home response exceeds size limit");
+    home_request_done (request, NULL, error); return;
+  }
+  if (n) {
+    g_byte_array_append (request->body, data, n);
+    home_read_next (request); return;
+  }
+  /* Bound JSON nesting before invoking the recursive JSON parser. */
+  gint depth = 0;
+  gboolean quoted = FALSE, escaped = FALSE;
+  for (guint i = 0; i < request->body->len; i++) {
+    guint8 c = request->body->data[i];
+    if (quoted) {
+      if (escaped) escaped = FALSE;
+      else if (c == '\\') escaped = TRUE;
+      else if (c == '"') quoted = FALSE;
+    } else if (c == '"') quoted = TRUE;
+    else if (c == '[' || c == '{') {
+      if (++depth > 64) {
+        g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Home response nesting exceeds limit");
+        home_request_done (request, NULL, error); return;
+      }
+    } else if (c == ']' || c == '}') depth--;
+  }
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  JsonNode *answer = NULL;
+  if (json_parser_load_from_data (parser, (gchar *) request->body->data, request->body->len, &error)) {
+    JsonNode *root = json_parser_get_root (parser);
+    if (root && JSON_NODE_HOLDS_OBJECT (root) &&
+        !json_object_has_member (json_node_get_object (root), "errors")) answer = json_node_copy (root);
+    else g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_FAILED, "Home query unavailable");
+  } else {
+    g_clear_error (&error);
+    g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Home returned invalid JSON");
+  }
+  home_request_done (request, answer, error);
+}
+
+static void
+home_read_next (HomeRequest *request)
+{
+  g_input_stream_read_bytes_async (request->stream, 65536, G_PRIORITY_DEFAULT,
+                                  request->cancel, on_home_bytes, request);
+}
+
+static void
+on_home_response (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  HomeRequest *request = user_data;
+  g_autoptr(GError) error = NULL;
+  request->stream = soup_session_send_finish (SOUP_SESSION (source), result, &error);
+  if (request->stream && soup_message_get_status (request->message) != SOUP_STATUS_OK)
+    g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED, "Home returned HTTP %u",
+                 soup_message_get_status (request->message));
+  if (error) { home_request_done (request, NULL, error); return; }
+  home_read_next (request);
+}
+
+gchar *
+spotifygtk_spclient_build_home_body (const gchar *timezone)
+{
+  g_autoptr(JsonBuilder) b = json_builder_new ();
+  json_builder_begin_object (b);
+  json_builder_set_member_name (b, "operationName"); json_builder_add_string_value (b, "home");
+  json_builder_set_member_name (b, "variables"); json_builder_begin_object (b);
+  json_builder_set_member_name (b, "homeEndUserIntegration"); json_builder_add_string_value (b, "INTEGRATION_DESKTOP");
+  json_builder_set_member_name (b, "timeZone"); json_builder_add_string_value (b, timezone ?: "UTC");
+  json_builder_set_member_name (b, "sp_t"); json_builder_add_string_value (b, "");
+  json_builder_set_member_name (b, "facet"); json_builder_add_string_value (b, "");
+  json_builder_set_member_name (b, "sectionItemsLimit"); json_builder_add_int_value (b, 10);
+  json_builder_set_member_name (b, "includeEpisodeContentRatingsV2"); json_builder_add_boolean_value (b, TRUE);
+  json_builder_end_object (b);
+  json_builder_set_member_name (b, "extensions"); json_builder_begin_object (b);
+  json_builder_set_member_name (b, "persistedQuery"); json_builder_begin_object (b);
+  json_builder_set_member_name (b, "version"); json_builder_add_int_value (b, 1);
+  json_builder_set_member_name (b, "sha256Hash"); json_builder_add_string_value (b,
+    "76243c78b0e20ecdbe41b794dec8cbe73f75e585b0a7201b8d2e84578412847a");
+  json_builder_end_object (b); json_builder_end_object (b); json_builder_end_object (b);
+  g_autoptr(JsonNode) root = json_builder_get_root (b);
+  g_autoptr(JsonGenerator) gen = json_generator_new ();
+  json_generator_set_root (gen, root);
+  return json_generator_to_data (gen, NULL);
+}
+
+void
+spotifygtk_spclient_get_home (SpotifySpclient *self, const gchar *timezone,
+                              const gchar *bearer, const gchar *client,
+                              GCancellable *cancel, SpclientContextCallback callback, gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SPCLIENT (self));
+  g_return_if_fail (callback != NULL);
+  HomeRequest *r = g_new0 (HomeRequest, 1);
+  r->message = soup_message_new (SOUP_METHOD_POST, "https://api-partner.spotify.com/pathfinder/v2/query");
+  soup_message_add_flags (r->message, SOUP_MESSAGE_NO_REDIRECT);
+  r->body = g_byte_array_new (); r->cancel = cancel ? g_object_ref (cancel) : NULL;
+  r->callback = callback; r->user_data = user_data;
+  g_autofree gchar *body = spotifygtk_spclient_build_home_body (timezone);
+  g_autoptr(GBytes) bytes = g_bytes_new (body, strlen (body));
+  soup_message_set_request_body_from_bytes (r->message, "application/json", bytes);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (r->message);
+  g_autofree gchar *auth = g_strdup_printf ("Bearer %s", bearer ?: "");
+  soup_message_headers_replace (headers, "Authorization", auth);
+  if (client && *client) soup_message_headers_replace (headers, "Client-Token", client);
+  if (!self->gql_session) self->gql_session = new_pathfinder_session ();
+  soup_session_send_async (self->gql_session, r->message, G_PRIORITY_DEFAULT, cancel, on_home_response, r);
+}
 
 static void
 on_playlist_search (GObject *source, GAsyncResult *result, gpointer user_data)

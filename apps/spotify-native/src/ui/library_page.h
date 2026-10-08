@@ -22,6 +22,8 @@ void spotifygtk_library_page_resolve_playlist (SpotifyGtkLibraryPage *self,
   const gchar *uri, const gchar *name, const gchar *cover);
 
 SpotifyGtkLibraryPage *spotifygtk_library_page_new (void);
+/* Home's device shortcut selects the same Local Files view as its toggle. */
+void spotifygtk_library_page_show_local (SpotifyGtkLibraryPage *self);
 
 /* Set the READY session, then fill Albums lazily on first visit. */
 void spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,

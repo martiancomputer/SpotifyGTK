@@ -5,6 +5,7 @@
 #include "liked_songs_page.h"
 #include "track_list.h"
 #include "../log_file.h"
+#include "spotify/catalog_cache.h"
 
 #include <string.h>
 
@@ -36,6 +37,8 @@ struct _SpotifyGtkLikedSongsPage {
   /* Borrowed from the window: URIs known to be liked, read from collection v2.
    * Authoritative; see set_liked_filter(). */
   GHashTable *liked_filter;
+  GHashTable *liked_dates; /* owned Spotify URI -> boxed epoch seconds */
+  gchar *dates_key;
 
   /*
    * Filtering and sorting precomputation, both keyed by track pointer so the
@@ -73,12 +76,8 @@ struct _SpotifyGtkLikedSongsPage {
 /*
  * Sort keys.
  *
- * ADDED is the order the collection came back in, which is Spotify's own
- * newest-first ordering -- so it needs no key of its own, just the original
- * index. That matters because the actual added_at timestamp lives in
- * collection2v2, which this client has a write encoder for and no read path;
- * sorting by position gets the ordering right without that work, though it is
- * why no date can be *shown* per row yet.
+ * ADDED merges device like dates with collection-v2 dates. Original position
+ * is the stable tiebreaker; undated legacy entries stay behind dated likes.
  */
 enum {
   SORT_ADDED = 0,
@@ -178,9 +177,7 @@ ensure_collate_keys (SpotifyGtkLikedSongsPage *self)
   }
 }
 
-/* Stable across equal keys: qsort is not required to be, and two songs of the
- * same length jumping about on every re-sort looks like a bug. The original
- * index is the tiebreak, which is also what makes SORT_ADDED work. */
+/* Stable across equal keys: preserve source order for equal dates/durations. */
 typedef struct { SpotifyNativeTrack *track; guint index; } SortRow;
 
 static gint
@@ -202,8 +199,14 @@ compare_rows (gconstpointer a, gconstpointer b, gpointer user_data)
     break;
   }
   case SORT_ADDED:
-  default:
-    break;   /* index alone; see the enum comment */
+  default: {
+    const gint64 *a_date = g_hash_table_lookup (self->liked_dates, ra->track->uri);
+    const gint64 *b_date = g_hash_table_lookup (self->liked_dates, rb->track->uri);
+    gint64 da = a_date ? *a_date : ra->track->liked_at;
+    gint64 db = b_date ? *b_date : rb->track->liked_at;
+    cmp = (db > da) - (db < da); /* newest first */
+    break;
+  }
   }
 
   if (cmp == 0)
@@ -384,6 +387,18 @@ on_filter_changed (GtkSearchEntry *entry, gpointer user_data)
   (void) entry;
 }
 
+void
+spotifygtk_liked_songs_page_show_recent (SpotifyGtkLikedSongsPage *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
+  self->sort_key = SORT_ADDED;
+  self->sort_desc[SORT_ADDED] = FALSE;
+  gtk_editable_set_text (GTK_EDITABLE (self->filter_entry), "");
+  refresh_sort_labels (self);
+  rebuild_sorted (self);
+  apply_filter (self);
+}
+
 static void
 on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -517,6 +532,8 @@ spotifygtk_liked_songs_page_dispose (GObject *object)
   g_clear_pointer (&self->sorted_tracks, g_ptr_array_unref);
   g_clear_pointer (&self->haystacks, g_hash_table_unref);
   g_clear_pointer (&self->collate_keys, g_hash_table_unref);
+  g_clear_pointer (&self->liked_dates, g_hash_table_unref);
+  g_clear_pointer (&self->dates_key, g_free);
 
   G_OBJECT_CLASS (spotifygtk_liked_songs_page_parent_class)->dispose (object);
 }
@@ -538,6 +555,7 @@ spotifygtk_liked_songs_page_class_init (SpotifyGtkLikedSongsPageClass *klass)
 static void
 spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
 {
+  self->liked_dates = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_box_set_spacing (GTK_BOX (self), 12);
   gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
@@ -644,6 +662,30 @@ spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
   set_loading (self, FALSE);
   g_clear_object (&self->session);
   self->session = session ? g_object_ref (session) : NULL;
+  if (session) {
+    g_autofree gchar *user = spotifygtk_native_session_dup_username (session);
+    g_autofree gchar *key = user ? g_strdup_printf ("liked-dates:%s", user) : NULL;
+    if (g_strcmp0 (key, self->dates_key) != 0) {
+      g_hash_table_remove_all (self->liked_dates);
+      g_free (self->dates_key);
+      self->dates_key = g_strdup (key);
+      g_autoptr(GBytes) bytes = key ? spotifygtk_catalog_cache_get (key, 7 * 86400) : NULL;
+      if (bytes && g_bytes_get_size (bytes) <= 2 * 1024 * 1024) {
+        g_autoptr(GVariant) data = g_variant_ref_sink (
+          g_variant_new_from_bytes (G_VARIANT_TYPE ("a(sx)"), bytes, FALSE));
+        if (g_variant_is_normal_form (data) &&
+            g_variant_n_children (data) <= LIKED_SONGS_LIMIT) {
+          GVariantIter iter; const gchar *uri; gint64 date;
+          g_variant_iter_init (&iter, data);
+          while (g_variant_iter_loop (&iter, "(&sx)", &uri, &date)) {
+            if (!g_str_has_prefix (uri, "spotify:track:") || strlen (uri) > 128 || date <= 0) continue;
+            gint64 *copy = g_new (gint64, 1); *copy = date;
+            g_hash_table_replace (self->liked_dates, g_strdup (uri), copy);
+          }
+        }
+      }
+    }
+  }
 
   /* A newly-ready session is exactly what fixes an earlier failure. */
   self->loaded = FALSE;
@@ -717,12 +759,38 @@ spotifygtk_liked_songs_page_invalidate (SpotifyGtkLikedSongsPage *self)
  * list is numbered, so inserting at the top renumbers everything below it
  * anyway.
  */
-/*
- * Where `target` sits among the rows currently on screen, or -1 if the filter
- * is hiding it. Walks the sorted order applying the same test apply_filter()
- * does, so the answer is an index into the visible list rather than into
- * all_tracks.
- */
+/* Merge one collection page, then save/reorder only after pagination finishes. */
+void
+spotifygtk_liked_songs_page_update_dates (SpotifyGtkLikedSongsPage *self,
+                                         GHashTable *dates, gboolean complete)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
+  GHashTableIter iter; gpointer uri, value;
+  g_hash_table_iter_init (&iter, dates);
+  while (g_hash_table_iter_next (&iter, &uri, &value)) {
+    gint64 date = *(gint64 *) value;
+    if (date <= 0 || !g_str_has_prefix (uri, "spotify:track:") || strlen (uri) > 128) continue;
+    if (!g_hash_table_contains (self->liked_dates, uri) &&
+        g_hash_table_size (self->liked_dates) >= LIKED_SONGS_LIMIT) continue;
+    gint64 *copy = g_new (gint64, 1); *copy = date;
+    g_hash_table_replace (self->liked_dates, g_strdup (uri), copy);
+  }
+  if (complete && self->dates_key) {
+    GVariantBuilder b; g_variant_builder_init (&b, G_VARIANT_TYPE ("a(sx)"));
+    g_hash_table_iter_init (&iter, self->liked_dates);
+    while (g_hash_table_iter_next (&iter, &uri, &value))
+      g_variant_builder_add (&b, "(sx)", (gchar *) uri, *(gint64 *) value);
+    g_autoptr(GVariant) data = g_variant_ref_sink (g_variant_builder_end (&b));
+    g_autoptr(GBytes) bytes = g_variant_get_data_as_bytes (data);
+    spotifygtk_catalog_cache_put (self->dates_key, bytes, spotifygtk_catalog_cache_epoch ());
+  }
+  if (complete && self->all_tracks && self->sort_key == SORT_ADDED) {
+    rebuild_sorted (self);
+    apply_filter (self);
+  }
+}
+
+/* Position in the filtered, sorted list, or -1 when the filter hides it. */
 static gint
 visible_index_of (SpotifyGtkLikedSongsPage *self, const SpotifyNativeTrack *target)
 {
@@ -794,9 +862,19 @@ spotifygtk_liked_songs_page_add_track (SpotifyGtkLikedSongsPage *self,
   if (!track->name || !*track->name)
     return;
 
-  /* Position 0 is newest: the collection arrives newest-first and SORT_ADDED
-   * is that arrival order. See the sort-key enum. */
+  /* Optimistic new likes get today's date; seeded local favorites retain
+   * their persisted date (or zero for undated legacy data). */
   SpotifyNativeTrack *copy = spotifygtk_native_track_copy (track);
+  if (!g_str_has_prefix (copy->uri, "local:")) {
+    const gint64 *known = g_hash_table_lookup (self->liked_dates, copy->uri);
+    copy->liked_at = track->liked_at > 0 ? track->liked_at : known
+      ? *known : g_get_real_time () / G_USEC_PER_SEC;
+    if (known || g_hash_table_size (self->liked_dates) < LIKED_SONGS_LIMIT) {
+      gint64 *date = g_new (gint64, 1);
+      *date = copy->liked_at;
+      g_hash_table_replace (self->liked_dates, g_strdup (copy->uri), date);
+    }
+  }
   g_ptr_array_insert (self->all_tracks, 0, copy);
   index_one_track (self, copy);
 

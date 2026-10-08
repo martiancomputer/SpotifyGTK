@@ -23,6 +23,7 @@
 #include "../log_file.h"
 #include "../log_verbose.h"
 #include "../spotify/catalog_cache.h"
+#include "../spotify/image_uri.h"
 
 #define COVER_CDN_BASE "https://i.scdn.co/image/"
 
@@ -284,6 +285,10 @@ disk_cache_path (const gchar *cover_id)
    * turned into a path. */
   if (!cover_id || !*cover_id)
     return NULL;
+  if (spotifygtk_image_uri_allowed (cover_id)) {
+    g_autofree gchar *hash = g_compute_checksum_for_string (G_CHECKSUM_SHA256, cover_id, -1);
+    return g_build_filename (g_get_user_cache_dir (), "spotifygtk", "images", hash, NULL);
+  }
   for (const gchar *p = cover_id; *p; p++)
     if (!g_ascii_isxdigit (*p))
       return NULL;
@@ -705,6 +710,7 @@ spotifygtk_cover_build_url (const gchar *cover_id)
 {
   if (!cover_id || !*cover_id)
     return NULL;
+  if (spotifygtk_image_uri_allowed (cover_id)) return g_strdup (cover_id);
 
   /* Ids are hex from the protobuf, so they cannot contain anything needing
    * escaping — but validate rather than trust, since this becomes a URL. */
@@ -817,6 +823,8 @@ typedef struct {
   gint64 started_us;    /* request issued; split into network and decode below */
   gint64 fetched_us;    /* bytes in hand, decode about to begin */
   SoupMessage *message; /* owned, for its metrics */
+  GInputStream *stream;
+  GByteArray *body;
   gboolean playback;
 } FetchClosure;
 
@@ -900,8 +908,10 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
     return;
   }
 
-  gdouble scale = MIN ((gdouble) target_px / source_w,
-                       (gdouble) target_px / source_h);
+  /* Requesting a large preview must not manufacture detail by enlarging a
+   * lower-resolution source. The viewer can display this at its native size. */
+  gdouble scale = MIN (1.0, MIN ((gdouble) target_px / source_w,
+                                (gdouble) target_px / source_h));
   gint w = MAX (1, (gint) floor (source_w * scale + 0.5));
   gint h = MAX (1, (gint) floor (source_h * scale + 0.5));
   gint rowstride = w * 4;
@@ -1060,12 +1070,14 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
   fetch->playback = playback;
 
   SoupMessage *msg = soup_message_new (SOUP_METHOD_GET, url);
+  /* An allowed artwork URL must not redirect to an arbitrary destination. */
+  soup_message_add_flags (msg, SOUP_MESSAGE_NO_REDIRECT);
   /* Metrics are what let queue wait be told apart from transfer time. Without
    * them the only measurable span is enqueue-to-completion, which conflates
    * the two. */
   soup_message_add_flags (msg, SOUP_MESSAGE_COLLECT_METRICS);
   fetch->message = g_object_ref (msg);
-  soup_session_send_and_read_async (cover_session, msg,
+  soup_session_send_async (cover_session, msg,
                                     playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW,
                                     NULL,
                                     on_cover_fetched, fetch);
@@ -1073,11 +1085,14 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
 }
 
 static void
-on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
+finish_cover_fetch (FetchClosure *fetch, GBytes *bytes, GError *error)
 {
-  FetchClosure *fetch = user_data;
   gchar *cache_key = fetch->cache_key;   /* ownership moves to the decode task */
   gint target_px = fetch->target_px;
+  if (fetch->stream)
+    g_input_stream_close_async (fetch->stream, G_PRIORITY_LOW, NULL, NULL, NULL);
+  g_clear_object (&fetch->stream);
+  g_clear_pointer (&fetch->body, g_byte_array_unref);
 
   /*
    * The closure is freed at the end, not here.
@@ -1088,8 +1103,6 @@ on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
    * numbers looked plausible. The metrics work made it obvious, because it
    * dereferences a GObject pointer out of the same freed struct.
    */
-  g_autoptr(GError) error = NULL;
-  GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &error);
 
   if (fetch->started_us) {
     gint64 took = g_get_monotonic_time () - fetch->started_us;
@@ -1140,6 +1153,16 @@ on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
 
   /* Decode off the main thread. The bytes and target size ride along; the
    * key is the callback's user_data. */
+  if (waiters_all_cancelled (cache_key)) {
+    complete_waiters (cache_key, NULL);
+    g_bytes_unref (bytes);
+    g_free (cache_key);
+    g_clear_object (&fetch->message);
+    g_free (fetch);
+    cover_active--;
+    cover_pump ();
+    return;
+  }
   GTask *task = g_task_new (NULL, NULL, on_cover_decoded, cache_key);
   g_task_set_priority (task, fetch->playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW);
   /* Carried on the task rather than accumulated in decode_in_thread: that runs
@@ -1163,6 +1186,50 @@ on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data)
   /* The slot remains occupied through decoding. Releasing it here allowed a
    * warm disk cache to dispatch hundreds of decode jobs into GLib's worker
    * pool at once; on_cover_decoded() releases it after the complete job. */
+}
+
+static void cover_read_next (FetchClosure *fetch);
+
+static void
+on_cover_chunk (GObject *source, GAsyncResult *result, gpointer data)
+{
+  FetchClosure *fetch = data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) chunk = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &error);
+  if (!chunk) { finish_cover_fetch (fetch, NULL, error); return; }
+  gsize n;
+  const guint8 *bytes = g_bytes_get_data (chunk, &n);
+  if (n > 8 * 1024 * 1024 - fetch->body->len) {
+    g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Artwork exceeds size limit");
+    finish_cover_fetch (fetch, NULL, error); return;
+  }
+  if (n) {
+    g_byte_array_append (fetch->body, bytes, n);
+    cover_read_next (fetch);
+  } else {
+    GBytes *body = g_byte_array_free_to_bytes (g_steal_pointer (&fetch->body));
+    finish_cover_fetch (fetch, body, NULL);
+  }
+}
+
+static void
+cover_read_next (FetchClosure *fetch)
+{
+  g_input_stream_read_bytes_async (fetch->stream, 65536,
+    fetch->playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW, NULL, on_cover_chunk, fetch);
+}
+
+static void
+on_cover_fetched (GObject *source, GAsyncResult *result, gpointer data)
+{
+  FetchClosure *fetch = data;
+  g_autoptr(GError) error = NULL;
+  fetch->stream = soup_session_send_finish (SOUP_SESSION (source), result, &error);
+  if (fetch->stream && soup_message_get_status (fetch->message) != SOUP_STATUS_OK)
+    g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_FAILED, "Artwork request failed");
+  if (error) { finish_cover_fetch (fetch, NULL, error); return; }
+  fetch->body = g_byte_array_new ();
+  cover_read_next (fetch);
 }
 
 void

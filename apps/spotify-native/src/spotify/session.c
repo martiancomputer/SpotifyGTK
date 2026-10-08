@@ -58,6 +58,7 @@ struct _SpotifyNativeSession {
   gboolean  refreshing;
   gboolean  reconnect_pending;
   GList    *pending_ops;
+  GList    *pending_home; /* GTask references waiting for login5 refresh */
 
   /*
    * One shared copy of the collection.
@@ -140,6 +141,8 @@ spotifygtk_native_track_copy (const SpotifyNativeTrack *track)
   copy->artists     = g_strdup (track->artists);
   copy->album       = g_strdup (track->album);
   copy->duration_ms = track->duration_ms;
+  copy->liked_at    = track->liked_at;
+  copy->device_index = track->device_index;
   copy->is_explicit = track->is_explicit;
   copy->cover_id    = g_strdup (track->cover_id);
   copy->cover_id_small = g_strdup (track->cover_id_small);
@@ -303,6 +306,7 @@ generate_device_id (void)
 }
 
 static void flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok);
+static gboolean start_home_catalog (gpointer user_data);
 static void on_session_ap_disconnected (SpotifyApSession *ap, GError *error,
                                         gpointer user_data);
 
@@ -2839,6 +2843,18 @@ run_load_op (LoadTracksOp *op)
 static void
 flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok)
 {
+  GList *home = self->pending_home;
+  self->pending_home = NULL;
+  for (GList *l = home; l; l = l->next) {
+    GTask *task = l->data;
+    if (refresh_ok) start_home_catalog (task);
+    else {
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               "Home credentials could not be renewed");
+      g_object_unref (task);
+    }
+  }
+  g_list_free (home);
   GList *ops = self->pending_ops;
   self->pending_ops = NULL;
 
@@ -3364,6 +3380,133 @@ GPtrArray *
 spotifygtk_native_session_load_albums_finish (SpotifyNativeSession *self,
                                               GAsyncResult         *result,
                                               GError              **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+  return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+typedef struct {
+  gchar *key;
+  guint cache_epoch;
+  gint auth_generation;
+} HomeOp;
+
+static void
+home_op_free (HomeOp *op)
+{
+  g_free (op->key); g_free (op);
+}
+
+static gchar *
+home_cache_key (SpotifyNativeSession *self)
+{
+  g_autofree gchar *username = spotifygtk_native_session_dup_username (self);
+  if (!username || !*username) return NULL;
+  g_autofree gchar *account = g_compute_checksum_for_string (G_CHECKSUM_SHA256, username, -1);
+  g_autoptr(GTimeZone) tz = g_time_zone_new_local ();
+  return g_strdup_printf ("home-v1:%s:%s:%s", account,
+                           g_time_zone_get_identifier (tz), g_get_language_names ()[0]);
+}
+
+SpotifyHomeFeed *
+spotifygtk_native_session_get_cached_home (SpotifyNativeSession *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self), NULL);
+  g_autofree gchar *key = home_cache_key (self);
+  if (!key) return NULL;
+  g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (key, 1800);
+  return spotifygtk_home_feed_decode (bytes);
+}
+
+static void
+on_home_catalog (JsonNode *answer, GError *error, gpointer user_data)
+{
+  GTask *task = user_data;
+  SpotifyNativeSession *self = g_task_get_source_object (task);
+  HomeOp *op = g_task_get_task_data (task);
+  g_autoptr(JsonNode) root = answer;
+  g_autoptr(GError) parse_error = NULL;
+  g_autoptr(SpotifyHomeFeed) feed = NULL;
+  if (op->auth_generation != g_atomic_int_get (&self->auth_generation) ||
+      g_atomic_int_get (&self->signed_out)) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Home session changed");
+  } else if (!g_task_return_error_if_cancelled (task)) {
+    if (error) g_task_return_error (task, g_error_copy (error));
+    else {
+      feed = spotifygtk_home_feed_parse (root, &parse_error);
+      if (!feed) g_task_return_error (task, g_steal_pointer (&parse_error));
+      else {
+        g_autoptr(GBytes) snapshot = spotifygtk_home_feed_encode (feed);
+        if (op->key) spotifygtk_catalog_cache_put (op->key, snapshot, op->cache_epoch);
+        g_task_return_pointer (task, g_steal_pointer (&feed), (GDestroyNotify) spotifygtk_home_feed_free);
+      }
+    }
+  }
+  g_object_unref (task);
+}
+
+static gboolean
+start_home_catalog (gpointer user_data)
+{
+  GTask *task = user_data;
+  SpotifyNativeSession *self = g_task_get_source_object (task);
+  HomeOp *op = g_task_get_task_data (task);
+  if (g_task_return_error_if_cancelled (task)) { g_object_unref (task); return G_SOURCE_REMOVE; }
+  if (op->auth_generation != g_atomic_int_get (&self->auth_generation)) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Home session changed");
+    g_object_unref (task); return G_SOURCE_REMOVE;
+  }
+  g_mutex_lock (&self->lock);
+  gboolean ready = self->state == SPOTIFYGTK_SESSION_READY;
+  gint64 expires_at = self->bearer_expires_at;
+  g_autofree gchar *bearer = g_strdup (self->bearer_token);
+  g_autofree gchar *client = g_strdup (self->client_token);
+  g_mutex_unlock (&self->lock);
+  if (!ready || !self->spclient || g_atomic_int_get (&self->signed_out)) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED, "Session not ready");
+    g_object_unref (task); return G_SOURCE_REMOVE;
+  }
+  g_free (op->key);
+  op->key = home_cache_key (self);
+  op->cache_epoch = spotifygtk_catalog_cache_epoch ();
+  if (op->key) {
+    g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (op->key, 300);
+    SpotifyHomeFeed *feed = spotifygtk_home_feed_decode (bytes);
+    if (feed) {
+      g_task_return_pointer (task, feed, (GDestroyNotify) spotifygtk_home_feed_free);
+      g_object_unref (task); return G_SOURCE_REMOVE;
+    }
+  }
+  if (self->refreshing || (expires_at > 0 &&
+      g_get_monotonic_time () > expires_at - BEARER_REFRESH_MARGIN_US)) {
+    self->pending_home = g_list_append (self->pending_home, task);
+    if (!self->refreshing) start_bearer_refresh (self);
+    return G_SOURCE_REMOVE;
+  }
+  g_autoptr(GTimeZone) tz = g_time_zone_new_local ();
+  spotifygtk_spclient_get_home (self->spclient, g_time_zone_get_identifier (tz), bearer, client,
+    g_task_get_cancellable (task), on_home_catalog, task);
+  return G_SOURCE_REMOVE;
+}
+
+void
+spotifygtk_native_session_load_home (SpotifyNativeSession *self, GCancellable *cancel,
+                                      GAsyncReadyCallback callback, gpointer user_data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+  GTask *task = g_task_new (self, cancel, callback, user_data);
+  g_task_set_source_tag (task, spotifygtk_native_session_load_home);
+  HomeOp *op = g_new0 (HomeOp, 1);
+  op->auth_generation = g_atomic_int_get (&self->auth_generation);
+  g_task_set_task_data (task, op, (GDestroyNotify) home_op_free);
+  if (!self->context) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED, "Session not started");
+    g_object_unref (task);
+  } else g_main_context_invoke (self->context, start_home_catalog, task);
+}
+
+SpotifyHomeFeed *
+spotifygtk_native_session_load_home_finish (SpotifyNativeSession *self, GAsyncResult *result, GError **error)
 {
   g_return_val_if_fail (g_task_is_valid (result, self), NULL);
   return g_task_propagate_pointer (G_TASK (result), error);
@@ -4131,6 +4274,12 @@ spotifygtk_native_session_dispose (GObject *object)
     load_op_free (op);
   }
   g_clear_pointer (&self->pending_ops, g_list_free);
+  for (GList *l = self->pending_home; l; l = l->next) {
+    GTask *task = l->data;
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Session shut down");
+    g_object_unref (task);
+  }
+  g_clear_pointer (&self->pending_home, g_list_free);
 
   g_clear_pointer (&self->loop, g_main_loop_unref);
   g_clear_pointer (&self->context, g_main_context_unref);

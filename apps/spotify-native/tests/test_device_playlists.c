@@ -126,6 +126,39 @@ test_mixed_playlist_and_overlay (void)
   spotifygtk_device_playlists_free (store);
 }
 
+static void
+test_overlay_position_survives_refresh (void)
+{
+  const gchar *uri = "spotify:playlist:positions";
+  SpotifyNativeTrack a = { .uri = "spotify:track:a" };
+  SpotifyNativeTrack b = { .uri = "spotify:track:b" };
+  SpotifyNativeTrack c = { .uri = "spotify:track:c" };
+  SpotifyNativeTrack local = { .uri = "local:track:position", .name = "Local",
+    .artists = "Artist", .album = "Album", .cover_id = "" };
+  SpotifyGtkDevicePlaylists *store = spotifygtk_device_playlists_new ();
+  g_assert_true (spotifygtk_device_playlists_add (store, uri, &local));
+  g_assert_true (spotifygtk_device_playlists_add (store, uri, &local));
+  g_autoptr(GPtrArray) offline = spotifygtk_device_playlists_tracks (store, uri, NULL);
+  g_assert_cmpuint (offline->len, ==, 2);
+  g_autoptr(GPtrArray) server = g_ptr_array_new ();
+  g_ptr_array_add (server, &a); g_ptr_array_add (server, &b); g_ptr_array_add (server, &b);
+  g_autoptr(GPtrArray) first = spotifygtk_device_playlists_tracks (store, uri, server);
+  g_assert_cmpuint (first->len, ==, 5);
+  spotifygtk_device_playlists_free (store);
+  store = spotifygtk_device_playlists_new ();
+  g_ptr_array_add (server, &c);
+  g_autoptr(GPtrArray) refreshed = spotifygtk_device_playlists_tracks (store, uri, server);
+  g_assert_cmpstr (((SpotifyNativeTrack *) refreshed->pdata[3])->uri, ==, local.uri);
+  g_assert_cmpstr (((SpotifyNativeTrack *) refreshed->pdata[4])->uri, ==, local.uri);
+  g_assert_cmpstr (((SpotifyNativeTrack *) refreshed->pdata[5])->uri, ==, c.uri);
+  /* Removing an anchor has a deterministic bounded-position fallback. */
+  g_ptr_array_remove_index (server, 2);
+  g_autoptr(GPtrArray) missing = spotifygtk_device_playlists_tracks (store, uri, server);
+  g_assert_cmpstr (((SpotifyNativeTrack *) missing->pdata[3])->uri, ==, local.uri);
+  g_assert_true (spotifygtk_device_playlists_remove (store, uri, local.uri, 1));
+  spotifygtk_device_playlists_free (store);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -135,6 +168,7 @@ main (int argc, char **argv)
   g_setenv ("XDG_DATA_HOME", test_dir, TRUE);
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/device-playlists/mixed-and-overlay", test_mixed_playlist_and_overlay);
+  g_test_add_func ("/device-playlists/stable-position", test_overlay_position_survives_refresh);
   int result = g_test_run ();
   g_free (test_dir);
   return result;

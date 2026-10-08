@@ -1419,7 +1419,18 @@ spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position
   if (position < header_prefix_len (self) ||
       position >= g_list_model_get_n_items (G_LIST_MODEL (self->store)))
     return;
+  g_autoptr(SpotifyGtkTrackItem) removed = g_list_model_get_item (G_LIST_MODEL (self->store), position);
+  const SpotifyNativeTrack *removed_track = spotifygtk_track_item_get_track (removed);
+  guint device_index = removed_track ? removed_track->device_index : 0;
   g_list_store_remove (self->store, position);
+  /* Overlay anchors can put storage entries in a different visual order.
+   * Keep their storage indexes accurate after deleting an earlier entry. */
+  if (device_index)
+    for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (self->store)); i++) {
+      g_autoptr(SpotifyGtkTrackItem) item = g_list_model_get_item (G_LIST_MODEL (self->store), i);
+      SpotifyNativeTrack *track = (SpotifyNativeTrack *) spotifygtk_track_item_get_track (item);
+      if (track && track->device_index > device_index) track->device_index--;
+    }
 }
 
 gint
@@ -1435,7 +1446,8 @@ spotifygtk_track_list_device_index_at (SpotifyGtkTrackList *self, guint position
     const SpotifyNativeTrack *track = item ? spotifygtk_track_item_get_track (item) : NULL;
     gboolean device = track &&
       g_strcmp0 (track->section_detail, "On this device") == 0;
-    if (i == position) return device ? device_index : -1;
+    if (i == position) return device ? (track->device_index
+      ? (gint) track->device_index - 1 : device_index) : -1;
     if (device) device_index++;
   }
   return -1;

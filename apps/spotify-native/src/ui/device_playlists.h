@@ -41,6 +41,9 @@ gboolean spotifygtk_device_playlists_remove_at (SpotifyGtkDevicePlaylists *self,
                                                  const gchar *expected_uri);
 GPtrArray *spotifygtk_device_playlists_list (SpotifyGtkDevicePlaylists *self);
 void spotifygtk_device_playlist_info_free (SpotifyGtkDevicePlaylistInfo *info);
+/* A non-NULL server sequence pins newly added overlay entries once. Later
+ * refreshes merge against URI/occurrence anchors. NULL means offline and
+ * never establishes a new ordering anchor. */
 GPtrArray *spotifygtk_device_playlists_tracks (SpotifyGtkDevicePlaylists *self,
                                                const gchar *playlist_uri,
                                                GPtrArray *server_tracks);

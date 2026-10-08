@@ -81,6 +81,8 @@ spotifygtk_track_item_new (const SpotifyNativeTrack *track, guint number)
   self->track.section_title = g_strdup (track->section_title);
   self->track.section_detail = g_strdup (track->section_detail);
   self->track.duration_ms = track->duration_ms;
+  self->track.liked_at = track->liked_at;
+  self->track.device_index = track->device_index;
   self->track.is_explicit = track->is_explicit;
   return self;
 }

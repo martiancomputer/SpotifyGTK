@@ -23,10 +23,18 @@ spotifygtk_native_track_copy (const SpotifyNativeTrack *track)
   copy->album = g_strdup (track->album);
   copy->cover_id = g_strdup (track->cover_id);
   copy->duration_ms = track->duration_ms;
+  copy->liked_at = track->liked_at;
   return copy;
 }
 
 static gchar *test_dir;
+
+static void
+capture_date (gpointer key, gpointer value, gpointer data)
+{
+  *(gint64 *) data = ((SpotifyNativeTrack *) value)->liked_at;
+  (void) key;
+}
 
 static void
 test_local_favorite_persists_and_rejects_spotify (void)
@@ -40,6 +48,14 @@ test_local_favorite_persists_and_rejects_spotify (void)
   g_assert_false (spotifygtk_local_favorites_set (favorites, &remote, TRUE));
   g_assert_true (spotifygtk_local_favorites_set (favorites, &local, TRUE));
   g_assert_true (spotifygtk_local_favorites_contains (favorites, local.uri));
+  gint64 liked_at = 0;
+  spotifygtk_local_favorites_foreach (favorites, capture_date, &liked_at);
+  g_assert_cmpint (liked_at, >, 0);
+  local.liked_at = liked_at + 86400;
+  g_assert_true (spotifygtk_local_favorites_set (favorites, &local, TRUE));
+  gint64 updated_at = 0;
+  spotifygtk_local_favorites_foreach (favorites, capture_date, &updated_at);
+  g_assert_cmpint (updated_at, ==, liked_at);
   spotifygtk_local_favorites_free (favorites);
 
   g_autofree gchar *path = g_build_filename (test_dir, "spotifygtk",
@@ -59,6 +75,9 @@ test_local_favorite_persists_and_rejects_spotify (void)
 
   favorites = spotifygtk_local_favorites_new ();
   g_assert_true (spotifygtk_local_favorites_contains (favorites, local.uri));
+  updated_at = 0;
+  spotifygtk_local_favorites_foreach (favorites, capture_date, &updated_at);
+  g_assert_cmpint (updated_at, ==, liked_at);
   g_assert_true (spotifygtk_local_favorites_set (favorites, &local, FALSE));
   g_assert_false (spotifygtk_local_favorites_contains (favorites, local.uri));
   spotifygtk_local_favorites_free (favorites);

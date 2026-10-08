@@ -4,6 +4,9 @@
  * Covers arrive as a hex image id on SpotifyNativeTrack (extracted from
  * Track.album.cover_group by track_meta.c) and are served from Spotify's
  * public image CDN at https://i.scdn.co/image/<id>.
+ * Home also supplies HTTPS image URLs on an exact allowlist of Spotify image
+ * CDNs. These are cached under a URL hash; redirects and other hosts are
+ * rejected, and encoded network responses are capped at 8 MiB.
  *
  * Why not the image cache in spotify-connect: that one is built around the
  * Web API's JSON image URLs and carries a VA-API/libjpeg-turbo decode ladder

@@ -1,4 +1,10 @@
 if get_option('tests')
+  test_home_feed = executable('test-home-feed',
+    'test_home_feed.c', '../src/spotify/home_feed.c',
+    include_directories: [include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, json_glib_dep],
+  )
+  test('home-feed', test_home_feed, timeout: 15)
   test_spclient_compression = executable('test-spclient-compression',
     'test_spclient_compression.c',
     '../src/spotify/protobuf_min.c', '../src/spotify/track_meta.c',
@@ -15,6 +21,12 @@ if get_option('tests')
   )
   test('catalog-cache', test_catalog_cache, timeout: 15)
   if enable_gui
+    test_artwork_viewer = executable('test-artwork-viewer',
+      'test_artwork_viewer.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [gtk4_dep, adw_check],
+    )
+    test('artwork-viewer', test_artwork_viewer, timeout: 15)
     test_ui_refinements = executable('test-ui-refinements',
       'test_ui_refinements.c', ui_component_sources,
       '../src/player_service.c', '../src/playback_probe.c', '../src/main.c',

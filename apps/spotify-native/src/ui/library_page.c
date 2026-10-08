@@ -922,6 +922,13 @@ on_local_catalog_changed (SpotifyGtkLocalCatalog *catalog, gpointer user_data)
   (void) catalog;
 }
 
+void
+spotifygtk_library_page_show_local (SpotifyGtkLibraryPage *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->view_buttons[LIBRARY_LOCAL]), TRUE);
+}
+
 static void
 on_filter_changed (GtkSearchEntry *entry, gpointer user_data)
 {

@@ -151,12 +151,20 @@ struct _SpotifyGtkAlbumGrid {
   gchar       *filter_text;
   gboolean    wrap;
   gboolean    full_card_shelf;
+  gboolean    home_style;
   gboolean    shelf_snapping;
   gint        shelf_width;
   guint       shelf_columns;
 
   GtkWidget  *scroller;   /* borrowed: owned by the box */
   GtkWidget  *view;       /* borrowed: owned by the scroller */
+  GWeakRef outer_viewport;
+  GtkSelectionModel *outer_model;
+  GtkListItemFactory *outer_factory;
+  gboolean outer_suspended;
+  gboolean outer_active;
+  gdouble outer_saved_scroll;
+  guint outer_restore_tick, outer_restore_attempts;
 
   /* Scroll settle detection, mirroring track_list. Without it a fling through
    * the grid fires a request for every card it passes -- each a 352px decode
@@ -476,8 +484,65 @@ on_card_mapped (GtkWidget *card, gpointer user_data)
 }
 
 static gboolean
+grid_near_outer_viewport (SpotifyGtkAlbumGrid *self)
+{
+  g_autoptr(GtkScrolledWindow) outer = g_weak_ref_get (&self->outer_viewport);
+  if (!outer) return TRUE;
+  graphene_rect_t bounds;
+  gint height = gtk_widget_get_height (GTK_WIDGET (outer));
+  if (height <= 0 || !gtk_widget_get_mapped (GTK_WIDGET (self)) ||
+      !gtk_widget_compute_bounds (GTK_WIDGET (self), GTK_WIDGET (outer), &bounds))
+    return FALSE;
+  gdouble overscan = height * 0.5;
+  return bounds.origin.y + bounds.size.height > -overscan &&
+         bounds.origin.y < height + overscan;
+}
+
+static gboolean
+restore_outer_scroll (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
+{
+  SpotifyGtkAlbumGrid *self = data;
+  if (gtk_adjustment_get_upper (self->vadj) > gtk_adjustment_get_page_size (self->vadj) ||
+      ++self->outer_restore_attempts >= 8) {
+    gtk_adjustment_set_value (self->vadj, self->outer_saved_scroll);
+    self->outer_restore_tick = 0;
+    schedule_grid_settle (self);
+    return G_SOURCE_REMOVE;
+  }
+  (void) widget; (void) clock;
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+set_outer_suspended (SpotifyGtkAlbumGrid *self, gboolean suspended)
+{
+  if (!self->outer_model || self->outer_suspended == suspended) return;
+  self->outer_suspended = suspended;
+  if (self->outer_restore_tick) {
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->outer_restore_tick);
+    self->outer_restore_tick = 0;
+  }
+  if (suspended) {
+    self->outer_saved_scroll = gtk_adjustment_get_value (self->vadj);
+    spotifygtk_album_grid_release_covers (self);
+    /* Horizontal virtualization cannot see the outer vertical viewport.
+     * Detach both model and factory so off-page shelves release their row
+     * trees and GTK render nodes, not just their artwork references. */
+    gtk_list_view_set_model (GTK_LIST_VIEW (self->view), NULL);
+    gtk_list_view_set_factory (GTK_LIST_VIEW (self->view), NULL);
+  } else {
+    gtk_list_view_set_factory (GTK_LIST_VIEW (self->view), self->outer_factory);
+    gtk_list_view_set_model (GTK_LIST_VIEW (self->view), self->outer_model);
+    self->outer_restore_attempts = 0;
+    self->outer_restore_tick = gtk_widget_add_tick_callback (
+      GTK_WIDGET (self), restore_outer_scroll, self, NULL);
+  }
+}
+
+static gboolean
 card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 {
+  if (!grid_near_outer_viewport (self)) return FALSE;
   if (!self->scroller)
     return TRUE;                /* nothing to measure against */
 
@@ -506,6 +571,7 @@ card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 static gboolean
 card_near_allocated_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card)
 {
+  if (!grid_near_outer_viewport (self)) return FALSE;
   if (!self->scroller || !gtk_widget_get_mapped (card))
     return FALSE;
 
@@ -562,6 +628,11 @@ on_grid_settled (gpointer user_data)
 
   self->settle_id = 0;
   self->scrolling = FALSE;
+
+  if (self->outer_model) {
+    set_outer_suspended (self, !self->outer_active || !grid_near_outer_viewport (self));
+    if (self->outer_suspended) return G_SOURCE_REMOVE;
+  }
 
   self->window_valid = grid_model_window (
     self, &self->window_first, &self->window_last, NULL);
@@ -889,6 +960,11 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_widget_set_margin_end (box, 8);
   gtk_widget_set_margin_top (box, 8);
   gtk_widget_set_margin_bottom (box, 8);
+  if (self->home_style) {
+    gtk_widget_set_margin_start (box, 0);
+    gtk_widget_set_margin_end (box, 24);
+    gtk_widget_set_margin_top (box, 0);
+  }
 
   GtkWidget *art = gtk_image_new_from_icon_name ("media-optical-symbolic");
   gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
@@ -1148,11 +1224,51 @@ void
 spotifygtk_album_grid_reload_covers (SpotifyGtkAlbumGrid *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  if (self->outer_model) {
+    self->outer_active = TRUE;
+    schedule_grid_settle (self);
+  }
   if (!self->bound_cards)
     return;
 
   for (guint i = 0; i < self->bound_cards->len; i++)
     card_retry_cover (g_ptr_array_index (self->bound_cards, i), TRUE);
+}
+
+static void
+on_outer_scrolled (GtkAdjustment *adjustment, gpointer data)
+{
+  SpotifyGtkAlbumGrid *self = data;
+  schedule_grid_settle (self);
+  self->last_scroll_us = g_get_monotonic_time ();
+  (void) adjustment;
+}
+
+void
+spotifygtk_album_grid_set_outer_viewport (SpotifyGtkAlbumGrid *self, GtkScrolledWindow *outer)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  g_return_if_fail (GTK_IS_SCROLLED_WINDOW (outer));
+  /* Set once when a Home shelf is constructed; callbacks disappear with it. */
+  g_weak_ref_set (&self->outer_viewport, outer);
+  self->outer_active = TRUE;
+  if (!self->outer_model) {
+    self->outer_model = g_object_ref (gtk_list_view_get_model (GTK_LIST_VIEW (self->view)));
+    self->outer_factory = g_object_ref (gtk_list_view_get_factory (GTK_LIST_VIEW (self->view)));
+    set_outer_suspended (self, TRUE);
+  }
+  g_signal_connect_object (gtk_scrolled_window_get_vadjustment (outer), "value-changed",
+                            G_CALLBACK (on_outer_scrolled), self, 0);
+  g_signal_connect_object (gtk_scrolled_window_get_vadjustment (outer), "changed",
+                            G_CALLBACK (on_outer_scrolled), self, 0);
+  schedule_grid_settle (self);
+}
+
+void
+spotifygtk_album_grid_suspend_outer_view (SpotifyGtkAlbumGrid *self)
+{
+  self->outer_active = FALSE;
+  set_outer_suspended (self, TRUE);
 }
 
 gboolean
@@ -1240,6 +1356,7 @@ set_card_specs (SpotifyGtkAlbumGrid       *self,
   g_list_store_splice (self->store, 0,
                        g_list_model_get_n_items (G_LIST_MODEL (self->store)),
                        items, n);
+  if (self->outer_model) schedule_grid_settle (self);
 
   if (self->full_card_shelf && self->vadj) {
     spotifygtk_smooth_scroll_cancel (GTK_SCROLLED_WINDOW (self->scroller));
@@ -1406,6 +1523,16 @@ spotifygtk_album_grid_dispose (GObject *object)
     g_source_remove (self->settle_id);
     self->settle_id = 0;
   }
+  if (self->outer_restore_tick) {
+    gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->outer_restore_tick);
+    self->outer_restore_tick = 0;
+  }
+  if (self->outer_model) {
+    gtk_list_view_set_model (GTK_LIST_VIEW (self->view), NULL);
+    gtk_list_view_set_factory (GTK_LIST_VIEW (self->view), NULL);
+  }
+  g_clear_object (&self->outer_model);
+  g_clear_object (&self->outer_factory);
   g_clear_pointer (&self->bound_cards, g_ptr_array_unref);
   g_clear_pointer (&self->filter_text, g_free);
   g_clear_object (&self->filter);
@@ -1415,9 +1542,17 @@ spotifygtk_album_grid_dispose (GObject *object)
 }
 
 static void
+spotifygtk_album_grid_finalize (GObject *object)
+{
+  g_weak_ref_clear (&SPOTIFYGTK_ALBUM_GRID (object)->outer_viewport);
+  G_OBJECT_CLASS (spotifygtk_album_grid_parent_class)->finalize (object);
+}
+
+static void
 spotifygtk_album_grid_class_init (SpotifyGtkAlbumGridClass *klass)
 {
   G_OBJECT_CLASS (klass)->dispose = spotifygtk_album_grid_dispose;
+  G_OBJECT_CLASS (klass)->finalize = spotifygtk_album_grid_finalize;
 
   signals[ALBUM_ACTIVATED] = g_signal_new (
     "album-activated", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
@@ -1460,6 +1595,7 @@ spotifygtk_album_grid_class_init (SpotifyGtkAlbumGridClass *klass)
 static void
 spotifygtk_album_grid_init (SpotifyGtkAlbumGrid *self)
 {
+  g_weak_ref_init (&self->outer_viewport, NULL);
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_widget_set_hexpand (GTK_WIDGET (self), TRUE);
 }
@@ -1647,6 +1783,15 @@ spotifygtk_album_grid_set_content_margins (SpotifyGtkAlbumGrid *self,
     return;
   gtk_widget_set_margin_start (self->view, start);
   gtk_widget_set_margin_end (self->view, end);
+}
+
+void
+spotifygtk_album_grid_set_home_style (SpotifyGtkAlbumGrid *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  self->home_style = TRUE;
+  gtk_widget_add_css_class (GTK_WIDGET (self), "home-shelf");
+  spotifygtk_album_grid_set_content_margins (self, 0, 0);
 }
 
 SpotifyGtkAlbumGrid *
