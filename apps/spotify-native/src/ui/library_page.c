@@ -16,79 +16,10 @@
 #include "settings.h"
 #include "../log_file.h"
 #include "../spotify/collection.h"
+#include "../spotify/catalog_cache.h"
 
-/* Artist names are catalogue metadata rather than image data, so they need a
- * tiny companion map beside the existing cover cache. Values are base64 in
- * the file to preserve arbitrary UTF-8 names without inventing escaping. */
-static GHashTable *artist_name_cache;
-
-static gchar *
-artist_name_map_path (void)
-{
-  return g_build_filename (g_get_user_cache_dir (), "spotifygtk",
-                           "artist-names-v2", NULL);
-}
-
-static void
-artist_name_map_load (void)
-{
-  if (artist_name_cache)
-    return;
-  artist_name_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
-                                             g_free, g_free);
-  g_autofree gchar *path = artist_name_map_path ();
-  g_autofree gchar *data = NULL;
-  if (!g_file_get_contents (path, &data, NULL, NULL))
-    return;
-
-  g_auto(GStrv) lines = g_strsplit (data, "\n", -1);
-  for (guint i = 0; lines[i]; i++) {
-    gchar *space = strchr (lines[i], ' ');
-    if (!space)
-      continue;
-    *space = '\0';
-    gsize len = 0;
-    g_autofree guchar *decoded = g_base64_decode (space + 1, &len);
-    if (len > 0)
-      g_hash_table_replace (artist_name_cache, g_strdup (lines[i]),
-                            g_strndup ((const gchar *) decoded, len));
-  }
-}
-
-static void
-artist_name_map_save (void)
-{
-  if (!artist_name_cache)
-    return;
-  g_autofree gchar *path = artist_name_map_path ();
-  g_autofree gchar *dir = g_path_get_dirname (path);
-  g_mkdir_with_parents (dir, 0700);
-
-  GString *out = g_string_new (NULL);
-  GHashTableIter it;
-  gpointer key, value;
-  g_hash_table_iter_init (&it, artist_name_cache);
-  while (g_hash_table_iter_next (&it, &key, &value)) {
-    g_autofree gchar *encoded = g_base64_encode ((const guchar *) value,
-                                                  strlen (value));
-    g_string_append_printf (out, "%s %s\n", (const gchar *) key, encoded);
-  }
-  g_file_set_contents (path, out->str, (gssize) out->len, NULL);
-  g_string_free (out, TRUE);
-}
-
-static void
-artist_name_cache_store (const gchar *uri, const gchar *name)
-{
-  if (!uri || !name || !*name)
-    return;
-  artist_name_map_load ();
-  const gchar *known = g_hash_table_lookup (artist_name_cache, uri);
-  if (g_strcmp0 (known, name) == 0)
-    return;
-  g_hash_table_replace (artist_name_cache, g_strdup (uri), g_strdup (name));
-  artist_name_map_save ();
-}
+/* Artist identities share the bounded catalogue cache with the session.
+ * Do not rewrite a whole name map synchronously on GTK's thread per card. */
 
 typedef enum {
   LIBRARY_ALL = 0,
@@ -111,6 +42,8 @@ struct _SpotifyGtkLibraryPage {
   GtkWidget            *albums_status;   /* empty/error note; loading uses window overlay */
   GtkWidget            *albums_status_primary;
   GtkWidget            *albums_status_alt;
+  GtkWidget            *local_empty_primary;
+  GtkWidget            *local_empty_alt;
   GtkWidget            *artists_status;
   GtkStack             *content_stack;
   GtkSearchEntry       *filter_entry;
@@ -395,12 +328,14 @@ show_release_view (SpotifyGtkLibraryPage *self)
       ? "No saved singles yet."
       : self->active_view == LIBRARY_ALL
         ? "No saved or local releases yet."
-      : self->active_view == LIBRARY_LOCAL
-        ? "No local albums yet. Add a music folder in Settings."
       : self->active_view == LIBRARY_PLAYLISTS
         ? "No playlists yet."
       : "No saved albums yet.";
-  gtk_widget_set_visible (self->albums_status, out == 0);
+  gboolean local_empty = self->active_view == LIBRARY_LOCAL && out == 0;
+  GtkWidget *empty_state = self->albums == self->albums_primary
+    ? self->local_empty_primary : self->local_empty_alt;
+  gtk_widget_set_visible (empty_state, local_empty);
+  gtk_widget_set_visible (self->albums_status, out == 0 && !local_empty);
   gtk_label_set_text (GTK_LABEL (self->albums_status), out == 0 ? empty : "");
 }
 
@@ -427,6 +362,21 @@ spotifygtk_library_page_set_playlists (SpotifyGtkLibraryPage *self,
       (self->active_view == LIBRARY_ALL ||
        self->active_view == LIBRARY_PLAYLISTS))
     show_release_view (self);
+}
+
+void
+spotifygtk_library_page_resolve_playlist (SpotifyGtkLibraryPage *self,
+  const gchar *uri, const gchar *name, const gchar *cover)
+{
+  for (guint i = 0; self->playlists && i < self->playlists->len; i++) {
+    SpotifyGtkCardSpec *card = self->playlists->pdata[i];
+    if (g_strcmp0 (card->uri, uri) != 0) continue;
+    g_free ((gchar *) card->title); card->title = g_strdup (name);
+    g_free ((gchar *) card->cover_id); card->cover_id = g_strdup (cover);
+    break;
+  }
+  spotifygtk_album_grid_resolve_card (self->albums_primary, uri, name, "Playlist", cover);
+  spotifygtk_album_grid_resolve_card (self->albums_alt, uri, name, "Playlist", cover);
 }
 
 static void
@@ -784,14 +734,20 @@ populate_artist_cards (SpotifyGtkLibraryPage *self)
   self->artists_populated = TRUE;
 
   guint n = self->followed_artist_uris ? self->followed_artist_uris->len : 0;
-  artist_name_map_load ();
   g_autofree SpotifyGtkCardSpec *specs = g_new0 (SpotifyGtkCardSpec, MAX (n, 1));
+  g_autoptr(GPtrArray) identities = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < n; i++) {
     const gchar *uri = g_ptr_array_index (self->followed_artist_uris, i);
-    const gchar *known_name = g_hash_table_lookup (artist_name_cache, uri);
     specs[i].uri = uri;
-    specs[i].title = known_name ? known_name : "Artist";
+    specs[i].title = "Artist";
     specs[i].subtitle = "Followed artist";
+    gchar *name = NULL, *cover = NULL;
+    if (spotifygtk_catalog_card_get (uri, &name, &cover)) {
+      specs[i].title = name;
+      specs[i].cover_id = cover;
+      g_ptr_array_add (identities, name);
+      g_ptr_array_add (identities, cover);
+    }
   }
   spotifygtk_album_grid_set_pending_cards (self->artists, specs, n);
   gtk_widget_set_visible (self->artists_status, n == 0);
@@ -854,9 +810,11 @@ on_artist_card_identity (const gchar *name, const gchar *cover_id,
   if (name && *name) {
     g_free (load->name);
     load->name = g_strdup (name);
-    artist_name_cache_store (load->uri, name);
   }
-  load->cover_id = g_strdup (cover_id);
+  if (cover_id && *cover_id) {
+    g_free (load->cover_id);
+    load->cover_id = g_strdup (cover_id);
+  }
   artist_card_load_complete (load);
 }
 
@@ -872,10 +830,7 @@ on_artist_card_needs_resolve (SpotifyGtkAlbumGrid *grid,
   g_weak_ref_init (&load->page, self);
   load->generation = self->generation;
   load->uri = g_strdup (uri);
-  artist_name_map_load ();
-  const gchar *known_name = g_hash_table_lookup (artist_name_cache, uri);
-  if (known_name)
-    load->name = g_strdup (known_name);
+  spotifygtk_catalog_card_get (uri, &load->name, &load->cover_id);
   load->remaining = 1;
   spotifygtk_native_session_get_artist_identity (
     self->session, uri, on_artist_card_identity, load);
@@ -1024,6 +979,37 @@ on_albums_scrolled (GtkAdjustment *adj, gpointer user_data)
 
 /* === Building blocks === */
 
+static GtkWidget *
+add_local_empty_state (GtkStack *stack, GtkWidget *page, const gchar *name)
+{
+  GtkWidget *overlay = gtk_overlay_new ();
+  gtk_overlay_set_child (GTK_OVERLAY (overlay), page);
+  GtkWidget *state = gtk_box_new (GTK_ORIENTATION_VERTICAL, 16);
+  gtk_widget_add_css_class (state, "local-files-empty-state");
+  gtk_widget_set_halign (state, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (state, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_start (state, 24);
+  gtk_widget_set_margin_end (state, 24);
+  gtk_widget_set_can_target (state, FALSE);
+  /* A non-symbolic scalable icon keeps the supplied colors and a bounded
+   * 228px natural size, rather than the SVG's original 512px request. */
+  GtkWidget *vinyl = gtk_image_new_from_icon_name ("spotifygtk-vinyl-record");
+  gtk_image_set_pixel_size (GTK_IMAGE (vinyl), 228);
+  gtk_widget_set_halign (vinyl, GTK_ALIGN_CENTER);
+  gtk_box_append (GTK_BOX (state), vinyl);
+  GtkWidget *hint = gtk_label_new (
+    "Enable Local files and add a folder to get started.");
+  gtk_widget_add_css_class (hint, "dim-text");
+  gtk_label_set_wrap (GTK_LABEL (hint), TRUE);
+  gtk_label_set_max_width_chars (GTK_LABEL (hint), 42);
+  gtk_label_set_justify (GTK_LABEL (hint), GTK_JUSTIFY_CENTER);
+  gtk_box_append (GTK_BOX (state), hint);
+  gtk_widget_set_visible (state, FALSE);
+  gtk_overlay_add_overlay (GTK_OVERLAY (overlay), state);
+  gtk_stack_add_named (stack, overlay, name);
+  return state;
+}
+
 static void
 spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
 {
@@ -1044,11 +1030,13 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
   gtk_widget_set_hexpand (title, TRUE);
   gtk_box_append (GTK_BOX (title_row), title);
-  self->new_playlist_button = gtk_button_new_with_label ("New device playlist");
-  gtk_widget_add_css_class (self->new_playlist_button, "dialog-secondary");
+  self->new_playlist_button = gtk_button_new_from_icon_name ("list-add-symbolic");
+  gtk_widget_add_css_class (self->new_playlist_button, "playlist-create-button");
+  gtk_widget_set_tooltip_text (self->new_playlist_button, "Create playlist");
+  gtk_accessible_update_property (GTK_ACCESSIBLE (self->new_playlist_button),
+    GTK_ACCESSIBLE_PROPERTY_LABEL, "Create playlist", -1);
   g_signal_connect (self->new_playlist_button, "clicked",
                     G_CALLBACK (on_new_playlist_clicked), self);
-  gtk_box_append (GTK_BOX (title_row), self->new_playlist_button);
   gtk_box_append (GTK_BOX (header), title_row);
 
   /* Match the sort controls elsewhere: caption plus a linked segmented group,
@@ -1064,6 +1052,8 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   g_signal_connect (self->filter_entry, "search-changed",
                     G_CALLBACK (on_filter_changed), self);
   gtk_box_append (GTK_BOX (view_controls), GTK_WIDGET (self->filter_entry));
+  gtk_widget_set_valign (self->new_playlist_button, GTK_ALIGN_CENTER);
+  gtk_box_append (GTK_BOX (view_controls), self->new_playlist_button);
 
   GtkWidget *view_spacer = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_hexpand (view_spacer, TRUE);
@@ -1132,7 +1122,8 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   spotifygtk_album_grid_set_content_margins (self->albums, 35, 2);
   gtk_widget_set_vexpand (GTK_WIDGET (self->albums), TRUE);
   gtk_box_append (GTK_BOX (albums_page), GTK_WIDGET (self->albums));
-  gtk_stack_add_named (self->content_stack, albums_page, "releases");
+  self->local_empty_primary = add_local_empty_state (
+    self->content_stack, albums_page, "releases");
 
   GtkWidget *albums_alt_page = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   self->albums_status_alt = gtk_label_new ("");
@@ -1145,7 +1136,8 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   spotifygtk_album_grid_set_content_margins (self->albums_alt, 35, 2);
   gtk_widget_set_vexpand (GTK_WIDGET (self->albums_alt), TRUE);
   gtk_box_append (GTK_BOX (albums_alt_page), GTK_WIDGET (self->albums_alt));
-  gtk_stack_add_named (self->content_stack, albums_alt_page, "releases-alt");
+  self->local_empty_alt = add_local_empty_state (
+    self->content_stack, albums_alt_page, "releases-alt");
 
   GtkWidget *artists_page = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
   self->artists_status = gtk_label_new ("");

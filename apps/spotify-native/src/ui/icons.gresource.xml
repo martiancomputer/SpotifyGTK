@@ -4,4 +4,7 @@
     <file preprocess="xml-stripblanks" alias="spotifygtk-heart-outline-symbolic.svg">icons/spotifygtk-heart-outline-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="spotifygtk-heart-filled-symbolic.svg">icons/spotifygtk-heart-filled-symbolic.svg</file>
   </gresource>
+  <gresource prefix="/com/github/spotifygtk/SpotifyNative/icons/scalable/status">
+    <file preprocess="xml-stripblanks" alias="spotifygtk-vinyl-record.svg">icons/vinyl-record.svg</file>
+  </gresource>
 </gresources>

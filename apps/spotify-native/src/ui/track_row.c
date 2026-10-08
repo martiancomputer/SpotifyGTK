@@ -15,7 +15,7 @@
  * for, so a long title cannot drag the window wider.
  */
 #define ROW_TITLE_MAX_CHARS 48
-#define ROW_META_MAX_CHARS  28
+#define ROW_META_MAX_CHARS  56
 
 /* Wide enough for the longest duration ("10:05") and for EQ_WIDTH, so the two
  * states are the same size and the column does not twitch when one replaces
@@ -39,8 +39,10 @@ struct _SpotifyGtkTrackRow {
   GtkLabel *track_num;
   GtkLabel *title_label;
   GtkWidget *type_label;
-  GtkLabel *artist_label;
-  GtkLabel *album_label;
+  GtkLabel *metadata_label;
+  gchar *artists_text;
+  gchar *album_text;
+  gboolean context_item;
   GtkLabel *section_title;
   GtkLabel *section_detail;
   GtkWidget *section_row;
@@ -107,6 +109,8 @@ spotifygtk_track_row_dispose (GObject *object)
   }
   g_clear_pointer (&self->track_uri, g_free);
   g_clear_pointer (&self->track_id, g_free);
+  g_clear_pointer (&self->artists_text, g_free);
+  g_clear_pointer (&self->album_text, g_free);
   G_OBJECT_CLASS (spotifygtk_track_row_parent_class)->dispose (object);
 }
 
@@ -154,7 +158,17 @@ static const gdouble EQ_PHASES[EQ_BARS]  = { 0.0,  0.5,  0.25 };
 static void
 eq_draw (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data)
 {
-  gdouble seconds = *(gdouble *) user_data;
+  SpotifyGtkTrackRow *self = user_data;
+  gdouble seconds = *(gdouble *) g_object_get_data (G_OBJECT (area), "eq-seconds");
+  /* The duration is right-aligned, not centered in its reserved column.
+   * Center the bars on the actual text run (including double-digit minutes),
+   * retaining the same allocation in both states. No layout work or extra
+   * frame callback is needed when rows scroll or the theme changes. */
+  gint text_width = 0;
+  pango_layout_get_pixel_size (gtk_label_get_layout (self->duration_label),
+                               &text_width, NULL);
+  gdouble origin = CLAMP (width - (text_width + EQ_WIDTH) / 2.0,
+                          0.0, MAX (0, width - EQ_WIDTH));
 
   /* Accent green, matching .eq-bar in the stylesheet. Drawn rather than
    * styled because the heights change per frame. */
@@ -165,13 +179,12 @@ eq_draw (GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user
     /* sin -> 0..1, then 25%..100% of the available height. */
     gdouble level = 0.25 + 0.75 * (0.5 + 0.5 * sin (t * 2.0 * G_PI));
     gdouble h = level * height;
-    gdouble x = i * (EQ_BAR_WIDTH + EQ_BAR_GAP);
+    gdouble x = origin + i * (EQ_BAR_WIDTH + EQ_BAR_GAP);
 
     cairo_rectangle (cr, x, height - h, EQ_BAR_WIDTH, h);
   }
   cairo_fill (cr);
 
-  (void) area; (void) width;
 }
 
 static gboolean
@@ -529,21 +542,17 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   gtk_widget_add_css_class (self->type_label, "dim-label");
   gtk_widget_set_visible (self->type_label, FALSE);
   gtk_box_append (GTK_BOX (meta_row), self->type_label);
-  self->artist_label = GTK_LABEL (gtk_label_new ("Artist"));
-  gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "dim-label");
-  gtk_widget_add_css_class (GTK_WIDGET (self->artist_label), "caption");
-  gtk_label_set_xalign (self->artist_label, 0.0);
-  gtk_label_set_ellipsize (self->artist_label, PANGO_ELLIPSIZE_END);
-  gtk_label_set_max_width_chars (self->artist_label, ROW_META_MAX_CHARS);
-  gtk_box_append (GTK_BOX (meta_row), GTK_WIDGET (self->artist_label));
-
-  self->album_label = GTK_LABEL (gtk_label_new ("Album"));
-  gtk_widget_add_css_class (GTK_WIDGET (self->album_label), "dim-label");
-  gtk_widget_add_css_class (GTK_WIDGET (self->album_label), "caption");
-  gtk_label_set_xalign (self->album_label, 0.0);
-  gtk_label_set_ellipsize (self->album_label, PANGO_ELLIPSIZE_END);
-  gtk_label_set_max_width_chars (self->album_label, ROW_META_MAX_CHARS);
-  gtk_box_append (GTK_BOX (meta_row), GTK_WIDGET (self->album_label));
+  /* One expanding text run shares the actual row allocation. Two independent
+   * capped labels ellipsized at their natural widths even in a wide window.
+   * Bound only the size request, not the space the text may actually use. */
+  self->metadata_label = GTK_LABEL (gtk_label_new (NULL));
+  gtk_widget_add_css_class (GTK_WIDGET (self->metadata_label), "dim-label");
+  gtk_widget_add_css_class (GTK_WIDGET (self->metadata_label), "caption");
+  gtk_label_set_xalign (self->metadata_label, 0.0);
+  gtk_label_set_ellipsize (self->metadata_label, PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars (self->metadata_label, ROW_META_MAX_CHARS);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->metadata_label), TRUE);
+  gtk_box_append (GTK_BOX (meta_row), GTK_WIDGET (self->metadata_label));
 
   gtk_box_append (GTK_BOX (info), meta_row);
   gtk_box_append (GTK_BOX (self->root_box), info);
@@ -598,17 +607,21 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
     gdouble *seconds = g_new0 (gdouble, 1);
     g_object_set_data_full (G_OBJECT (self->eq_area), "eq-seconds", seconds, g_free);
     gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (self->eq_area),
-                                    eq_draw, seconds, NULL);
+                                    eq_draw, self, NULL);
   }
-  /* Right-aligned like the duration text it replaces, so the indicator lands
-   * in the same column rather than at the left of the slot. */
-  gtk_widget_set_halign (self->eq_area, GTK_ALIGN_END);
+  /* Occupy the duration's full slot; the draw function centers the bars on
+   * its text rather than on the column's right boundary. */
+  gtk_widget_set_halign (self->eq_area, GTK_ALIGN_FILL);
   gtk_widget_set_hexpand (self->eq_area, TRUE);
   gtk_box_append (GTK_BOX (self->status_slot), self->eq_area);
   /* The action occupies the existing fixed-width status column, rather than
    * adding another column and moving every duration left. Painting it over
    * the duration on hover changes neither the row width nor its height. */
   GtkWidget *status_overlay = gtk_overlay_new ();
+  /* Its children expand *inside* the status column, not across the row.
+   * Inheriting their expansion gave this overlay half the spare row width,
+   * leaving the text cramped while the duration still sat at the far edge. */
+  gtk_widget_set_hexpand (status_overlay, FALSE);
   gtk_overlay_set_child (GTK_OVERLAY (status_overlay), self->status_slot);
   gtk_box_append (GTK_BOX (self->root_box), status_overlay);
 
@@ -642,6 +655,19 @@ spotifygtk_track_row_new (void)
   return g_object_new (SPOTIFYGTK_TYPE_TRACK_ROW, NULL);
 }
 
+static void
+update_metadata (SpotifyGtkTrackRow *self)
+{
+  const gchar *artists = self->show_artists && self->artists_text
+    ? self->artists_text : "";
+  const gchar *album = self->show_album && !self->context_item && self->album_text
+    ? self->album_text : "";
+  g_autofree gchar *text = g_strconcat (artists,
+    *artists && *album ? "  " : "", album, NULL);
+  gtk_label_set_text (self->metadata_label, text);
+  gtk_widget_set_visible (GTK_WIDGET (self->metadata_label), *text != '\0');
+}
+
 void
 spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self, JsonObject *track_data, gint track_number)
 {
@@ -660,6 +686,9 @@ spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self, JsonObject *track_data
   self->track_id = g_strdup (id);
 
   gtk_label_set_text (self->title_label, name);
+  self->context_item = FALSE;
+  g_clear_pointer (&self->artists_text, g_free);
+  g_clear_pointer (&self->album_text, g_free);
 
   /* Track number */
   self->row_number = track_number;
@@ -700,8 +729,7 @@ spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self, JsonObject *track_data
         g_string_append (names, n);
       }
     }
-    gtk_label_set_text (self->artist_label, names->str);
-    g_string_free (names, TRUE);
+    self->artists_text = g_string_free (names, FALSE);
   }
 
   /* Album */
@@ -709,8 +737,9 @@ spotifygtk_track_row_set_track (SpotifyGtkTrackRow *self, JsonObject *track_data
     json_object_get_object_member (track_data, "album") : NULL;
   if (album) {
     const gchar *album_name = json_object_get_string_member_with_default (album, "name", "");
-    gtk_label_set_text (self->album_label, album_name);
+    self->album_text = g_strdup (album_name);
   }
+  update_metadata (self);
 
   /* Duration */
   gint total_secs = (gint) (duration_ms / 1000);
@@ -774,18 +803,21 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
                        track->artists ? track->artists : "",
                        track->artists && *track->artists ? " · " : "")
     : NULL;
-  gtk_label_set_text (self->artist_label, artist_line ? artist_line :
-                      track->artists ? track->artists : "");
-  gtk_label_set_text (self->album_label, track->album ? track->album : "");
+  g_free (self->artists_text);
+  g_free (self->album_text);
+  self->artists_text = g_strdup (artist_line ? artist_line : track->artists);
+  self->album_text = g_strdup (track->album);
 
   gboolean album = track->uri && g_str_has_prefix (track->uri, "spotify:album:");
-  gboolean playlist = track->uri && g_str_has_prefix (track->uri, "spotify:playlist:");
+  gboolean playlist = track->uri &&
+    (g_str_has_prefix (track->uri, "spotify:playlist:") ||
+     g_str_has_prefix (track->uri, "local:playlist:"));
+  self->context_item = album || playlist;
+  update_metadata (self);
   gtk_label_set_text (GTK_LABEL (self->type_label),
                       playlist ? "Playlist" : album ? "Album" :
                       device_only ? "Local" : "Track");
   gtk_widget_set_visible (self->status_slot, !album && !playlist);
-  gtk_widget_set_visible (GTK_WIDGET (self->album_label),
-                          self->show_album && !album && !playlist);
   gtk_button_set_icon_name (self->play_btn,
     album || playlist ? "go-next-symbolic" : "media-playback-start-symbolic");
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->play_btn),
@@ -885,8 +917,10 @@ void
 spotifygtk_track_row_set_show_album (SpotifyGtkTrackRow *self, gboolean show)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+  show = !!show;
+  if (self->show_album == show) return;
   self->show_album = show;
-  gtk_widget_set_visible (GTK_WIDGET (self->album_label), show);
+  update_metadata (self);
 }
 
 void
@@ -914,8 +948,10 @@ void
 spotifygtk_track_row_set_show_artists (SpotifyGtkTrackRow *self, gboolean show)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+  show = !!show;
+  if (self->show_artists == show) return;
   self->show_artists = show;
-  gtk_widget_set_visible (GTK_WIDGET (self->artist_label), show);
+  update_metadata (self);
 }
 
 void

@@ -17,7 +17,7 @@ G_BEGIN_DECLS
 
 #define SPOTIFYGTK_TYPE_NATIVE_WINDOW (spotifygtk_native_window_get_type ())
 G_DECLARE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window,
-                      SPOTIFYGTK, NATIVE_WINDOW, GtkApplicationWindow)
+                      SPOTIFYGTK, NATIVE_WINDOW, AdwApplicationWindow)
 
 SpotifyGtkNativeWindow *spotifygtk_native_window_new (GtkApplication *app);
 

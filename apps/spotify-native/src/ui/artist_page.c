@@ -182,9 +182,14 @@ finish_load_part (SpotifyGtkArtistPage *self)
 static void
 on_hero_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
-  GtkPicture *pic = user_data;
-  if (!texture || !GTK_IS_PICTURE (pic))
+  ArtistLoad *load = user_data;
+  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (&load->page);
+  guint generation = load->generation;
+  g_weak_ref_clear (&load->page);
+  g_free (load);
+  if (!self || generation != self->generation || !texture)
     return;
+  GtkPicture *pic = self->hero_art;
 
   /*
    * Only a landscape image gets covered into the banner. What arrives is not
@@ -206,17 +211,21 @@ on_hero_cover_loaded (GdkTexture *texture, gpointer user_data)
 static void
 on_artist_image (const gchar *cover_id, gpointer user_data)
 {
-  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (user_data);
-  g_weak_ref_clear (user_data);
-  g_free (user_data);
+  ArtistLoad *load = user_data;
+  g_autoptr(SpotifyGtkArtistPage) self = g_weak_ref_get (&load->page);
 
-  if (!self)
+  if (!self || load->generation != self->generation) {
+    g_weak_ref_clear (&load->page);
+    g_free (load);
     return;
+  }
 
   if (!cover_id || !*cover_id) {
     /* Neither a header nor a portrait. The placeholder stays, and the caption
      * says so rather than leaving an unexplained empty panel. */
     gtk_label_set_text (self->hero_caption, "No artist image");
+    g_weak_ref_clear (&load->page);
+    g_free (load);
     return;
   }
 
@@ -227,8 +236,8 @@ on_artist_image (const gchar *cover_id, gpointer user_data)
    * a full-width panel without upscaling, and a decode box much past it is
    * megabytes of pixels for no visible gain. */
   gint scale = gtk_widget_get_scale_factor (GTK_WIDGET (self));
-  spotifygtk_cover_load (cover_id, HERO_IMAGE_PX * MAX (1, scale), NULL,
-                         on_hero_cover_loaded, self->hero_art);
+  spotifygtk_cover_load (cover_id, HERO_IMAGE_PX * MAX (1, scale), self->in_flight,
+                         on_hero_cover_loaded, load);
 }
 
 static void on_follow_clicked (GtkButton *button, gpointer user_data);
@@ -480,12 +489,8 @@ on_discography_loaded (GObject *source, GAsyncResult *result, gpointer user_data
     r->year       = src->year;
     r->type       = src->type;
     r->first_seen = i;
-    r->tracks     = g_ptr_array_new_with_free_func (
-      (GDestroyNotify) spotifygtk_native_track_free);
-
-    for (guint j = 0; j < src->tracks->len; j++)
-      g_ptr_array_add (r->tracks, spotifygtk_native_track_copy (
-        g_ptr_array_index (src->tracks, j)));
+    /* The catalogue result is immutable: avoid a full extra discography copy. */
+    r->tracks = g_ptr_array_ref (src->tracks);
 
     g_ptr_array_add (self->all_releases, r);
   }
@@ -603,8 +608,9 @@ spotifygtk_artist_page_show (SpotifyGtkArtistPage *self,
   /* The portrait is its own request -- a different entity kind on the same
    * batch endpoint -- so it is asked for in parallel with the resolve rather
    * than after it. */
-  GWeakRef *img_ref = g_new0 (GWeakRef, 1);
-  g_weak_ref_init (img_ref, self);
+  ArtistLoad *img_ref = g_new0 (ArtistLoad, 1);
+  g_weak_ref_init (&img_ref->page, self);
+  img_ref->generation = self->generation;
   spotifygtk_native_session_get_artist_image (self->session, artist_uri,
                                               on_artist_image, img_ref);
 

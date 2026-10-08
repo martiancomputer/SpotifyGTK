@@ -34,6 +34,8 @@
 #include "local_catalog.h"
 #include "local_favorites.h"
 #include "device_playlists.h"
+#include "playlist_create_dialog.h"
+#include "dialog_host.h"
 #include "settings_page.h"
 #include "spotify/native_auth.h"
 #include "settings.h"
@@ -50,6 +52,7 @@
 #include "smooth_scroll.h"
 #include "../spotify/protobuf_min.h"
 #include "../spotify/session.h"
+#include "../spotify/catalog_cache.h"
 
 #include <math.h>
 #include <string.h>
@@ -69,7 +72,7 @@
 #define PLAYLIST_LOAD_TIMEOUT_SECONDS 30
 
 struct _SpotifyGtkNativeWindow {
-  GtkApplicationWindow parent_instance;
+  AdwApplicationWindow parent_instance;
 
   /* Layout widgets */
   GtkPaned *main_paned;       /* Sidebar | Content+Queue */
@@ -155,6 +158,9 @@ struct _SpotifyGtkNativeWindow {
   guint      library_write_retry_id;
   SpotifyGtkAlbumGrid *playlists_grid;   /* cards for the rootlist */
   guint playlists_generation;            /* stale in-flight card lookups */
+  GHashTable *playlist_card_requests;      /* URI -> borrowed outstanding lookup */
+  GQueue playlist_card_pending;
+  guint playlist_card_active;
   guint playlists_timeout_id;
   guint playlists_retry_count;
   guint transfer_generation;             /* stale in-flight transfer adoptions */
@@ -253,7 +259,7 @@ struct _SpotifyGtkNativeWindow {
   SpotifyGtkRepeatMode repeat;
 };
 
-G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, GTK_TYPE_APPLICATION_WINDOW)
+G_DEFINE_FINAL_TYPE (SpotifyGtkNativeWindow, spotifygtk_native_window, ADW_TYPE_APPLICATION_WINDOW)
 
 /* === Forward declarations === */
 static void spotifygtk_native_window_show_login_gate (SpotifyGtkNativeWindow *self,
@@ -2416,17 +2422,36 @@ typedef struct {
   gchar                  *uri;
   gchar                  *name;      /* from the playlist head */
   guint                   generation;
+  guint                   cache_epoch;
+  gboolean                started;
+  gboolean                name_resolved;
 } PlaylistCard;
+
+static void playlist_card_pump (SpotifyGtkNativeWindow *self);
 
 static void
 playlist_card_free (gpointer data)
 {
   PlaylistCard *c = data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&c->window);
+  if (self && self->playlist_card_requests) {
+    if (g_hash_table_lookup (self->playlist_card_requests, c->uri) == c)
+      g_hash_table_remove (self->playlist_card_requests, c->uri);
+    if (c->started && self->playlist_card_active) self->playlist_card_active--;
+  }
   g_weak_ref_clear (&c->window);
   g_weak_ref_clear (&c->grid);
   g_free (c->uri);
   g_free (c->name);
   g_free (c);
+  if (self && self->playlist_card_requests) playlist_card_pump (self);
+}
+
+static void playlist_card_publish (SpotifyGtkNativeWindow *self,
+  const gchar *uri, const gchar *name, const gchar *cover)
+{
+  spotifygtk_album_grid_resolve_card (self->playlists_grid, uri, name, "Playlist", cover);
+  spotifygtk_library_page_resolve_playlist (self->library_page, uri, name, cover);
 }
 
 static void
@@ -2464,8 +2489,13 @@ on_playlist_cover_tracks (GObject *source, GAsyncResult *result, gpointer user_d
     if (t) cover = t->cover_id;
   }
 
-  spotifygtk_album_grid_resolve_card (grid, c->uri,
-                                      c->name ? c->name : c->uri, "Playlist", cover);
+  g_autofree gchar *cached_name = NULL, *cached_cover = NULL;
+  spotifygtk_catalog_card_get (c->uri, &cached_name, &cached_cover);
+  const gchar *name = c->name ? c->name : cached_name ? cached_name : "Playlist";
+  if (!cover) cover = cached_cover;
+  playlist_card_publish (self, c->uri, name, cover);
+  if (c->name && (c->name_resolved || (tracks && tracks->len > 0)))
+    spotifygtk_catalog_card_put (c->uri, name, cover, c->cache_epoch);
   playlist_card_free (c);
 }
 
@@ -2483,23 +2513,62 @@ on_playlist_card_name (MercuryResponse *response, gpointer user_data)
     return;
   }
 
-  if (response && response->parts && response->parts->len > 0) {
+  if (response && response->status_code >= 200 && response->status_code < 300 &&
+      response->parts && response->parts->len > 0) {
     gsize len = 0;
     const guint8 *d = g_bytes_get_data (g_ptr_array_index (response->parts, 0), &len);
     const guint8 *attrs = NULL; gsize alen = 0;
     const guint8 *name = NULL; gsize nlen = 0;
     if (pb_find_bytes_field (d, len, 3, &attrs, &alen) &&
-        pb_find_bytes_field (attrs, alen, 1, &name, &nlen))
+        pb_find_bytes_field (attrs, alen, 1, &name, &nlen) && nlen > 0 &&
+        nlen <= 4096 && g_utf8_validate ((const gchar *) name, nlen, NULL)) {
+      g_free (c->name);
       c->name = g_strndup ((const gchar *) name, nlen);
+      c->name_resolved = TRUE;
+    }
   }
   if (c->name)
     spotifygtk_device_playlists_set_overlay_name (self->device_playlists,
                                                    c->uri, c->name);
 
+  g_autofree gchar *cached_name = NULL, *cached_cover = NULL;
+  spotifygtk_catalog_card_get (c->uri, &cached_name, &cached_cover);
+  if (!c->name && cached_name) c->name = g_strdup (cached_name);
+  playlist_card_publish (self, c->uri, c->name ? c->name : "Playlist", cached_cover);
+  if (c->name_resolved)
+    spotifygtk_catalog_card_put (c->uri, c->name, cached_cover, c->cache_epoch);
+  if (!response || response->status_code < 200 || response->status_code >= 300) {
+    playlist_card_free (c);
+    return;
+  }
+
   /* One track is enough for a cover, and asking for one keeps this cheap on a
    * library of many playlists. */
   spotifygtk_native_session_load_tracks (self->session, c->uri, 1, NULL,
                                          on_playlist_cover_tracks, c);
+}
+
+static void playlist_card_pump (SpotifyGtkNativeWindow *self)
+{
+  while (self->playlist_card_active < 4 && !g_queue_is_empty (&self->playlist_card_pending)) {
+    PlaylistCard *c = g_queue_pop_head (&self->playlist_card_pending);
+    SpotifyMercury *m = self->session
+      ? spotifygtk_native_session_get_mercury (self->session) : NULL;
+    if (!m || c->generation != self->playlists_generation) {
+      /* Drop obsolete queued work without recursively pumping the queue. */
+      g_weak_ref_set (&c->window, NULL);
+      if (g_hash_table_lookup (self->playlist_card_requests, c->uri) == c)
+        g_hash_table_remove (self->playlist_card_requests, c->uri);
+      playlist_card_free (c);
+      continue;
+    }
+    c->started = TRUE;
+    self->playlist_card_active++;
+    g_autofree gchar *url = g_strdup_printf ("hm://playlist/v2/playlist/%s",
+      c->uri + strlen ("spotify:playlist:"));
+    spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", url, NULL,
+      on_playlist_card_name, c);
+  }
 }
 
 /*
@@ -2523,6 +2592,9 @@ set_playlists_status (SpotifyGtkNativeWindow *self, const gchar *message)
 typedef struct {
   GWeakRef window;
   guint generation;
+  gboolean cached;
+  gchar *cache_key;
+  guint cache_epoch;
 } PlaylistRootLoad;
 
 static void reload_playlists (SpotifyGtkNativeWindow *self);
@@ -2555,22 +2627,41 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
   PlaylistRootLoad *load = user_data;
   g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&load->window);
   guint generation = load->generation;
+  gboolean cached = load->cached;
+  g_autofree gchar *cache_key = g_steal_pointer (&load->cache_key);
+  guint cache_epoch = load->cache_epoch;
   g_weak_ref_clear (&load->window);
   g_free (load);
   if (!self || generation != self->playlists_generation)
     return;
 
-  g_clear_handle_id (&self->playlists_timeout_id, g_source_remove);
-  self->playlists_loading = FALSE;
-  set_loading_source (self, self->playlists_grid, FALSE);
+  if (!cached) {
+    g_clear_handle_id (&self->playlists_timeout_id, g_source_remove);
+    self->playlists_loading = FALSE;
+    set_loading_source (self, self->playlists_grid, FALSE);
+  }
   if (!self->playlists_grid)
     return;
 
-  if (!ok)
+  if (!ok) {
     g_warning ("playlists: rootlist read failed (status %d)", status);
+    set_playlists_status (self, "Couldn't refresh Spotify playlists. Cached playlists remain available.");
+    self->playlists_loaded = FALSE;
+    return;
+  }
   set_playlists_status (self, NULL);
   self->playlists_loaded = TRUE;
   self->playlists_retry_count = 0;
+  if (!cached && cache_key) {
+    GVariantBuilder b;
+    g_variant_builder_init (&b, G_VARIANT_TYPE ("a(sx)"));
+    for (guint i = 0; i < n_entries; i++)
+      if (entries[i].uri && g_str_has_prefix (entries[i].uri, "spotify:playlist:"))
+        g_variant_builder_add (&b, "(sx)", entries[i].uri, entries[i].added_at);
+    g_autoptr(GVariant) value = g_variant_ref_sink (g_variant_builder_end (&b));
+    g_autoptr(GBytes) bytes = g_variant_get_data_as_bytes (value);
+    spotifygtk_catalog_cache_put (cache_key, bytes, cache_epoch);
+  }
 
   /*
    * Cards go up straight away, knowing only their URIs; each fetches its own
@@ -2586,6 +2677,7 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
   g_autofree SpotifyGtkCardSpec *cards =
     g_new0 (SpotifyGtkCardSpec, n_entries + device->len);
   guint added = 0;
+  g_autoptr(GPtrArray) cached_strings = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < n_entries; i++) {
     if (!entries[i].uri ||
         !g_str_has_prefix (entries[i].uri, "spotify:playlist:"))
@@ -2603,6 +2695,13 @@ on_page_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entr
       .subtitle = "Playlist",
       .added_at = entries[i].added_at,
     };
+    gchar *name = NULL, *cover = NULL;
+    if (spotifygtk_catalog_card_get (entries[i].uri, &name, &cover)) {
+      cards[added - 1].title = name;
+      cards[added - 1].cover_id = cover;
+      g_ptr_array_add (cached_strings, name);
+      g_ptr_array_add (cached_strings, cover);
+    }
   }
   for (guint i = 0; i < device->len; i++) {
     SpotifyGtkDevicePlaylistInfo *info = g_ptr_array_index (device, i);
@@ -2642,9 +2741,21 @@ on_playlist_card_needs_resolve (SpotifyGtkAlbumGrid *grid, const gchar *uri,
   SpotifyGtkNativeWindow *self = user_data;
   (void) grid;
 
-  SpotifyMercury *m = spotifygtk_native_session_get_mercury (self->session);
-  if (!m || !uri || g_str_has_prefix (uri, "local:playlist:"))
+  if (!uri || !g_str_has_prefix (uri, "spotify:playlist:")) return;
+  g_autofree gchar *name = NULL, *cover = NULL;
+  if (spotifygtk_catalog_card_get (uri, &name, &cover) && cover &&
+      spotifygtk_catalog_card_is_fresh (uri, 3600)) {
+    playlist_card_publish (self, uri, name, cover);
     return;
+  }
+  SpotifyMercury *m = self->session
+    ? spotifygtk_native_session_get_mercury (self->session) : NULL;
+  if (!m)
+    return;
+  if (!self->playlist_card_requests)
+    self->playlist_card_requests = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  PlaylistCard *existing = g_hash_table_lookup (self->playlist_card_requests, uri);
+  if (existing && existing->generation == self->playlists_generation) return;
 
   self->playlists_resolved++;
   SPOTIFYGTK_DEBUG ("playlists: resolving card %u (%s)", self->playlists_resolved, uri);
@@ -2654,12 +2765,11 @@ on_playlist_card_needs_resolve (SpotifyGtkAlbumGrid *grid, const gchar *uri,
   g_weak_ref_init (&c->grid, grid);
   c->uri        = g_strdup (uri);
   c->generation = self->playlists_generation;
-
-  const gchar *id = strrchr (uri, ':');
-  g_autofree gchar *head =
-    g_strdup_printf ("hm://playlist/v2/playlist/%s", id ? id + 1 : uri);
-  spotifygtk_mercury_request_full (m, MERCURY_METHOD_GET, "GET", head, NULL,
-                                   on_playlist_card_name, c);
+  c->name = g_strdup (name);
+  c->cache_epoch = spotifygtk_catalog_cache_epoch ();
+  g_hash_table_insert (self->playlist_card_requests, g_strdup (uri), c);
+  g_queue_push_tail (&self->playlist_card_pending, c);
+  playlist_card_pump (self);
 }
 
 static void
@@ -2699,11 +2809,33 @@ reload_playlists (SpotifyGtkNativeWindow *self)
 
   self->playlists_generation++;
   self->playlists_loading = TRUE;
+  g_autofree gchar *root_key = g_strconcat ("playlist-root:", user, NULL);
+  g_autoptr(GBytes) root_bytes = spotifygtk_catalog_cache_get (root_key, 0);
+  if (root_bytes) {
+    g_autoptr(GVariant) value = g_variant_ref_sink (
+      g_variant_new_from_bytes (G_VARIANT_TYPE ("a(sx)"), root_bytes, FALSE));
+    if (g_variant_is_normal_form (value) && g_variant_n_children (value) <= 10000) {
+      guint n = g_variant_n_children (value);
+      g_autofree SpotifyPlaylistEntry *entries = g_new0 (SpotifyPlaylistEntry, MAX (n, 1));
+      for (guint i = 0; i < n; i++) {
+        g_autoptr(GVariant) item = g_variant_get_child_value (value, i);
+        g_variant_get (item, "(sx)", &entries[i].uri, &entries[i].added_at);
+      }
+      PlaylistRootLoad *warm = g_new0 (PlaylistRootLoad, 1);
+      g_weak_ref_init (&warm->window, self);
+      warm->generation = self->playlists_generation;
+      warm->cached = TRUE;
+      on_page_playlists_listed (TRUE, 200, entries, n, warm);
+      for (guint i = 0; i < n; i++) g_free (entries[i].uri);
+    }
+  }
   set_playlists_status (self, NULL);
   set_loading_source (self, self->playlists_grid, TRUE);
   PlaylistRootLoad *load = g_new0 (PlaylistRootLoad, 1);
   g_weak_ref_init (&load->window, self);
   load->generation = self->playlists_generation;
+  load->cache_key = g_strdup (root_key);
+  load->cache_epoch = spotifygtk_catalog_cache_epoch ();
   self->playlists_timeout_id = g_timeout_add_seconds (
     PLAYLIST_LOAD_TIMEOUT_SECONDS, on_playlists_timeout, self);
   spotifygtk_playlist_list (m, user, on_page_playlists_listed, load);
@@ -2773,39 +2905,11 @@ on_list_remove_from_playlist (SpotifyGtkTrackList *list, gpointer track_ptr,
                                     position, on_track_removed_from_playlist, op);
 }
 
-/*
- * Escape closes a dialog.
- *
- * These have no title bar -- deliberately, so they cannot be dragged off on
- * their own -- which also means no close button, and a dialog you can only
- * leave by completing it is a trap. Nothing is written on the way out: the
- * work happens in the confirm handler and nowhere else, so dismissing is
- * discarding.
- */
-static gboolean
-on_dialog_escape (GtkEventControllerKey *key, guint keyval, guint code,
-                  GdkModifierType state, gpointer user_data)
-{
-  (void) key; (void) code; (void) state;
-  if (keyval != GDK_KEY_Escape)
-    return GDK_EVENT_PROPAGATE;
-  gtk_window_destroy (GTK_WINDOW (user_data));
-  return GDK_EVENT_STOP;
-}
-
-static void
-dialog_bind_escape (GtkWidget *dialog)
-{
-  GtkEventController *key = gtk_event_controller_key_new ();
-  g_signal_connect (key, "key-pressed", G_CALLBACK (on_dialog_escape), dialog);
-  gtk_widget_add_controller (dialog, key);
-}
-
 static void
 on_dialog_cancel (GtkButton *button, gpointer user_data)
 {
   (void) button;
-  gtk_window_destroy (GTK_WINDOW (user_data));
+  adw_dialog_close (ADW_DIALOG (user_data));
 }
 
 /* ── Add to Playlist ────────────────────────────────────────────────────────
@@ -2819,12 +2923,25 @@ typedef struct {
   SpotifyGtkNativeWindow *window;
   gchar                  *track_uri;
   SpotifyNativeTrack     *track;
-  GtkWindow              *dialog;
+  AdwDialog              *dialog;
+  gboolean                closed;
   GtkWidget              *list_box;
   GtkWidget              *name_entry;   /* NULL once the dialog is gone */
   GtkWidget              *create_btn;
   GtkWidget              *device_btn;
 } PlaylistPick;
+
+static void
+on_playlist_pick_closed (AdwDialog *dialog, PlaylistPick *p)
+{
+  (void) dialog;
+  p->closed = TRUE;
+  p->name_entry = NULL;
+  p->create_btn = NULL;
+  p->device_btn = NULL;
+  p->list_box = NULL;
+  set_loading_source (p->window, p, FALSE);
+}
 
 static void
 playlist_pick_free (gpointer data)
@@ -2853,6 +2970,7 @@ static void
 on_pick_row_activated (GtkButton *button, gpointer user_data)
 {
   PlaylistPick *p = user_data;
+  if (p->closed) return;
   const gchar *uri = g_object_get_data (G_OBJECT (button), "playlist-uri");
 
   SpotifyMercury *m = spotifygtk_native_session_get_mercury (p->window->session);
@@ -2870,7 +2988,8 @@ on_pick_row_activated (GtkButton *button, gpointer user_data)
     spotifygtk_playlist_add_tracks (m, uri, tracks, 1, on_playlist_add_done,
                                     g_strdup (gtk_button_get_label (button)));
   }
-  gtk_window_destroy (p->dialog);
+  p->closed = TRUE;
+  adw_dialog_close (p->dialog);
 }
 
 typedef struct {
@@ -2946,6 +3065,7 @@ static void
 on_new_playlist_clicked (GtkButton *button, gpointer user_data)
 {
   PlaylistPick *p = user_data;
+  if (p->closed) return;
   gboolean device_only = GPOINTER_TO_INT (g_object_get_data (
     G_OBJECT (button), "device-only"));
 
@@ -2966,7 +3086,8 @@ on_new_playlist_clicked (GtkButton *button, gpointer user_data)
     if (uri && spotifygtk_device_playlists_add (
           p->window->device_playlists, uri, p->track))
       p->window->playlists_loaded = FALSE;
-    gtk_window_destroy (p->dialog);
+    p->closed = TRUE;
+    adw_dialog_close (p->dialog);
     return;
   }
 
@@ -2977,13 +3098,15 @@ on_new_playlist_clicked (GtkButton *button, gpointer user_data)
 
   spotifygtk_playlist_create (m, user, name,
                               on_new_playlist_response, owned);
-  gtk_window_destroy (p->dialog);
+  p->closed = TRUE;
+  adw_dialog_close (p->dialog);
 }
 
 static void
 on_new_playlist_name_changed (GtkEditable *entry, gpointer user_data)
 {
   PlaylistPick *p = user_data;
+  if (p->closed) return;
   g_autofree gchar *trimmed = g_strstrip (g_strdup (
     gtk_editable_get_text (entry)));
   gboolean valid = *trimmed && strlen (trimmed) <= 256;
@@ -2995,9 +3118,9 @@ static void
 on_playlists_listed (gboolean ok, gint32 status, SpotifyPlaylistEntry *entries,
                      guint n_entries, gpointer user_data)
 {
-  GtkWindow *dialog = user_data;
+  AdwDialog *dialog = user_data;
   PlaylistPick *p = g_object_get_data (G_OBJECT (dialog), "pick");
-  if (!gtk_widget_get_visible (GTK_WIDGET (dialog))) {
+  if (p->closed) {
     g_object_unref (dialog);
     return;
   }
@@ -3063,48 +3186,11 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   g_autofree gchar *user = m ? spotifygtk_native_session_dup_username (self->session)
                              : NULL;
 
-  /*
-   * An AdwWindow with its own header, not a bare GtkWindow.
-   *
-   * A GtkWindow here got the desktop's decorations and Adwaita's stock blue
-   * for the default button, so the one dialog in the app looked like it came
-   * from a different program. This carries the app's own header bar and
-   * palette instead.
-   */
-  GtkWidget *dialog = adw_window_new ();
-  gtk_window_set_title (GTK_WINDOW (dialog), "Add to playlist");
-  /*
-   * Transient but not modal.
-   *
-   * A modal grab covers the whole parent surface, and with client-side
-   * decorations the title bar is part of that surface -- so the app could not
-   * be dragged, resized or closed while this was open, and there is no way to
-   * exempt a region from the grab. Transient alone keeps it above its parent,
-   * which is what it was actually for.
-   *
-   * destroy-with-parent because the main window can now be closed while this
-   * is open -- modal had made that impossible -- and a dialog outliving the
-   * window it belongs to would be left pointing at a dead one.
-   */
-  gtk_window_set_modal (GTK_WINDOW (dialog), FALSE);
-  gtk_window_set_destroy_with_parent (GTK_WINDOW (dialog), TRUE);
-  gtk_window_set_transient_for (GTK_WINDOW (dialog), GTK_WINDOW (self));
-  gtk_window_set_default_size (GTK_WINDOW (dialog), 360, 420);
-
-  /*
-   * Fixed in place, and titled in its own content.
-   *
-   * It carried an AdwHeaderBar, which is a drag handle: the one dialog in the
-   * app could be thrown around the desktop independently of the window it
-   * belongs to, which is not how the rest of this reads. Without a title bar
-   * there is nothing to drag it by, and the title moves inside where it looks
-   * like part of the client rather than part of the desktop.
-   *
-   * A sheet drawn inside the window -- AdwDialog -- would be the fuller answer
-   * to "fit in with the client", but it needs libadwaita 1.5 and the floor
-   * here is 1.4.
-   */
-  gtk_window_set_resizable (GTK_WINDOW (dialog), FALSE);
+  AdwDialog *dialog = adw_dialog_new ();
+  adw_dialog_set_title (dialog, "Add to playlist");
+  spotifygtk_dialog_prepare (dialog);
+  adw_dialog_set_content_width (dialog, 360);
+  adw_dialog_set_content_height (dialog, 420);
 
   GtkWidget *dialog_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
 
@@ -3126,11 +3212,7 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   p->window    = g_object_ref (self);
   p->track_uri = g_strdup (track->uri);
   p->track = spotifygtk_native_track_copy (track);
-  p->dialog    = GTK_WINDOW (dialog);
-
-  /* The close button went with the header bar, so Escape has to work. GTK
-   * gives a modal window that for free, but only while it can be closed. */
-  gtk_window_set_deletable (GTK_WINDOW (dialog), TRUE);
+  p->dialog    = dialog;
 
   /* Name first, then the button that uses it. Enter in the field creates,
    * which is what a one-field form should do. */
@@ -3211,18 +3293,18 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, gpointer track_ptr, gpointer
   g_signal_connect (close_btn, "clicked", G_CALLBACK (on_dialog_cancel), dialog);
   gtk_box_append (GTK_BOX (close_row), close_btn);
   gtk_box_append (GTK_BOX (box), close_row);
-  dialog_bind_escape (dialog);
 
   gtk_box_append (GTK_BOX (dialog_box), box);
-  adw_window_set_content (ADW_WINDOW (dialog), dialog_box);
+  adw_dialog_set_child (dialog, dialog_box);
   g_object_set_data_full (G_OBJECT (dialog), "pick", p, playlist_pick_free);
+  g_signal_connect (dialog, "closed", G_CALLBACK (on_playlist_pick_closed), p);
 
   if (m && user) {
     set_loading_source (self, p, TRUE);
     spotifygtk_playlist_list (m, user, on_playlists_listed,
                               g_object_ref (dialog));
   }
-  gtk_window_present (GTK_WINDOW (dialog));
+  adw_dialog_present (dialog, GTK_WIDGET (self));
 }
 
 static void
@@ -4345,6 +4427,9 @@ typedef struct {
   SpotifyGtkNativeWindow *window;
   gchar                  *uri;
   GtkEditable            *entry;
+  gchar                  *name;
+  guint                   account_generation;
+  guint                   cache_epoch;
 } PlaylistNameDialog;
 
 static void
@@ -4352,17 +4437,29 @@ playlist_name_dialog_free (PlaylistNameDialog *dialog)
 {
   g_object_unref (dialog->window);
   g_free (dialog->uri);
+  g_free (dialog->name);
   g_free (dialog);
 }
 
 static void
 on_rename_done (gboolean ok, gint32 status, gpointer user_data)
 {
-  g_autoptr(SpotifyGtkNativeWindow) self = user_data;
+  PlaylistNameDialog *rename = user_data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_object_ref (rename->window);
+  g_autofree gchar *uri = g_strdup (rename->uri);
+  g_autofree gchar *name = g_strdup (rename->name);
+  guint generation = rename->account_generation;
+  guint epoch = rename->cache_epoch;
+  playlist_name_dialog_free (rename);
+  if (generation != self->account_generation) return;
   if (!ok) {
     g_warning ("window: renaming the playlist failed (status %d)", status);
     return;
   }
+  g_autofree gchar *old_name = NULL, *cover = NULL;
+  spotifygtk_catalog_card_get (uri, &old_name, &cover);
+  spotifygtk_catalog_card_put (uri, name, cover, epoch);
+  playlist_card_publish (self, uri, name, cover);
   /* The rootlist carries no names, so the card's label comes from the
    * playlist itself and only a reload will show the new one. */
   note_local_write (self);
@@ -4409,9 +4506,16 @@ on_playlist_name_chosen (GObject *source, GAsyncResult *result,
     } else if (g_str_has_prefix (dialog->uri, "spotify:playlist:")) {
       SpotifyMercury *m = spotifygtk_native_session_get_mercury (
         dialog->window->session);
-      if (m)
+      if (m) {
+        PlaylistNameDialog *rename = g_new0 (PlaylistNameDialog, 1);
+        rename->window = g_object_ref (dialog->window);
+        rename->uri = g_strdup (dialog->uri);
+        rename->name = g_strdup (trimmed);
+        rename->account_generation = dialog->window->account_generation;
+        rename->cache_epoch = spotifygtk_catalog_cache_epoch ();
         spotifygtk_playlist_rename (m, dialog->uri, trimmed,
-                                   on_rename_done, g_object_ref (dialog->window));
+                                   on_rename_done, rename);
+      }
     }
   }
   playlist_name_dialog_free (dialog);
@@ -4426,6 +4530,7 @@ show_playlist_name_dialog (SpotifyGtkNativeWindow *self, const gchar *uri,
     uri && g_str_has_prefix (uri, "spotify:")
       ? "The new name will sync to Spotify."
       : "This playlist and its name stay on this device."));
+  spotifygtk_dialog_prepare (ADW_DIALOG (alert));
   GtkWidget *entry = gtk_entry_new ();
   gtk_editable_set_text (GTK_EDITABLE (entry), name ? name : "");
   gtk_entry_set_placeholder_text (GTK_ENTRY (entry), "Playlist name");
@@ -4461,17 +4566,101 @@ on_album_rename (SpotifyGtkAlbumGrid *grid, const gchar *uri, const gchar *name,
   show_playlist_name_dialog (self, uri, name);
 }
 
+typedef struct {
+  GWeakRef window;
+  GWeakRef dialog;
+  guint account_generation;
+} PlaylistCreateAttempt;
+
+static void
+on_playlist_created (gboolean ok, gint32 status, const gchar *uri, gpointer data)
+{
+  PlaylistCreateAttempt *attempt = data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&attempt->window);
+  g_autoptr(SpotifyGtkPlaylistCreateDialog) dialog = g_weak_ref_get (&attempt->dialog);
+  gboolean current_account = self &&
+    self->account_generation == attempt->account_generation;
+  gboolean created = ok && uri && g_str_has_prefix (uri, "spotify:playlist:");
+  if (current_account && created) {
+    note_local_write (self);
+    self->playlists_loaded = FALSE;
+    reload_playlists (self);
+  }
+  if (dialog) {
+    g_autofree gchar *error = !current_account
+      ? g_strdup ("Your sign-in changed. Close this dialog and try again.")
+      : !created ? g_strdup_printf ("Could not create the Spotify playlist (status %d). Try again.", status)
+                 : NULL;
+    spotifygtk_playlist_create_dialog_complete (dialog, error);
+  }
+  g_weak_ref_clear (&attempt->window);
+  g_weak_ref_clear (&attempt->dialog);
+  g_free (attempt);
+}
+
+static void
+on_playlist_create_requested (SpotifyGtkPlaylistCreateDialog *dialog,
+                              gboolean spotify, const gchar *name,
+                              SpotifyGtkNativeWindow *self)
+{
+  /* Validate again at the write boundary; a dialog can outlive sign-out or
+   * connection loss. An explicit Spotify choice must never become local. */
+  if (!name || !*name || strlen (name) > 256 || !g_utf8_validate (name, -1, NULL)) {
+    spotifygtk_playlist_create_dialog_complete (dialog, "Enter a valid playlist name (up to 256 bytes).");
+    return;
+  }
+  if (!spotify) {
+    g_autofree gchar *uri = spotifygtk_device_playlists_create (self->device_playlists, name);
+    if (uri) {
+      self->playlists_loaded = FALSE;
+      reload_playlists (self);
+    }
+    spotifygtk_playlist_create_dialog_complete (dialog,
+      uri ? NULL : "Could not create the device playlist. The playlist limit may have been reached.");
+    return;
+  }
+  SpotifyMercury *mercury = spotifygtk_native_session_get_mercury (self->session);
+  g_autofree gchar *username = spotifygtk_native_session_dup_username (self->session);
+  guint opened_generation = GPOINTER_TO_UINT (g_object_get_data (
+    G_OBJECT (dialog), "account-generation"));
+  if (!mercury || !username || !*username || opened_generation != self->account_generation) {
+    spotifygtk_playlist_create_dialog_complete (dialog,
+      "Spotify sign-in is unavailable or changed. Go back to create a device playlist, or sign in and reopen this dialog.");
+    return;
+  }
+  PlaylistCreateAttempt *attempt = g_new0 (PlaylistCreateAttempt, 1);
+  g_weak_ref_init (&attempt->window, self);
+  g_weak_ref_init (&attempt->dialog, dialog);
+  attempt->account_generation = self->account_generation;
+  spotifygtk_playlist_create (mercury, username, name, on_playlist_created, attempt);
+}
+
+static void
+show_playlist_create_dialog (SpotifyGtkNativeWindow *self)
+{
+  g_autofree gchar *username = spotifygtk_native_session_dup_username (self->session);
+  gboolean available = spotifygtk_native_session_get_mercury (self->session) &&
+    username && *username;
+  SpotifyGtkPlaylistCreateDialog *dialog = spotifygtk_playlist_create_dialog_new (available);
+  spotifygtk_dialog_prepare (ADW_DIALOG (dialog));
+  g_object_set_data (G_OBJECT (dialog), "account-generation",
+                     GUINT_TO_POINTER (self->account_generation));
+  g_signal_connect_object (dialog, "create-requested",
+    G_CALLBACK (on_playlist_create_requested), self, 0);
+  adw_dialog_present (ADW_DIALOG (dialog), GTK_WIDGET (self));
+}
+
 static void
 on_new_device_playlist (GtkButton *button, gpointer user_data)
 {
-  show_playlist_name_dialog (user_data, NULL, NULL);
+  show_playlist_create_dialog (user_data);
   (void) button;
 }
 
 static void
 on_library_new_playlist (SpotifyGtkLibraryPage *page, gpointer user_data)
 {
-  show_playlist_name_dialog (user_data, NULL, NULL);
+  show_playlist_create_dialog (user_data);
   (void) page;
 }
 
@@ -5204,6 +5393,7 @@ spotifygtk_native_window_log_out (SpotifyGtkNativeWindow *self)
     "Local files, favorites and device-only playlists stay on this device. "
     "Clearing the Spotify cache runs in the background.");
   AdwAlertDialog *alert = ADW_ALERT_DIALOG (dialog);
+  spotifygtk_dialog_prepare (dialog);
   adw_alert_dialog_add_responses (alert,
     "cancel", "Cancel",
     "clear", "Sign out and clear Spotify cache",
@@ -5906,6 +6096,18 @@ static const gchar *theme_body =
   /* Greyed rather than hidden: the track is part of the release and its
    * absence would look like a gap in the tracklist. Dimmed to read as
    * unavailable at a glance, the way Spotify greys them. */
+  /* Native floating dialogs keep their sizing, keyboard behavior and shape,
+   * but use our palette rather than Adwaita's unrelated gray surfaces. */
+  ".spotifygtk-dialog { --dialog-bg-color: @bg_card; --dialog-fg-color: @fg; }"
+  ".spotifygtk-dialog sheet { background-color: @bg_card; color: @fg; }"
+  ".spotifygtk-dialog entry { background-color: @bg_selected; color: @fg; }"
+  ".spotifygtk-dialog .response-area button,"
+  " .spotifygtk-dialog .playlist-wizard-actions button"
+  "  { background-color: @bg_selected; color: @fg; }"
+  ".spotifygtk-dialog .response-area button:hover,"
+  " .spotifygtk-dialog .playlist-wizard-actions button:hover"
+  "  { background-color: @bg_hover; color: @fg_strong; }"
+  ".spotifygtk-dialog button:disabled { color: @fg_dimmer; }"
   ".dialog-title { font-size: 15px; font-weight: 700; color: @fg_strong; }"
   /*
    * A dialog's primary action is white, not green.
@@ -5926,6 +6128,13 @@ static const gchar *theme_body =
   "  padding: 8px 18px; min-height: 0; border: none;"
   "  transition: background-color 140ms ease; }"
   ".dialog-secondary:hover { background-color: @bg_hover; color: @fg_strong; }"
+  /* Creation uses the rename dialog's native alert surface. Custom actions
+   * keep both wizard steps in that same dialog instead of closing on Next. */
+  ".playlist-wizard-actions button { border-radius: 12px; min-height: 20px;"
+  "  padding: 12px; font-weight: 700; }"
+  ".playlist-destination { border-radius: 10px; padding: 10px;"
+  "  background-color: alpha(currentColor, 0.06); }"
+  ".playlist-create-button { border-radius: 8px; }"
   ".sign-in-banner { background-color: @bg_selected; color: @fg_strong;"
   "  border-radius: 10px; padding: 8px 12px; }"
   ".dialog-section { font-size: 11px; font-weight: 700; letter-spacing: 0.6px;"
@@ -6115,6 +6324,7 @@ on_settings_theme_changed (SpotifyGtkSettings *settings, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   apply_theme (spotifygtk_settings_get_theme (settings));
+  spotifygtk_catalog_cache_set_enabled (spotifygtk_settings_get_caching_enabled (settings));
   apply_eq_from_settings (self);
   if (self->sidebar) {
     gboolean separate = spotifygtk_settings_get_show_playlists_separately (settings);
@@ -6207,6 +6417,7 @@ spotifygtk_native_window_constructed (GObject *object)
    * restyles the running window live. */
   SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
   apply_theme (spotifygtk_settings_get_theme (settings));
+  spotifygtk_catalog_cache_set_enabled (spotifygtk_settings_get_caching_enabled (settings));
   g_signal_connect (settings, "changed",
                     G_CALLBACK (on_settings_theme_changed), self);
 
@@ -6285,7 +6496,10 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_header_bar_set_title_widget (GTK_HEADER_BAR (header), title);
   self->window_title = title;
 
-  gtk_window_set_titlebar (GTK_WINDOW (self), header);
+  /* Keep the same header, but inside the native dialog host rather than
+   * outside it as GtkWindow:titlebar. Only the main header is a drag handle. */
+  GtkWidget *header_handle = gtk_window_handle_new ();
+  gtk_window_handle_set_child (GTK_WINDOW_HANDLE (header_handle), header);
 
   /* Horizontal paned: sidebar | (content | queue) */
   self->main_paned = GTK_PANED (gtk_paned_new (GTK_ORIENTATION_HORIZONTAL));
@@ -6393,8 +6607,11 @@ spotifygtk_native_window_constructed (GObject *object)
     gtk_label_set_xalign (GTK_LABEL (pl_title), 0.0);
     gtk_widget_set_hexpand (pl_title, TRUE);
     gtk_box_append (GTK_BOX (pl_heading), pl_title);
-    GtkWidget *new_playlist = gtk_button_new_with_label ("New device playlist");
-    gtk_widget_add_css_class (new_playlist, "dialog-secondary");
+    GtkWidget *new_playlist = gtk_button_new_from_icon_name ("list-add-symbolic");
+    gtk_widget_add_css_class (new_playlist, "playlist-create-button");
+    gtk_widget_set_tooltip_text (new_playlist, "Create playlist");
+    gtk_accessible_update_property (GTK_ACCESSIBLE (new_playlist),
+      GTK_ACCESSIBLE_PROPERTY_LABEL, "Create playlist", -1);
     g_signal_connect (new_playlist, "clicked",
                       G_CALLBACK (on_new_device_playlist), self);
     gtk_box_append (GTK_BOX (pl_heading), new_playlist);
@@ -6562,7 +6779,12 @@ spotifygtk_native_window_constructed (GObject *object)
   self->sign_in_banner = build_sign_in_banner (self);
   gtk_overlay_add_overlay (GTK_OVERLAY (shell), self->sign_in_banner);
 
-  gtk_window_set_child (GTK_WINDOW (self), shell);
+  GtkWidget *window_content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_box_append (GTK_BOX (window_content), header_handle);
+  gtk_widget_set_vexpand (shell, TRUE);
+  gtk_box_append (GTK_BOX (window_content), shell);
+  adw_application_window_set_content (ADW_APPLICATION_WINDOW (self), window_content);
+  spotifygtk_dialog_host_bind (ADW_APPLICATION_WINDOW (self));
   mpris_start (self);
 
   self->queue_expanded = TRUE;
@@ -6610,6 +6832,12 @@ static void
 spotifygtk_native_window_dispose (GObject *object)
 {
   SpotifyGtkNativeWindow *self = SPOTIFYGTK_NATIVE_WINDOW (object);
+  g_clear_pointer (&self->playlist_card_requests, g_hash_table_unref);
+  while (!g_queue_is_empty (&self->playlist_card_pending)) {
+    PlaylistCard *c = g_queue_pop_head (&self->playlist_card_pending);
+    g_weak_ref_set (&c->window, NULL);
+    playlist_card_free (c);
+  }
 
   if (self->cover_release_handler) {
     g_signal_handler_disconnect (self->cover_release_clock,

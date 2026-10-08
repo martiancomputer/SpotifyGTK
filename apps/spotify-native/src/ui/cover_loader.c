@@ -22,6 +22,7 @@
 #include "local_catalog.h"
 #include "../log_file.h"
 #include "../log_verbose.h"
+#include "../spotify/catalog_cache.h"
 
 #define COVER_CDN_BASE "https://i.scdn.co/image/"
 
@@ -1410,6 +1411,7 @@ clear_cache_thread (GTask *task, gpointer source, gpointer task_data,
                     GCancellable *cancellable)
 {
   const gchar *root = task_data;
+  spotifygtk_catalog_cache_clear ();
   /* Clear only Spotify-derived entries. local-index-v1 and local-art live in
    * the same legacy cache root; removing that directory orphaned favorites
    * and forced an unnecessary full local rescan. Explicit names also prevent

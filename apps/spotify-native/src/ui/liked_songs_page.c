@@ -60,6 +60,9 @@ struct _SpotifyGtkLikedSongsPage {
 
   /* Sort controls: which key, and whether it runs the natural way round. */
   GtkWidget *sort_buttons[3];
+  GtkWidget *controls;
+  guint      align_tick;
+  guint      align_attempts;
   guint      sort_key;
   gboolean   sort_desc[3];   /* remembered per key, so switching back restores it */
 
@@ -247,6 +250,56 @@ rebuild_sorted (SpotifyGtkLikedSongsPage *self)
 }
 
 /* Rebuild the visible list from all_tracks under the current filter text. */
+static gboolean
+align_sort_controls (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
+{
+  SpotifyGtkLikedSongsPage *self = data;
+  (void) widget; (void) clock;
+  gdouble inset = 0;
+  if (spotifygtk_track_list_duration_inset (self->list, &inset)) {
+    gint margin = MAX (0, (gint) (inset + 0.5));
+    if (gtk_widget_get_margin_end (self->controls) != margin)
+      gtk_widget_set_margin_end (self->controls, margin);
+    self->align_tick = 0;
+    return G_SOURCE_REMOVE;
+  }
+  /* Empty/error pages must not keep a frame clock running. A later model
+   * replacement or map retries after the virtualized rows have allocated. */
+  if (++self->align_attempts >= 24) {
+    self->align_tick = 0;
+    return G_SOURCE_REMOVE;
+  }
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+queue_sort_alignment (SpotifyGtkLikedSongsPage *self)
+{
+  if (self->align_tick || !gtk_widget_get_mapped (GTK_WIDGET (self)))
+    return;
+  self->align_attempts = 0;
+  self->align_tick = gtk_widget_add_tick_callback (
+    GTK_WIDGET (self), align_sort_controls, self, NULL);
+}
+
+static void
+on_liked_page_map (GtkWidget *widget, gpointer data)
+{
+  (void) data;
+  queue_sort_alignment (SPOTIFYGTK_LIKED_SONGS_PAGE (widget));
+}
+
+static void
+on_liked_page_unmap (GtkWidget *widget, gpointer data)
+{
+  (void) data;
+  SpotifyGtkLikedSongsPage *self = SPOTIFYGTK_LIKED_SONGS_PAGE (widget);
+  if (self->align_tick) {
+    gtk_widget_remove_tick_callback (widget, self->align_tick);
+    self->align_tick = 0;
+  }
+}
+
 static void
 apply_filter (SpotifyGtkLikedSongsPage *self)
 {
@@ -262,6 +315,7 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
     spotifygtk_track_list_set_borrowed_native_tracks (self->list, self->sorted_tracks);
     if (self->sorted_tracks->len == 0)
       spotifygtk_track_list_set_status (self->list, "No liked songs yet.");
+    queue_sort_alignment (self);
     return;
   }
 
@@ -282,6 +336,7 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
   spotifygtk_track_list_set_borrowed_native_tracks (self->list, filtered);
   if (filtered->len == 0)
     spotifygtk_track_list_set_status (self->list, "No matches.");
+  queue_sort_alignment (self);
 }
 
 /* Show the direction on the active button only. The inactive ones carry no
@@ -451,6 +506,7 @@ spotifygtk_liked_songs_page_dispose (GObject *object)
 {
   SpotifyGtkLikedSongsPage *self = SPOTIFYGTK_LIKED_SONGS_PAGE (object);
 
+  on_liked_page_unmap (GTK_WIDGET (self), NULL);
   if (self->in_flight)
     g_cancellable_cancel (self->in_flight);
   g_clear_object (&self->in_flight);
@@ -520,6 +576,7 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
    * wearing instead of introducing a look of its own.
    */
   GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  self->controls = controls;
   gtk_widget_set_margin_bottom (controls, 4);
   gtk_box_append (GTK_BOX (controls), GTK_WIDGET (self->filter_entry));
 
@@ -561,6 +618,8 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   spotifygtk_track_list_set_numbered (self->list, TRUE);
   g_signal_connect (self->list, "track-activated", G_CALLBACK (on_track_activated), self);
   gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->list));
+  g_signal_connect (self, "map", G_CALLBACK (on_liked_page_map), NULL);
+  g_signal_connect (self, "unmap", G_CALLBACK (on_liked_page_unmap), NULL);
 }
 
 SpotifyGtkLikedSongsPage *

@@ -7,7 +7,37 @@ if get_option('tests')
     dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
   )
   test('spclient-response-compression', test_spclient_compression, timeout: 30)
+  test_catalog_cache = executable('test-catalog-cache',
+    'test_catalog_cache.c', '../src/spotify/catalog_cache.c',
+    '../src/spotify/catalog_snapshot.c',
+    include_directories: [include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
+  )
+  test('catalog-cache', test_catalog_cache, timeout: 15)
   if enable_gui
+    test_ui_refinements = executable('test-ui-refinements',
+      'test_ui_refinements.c', ui_component_sources,
+      '../src/player_service.c', '../src/playback_probe.c', '../src/main.c',
+      runtime_sources, spotify_connect_api_sources, spotify_proto_sources,
+      audio_engine_sources,
+      include_directories: [config_inc, include_directories('../src'), spotify_connect_inc],
+      dependencies: all_deps + [gtk4_dep, adw_check],
+      c_args: ['-DSPOTIFYGTK_ENGINE_LIBRARY'],
+    )
+    test('ui-refinements', test_ui_refinements, timeout: 30)
+    test_pending_cards = executable('test-pending-cards',
+      'test_pending_cards.c', '../src/ui/context_menu.c',
+      '../src/ui/smooth_scroll.c', '../src/ui/settings.c', '../src/log_file.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [gtk4_dep, adw_check, gio_dep, soup_dep, json_glib_dep, m_dep],
+    )
+    test('pending-artist-playlist-cards', test_pending_cards, timeout: 10)
+    test_playlist_create_dialog = executable('test-playlist-create-dialog',
+      'test_playlist_create_dialog.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [gtk4_dep, adw_check],
+    )
+    test('playlist-create-wizard', test_playlist_create_dialog, timeout: 10)
     test_shuffle_toggle = executable('test-shuffle-toggle',
       'test_shuffle_toggle.c', '../src/ui/playback_bar.c',
       include_directories: [config_inc, include_directories('../src')],

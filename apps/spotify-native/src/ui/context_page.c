@@ -8,6 +8,8 @@
  */
 
 #include "context_page.h"
+#include "../spotify/catalog_cache.h"
+#include "../spotify/catalog_snapshot.h"
 #include "cover_loader.h"
 #include "settings.h"
 #include "local_catalog.h"
@@ -708,6 +710,14 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
   gtk_label_set_text (self->title_label, title ? title : "");
   gtk_label_set_text (self->expanded_kind, kind ? kind : "");
   gtk_label_set_text (self->expanded_title, title ? title : "");
+  if (g_str_has_prefix (uri, "spotify:playlist:") &&
+      (!title || !*title || g_str_has_prefix (title, "spotify:"))) {
+    g_autofree gchar *cached_name = NULL, *cover = NULL;
+    spotifygtk_catalog_card_get (uri, &cached_name, &cover);
+    const gchar *display = cached_name ? cached_name : "Playlist";
+    gtk_label_set_text (self->title_label, display);
+    gtk_label_set_text (self->expanded_title, display);
+  }
   /* Already showing this exactly — don't re-fetch on a repeat navigation. */
   if (same_context && !self->in_flight &&
       !g_str_has_prefix (uri, "local:")) {
@@ -788,6 +798,13 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
   if (!self->session ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY) {
     GPtrArray *cached = g_hash_table_lookup (self->cached_contexts, uri);
+    g_autoptr(GPtrArray) disk_tracks = NULL;
+    if (!cached && g_str_has_prefix (uri, "spotify:playlist:")) {
+      g_autofree gchar *key = spotifygtk_catalog_context_key (uri, CONTEXT_PAGE_LIMIT);
+      g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (key, 0);
+      disk_tracks = spotifygtk_catalog_tracks_unpack (bytes);
+      cached = disk_tracks;
+    }
     gboolean playlist = g_str_has_prefix (uri, "spotify:playlist:");
     g_autoptr(GPtrArray) visible = playlist
       ? spotifygtk_device_playlists_tracks (self->device_playlists, uri, cached)

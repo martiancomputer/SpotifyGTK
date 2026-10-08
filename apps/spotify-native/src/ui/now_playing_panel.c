@@ -408,9 +408,17 @@ spotifygtk_now_playing_panel_init (SpotifyGtkNowPlayingPanel *self)
 
   /* This was a GtkLabel, which is why clicking it did nothing. It has to be
    * an actual button to be activatable at all. */
-  self->collapse_btn = GTK_BUTTON (gtk_button_new_with_label ("Collapse ◂"));
+  self->collapse_btn = GTK_BUTTON (gtk_button_new ());
   gtk_widget_add_css_class (GTK_WIDGET (self->collapse_btn), "flat");
-  gtk_widget_add_css_class (GTK_WIDGET (self->collapse_btn), "dim-text");
+  GtkWidget *collapse_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  GtkWidget *collapse_icon = gtk_image_new_from_icon_name ("go-next-symbolic");
+  gtk_image_set_pixel_size (GTK_IMAGE (collapse_icon), 14);
+  gtk_box_append (GTK_BOX (collapse_box), collapse_icon);
+  GtkWidget *collapse_label = gtk_label_new ("Collapse");
+  gtk_label_set_xalign (GTK_LABEL (collapse_label), 0.0);
+  gtk_widget_add_css_class (collapse_label, "sidebar-action");
+  gtk_box_append (GTK_BOX (collapse_box), collapse_label);
+  gtk_button_set_child (self->collapse_btn, collapse_box);
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->collapse_btn), "Hide the artwork");
   g_signal_connect (self->collapse_btn, "clicked", G_CALLBACK (on_collapse_clicked), self);
   gtk_box_append (GTK_BOX (header), GTK_WIDGET (self->collapse_btn));

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <circle cx="256" cy="256" r="220" fill="#101114"/>
+  <circle cx="256" cy="256" r="220" stroke="#1F2128" stroke-width="8"/>
+  <!-- grooves -->
+  <circle cx="256" cy="256" r="182" stroke="#2A2D35" stroke-width="3" opacity="0.9"/>
+  <circle cx="256" cy="256" r="164" stroke="#2A2D35" stroke-width="2.5" opacity="0.85"/>
+  <circle cx="256" cy="256" r="146" stroke="#2A2D35" stroke-width="2.5" opacity="0.8"/>
+  <circle cx="256" cy="256" r="128" stroke="#2A2D35" stroke-width="2" opacity="0.75"/>
+  <circle cx="256" cy="256" r="110" stroke="#2A2D35" stroke-width="2" opacity="0.7"/>
+  <circle cx="256" cy="256" r="92" stroke="#2A2D35" stroke-width="1.8" opacity="0.65"/>
+  <!-- subtle highlight -->
+  <path d="M118 162C145 118 196 88 256 88" stroke="#3B3F4A" stroke-width="10" stroke-linecap="round" opacity="0.55"/>
+  <!-- center label -->
+  <circle cx="256" cy="256" r="56" fill="#F4F1EB"/>
+  <circle cx="256" cy="256" r="56" stroke="#D6D2CB" stroke-width="3"/>
+  <circle cx="256" cy="256" r="10" fill="#101114"/>
+</svg>

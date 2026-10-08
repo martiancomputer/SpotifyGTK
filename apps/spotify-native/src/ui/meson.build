@@ -10,9 +10,9 @@ ui_resources = gnome.compile_resources(
 
 # UI module for spotify-native - matching mockup design
 
-ui_sources = ui_resources + files(
+ui_component_sources = ui_resources + files(
   'context_menu.c',
-  'window.c',
+  'dialog_host.c',
   'page_stack.c',
   'frame_stats.c',
   'sidebar.c',
@@ -34,6 +34,9 @@ ui_sources = ui_resources + files(
   'local_catalog.c',
   'local_favorites.c',
   'device_playlists.c',
+  'playlist_create_dialog.c',
   'context_page.c',
   'artist_page.c',
 )
+
+ui_sources = ui_component_sources + files('window.c')

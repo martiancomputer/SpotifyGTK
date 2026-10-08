@@ -50,3 +50,8 @@ spotify-native.prev.log
 # Profiling build and heaptrack captures
 build-prof/
 heaptrack.*.zst
+
+# Local design references and development notes
+/equalizer_white_box_dark_lines.svg
+/mockup.svg
+/to-do.md

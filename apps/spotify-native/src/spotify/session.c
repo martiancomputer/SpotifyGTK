@@ -9,6 +9,8 @@
 
 #include "config.h"
 #include "session.h"
+#include "catalog_cache.h"
+#include "catalog_snapshot.h"
 
 #include "ap.h"
 #include "clienttoken.h"
@@ -2474,7 +2476,20 @@ typedef struct {
   GPtrArray            *out;       /* SpotifyNativeTrack*, owned; accumulated */
   gint64                started_us;
   gint64                context_resolved_us;
+  guint                 cache_epoch;
+  gboolean              partial;
 } LoadTracksOp;
+
+static gchar *tracks_cache_key (const gchar *uri, guint limit)
+{
+  return spotifygtk_catalog_context_key (uri, limit);
+}
+
+static gboolean cacheable_context (const gchar *uri)
+{
+  return uri && (g_str_has_prefix (uri, "spotify:playlist:") ||
+                 g_str_has_prefix (uri, "spotify:artist:"));
+}
 
 static void
 load_op_free (LoadTracksOp *op)
@@ -2536,6 +2551,13 @@ static void
 load_op_finish (LoadTracksOp *op)
 {
   GPtrArray *out = g_steal_pointer (&op->out);
+  if (cacheable_context (op->context_uri) && !op->partial &&
+      !g_task_get_completed (op->task) &&
+      !g_cancellable_is_cancelled (g_task_get_cancellable (op->task))) {
+    g_autofree gchar *key = tracks_cache_key (op->context_uri, op->max_tracks);
+    g_autoptr(GBytes) bytes = spotifygtk_catalog_tracks_pack (out);
+    spotifygtk_catalog_cache_put (key, bytes, op->cache_epoch);
+  }
 
   SPOTIFYGTK_DEBUG ("catalog %s: complete in %.1f ms (context %.1f ms, metadata %.1f ms, %u tracks)",
     op->context_uri ? op->context_uri : "<ordered uris>",
@@ -2590,6 +2612,7 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
      * worth showing, and a partial collection beats an error page -- so only
      * fail the whole load when nothing at all was gathered. */
     if (op->out && op->out->len > 0) {
+      op->partial = TRUE;
       g_warning ("session: metadata page starting at %u failed (%s); returning "
                  "the %u track(s) already loaded",
                  op->next_uri, error ? error->message : "no tracks returned",
@@ -2673,6 +2696,13 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
 static void
 request_next_page (LoadTracksOp *op)
 {
+  if (g_task_return_error_if_cancelled (op->task)) {
+    if (op->context_uri && strstr (op->context_uri, ":collection"))
+      collection_drain_waiters (op->session, NULL, "collection load cancelled");
+    g_object_unref (op->task);
+    load_op_free (op);
+    return;
+  }
   if (!op->uris || op->next_uri >= op->uris->len) {
     load_op_finish (op);
     return;
@@ -2833,6 +2863,23 @@ start_load_tracks (gpointer user_data)
 {
   LoadTracksOp *op = user_data;
   SpotifyNativeSession *self = op->session;
+  op->cache_epoch = spotifygtk_catalog_cache_epoch ();
+  if (g_task_return_error_if_cancelled (op->task)) {
+    g_object_unref (op->task);
+    load_op_free (op);
+    return G_SOURCE_REMOVE;
+  }
+  if (cacheable_context (op->context_uri)) {
+    g_autofree gchar *key = tracks_cache_key (op->context_uri, op->max_tracks);
+    g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (key, 300);
+    GPtrArray *tracks = spotifygtk_catalog_tracks_unpack (bytes);
+    if (tracks) {
+      g_task_return_pointer (op->task, tracks, (GDestroyNotify) g_ptr_array_unref);
+      g_object_unref (op->task);
+      load_op_free (op);
+      return G_SOURCE_REMOVE;
+    }
+  }
 
   g_mutex_lock (&self->lock);
   gboolean ready = (self->state == SPOTIFYGTK_SESSION_READY);
@@ -3000,6 +3047,7 @@ typedef struct {
   GPtrArray            *track_uris;  /* gchar* */
   GHashTable           *track_owner; /* track uri -> SpotifyNativeRelease* (borrowed) */
   guint                 next_track;
+  guint                 cache_epoch;
 } DiscoOp;
 
 static void disco_request_albums (DiscoOp *op);
@@ -3032,6 +3080,11 @@ disco_fail (DiscoOp *op, const gchar *what, GError *error)
 static void
 disco_finish (DiscoOp *op)
 {
+  if (!g_cancellable_is_cancelled (g_task_get_cancellable (op->task))) {
+    g_autofree gchar *key = g_strconcat ("discography:", op->artist_uri, NULL);
+    g_autoptr(GBytes) bytes = spotifygtk_catalog_releases_pack (op->releases);
+    spotifygtk_catalog_cache_put (key, bytes, op->cache_epoch);
+  }
   g_task_return_pointer (op->task, g_steal_pointer (&op->releases),
                          (GDestroyNotify) g_ptr_array_unref);
   g_object_unref (op->task);
@@ -3089,6 +3142,11 @@ on_disco_tracks (const SpclientTrackInfo *tracks, guint n_tracks,
 static void
 disco_request_tracks (DiscoOp *op)
 {
+  if (g_task_return_error_if_cancelled (op->task)) {
+    g_object_unref (op->task);
+    disco_op_free (op);
+    return;
+  }
   if (!op->track_uris || op->next_track >= op->track_uris->len) {
     disco_finish (op);
     return;
@@ -3149,6 +3207,11 @@ on_disco_albums (GPtrArray *albums, GError *error, gpointer user_data)
 static void
 disco_request_albums (DiscoOp *op)
 {
+  if (g_task_return_error_if_cancelled (op->task)) {
+    g_object_unref (op->task);
+    disco_op_free (op);
+    return;
+  }
   if (!op->album_uris || op->next_album >= op->album_uris->len) {
     disco_request_tracks (op);
     return;
@@ -3412,6 +3475,21 @@ static gboolean
 start_discography (gpointer user_data)
 {
   DiscoOp *op = user_data;
+  op->cache_epoch = spotifygtk_catalog_cache_epoch ();
+  if (g_task_return_error_if_cancelled (op->task)) {
+    g_object_unref (op->task);
+    disco_op_free (op);
+    return G_SOURCE_REMOVE;
+  }
+  g_autofree gchar *key = g_strconcat ("discography:", op->artist_uri, NULL);
+  g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (key, 24 * 60 * 60);
+  GPtrArray *releases = spotifygtk_catalog_releases_unpack (bytes);
+  if (releases) {
+    g_task_return_pointer (op->task, releases, (GDestroyNotify) g_ptr_array_unref);
+    g_object_unref (op->task);
+    disco_op_free (op);
+    return G_SOURCE_REMOVE;
+  }
 
   if (!op->session->spclient) {
     disco_fail (op, "session", NULL);
@@ -3479,6 +3557,8 @@ typedef struct {
   SpotifyNativeArtistIdentityFunc identity_callback;
   gpointer                     user_data;
   gboolean                     portrait_only;
+  guint                        cache_epoch;
+  gboolean                     from_cache;
   GMainContext                *callback_context;
 } ArtistImageOp;
 
@@ -3591,6 +3671,8 @@ artist_image_map_save (gboolean portrait)
 static void
 artist_image_done (ArtistImageOp *op, const gchar *name, const gchar *cover_id)
 {
+  if (op->identity_callback && name && cover_id && !op->from_cache)
+    spotifygtk_catalog_card_put (op->uri, name, cover_id, op->cache_epoch);
   if (cover_id && *cover_id && op->uri) {
     artist_image_map_load (op->portrait_only);
     GHashTable *cache = op->portrait_only ? artist_portrait_cache
@@ -3667,6 +3749,16 @@ start_artist_image (gpointer user_data)
 {
   ArtistImageOp *op = user_data;
   SpotifyNativeSession *self = op->session;
+  op->cache_epoch = spotifygtk_catalog_cache_epoch ();
+  if (op->identity_callback) {
+    g_autofree gchar *name = NULL, *cover = NULL;
+    if (spotifygtk_catalog_card_get (op->uri, &name, &cover) && cover &&
+        spotifygtk_catalog_card_is_fresh (op->uri, 24 * 60 * 60)) {
+      op->from_cache = TRUE;
+      artist_image_done (op, name, cover);
+      return G_SOURCE_REMOVE;
+    }
+  }
 
   /* Already known, from this session or an earlier one: no round trip. */
   artist_image_map_load (op->portrait_only);
@@ -3875,6 +3967,9 @@ invalidate_context_on_worker (gpointer user_data)
 {
   InvalidateContext *request = user_data;
   SpotifyNativeSession *self = request->session;
+
+  if (cacheable_context (request->context_uri))
+    spotifygtk_catalog_context_invalidate (request->context_uri);
 
   if (!self->collection_cache_uri)
     return G_SOURCE_REMOVE;

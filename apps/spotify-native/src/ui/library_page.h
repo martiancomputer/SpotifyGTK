@@ -18,6 +18,9 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (SpotifyGtkLibraryPage, spotifygtk_library_page,
                       SPOTIFYGTK, LIBRARY_PAGE, GtkBox)
 
+void spotifygtk_library_page_resolve_playlist (SpotifyGtkLibraryPage *self,
+  const gchar *uri, const gchar *name, const gchar *cover);
+
 SpotifyGtkLibraryPage *spotifygtk_library_page_new (void);
 
 /* Set the READY session, then fill Albums lazily on first visit. */

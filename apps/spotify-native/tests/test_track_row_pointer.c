@@ -129,6 +129,97 @@ test_activation_without_selection (void)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+static void
+test_metadata_width (void)
+{
+  g_autoptr(SpotifyGtkTrackRow) row = g_object_ref_sink (spotifygtk_track_row_new ());
+  SpotifyNativeTrack track = {
+    .uri = "spotify:track:test",
+    .name = "A long soundtrack title that should fit comfortably in a wide row",
+    .artists = "Composer One, Composer Two, Orchestra Three",
+    .album = "An Original Soundtrack Selection with a Long Album Name",
+  };
+  spotifygtk_track_row_set_native_track (row, &track, 1);
+  gtk_widget_allocate (GTK_WIDGET (row), 1200, 80, -1, NULL);
+  g_assert_cmpint (gtk_widget_get_width (GTK_WIDGET (row->metadata_label)), >, 1000);
+  g_assert_false (pango_layout_is_ellipsized (gtk_label_get_layout (row->metadata_label)));
+  g_assert_false (pango_layout_is_ellipsized (gtk_label_get_layout (row->title_label)));
+
+  gtk_widget_allocate (GTK_WIDGET (row), 350, 80, -1, NULL);
+  g_assert_true (pango_layout_is_ellipsized (gtk_label_get_layout (row->metadata_label)));
+  g_assert_true (pango_layout_is_ellipsized (gtk_label_get_layout (row->title_label)));
+
+  g_autofree gchar *long_text = g_strnfill (5000, 'W');
+  track.artists = long_text;
+  track.album = long_text;
+  spotifygtk_track_row_set_native_track (row, &track, 1);
+  int minimum, natural;
+  gtk_widget_measure (GTK_WIDGET (row), GTK_ORIENTATION_HORIZONTAL, -1,
+                      &minimum, &natural, NULL, NULL);
+  g_assert_cmpint (minimum, <, 350);
+  g_assert_cmpint (natural, <, 1000);
+}
+
+static void
+test_metadata_visibility_and_reuse (void)
+{
+  g_autoptr(SpotifyGtkTrackRow) row = g_object_ref_sink (spotifygtk_track_row_new ());
+  SpotifyNativeTrack track = {
+    .uri = "local:track:test", .name = "Track", .artists = "Artist", .album = "Album"
+  };
+  spotifygtk_track_row_set_native_track (row, &track, 1);
+  g_assert_cmpstr (gtk_label_get_text (row->metadata_label), ==, "Artist · On this device  Album");
+  spotifygtk_track_row_set_show_album (row, FALSE);
+  g_assert_cmpstr (gtk_label_get_text (row->metadata_label), ==, "Artist · On this device");
+  spotifygtk_track_row_set_show_artists (row, FALSE);
+  g_assert_false (gtk_widget_get_visible (GTK_WIDGET (row->metadata_label)));
+  spotifygtk_track_row_set_show_album (row, TRUE);
+  g_assert_cmpstr (gtk_label_get_text (row->metadata_label), ==, "Album");
+  spotifygtk_track_row_set_show_artists (row, TRUE);
+  track.uri = "spotify:album:test";
+  spotifygtk_track_row_set_native_track (row, &track, 1);
+  spotifygtk_track_row_set_show_album (row, TRUE);
+  g_assert_cmpstr (gtk_label_get_text (row->metadata_label), ==, "Artist");
+  g_autoptr(JsonObject) empty = json_object_new ();
+  spotifygtk_track_row_set_track (row, empty, 1);
+  g_assert_cmpstr (gtk_label_get_text (row->metadata_label), ==, "");
+  g_assert_false (gtk_widget_get_visible (GTK_WIDGET (row->metadata_label)));
+}
+
+static void
+test_equalizer_centered_on_duration (void)
+{
+  g_autoptr(SpotifyGtkTrackRow) row = g_object_ref_sink (spotifygtk_track_row_new ());
+  const gchar *durations[] = { "3:28", "10:24", "0:59" };
+  for (guint i = 0; i < G_N_ELEMENTS (durations); i++) {
+    gtk_label_set_text (row->duration_label, durations[i]);
+    gint text_width = 0;
+    pango_layout_get_pixel_size (gtk_label_get_layout (row->duration_label),
+                                 &text_width, NULL);
+    gint width = MAX (text_width, 44);
+    cairo_surface_t *surface = cairo_image_surface_create (
+      CAIRO_FORMAT_ARGB32, width, EQ_HEIGHT);
+    cairo_t *cr = cairo_create (surface);
+    eq_draw (GTK_DRAWING_AREA (row->eq_area), cr, width, EQ_HEIGHT, row);
+    cairo_surface_flush (surface);
+    const guint32 *pixels = (const guint32 *) cairo_image_surface_get_data (surface);
+    gint stride = cairo_image_surface_get_stride (surface) / 4;
+    gint left = width, right = -1;
+    for (gint y = 0; y < EQ_HEIGHT; y++)
+      for (gint x = 0; x < width; x++)
+        if (pixels[y * stride + x] >> 24) {
+          left = MIN (left, x);
+          right = MAX (right, x);
+        }
+    g_assert_cmpint (right, >=, left);
+    g_assert_cmpfloat (fabs ((left + right + 1) / 2.0 -
+                             (width - text_width / 2.0)), <=, 0.5);
+    cairo_destroy (cr);
+    cairo_surface_destroy (surface);
+  }
+  g_assert_cmpint (gtk_widget_get_halign (row->eq_area), ==, GTK_ALIGN_FILL);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -138,5 +229,8 @@ main (int argc, char **argv)
   g_test_add_func ("/track-row/pointer-routing", test_pointer_routing);
   g_test_add_func ("/track-row/activation-without-selection",
                    test_activation_without_selection);
+  g_test_add_func ("/track-row/metadata-width", test_metadata_width);
+  g_test_add_func ("/track-row/metadata-visibility-reuse", test_metadata_visibility_and_reuse);
+  g_test_add_func ("/track-row/equalizer-centered", test_equalizer_centered_on_duration);
   return g_test_run ();
 }
