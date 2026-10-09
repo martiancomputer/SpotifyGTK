@@ -1,6 +1,6 @@
 if get_option('tests')
   test_home_feed = executable('test-home-feed',
-    'test_home_feed.c', '../src/spotify/home_feed.c',
+    'test_home_feed.c', '../src/spotify/home_feed.c', '../src/spotify/catalog_cache.c',
     include_directories: [include_directories('../src')],
     dependencies: [glib_dep, gio_dep, json_glib_dep],
   )
@@ -36,7 +36,7 @@ if get_option('tests')
       dependencies: all_deps + [gtk4_dep, adw_check],
       c_args: ['-DSPOTIFYGTK_ENGINE_LIBRARY'],
     )
-    test('ui-refinements', test_ui_refinements, timeout: 30)
+    test('ui-refinements', test_ui_refinements, timeout: 60)
     test_pending_cards = executable('test-pending-cards',
       'test_pending_cards.c', '../src/ui/context_menu.c',
       '../src/ui/smooth_scroll.c', '../src/ui/settings.c', '../src/log_file.c',

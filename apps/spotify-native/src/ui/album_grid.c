@@ -493,7 +493,9 @@ grid_near_outer_viewport (SpotifyGtkAlbumGrid *self)
   if (height <= 0 || !gtk_widget_get_mapped (GTK_WIDGET (self)) ||
       !gtk_widget_compute_bounds (GTK_WIDGET (self), GTK_WIDGET (outer), &bounds))
     return FALSE;
-  gdouble overscan = height * 0.5;
+  /* Home scans while moving: warm the next shelf early and retain it a little
+   * farther on the way out, avoiding mount/unmount churn at one boundary. */
+  gdouble overscan = self->home_style ? (self->outer_suspended ? 160 : 320) : height * 0.5;
   return bounds.origin.y + bounds.size.height > -overscan &&
          bounds.origin.y < height + overscan;
 }
@@ -956,19 +958,27 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
    * artwork and labels should not churn descendant hover states as cards
    * move beneath a stationary pointer. */
   gtk_widget_set_can_target (box, FALSE);
+  /* Grid cells can grow wider than the cover. Keep artwork and both labels
+   * in one centered cover-width column instead of stretching text to the cell
+   * edges; ellipsization then uses the same width as the visible artwork. */
+  gtk_widget_set_halign (box, GTK_ALIGN_CENTER);
+  gtk_widget_set_size_request (box, CARD_ART_PX, -1);
   gtk_widget_set_margin_start (box, 8);
   gtk_widget_set_margin_end (box, 8);
   gtk_widget_set_margin_top (box, 8);
   gtk_widget_set_margin_bottom (box, 8);
   if (self->home_style) {
-    gtk_widget_set_margin_start (box, 0);
-    gtk_widget_set_margin_end (box, 24);
-    gtk_widget_set_margin_top (box, 0);
+    /* Symmetric content inset inside one card; spacing between items belongs
+     * outside its hover surface, not in an extra trailing rectangle. */
+    gtk_widget_set_margin_end (card, 12);
   }
 
   GtkWidget *art = gtk_image_new_from_icon_name ("media-optical-symbolic");
   gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
   gtk_widget_add_css_class (art, "art-large");
+  /* Clip the actual pixels, not just the placeholder's CSS background. */
+  gtk_widget_set_halign (art, GTK_ALIGN_CENTER);
+  gtk_widget_set_overflow (art, GTK_OVERFLOW_HIDDEN);
   gtk_box_append (GTK_BOX (box), art);
 
   GtkWidget *title = gtk_label_new ("");
@@ -993,6 +1003,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_button_set_child (GTK_BUTTON (card), box);
   /* GtkNoSelection is intentional: opening a card is not selecting it. */
   gtk_list_item_set_selectable (list_item, FALSE);
+  gtk_list_item_set_activatable (list_item, FALSE);
   gtk_list_item_set_child (list_item, card);
   (void) factory;
 }
@@ -1245,6 +1256,14 @@ on_outer_scrolled (GtkAdjustment *adjustment, gpointer data)
 }
 
 void
+spotifygtk_album_grid_scan_outer_view (SpotifyGtkAlbumGrid *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  if (!self->outer_model) return;
+  set_outer_suspended (self, !self->outer_active || !grid_near_outer_viewport (self));
+}
+
+void
 spotifygtk_album_grid_set_outer_viewport (SpotifyGtkAlbumGrid *self, GtkScrolledWindow *outer)
 {
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
@@ -1257,10 +1276,14 @@ spotifygtk_album_grid_set_outer_viewport (SpotifyGtkAlbumGrid *self, GtkScrolled
     self->outer_factory = g_object_ref (gtk_list_view_get_factory (GTK_LIST_VIEW (self->view)));
     set_outer_suspended (self, TRUE);
   }
-  g_signal_connect_object (gtk_scrolled_window_get_vadjustment (outer), "value-changed",
+  /* Home owns one throttled scan for the entire page, rather than twenty
+   * settle timers whose deadlines are postponed by every vertical frame. */
+  if (!self->home_style) {
+    g_signal_connect_object (gtk_scrolled_window_get_vadjustment (outer), "value-changed",
                             G_CALLBACK (on_outer_scrolled), self, 0);
-  g_signal_connect_object (gtk_scrolled_window_get_vadjustment (outer), "changed",
+    g_signal_connect_object (gtk_scrolled_window_get_vadjustment (outer), "changed",
                             G_CALLBACK (on_outer_scrolled), self, 0);
+  }
   schedule_grid_settle (self);
 }
 
@@ -1791,6 +1814,13 @@ spotifygtk_album_grid_set_home_style (SpotifyGtkAlbumGrid *self)
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
   self->home_style = TRUE;
   gtk_widget_add_css_class (GTK_WIDGET (self), "home-shelf");
+  /* EXTERNAL hides the bar without disabling horizontal adjustment, touchpad,
+   * eased wheel or keyboard scrolling (NEVER would change the viewport). */
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (self->scroller),
+                                  GTK_POLICY_EXTERNAL, GTK_POLICY_NEVER);
+  gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (self->scroller),
+                                              CARD_ART_PX + SHELF_TEXT_ALLOWANCE);
+  gtk_widget_set_size_request (self->scroller, -1, CARD_ART_PX + SHELF_TEXT_ALLOWANCE);
   spotifygtk_album_grid_set_content_margins (self, 0, 0);
 }
 

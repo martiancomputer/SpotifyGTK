@@ -1,6 +1,8 @@
 /* Synthetic display metadata only: no captured feed or account identifiers. */
 #include "spotify/home_feed.h"
 #include "spotify/image_uri.h"
+#include "spotify/catalog_cache.h"
+#include <glib/gstdio.h>
 #include <string.h>
 
 #define ID "0000000000000000000000"
@@ -142,12 +144,50 @@ test_validation (void)
   g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
 }
 
+static void
+test_saved_feed_lifetime (void)
+{
+  g_autoptr(JsonNode) root = root_new ();
+  g_autoptr(SpotifyHomeFeed) feed = spotifygtk_home_feed_parse (root, NULL);
+  g_autoptr(GBytes) bytes = spotifygtk_home_feed_encode (feed);
+  const gchar *key = "home-test-fixture";
+  spotifygtk_catalog_cache_put (key, bytes, spotifygtk_catalog_cache_epoch ());
+  g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256, key, -1);
+  g_autofree gchar *path = g_build_filename (g_get_user_cache_dir (), "spotifygtk", "catalog-v1", digest, NULL);
+  g_autoptr(GFile) file = g_file_new_for_path (path);
+  guint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  g_assert_true (g_file_set_attribute_uint64 (file, G_FILE_ATTRIBUTE_TIME_MODIFIED,
+    now - 24 * 60 * 60, G_FILE_QUERY_INFO_NONE, NULL, NULL));
+  g_autoptr(GBytes) fresh = spotifygtk_catalog_cache_get (key, SPOTIFYGTK_HOME_FRESH_SECONDS);
+  g_assert_null (fresh);
+  g_autoptr(GBytes) saved = spotifygtk_catalog_cache_get (key, SPOTIFYGTK_HOME_SAVED_SECONDS);
+  g_autoptr(SpotifyHomeFeed) offline = spotifygtk_home_feed_decode (saved);
+  g_assert_nonnull (offline);
+  g_assert_cmpuint (offline->sections->len, ==, feed->sections->len);
+  g_assert_true (g_file_set_attribute_uint64 (file, G_FILE_ATTRIBUTE_TIME_MODIFIED,
+    now - 8 * 24 * 60 * 60, G_FILE_QUERY_INFO_NONE, NULL, NULL));
+  g_autoptr(GBytes) expired = spotifygtk_catalog_cache_get (key, SPOTIFYGTK_HOME_SAVED_SECONDS);
+  g_assert_null (expired);
+  spotifygtk_catalog_cache_clear ();
+}
+
 int main (int argc, char **argv)
 {
+  g_autofree gchar *temp = g_dir_make_tmp ("spotifygtk-home-test-XXXXXX", NULL);
+  g_assert_nonnull (temp);
+  g_setenv ("XDG_CACHE_HOME", temp, TRUE);
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/home/feed-and-cache", test_feed);
   g_test_add_func ("/home/response-bounds", test_bounds);
   g_test_add_func ("/home/validation", test_validation);
   g_test_add_func ("/home/long-snapshot", test_long_snapshot);
-  return g_test_run ();
+  g_test_add_func ("/home/saved-feed-lifetime", test_saved_feed_lifetime);
+  gint result = g_test_run ();
+  spotifygtk_catalog_cache_clear ();
+  g_autofree gchar *cache = g_build_filename (temp, "spotifygtk", "catalog-v1", NULL);
+  g_rmdir (cache);
+  g_autofree gchar *app = g_build_filename (temp, "spotifygtk", NULL);
+  g_rmdir (app);
+  g_rmdir (temp);
+  return result;
 }

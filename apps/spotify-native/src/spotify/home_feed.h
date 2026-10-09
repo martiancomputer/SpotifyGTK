@@ -5,6 +5,10 @@
 #define SPOTIFYGTK_HOME_MAX_SECTIONS 32
 #define SPOTIFYGTK_HOME_MAX_CARDS 10
 #define SPOTIFYGTK_HOME_MAX_BYTES (4 * 1024 * 1024)
+/* Display snapshots can survive offline days; only fresh snapshots suppress
+ * the asynchronous server refresh. Neither duration retains decoded artwork. */
+#define SPOTIFYGTK_HOME_FRESH_SECONDS (15 * 60)
+#define SPOTIFYGTK_HOME_SAVED_SECONDS (7 * 24 * 60 * 60)
 
 typedef struct { gchar *uri, *title, *subtitle, *cover; } SpotifyHomeCard;
 typedef struct { gchar *title, *subtitle; GPtrArray *cards; } SpotifyHomeSection;

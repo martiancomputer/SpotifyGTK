@@ -3414,7 +3414,9 @@ spotifygtk_native_session_get_cached_home (SpotifyNativeSession *self)
   g_return_val_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self), NULL);
   g_autofree gchar *key = home_cache_key (self);
   if (!key) return NULL;
-  g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (key, 1800);
+  /* Stale-while-revalidate: keep Home browsable across restarts/offline days.
+   * Freshness is checked separately by load_home; this is only display data. */
+  g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (key, SPOTIFYGTK_HOME_SAVED_SECONDS);
   return spotifygtk_home_feed_decode (bytes);
 }
 
@@ -3470,7 +3472,7 @@ start_home_catalog (gpointer user_data)
   op->key = home_cache_key (self);
   op->cache_epoch = spotifygtk_catalog_cache_epoch ();
   if (op->key) {
-    g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (op->key, 300);
+    g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (op->key, SPOTIFYGTK_HOME_FRESH_SECONDS);
     SpotifyHomeFeed *feed = spotifygtk_home_feed_decode (bytes);
     if (feed) {
       g_task_return_pointer (task, feed, (GDestroyNotify) spotifygtk_home_feed_free);

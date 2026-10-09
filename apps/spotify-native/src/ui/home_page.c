@@ -20,6 +20,7 @@ typedef struct {
   GtkWidget *box;
   GtkLabel *title, *subtitle;
   GtkWidget *heading, *see_all;
+  GtkWidget *previous, *next;
   SpotifyGtkAlbumGrid *grid;
 } HomeShelf;
 
@@ -34,6 +35,7 @@ struct _SpotifyGtkHomePage {
   HomeQuickCard quick[6];
   HomeShelf *fresh;
   guint quick_settle;
+  guint viewport_scan;
   gboolean covers_active;
   GPtrArray *shelves, *grids; /* borrowed widgets, owned by the widget tree */
   SpotifyNativeSession *session; /* window-owned */
@@ -49,6 +51,7 @@ enum { LOADING_CHANGED, GRID_ADDED, CONTEXT_REQUESTED, DESTINATION_REQUESTED, N_
 static guint signals[N_SIGNALS];
 static void apply_visibility (SpotifyGtkHomePage *self);
 static void schedule_quick_covers (SpotifyGtkHomePage *self);
+static void schedule_viewport_scan (SpotifyGtkHomePage *self);
 
 static void
 set_quick_visible (HomeQuickCard *card, gboolean visible)
@@ -79,7 +82,17 @@ spotifygtk_home_page_dispose (GObject *object)
 {
   SpotifyGtkHomePage *self = SPOTIFYGTK_HOME_PAGE (object);
   self->generation++;
+  /* Detaching shelf models and destroying the viewport emits adjustment
+   * changes. Disconnect before teardown so they cannot re-arm a timer after
+   * its cancellation below, against an already disposed page. */
+  if (self->scroller && self->grids) {
+    g_signal_handlers_disconnect_by_data (
+      gtk_scrolled_window_get_vadjustment (self->scroller), self);
+    g_signal_handlers_disconnect_by_data (
+      gtk_scrolled_window_get_hadjustment (self->scroller), self);
+  }
   if (self->quick_settle) { g_source_remove (self->quick_settle); self->quick_settle = 0; }
+  if (self->viewport_scan) { g_source_remove (self->viewport_scan); self->viewport_scan = 0; }
   for (guint i = 0; i < G_N_ELEMENTS (self->quick); i++) {
     release_quick (&self->quick[i]);
     self->quick[i].picture = NULL;
@@ -91,6 +104,14 @@ spotifygtk_home_page_dispose (GObject *object)
   self->session = NULL;
   g_clear_pointer (&self->account, g_free);
   g_clear_pointer (&self->snapshot, g_bytes_unref);
+  for (guint i = 0; self->shelves && i < self->shelves->len; i++) {
+    HomeShelf *s = g_ptr_array_index (self->shelves, i);
+    GtkAdjustment *horizontal = gtk_scrolled_window_get_hadjustment (
+      spotifygtk_album_grid_get_scroller (s->grid));
+    g_signal_handlers_disconnect_by_data (horizontal, s);
+    g_signal_handlers_disconnect_by_data (s->previous, s);
+    g_signal_handlers_disconnect_by_data (s->next, s);
+  }
   g_clear_pointer (&self->shelves, g_ptr_array_unref);
   g_clear_pointer (&self->grids, g_ptr_array_unref);
   G_OBJECT_CLASS (spotifygtk_home_page_parent_class)->dispose (object);
@@ -190,7 +211,54 @@ static void
 on_home_scroll (GtkAdjustment *adjustment, gpointer data)
 {
   schedule_quick_covers (data);
+  schedule_viewport_scan (data);
   (void) adjustment;
+}
+
+static gboolean
+scan_viewport (gpointer data)
+{
+  SpotifyGtkHomePage *self = data;
+  self->viewport_scan = 0;
+  if (self->covers_active && gtk_widget_get_mapped (GTK_WIDGET (self)))
+    for (guint i = 0; i < self->grids->len; i++)
+      spotifygtk_album_grid_scan_outer_view (g_ptr_array_index (self->grids, i));
+  return G_SOURCE_REMOVE;
+}
+
+static void
+schedule_viewport_scan (SpotifyGtkHomePage *self)
+{
+  if (!self->viewport_scan)
+    self->viewport_scan = g_timeout_add (32, scan_viewport, self);
+}
+
+static void
+update_shelf_arrows (GtkAdjustment *adjustment, gpointer data)
+{
+  HomeShelf *s = data;
+  gdouble value = gtk_adjustment_get_value (adjustment);
+  gdouble end = MAX (0, gtk_adjustment_get_upper (adjustment) -
+                          gtk_adjustment_get_page_size (adjustment));
+  gtk_widget_set_visible (s->previous, end > 1);
+  gtk_widget_set_visible (s->next, end > 1);
+  gtk_widget_set_sensitive (s->previous, value > 1);
+  gtk_widget_set_sensitive (s->next, value < end - 1);
+}
+
+static void
+on_shelf_arrow (GtkButton *button, gpointer data)
+{
+  HomeShelf *s = data;
+  GtkScrolledWindow *scroller = spotifygtk_album_grid_get_scroller (s->grid);
+  spotifygtk_smooth_scroll_cancel (scroller);
+  GtkAdjustment *adjustment = gtk_scrolled_window_get_hadjustment (scroller);
+  gdouble value = gtk_adjustment_get_value (adjustment);
+  gdouble end = MAX (0, gtk_adjustment_get_upper (adjustment) -
+                          gtk_adjustment_get_page_size (adjustment));
+  gdouble step = MAX (1, gtk_adjustment_get_page_size (adjustment) * 0.85);
+  gtk_adjustment_set_value (adjustment, CLAMP (value +
+    (GTK_WIDGET (button) == s->previous ? -step : step), 0, end));
 }
 
 static void
@@ -270,12 +338,27 @@ add_shelf (SpotifyGtkHomePage *self)
   gtk_label_set_xalign (s->title, 0);
   gtk_label_set_ellipsize (s->title, PANGO_ELLIPSIZE_END);
   s->heading = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  /* Showing overflow controls must not change shelf height or shift the
+   * vertical adjustment when a detached shelf becomes populated again. */
+  gtk_widget_set_size_request (s->heading, -1, 34);
   gtk_widget_set_hexpand (GTK_WIDGET (s->title), TRUE);
   gtk_box_append (GTK_BOX (s->heading), GTK_WIDGET (s->title));
   s->see_all = gtk_button_new_with_label ("See all  ›");
   gtk_widget_add_css_class (s->see_all, "home-text-action");
   g_signal_connect (s->see_all, "clicked", G_CALLBACK (on_see_all), self);
   gtk_box_append (GTK_BOX (s->heading), s->see_all);
+  s->previous = gtk_button_new_from_icon_name ("go-previous-symbolic");
+  s->next = gtk_button_new_from_icon_name ("go-next-symbolic");
+  GtkWidget *arrows[] = { s->previous, s->next };
+  for (guint i = 0; i < G_N_ELEMENTS (arrows); i++) {
+    gtk_widget_add_css_class (arrows[i], "home-shelf-arrow");
+    gtk_widget_set_tooltip_text (arrows[i], i ? "Next items" : "Previous items");
+    gtk_accessible_update_property (GTK_ACCESSIBLE (arrows[i]),
+      GTK_ACCESSIBLE_PROPERTY_LABEL, i ? "Next items" : "Previous items", -1);
+    gtk_widget_set_visible (arrows[i], FALSE);
+    g_signal_connect (arrows[i], "clicked", G_CALLBACK (on_shelf_arrow), s);
+    gtk_box_append (GTK_BOX (s->heading), arrows[i]);
+  }
   gtk_box_append (GTK_BOX (s->box), s->heading);
   s->subtitle = GTK_LABEL (gtk_label_new (NULL));
   gtk_widget_add_css_class (GTK_WIDGET (s->subtitle), "dim-text");
@@ -287,6 +370,10 @@ add_shelf (SpotifyGtkHomePage *self)
   s->grid = spotifygtk_album_grid_new_shelf ();
   spotifygtk_album_grid_set_home_style (s->grid);
   spotifygtk_album_grid_set_outer_viewport (s->grid, self->scroller);
+  GtkAdjustment *horizontal = gtk_scrolled_window_get_hadjustment (
+    spotifygtk_album_grid_get_scroller (s->grid));
+  g_signal_connect (horizontal, "changed", G_CALLBACK (update_shelf_arrows), s);
+  g_signal_connect (horizontal, "value-changed", G_CALLBACK (update_shelf_arrows), s);
   gtk_box_append (GTK_BOX (s->box), GTK_WIDGET (s->grid));
   gtk_box_append (self->content, s->box);
   g_ptr_array_add (self->shelves, s);
@@ -315,6 +402,7 @@ apply_visibility (SpotifyGtkHomePage *self)
     if (!visible) spotifygtk_album_grid_suspend_outer_view (s->grid);
     else if (self->covers_active) spotifygtk_album_grid_reload_covers (s->grid);
   }
+  schedule_viewport_scan (self);
 }
 
 void
@@ -370,7 +458,9 @@ spotifygtk_home_page_set_feed (SpotifyGtkHomePage *self, const SpotifyHomeFeed *
         g_str_equal (card->uri, "spotify:collection:tracks") ||
         g_str_has_suffix (card->uri, ":collection") || !g_hash_table_add (seen, card->uri)) continue;
     HomeQuickCard *q = &self->quick[next++];
-    release_quick (q); g_free (q->uri); g_free (q->cover);
+    if (g_strcmp0 (q->uri, card->uri) != 0 || g_strcmp0 (q->cover, card->cover) != 0)
+      release_quick (q);
+    g_free (q->uri); g_free (q->cover);
     q->uri = g_strdup (card->uri); q->cover = g_strdup (card->cover);
     gtk_label_set_text (q->title, card->title);
     gtk_label_set_text (q->subtitle, card->subtitle);
@@ -400,6 +490,7 @@ spotifygtk_home_page_set_feed (SpotifyGtkHomePage *self, const SpotifyHomeFeed *
       gtk_widget_set_visible (s->box, FALSE);
       g_object_set_data (G_OBJECT (s->box), "populated", NULL);
       spotifygtk_album_grid_set_cards (s->grid, NULL, 0);
+      g_object_set_data_full (G_OBJECT (s->grid), "home-section-signature", NULL, NULL);
       continue;
     }
     SpotifyHomeSection *section = g_ptr_array_index (feed->sections, i);
@@ -418,7 +509,20 @@ spotifygtk_home_page_set_feed (SpotifyGtkHomePage *self, const SpotifyHomeFeed *
       specs[j] = (SpotifyGtkCardSpec) { .uri = card->uri, .title = card->title,
         .subtitle = card->subtitle, .cover_id = card->cover };
     }
-    spotifygtk_album_grid_set_cards (s->grid, specs, n);
+    /* A server refresh often changes one section. Retain the other models,
+     * row trees, horizontal position and decoded visible artwork unchanged. */
+    GPtrArray *one_section = g_ptr_array_new ();
+    g_ptr_array_add (one_section, section);
+    SpotifyHomeFeed section_feed = { "", one_section };
+    g_autoptr(GBytes) section_snapshot = spotifygtk_home_feed_encode (&section_feed);
+    g_ptr_array_unref (one_section);
+    g_autofree gchar *signature = g_compute_checksum_for_bytes (G_CHECKSUM_SHA256, section_snapshot);
+    const gchar *previous = g_object_get_data (G_OBJECT (s->grid), "home-section-signature");
+    if (g_strcmp0 (previous, signature) != 0) {
+      spotifygtk_album_grid_set_cards (s->grid, specs, n);
+      g_object_set_data_full (G_OBJECT (s->grid), "home-section-signature",
+                              g_steal_pointer (&signature), g_free);
+    }
     /* The compact recent section replaces its full shelf unless it is the
      * only recommendation source; remaining cards are accessible via Recent activity. */
     g_object_set_data (G_OBJECT (s->box), "populated",
@@ -450,7 +554,9 @@ on_home_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
     spotifygtk_home_page_set_feed (self, feed);
     self->last_success = g_get_monotonic_time ();
   } else if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-    gtk_label_set_text (self->status, "Couldn't refresh Home. Please try again.");
+    gtk_label_set_text (self->status, self->snapshot
+      ? "Showing saved Home. Couldn't refresh; please try again."
+      : "Couldn't refresh Home. Please try again.");
     gtk_widget_set_visible (self->status_box, TRUE);
     gtk_widget_set_visible (self->retry, TRUE);
     g_message ("Home refresh failed: %s", error ? error->message : "no feed");
@@ -464,7 +570,8 @@ refresh_home (SpotifyGtkHomePage *self)
   if (!self->session || self->loading ||
       spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY ||
       now - self->last_attempt < 10 * G_USEC_PER_SEC ||
-      (self->last_success && now - self->last_success < 300 * G_USEC_PER_SEC)) return;
+      (self->last_success && now - self->last_success <
+        (gint64) SPOTIFYGTK_HOME_FRESH_SECONDS * G_USEC_PER_SEC)) return;
   self->last_attempt = now;
   self->load_cancel = g_cancellable_new ();
   set_loading (self, TRUE);
@@ -516,6 +623,7 @@ spotifygtk_home_page_set_session (SpotifyGtkHomePage *self, SpotifyNativeSession
       gtk_widget_set_visible (s->box, FALSE);
       g_object_set_data (G_OBJECT (s->box), "populated", NULL);
       spotifygtk_album_grid_set_cards (s->grid, NULL, 0);
+      g_object_set_data_full (G_OBJECT (s->grid), "home-section-signature", NULL, NULL);
     }
     g_free (self->account); self->account = g_strdup (account);
   }
@@ -553,6 +661,7 @@ spotifygtk_home_page_clear_cache (SpotifyGtkHomePage *self)
     gtk_widget_set_visible (s->box, FALSE);
     g_object_set_data (G_OBJECT (s->box), "populated", NULL);
     spotifygtk_album_grid_set_cards (s->grid, NULL, 0);
+    g_object_set_data_full (G_OBJECT (s->grid), "home-section-signature", NULL, NULL);
   }
   gtk_label_set_text (self->status, "Sign in to see your personalised Home. Local files are available in Library.");
   gtk_widget_set_visible (self->status_box, TRUE);
@@ -578,6 +687,7 @@ spotifygtk_home_page_set_covers_loaded (SpotifyGtkHomePage *self, gboolean loade
     else spotifygtk_album_grid_suspend_outer_view (grid);
   }
   if (!loaded) spotifygtk_runtime_schedule_heap_trim ();
+  else schedule_viewport_scan (self);
 }
 
 static void
@@ -585,6 +695,7 @@ on_map (GtkWidget *widget, gpointer data)
 {
   refresh_home (SPOTIFYGTK_HOME_PAGE (widget));
   schedule_quick_covers (SPOTIFYGTK_HOME_PAGE (widget));
+  schedule_viewport_scan (SPOTIFYGTK_HOME_PAGE (widget));
   (void) data;
 }
 
@@ -705,7 +816,9 @@ spotifygtk_home_page_init (SpotifyGtkHomePage *self)
   spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller), GTK_ORIENTATION_VERTICAL);
   self->content = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 30));
   gtk_widget_set_margin_start (GTK_WIDGET (self->content), 34);
-  gtk_widget_set_margin_end (GTK_WIDGET (self->content), 34);
+  /* Like Library: inset the content, not the scroller. Keep the scrollbar at
+   * the page edge instead of reserving an extra blank strip beside it. */
+  gtk_widget_set_margin_end (GTK_WIDGET (self->content), 2);
   gtk_widget_set_margin_top (GTK_WIDGET (self->content), 22);
   gtk_widget_set_margin_bottom (GTK_WIDGET (self->content), 24);
   GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
@@ -769,6 +882,10 @@ spotifygtk_home_page_init (SpotifyGtkHomePage *self)
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), GTK_WIDGET (self->content));
   gtk_box_append (GTK_BOX (self), scroller);
   g_signal_connect_object (gtk_scrolled_window_get_vadjustment (self->scroller), "value-changed",
+                            G_CALLBACK (on_home_scroll), self, 0);
+  g_signal_connect_object (gtk_scrolled_window_get_vadjustment (self->scroller), "changed",
+                            G_CALLBACK (on_home_scroll), self, 0);
+  g_signal_connect_object (gtk_scrolled_window_get_hadjustment (self->scroller), "changed",
                             G_CALLBACK (on_home_scroll), self, 0);
   g_signal_connect_object (spotifygtk_settings_get_default (), "changed",
                             G_CALLBACK (on_home_settings), self, 0);

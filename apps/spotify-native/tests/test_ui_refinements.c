@@ -319,11 +319,28 @@ test_home_shelves (void)
   GtkWidget *recent = find_label (GTK_WIDGET (page), "For you");
   g_assert_cmpfloat (bounds (recent, window).origin.y, >, bounds (heading, window).origin.y);
   SpotifyGtkAlbumGrid *grid = g_ptr_array_index (spotifygtk_home_page_get_grids (page), 0);
+  SpotifyGtkAlbumGrid *retained = g_ptr_array_index (spotifygtk_home_page_get_grids (page), 1);
+  GtkListView *view = GTK_LIST_VIEW (gtk_scrolled_window_get_child (
+    spotifygtk_album_grid_get_scroller (retained)));
+  g_assert_nonnull (gtk_list_view_get_model (view));
+  g_autoptr(GObject) before = g_list_model_get_item (
+    G_LIST_MODEL (gtk_list_view_get_model (view)), 0);
+  /* A changed greeting must not destroy unchanged card models or artwork. */
+  feed.greeting = "Updated greeting";
   spotifygtk_home_page_set_feed (page, &feed);
+  settle ();
+  g_autoptr(GObject) after = g_list_model_get_item (
+    G_LIST_MODEL (gtk_list_view_get_model (view)), 0);
+  g_assert_true (before == after);
   g_assert_true (grid == g_ptr_array_index (spotifygtk_home_page_get_grids (page), 0));
   g_ptr_array_set_size (sections, 1);
   spotifygtk_home_page_set_feed (page, &feed);
   g_assert_nonnull (find_label (GTK_WIDGET (page), "For you"));
+  g_ptr_array_add (sections, &second);
+  spotifygtk_home_page_set_feed (page, &feed);
+  settle ();
+  g_assert_nonnull (gtk_list_view_get_model (view));
+  g_assert_cmpuint (g_list_model_get_n_items (G_LIST_MODEL (gtk_list_view_get_model (view))), ==, 2);
   spotifygtk_home_page_set_session (page, NULL);
   g_assert_true (gtk_widget_get_visible (gtk_widget_get_parent (heading)));
   spotifygtk_home_page_clear_cache (page);
@@ -360,24 +377,65 @@ test_home_large_feed (void)
   gtk_window_present (GTK_WINDOW (window));
   settle ();
   g_test_message ("20-shelf Home widget count: %u", widget_count (GTK_WIDGET (page)));
-  g_assert_cmpuint (widget_count (GTK_WIDGET (page)), <, 800);
+  /* Same card-row budget as before, plus 80 widgets for the 20 pairs of
+   * icon buttons. The navigation controls exist even on detached shelves. */
+  g_assert_cmpuint (widget_count (GTK_WIDGET (page)), <, 880);
   GtkScrolledWindow *scroller = GTK_SCROLLED_WINDOW (
     find_type (GTK_WIDGET (page), GTK_TYPE_SCROLLED_WINDOW));
   GtkAdjustment *adjustment = gtk_scrolled_window_get_vadjustment (scroller);
+  GtkWidget *viewport = gtk_scrolled_window_get_child (scroller);
+  GtkWidget *content = gtk_viewport_get_child (GTK_VIEWPORT (viewport));
+  graphene_rect_t content_rect = bounds (content, GTK_WIDGET (scroller));
+  graphene_rect_t scrollbar_rect = bounds (gtk_scrolled_window_get_vscrollbar (scroller),
+                                           GTK_WIDGET (scroller));
+  g_assert_cmpfloat_with_epsilon (content_rect.origin.x, 34, 0.5);
+  g_assert_cmpfloat_with_epsilon (scrollbar_rect.origin.x -
+    (content_rect.origin.x + content_rect.size.width), 2, 0.5);
+  g_assert_cmpfloat_with_epsilon (scrollbar_rect.origin.x + scrollbar_rect.size.width,
+    gtk_widget_get_width (GTK_WIDGET (scroller)), 0.5);
   gdouble upper = gtk_adjustment_get_upper (adjustment);
   gtk_adjustment_set_value (adjustment, 2800);
   settle ();
+  /* While vertical events continue faster than the old 180ms settle delay,
+   * shelves in the viewport must already have their rows, not blank space. */
+  for (guint frame = 0; frame < 20; frame++) {
+    gtk_adjustment_set_value (adjustment, 2800 + frame * 30);
+    gint64 until = g_get_monotonic_time () + 40 * 1000;
+    while (g_get_monotonic_time () < until) {
+      while (g_main_context_iteration (NULL, FALSE));
+      g_usleep (1000);
+    }
+    if (frame < 3) continue;
+    guint visible = 0;
+    GPtrArray *grids = spotifygtk_home_page_get_grids (page);
+    for (guint i = 0; i < grids->len; i++) {
+      SpotifyGtkAlbumGrid *grid = g_ptr_array_index (grids, i);
+      if (!gtk_widget_get_mapped (GTK_WIDGET (grid))) continue;
+      graphene_rect_t rect = bounds (GTK_WIDGET (grid), GTK_WIDGET (scroller));
+      if (rect.origin.y < gtk_widget_get_height (GTK_WIDGET (scroller)) &&
+          rect.origin.y + rect.size.height > 0) {
+        GtkListView *view = GTK_LIST_VIEW (gtk_scrolled_window_get_child (
+          spotifygtk_album_grid_get_scroller (grid)));
+        g_assert_nonnull (gtk_list_view_get_model (view));
+        visible++;
+      }
+    }
+    g_assert_cmpuint (visible, >, 0);
+  }
+  settle ();
   g_assert_cmpfloat (fabs (gtk_adjustment_get_upper (adjustment) - upper), <=, 1);
-  g_assert_cmpuint (widget_count (GTK_WIDGET (page)), <, 800);
+  g_assert_cmpuint (widget_count (GTK_WIDGET (page)), <, 880);
   gdouble position = gtk_adjustment_get_value (adjustment);
   spotifygtk_home_page_set_covers_loaded (page, FALSE);
   settle ();
   g_test_message ("Inactive Home widget count: %u", widget_count (GTK_WIDGET (page)));
-  g_assert_cmpuint (widget_count (GTK_WIDGET (page)), <, 500);
+  /* Includes the persistent two-button navigation controls on 20 headings;
+   * inactive shelves must still release their much larger card row trees. */
+  g_assert_cmpuint (widget_count (GTK_WIDGET (page)), <, 580);
   spotifygtk_home_page_set_covers_loaded (page, TRUE);
   settle ();
   g_assert_cmpfloat (fabs (gtk_adjustment_get_value (adjustment) - position), <=, 1);
-  g_assert_cmpuint (widget_count (GTK_WIDGET (page)), <, 800);
+  g_assert_cmpuint (widget_count (GTK_WIDGET (page)), <, 880);
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
@@ -400,6 +458,170 @@ capture_home_destination (SpotifyGtkHomePage *page, const gchar *destination, gp
   g_free (action->destination);
   action->destination = g_strdup (destination);
   (void) page;
+}
+
+/* Sample empty areas, averaging GL's near-black dithering. Nested row/button
+ * fills used to produce visibly different rectangles within one Home item. */
+static void
+assert_same_surface (GdkTexture *texture, gint ax, gint ay, gint bx, gint by)
+{
+  gint stride = gdk_texture_get_width (texture) * 4;
+  g_autofree guint8 *pixels = g_malloc (stride * gdk_texture_get_height (texture));
+  gdk_texture_download (texture, pixels, stride);
+  for (guint c = 0; c < 3; c++) {
+    guint a = 0, b = 0;
+    for (guint i = 0; i < 4; i++) {
+      a += pixels[(ay + i) * stride + ax * 4 + c];
+      b += pixels[(by + i) * stride + bx * 4 + c];
+    }
+    g_assert_cmpint (ABS ((gint) a - (gint) b), <=, 4);
+  }
+}
+
+static void
+assert_card_text_alignment (GtkWidget *card, GtkWidget *window)
+{
+  GtkWidget *art = g_object_get_data (G_OBJECT (card), "art");
+  GtkWidget *title = g_object_get_data (G_OBJECT (card), "title");
+  GtkWidget *sub = g_object_get_data (G_OBJECT (card), "sub");
+  graphene_rect_t a = bounds (art, window);
+  graphene_rect_t t = bounds (title, window);
+  graphene_rect_t s = bounds (sub, window);
+  g_assert_cmpfloat_with_epsilon (t.origin.x, a.origin.x, 0.5);
+  g_assert_cmpfloat_with_epsilon (s.origin.x, a.origin.x, 0.5);
+  g_assert_cmpfloat_with_epsilon (t.size.width, a.size.width, 0.5);
+  g_assert_cmpfloat_with_epsilon (s.size.width, a.size.width, 0.5);
+}
+
+static void
+test_shared_card_design (void)
+{
+  const SpotifyGtkTheme themes[] = { SPOTIFYGTK_THEME_LIGHT,
+    SPOTIFYGTK_THEME_DARK, SPOTIFYGTK_THEME_DARK_PLUS };
+  const gchar *previews[2][3] = {
+    { "library-cards-light.png", "library-cards-dark.png", "library-cards-dark-plus.png" },
+    { "search-cards-light.png", "search-cards-dark.png", "search-cards-dark-plus.png" }
+  };
+  /* The Library grid and Search's viewport-sized shelf use the same factory.
+   * Exercise both, without changing their scrollbar or sizing policies. */
+  for (guint shelf = 0; shelf < 2; shelf++) {
+    GtkWidget *window = gtk_window_new ();
+    gtk_window_set_default_size (GTK_WINDOW (window), 1000, 650);
+    SpotifyGtkAlbumGrid *grid = shelf ? spotifygtk_album_grid_new_shelf ()
+                                      : spotifygtk_album_grid_new_grid ();
+    if (shelf) spotifygtk_album_grid_set_full_card_shelf (grid, TRUE);
+    gtk_widget_set_margin_start (GTK_WIDGET (grid), 20);
+    gtk_widget_set_margin_end (GTK_WIDGET (grid), 20);
+    gtk_widget_set_margin_top (GTK_WIDGET (grid), 20);
+    gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (grid));
+    SpotifyGtkCardSpec cards[] = {
+      { .uri = "spotify:album:0000000000000000000001", .title = "Long album fixture title that must stay within its artwork", .subtitle = "Long artist fixture name that must also stay within its artwork" },
+      { .uri = "spotify:playlist:0000000000000000000002", .title = "Playlist fixture", .subtitle = "Playlist" },
+      { .uri = "local:album:fixture", .title = "Local album", .subtitle = "2026" },
+      { .uri = "spotify:artist:0000000000000000000003", .title = "Artist fixture", .subtitle = "Followed artist" }
+    };
+    spotifygtk_album_grid_set_cards (grid, cards, G_N_ELEMENTS (cards));
+    gtk_window_present (GTK_WINDOW (window)); settle ();
+    gtk_window_set_focus (GTK_WINDOW (window), NULL);
+    GtkPolicyType horizontal, vertical;
+    gtk_scrolled_window_get_policy (spotifygtk_album_grid_get_scroller (grid), &horizontal, &vertical);
+    g_assert_cmpint (horizontal, ==, shelf ? GTK_POLICY_AUTOMATIC : GTK_POLICY_NEVER);
+    g_assert_cmpint (vertical, ==, shelf ? GTK_POLICY_NEVER : GTK_POLICY_AUTOMATIC);
+    GtkWidget *card = find_class (GTK_WIDGET (grid), "media-card");
+    g_assert_nonnull (card);
+    GtkWidget *row = gtk_widget_get_parent (card);
+    GtkWidget *art = g_object_get_data (G_OBJECT (card), "art");
+    g_assert_cmpint (gtk_widget_get_overflow (art), ==, GTK_OVERFLOW_HIDDEN);
+    /* Opaque coloured pixels reveal whether the real image is corner-clipped,
+     * rather than just giving its empty placeholder a rounded background. */
+    g_autofree guint8 *pixels = g_malloc (176 * 176 * 4);
+    for (guint i = 0; i < 176 * 176; i++) {
+      pixels[i * 4] = 255; pixels[i * 4 + 1] = 0;
+      pixels[i * 4 + 2] = 255; pixels[i * 4 + 3] = 255;
+    }
+    g_autoptr(GBytes) bytes = g_bytes_new (pixels, 176 * 176 * 4);
+    g_autoptr(GdkTexture) fixture = gdk_memory_texture_new (176, 176,
+      GDK_MEMORY_R8G8B8A8, bytes, 176 * 4);
+    gtk_image_set_from_paintable (GTK_IMAGE (art), GDK_PAINTABLE (fixture));
+    for (guint i = 0; i < G_N_ELEMENTS (themes); i++) {
+      apply_theme (themes[i]);
+      gtk_widget_unset_state_flags (card, GTK_STATE_FLAG_PRELIGHT);
+      gtk_widget_unset_state_flags (row, GTK_STATE_FLAG_PRELIGHT);
+      settle ();
+      graphene_rect_t c = bounds (card, window), r = bounds (row, window), a = bounds (art, window);
+      assert_card_text_alignment (card, window);
+      g_autoptr(GdkTexture) idle = render (window);
+      g_test_message ("%s cards, theme %u: idle surface", shelf ? "Search" : "Library", i);
+      save_preview (window, previews[shelf][i]);
+      assert_same_surface (idle, c.origin.x + 8, c.origin.y + c.size.height - 8,
+                           10, c.origin.y + c.size.height - 8);
+      gint stride = gdk_texture_get_width (idle) * 4;
+      g_autofree guint8 *image = g_malloc (stride * gdk_texture_get_height (idle));
+      gdk_texture_download (idle, image, stride);
+      guint8 *corner = image + (gint) a.origin.y * stride + (gint) a.origin.x * 4;
+      guint8 *center = image + (gint) (a.origin.y + a.size.height / 2) * stride +
+                       (gint) (a.origin.x + a.size.width / 2) * 4;
+      gint difference = 0;
+      for (guint channel = 0; channel < 3; channel++) difference += ABS (corner[channel] - center[channel]);
+      g_assert_cmpint (difference, >, 10);
+      gtk_widget_set_state_flags (row, GTK_STATE_FLAG_PRELIGHT, FALSE);
+      gtk_widget_set_state_flags (card, GTK_STATE_FLAG_PRELIGHT, FALSE);
+      settle ();
+      g_autoptr(GdkTexture) hover = render (window);
+      g_test_message ("%s cards, theme %u: row surface", shelf ? "Search" : "Library", i);
+      if (r.origin.x + 1 < c.origin.x)
+        assert_same_surface (hover, r.origin.x + 1, c.origin.y + c.size.height - 8,
+                             10, c.origin.y + c.size.height - 8);
+      else
+        /* Search's row has no outer padding: its bounds equal the card, so
+         * compare the card's two empty insets rather than an interior pixel
+         * against the unhovered page background. */
+        assert_same_surface (hover, c.origin.x + 8, c.origin.y + c.size.height - 8,
+                             c.origin.x + c.size.width - 8, c.origin.y + c.size.height - 8);
+    }
+    gtk_window_set_default_size (GTK_WINDOW (window), 640, 650);
+    settle ();
+    assert_card_text_alignment (card, window);
+    gtk_window_destroy (GTK_WINDOW (window));
+  }
+}
+
+static void
+assert_home_surfaces (GtkWidget *window, GtkWidget *open, SpotifyGtkAlbumGrid *grid)
+{
+  GtkWidget *tile = gtk_widget_get_parent (open);
+  GtkWidget *play = gtk_widget_get_last_child (tile);
+  GtkWidget *card = find_class (GTK_WIDGET (grid), "media-card");
+  g_assert_nonnull (card);
+  assert_card_text_alignment (card, window);
+  GtkWidget *row = gtk_widget_get_parent (card);
+  graphene_rect_t t = bounds (tile, window), o = bounds (open, window);
+  graphene_rect_t p = bounds (play, window), c = bounds (card, window);
+  gint y = t.origin.y + t.size.height - 8;
+  g_autoptr(GdkTexture) idle = render (window);
+  assert_same_surface (idle, t.origin.x + 100, y, 10, y);
+  assert_same_surface (idle, c.origin.x + 8, c.origin.y + c.size.height - 8,
+                       10, c.origin.y + c.size.height - 8);
+  gtk_widget_set_state_flags (tile, GTK_STATE_FLAG_PRELIGHT, FALSE);
+  gtk_widget_set_state_flags (open, GTK_STATE_FLAG_PRELIGHT, FALSE);
+  gtk_widget_set_state_flags (play, GTK_STATE_FLAG_PRELIGHT, FALSE);
+  gtk_widget_set_state_flags (row, GTK_STATE_FLAG_PRELIGHT, FALSE);
+  gtk_widget_set_state_flags (card, GTK_STATE_FLAG_PRELIGHT, FALSE);
+  settle ();
+  g_autoptr(GdkTexture) hover = render (window);
+  assert_same_surface (hover, t.origin.x + 100, y, o.origin.x + o.size.width - 8, y);
+  assert_same_surface (hover, t.origin.x + 100, y, p.origin.x + p.size.width / 2, y);
+  assert_same_surface (hover, t.origin.x + 100, y,
+                       p.origin.x + 4, p.origin.y + p.size.height / 2);
+  /* The outer ListView row stays transparent even while its card is hovered. */
+  assert_same_surface (hover, c.origin.x + c.size.width + 4,
+                       c.origin.y + c.size.height - 8, 10, c.origin.y + c.size.height - 8);
+  gtk_widget_unset_state_flags (tile, GTK_STATE_FLAG_PRELIGHT);
+  gtk_widget_unset_state_flags (open, GTK_STATE_FLAG_PRELIGHT);
+  gtk_widget_unset_state_flags (play, GTK_STATE_FLAG_PRELIGHT);
+  gtk_widget_unset_state_flags (row, GTK_STATE_FLAG_PRELIGHT);
+  gtk_widget_unset_state_flags (card, GTK_STATE_FLAG_PRELIGHT);
+  settle ();
 }
 
 static void
@@ -458,10 +680,49 @@ test_home_dashboard (void)
   g_assert_cmpstr (action.destination, ==, "liked");
   g_signal_emit_by_name (button_for (GTK_WIDGET (page), "On repeat"), "clicked");
   g_assert_cmpstr (action.uri, ==, fixtures[5].uri);
+  GtkScrolledWindow *outer = GTK_SCROLLED_WINDOW (find_type (GTK_WIDGET (page), GTK_TYPE_SCROLLED_WINDOW));
+  GtkPolicyType horizontal, vertical;
+  gtk_scrolled_window_get_policy (outer, &horizontal, &vertical);
+  g_assert_cmpint (vertical, ==, GTK_POLICY_AUTOMATIC);
+  GPtrArray *grids = spotifygtk_home_page_get_grids (page);
+  guint scrolling_shelves = 0;
+  for (guint i = 0; i < grids->len; i++) {
+    GtkScrolledWindow *shelf = spotifygtk_album_grid_get_scroller (g_ptr_array_index (grids, i));
+    gtk_scrolled_window_get_policy (shelf, &horizontal, &vertical);
+    g_assert_cmpint (horizontal, ==, GTK_POLICY_EXTERNAL);
+    g_assert_cmpint (vertical, ==, GTK_POLICY_NEVER);
+    g_assert_false (gtk_widget_get_mapped (gtk_scrolled_window_get_hscrollbar (shelf)));
+    GtkAdjustment *adjustment = gtk_scrolled_window_get_hadjustment (shelf);
+    /* Off-page shelves deliberately detach their model to free row trees. */
+    if (gtk_adjustment_get_upper (adjustment) == 0) continue;
+    g_assert_cmpfloat (gtk_adjustment_get_upper (adjustment), >, gtk_adjustment_get_page_size (adjustment));
+    scrolling_shelves++;
+    GtkWidget *heading = gtk_widget_get_first_child (gtk_widget_get_parent (
+      GTK_WIDGET (g_ptr_array_index (grids, i))));
+    GtkWidget *next_arrow = gtk_widget_get_last_child (heading);
+    GtkWidget *previous_arrow = gtk_widget_get_prev_sibling (next_arrow);
+    g_assert_true (gtk_widget_has_css_class (next_arrow, "home-shelf-arrow"));
+    g_assert_true (gtk_widget_get_visible (next_arrow));
+    g_assert_false (gtk_widget_get_sensitive (previous_arrow));
+    g_signal_emit_by_name (next_arrow, "clicked");
+    settle ();
+    g_assert_cmpfloat (gtk_adjustment_get_value (adjustment), >, 0);
+    g_assert_true (gtk_widget_get_sensitive (previous_arrow));
+    g_signal_emit_by_name (previous_arrow, "clicked");
+    settle ();
+    g_assert_cmpfloat (gtk_adjustment_get_value (adjustment), ==, 0);
+    gtk_adjustment_set_value (adjustment, 80);
+    settle ();
+    g_assert_cmpfloat (gtk_adjustment_get_value (adjustment), >, 0);
+    gtk_adjustment_set_value (adjustment, 0);
+  }
+  g_assert_cmpuint (scrolling_shelves, >, 0);
+  settle ();
   const SpotifyGtkTheme themes[] = { SPOTIFYGTK_THEME_LIGHT, SPOTIFYGTK_THEME_DARK, SPOTIFYGTK_THEME_DARK_PLUS };
   const gchar *previews[] = { "home-dashboard-light.png", "home-dashboard-dark.png", "home-dashboard-dark-plus.png" };
   for (guint i = 0; i < G_N_ELEMENTS (themes); i++) {
     apply_theme (themes[i]); settle ();
+    assert_home_surfaces (window, first, g_ptr_array_index (grids, 1));
     save_preview (window, previews[i]);
   }
   gtk_window_set_default_size (GTK_WINDOW (window), 640, 850);
@@ -469,7 +730,7 @@ test_home_dashboard (void)
   g_assert_cmpint (gtk_widget_get_width (window), <=, 640);
   g_assert_cmpfloat (bounds (third, window).origin.y, >, bounds (first, window).origin.y);
   save_preview (window, "home-dashboard-narrow.png");
-  g_signal_emit_by_name (gtk_widget_get_last_child (gtk_widget_get_parent (primary)), "clicked");
+  g_signal_emit_by_name (button_for (gtk_widget_get_parent (primary), "See all  ›"), "clicked");
   settle ();
   AdwDialog *dialog = adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (window));
   g_assert_nonnull (dialog);
@@ -646,6 +907,7 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/home/cached-shelves", test_home_shelves);
   g_test_add_func ("/ui/home/large-feed", test_home_large_feed);
   g_test_add_func ("/ui/home/dashboard-responsive", test_home_dashboard);
+  g_test_add_func ("/ui/cards/shared-library-search-design", test_shared_card_design);
   g_test_add_func ("/ui/settings/account-actions", test_account_and_actions);
   g_test_add_func ("/ui/artist/follow-alignment", test_artist_follow_alignment);
   g_test_add_func ("/ui/liked/mixed-dates", test_liked_mixed_dates);

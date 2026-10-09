@@ -6186,9 +6186,14 @@ static const gchar *theme_body =
 
   /* ── Cards and rows ────────────────────────────────────────── */
   ".card { background-color: @bg_card; border-radius: 10px; }"
-  ".media-card { background-color: @bg_card; border-radius: 10px;"
+  /* Shared by Home, Library, Search and playlist/artist card grids. The
+   * containing row stays invisible; only the whole card paints on hover. */
+  ".album-gridview, .album-shelfview, .album-gridview > child, .album-shelfview > row,"
+  " .album-gridview > child:hover, .album-shelfview > row:hover"
+  " { background: transparent; border: none; box-shadow: none; }"
+  ".media-card { background: transparent; border: none; box-shadow: none; border-radius: 6px;"
   "  padding: 0px; transition: background-color 140ms ease; }"
-  ".media-card:hover { background-color: @bg_hover; }"
+  ".media-card:hover, .media-card:active { background-color: @bg_hover; }"
   ".media-card-title { color: @fg_strong; font-size: 14px; font-weight: 600; }"
   ".media-card-subtitle { color: @fg_dim; font-size: 12px; }"
   /* Track rows are a continuous list, not stacked cards. Giving each row a
@@ -6202,6 +6207,7 @@ static const gchar *theme_body =
   "  color: @art_glyph; }"
   ".art-large { background-color: @art_bg; border-radius: 12px;"
   "  color: @art_glyph; }"
+  ".media-card .art-large { background: transparent; border-radius: 3px; }"
   /* The artist page's banner. A larger radius than the art tiles because it
    * spans the page rather than sitting in a row of equals, and the same
    * palette entry so it reads as the same family of surface. */
@@ -6220,21 +6226,28 @@ static const gchar *theme_body =
   ".now-playing-metadata link { color: @fg_dim; text-decoration: none; }"
   ".now-playing-metadata link:hover { color: @fg; text-decoration: underline; }"
 
-  /* Home-specific surfaces; never alter Search or Library's card geometry. */
+  /* Home-specific layout; media-card styling above is shared across pages. */
   ".home-dashboard .title-text { font-size: 28px; }"
   ".home-dashboard .home-card-title { color: @fg_strong; font-size: 13px; font-weight: 700; }"
   ".home-card-subtitle { color: @fg_dim; font-size: 11px; font-weight: 400; }"
-  ".home-quick-grid flowboxchild { padding: 0; margin: 0; background: transparent; }"
-  ".home-quick-tile { background: @bg_card; border-radius: 10px; }"
-  ".home-quick-open { background: transparent; padding: 3px; border-radius: 10px; box-shadow: none; }"
-  ".home-quick-open:hover { background: @bg_hover; }"
-  ".home-quick-art { background: @art_bg; color: @art_glyph; border-radius: 5px; }"
-  ".home-quick-play { background: transparent; color: @fg_dim; padding: 8px;"
+  ".home-quick-grid flowboxchild { padding: 0; margin: 0; background: transparent;"
+  " border: none; box-shadow: none; }"
+  /* A tile has one hover surface, not separate slabs for its two actions. */
+  ".home-quick-tile { background: transparent; border-radius: 6px; }"
+  ".home-quick-tile:hover, .home-quick-tile:focus-within { background: @bg_hover; }"
+  ".home-quick-open, .home-quick-open:hover, .home-quick-open:active"
+  " { background: transparent; padding: 3px; border: none; border-radius: 6px; box-shadow: none; }"
+  ".home-quick-art { background: transparent; color: @art_glyph; border-radius: 3px; }"
+  ".home-quick-play { background: transparent; border: none; color: @fg_dim; padding: 8px;"
   " min-width: 20px; min-height: 20px; margin: 0 8px; border-radius: 6px; box-shadow: none; }"
-  ".home-quick-play:hover { color: @fg_strong; background: @bg_hover; }"
+  ".home-quick-play:hover, .home-quick-play:active"
+  " { color: @fg_strong; background: transparent; box-shadow: none; }"
   ".home-text-action, .home-eyebrow { background: transparent; color: @fg_dim;"
   " box-shadow: none; padding: 0; min-height: 22px; border-radius: 4px; font-size: 12px; }"
   ".home-text-action:hover, .home-eyebrow:hover { color: @fg_strong; }"
+  ".home-shelf-arrow { background: transparent; color: @fg_dim; border: none;"
+  " box-shadow: none; border-radius: 6px; padding: 5px; min-width: 20px; min-height: 20px; }"
+  ".home-shelf-arrow:hover { background: @bg_hover; color: @fg_strong; }"
   ".home-eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 1px; }"
   ".home-rotation-tile { background: @bg_card; border-radius: 12px; padding: 12px; box-shadow: none; }"
   ".home-rotation-tile:hover { background: @bg_hover; }"
@@ -6242,9 +6255,9 @@ static const gchar *theme_body =
   ".home-repeat-icon { background: #274152; color: #4ed4df; }"
   ".home-local-icon { background: #29483c; color: #7df2ab; }"
   ".home-liked-icon { background: #4e324c; color: #e4b9db; }"
-  ".home-shelf .media-card { background: transparent; border-radius: 6px; }"
-  ".home-shelf .media-card:hover { background: @bg_hover; }"
-  ".home-shelf .art-large { border-radius: 6px; }"
+  /* Suppress ListView's row hover/focus fill around the single card button. */
+  ".home-shelf listview, .home-shelf listview > row"
+  " { background: transparent; border: none; box-shadow: none; padding: 0; margin: 0; outline: none; }"
   ".home-dialog-row { background: @bg_card; padding: 10px 12px; border-radius: 8px; }"
   ".home-dialog-row:hover { background: @bg_hover; }"
 
