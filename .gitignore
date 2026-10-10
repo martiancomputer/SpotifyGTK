@@ -40,6 +40,9 @@ perf.data.old
 # file, disk images and the rebuilt ISO all stay local.
 apps/spotify-native-windows/vm/
 apps/spotify-native-windows/build/
+apps/spotify-native-windows/out/
+apps/spotify-native-windows/.signing/
+apps/spotify-native-windows/__pycache__/
 
 # Session logs written beside the executable by log_file.c
 spotify-native.log

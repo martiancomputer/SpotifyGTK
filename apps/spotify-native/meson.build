@@ -137,13 +137,15 @@ cc = meson.get_compiler('c')
 # libm: the now-playing equaliser animates its bar heights with sin().
 m_dep = cc.find_library('m', required: false)
 
-# WASAPI is COM, so it needs ole32; nothing else Windows-specific is linked.
+# WASAPI uses COM and audio-format GUIDs; private font registration uses GDI.
 # This has to live below cc, not up with the other dependency lookups -- the
 # earlier placement referenced cc before meson.get_compiler() defined it, which
 # only ever failed on Windows because the block sits behind `if is_windows` and
 # never evaluated on Linux.
 if is_windows
   all_deps += cc.find_library('ole32', required: true)
+  all_deps += cc.find_library('gdi32', required: true)
+  all_deps += cc.find_library('ksuser', required: true)
   if verbose_logging
     all_deps += cc.find_library('psapi', required: true)
   endif
@@ -173,8 +175,14 @@ conf.set_quoted('APP_ID', 'com.github.spotifygtk.SpotifyNative')
 # stray escape the compiler shrugs at but a universal character name: "error:
 # incomplete universal character name". Forward slashes are accepted by both
 # Windows and glib.
-conf.set_quoted('SPOTIFYGTK_SRC_DATA_DIR',
-                join_paths(meson.current_source_dir(), 'data').replace('\\', '/'))
+# Release artifacts must not embed the builder's private workspace path.
+# Installed releases discover icons through their bundled/installed theme.
+if get_option('buildtype') == 'release'
+  conf.set_quoted('SPOTIFYGTK_SRC_DATA_DIR', '')
+else
+  conf.set_quoted('SPOTIFYGTK_SRC_DATA_DIR',
+                  join_paths(meson.current_source_dir(), 'data').replace('\\', '/'))
+endif
 conf.set_quoted('APP_PROFILE', profile)
 conf.set10('SPOTIFY_NATIVE_NIGHTLY', is_nightly)
 conf.set10('HAVE_OPENSSL',  openssl_dep.found())

@@ -2307,6 +2307,7 @@ spotifygtk_native_session_reconnect (SpotifyNativeSession *self)
 
   g_atomic_int_set (&self->signed_out, FALSE);
   g_atomic_int_inc (&self->auth_generation);
+  set_state (self, SPOTIFYGTK_SESSION_CONNECTING, "Connecting to Spotify…");
 
   g_main_context_invoke_full (self->context, G_PRIORITY_DEFAULT,
                               reconnect_on_worker, g_object_ref (self),
@@ -2452,8 +2453,18 @@ spotifygtk_native_session_start (SpotifyNativeSession *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
 
-  if (self->thread)
-    return;   /* already connecting or ready */
+  if (self->thread) {
+    /* Logout leaves the worker alive, but cancels its transport and returns
+     * the session to IDLE. A worker existing is not evidence of a usable
+     * login: browser approval must re-read the new credentials and replace
+     * the cancelled transport through the normal reconnect path. */
+    SpotifyNativeSessionState state = spotifygtk_native_session_get_state (self);
+    if (g_atomic_int_get (&self->signed_out) ||
+        state == SPOTIFYGTK_SESSION_IDLE ||
+        state == SPOTIFYGTK_SESSION_FAILED)
+      spotifygtk_native_session_reconnect (self);
+    return;
+  }
 
   g_atomic_int_set (&self->signed_out, FALSE);
 

@@ -6,6 +6,8 @@
 
 #include "cover_loader.h"
 #include "smooth_scroll.h"
+#include "settings.h"
+#include "artwork_viewer.h"
 #include "../log_file.h"
 
 #include <string.h>
@@ -20,7 +22,8 @@
  * by the dozen rows on show.
  */
 #define ARTIST_PAGE_LIMIT   200
-#define ARTIST_TOP_TRACKS   12
+#define ARTIST_TOP_TRACKS   10
+#define ARTIST_RELEASE_COVER_PX 226 /* 15% smaller than the former 266px cover */
 
 /*
  * Height of the banner, and it is enforced rather than requested.
@@ -115,10 +118,15 @@ struct _SpotifyGtkArtistPage {
   GtkWidget           *title_row;   /* right edge kept level with the hero */
   guint                title_align_tick, title_align_frames;
   GtkWidget           *scroller;
+  SpotifyGtkArtistReleaseActionFunc release_action;
+  gpointer release_action_data;
+  gboolean compact;
   SpotifyGtkArtistFollowFunc follow_fn;
   gpointer                   follow_data;
 
   GtkPicture          *hero_art;   /* a banner, not an icon -- see init */
+  GtkWidget           *hero;
+  GtkWidget           *top_heading;
   GtkLabel            *hero_caption;
 
   SpotifyGtkTrackList *list;
@@ -148,6 +156,202 @@ G_DEFINE_FINAL_TYPE (SpotifyGtkArtistPage, spotifygtk_artist_page, GTK_TYPE_BOX)
 
 enum { TRACK_ACTIVATED, LOADING_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
+static ReleaseKind release_kind_of (const Release *r);
+
+/* The header owns only its current nearby artwork, never a history of covers. */
+typedef struct {
+  GtkPicture *picture;
+  GtkWidget *viewport;
+  gchar *cover;
+  GCancellable *request;
+} ReleaseArt;
+
+static void
+release_art_clear (ReleaseArt *art)
+{
+  if (art->request) g_cancellable_cancel (art->request);
+  g_clear_object (&art->request);
+  gtk_picture_set_paintable (art->picture, NULL);
+}
+
+static void
+release_art_free (gpointer data)
+{
+  ReleaseArt *art = data;
+  if (art->request) g_cancellable_cancel (art->request);
+  g_clear_object (&art->request);
+  g_free (art->cover);
+  g_free (art);
+}
+
+static void
+release_art_loaded (GdkTexture *texture, gpointer data)
+{
+  ReleaseArt *art = data;
+  if (texture) gtk_picture_set_paintable (art->picture, GDK_PAINTABLE (texture));
+}
+
+static void
+scan_release_art (GtkWidget *header)
+{
+  ReleaseArt *art = g_object_get_data (G_OBJECT (header), "release-art");
+  graphene_rect_t bounds;
+  gboolean near = gtk_widget_get_mapped (header) &&
+    gtk_widget_compute_bounds (header, art->viewport, &bounds) &&
+    bounds.origin.y + bounds.size.height > -160 &&
+    bounds.origin.y < gtk_widget_get_height (art->viewport) + 160;
+  if (!near) { release_art_clear (art); return; }
+  if (!art->request && art->cover && *art->cover) {
+    art->request = g_cancellable_new ();
+    spotifygtk_cover_load (art->cover,
+      ARTIST_RELEASE_COVER_PX * MAX (1, gtk_widget_get_scale_factor (header)), art->request,
+      release_art_loaded, art);
+  }
+}
+
+static gboolean
+scan_release_art_idle (gpointer data)
+{
+  scan_release_art (data);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+release_header_map (GtkWidget *header, gpointer data)
+{
+  g_idle_add_full (G_PRIORITY_DEFAULT_IDLE, scan_release_art_idle,
+                   g_object_ref (header), g_object_unref);
+  (void) data;
+}
+
+static void
+release_header_unmap (GtkWidget *header, gpointer data)
+{
+  release_art_clear (g_object_get_data (G_OBJECT (header), "release-art"));
+  (void) data;
+}
+
+static void
+release_cover_clicked (GtkButton *button, gpointer data)
+{
+  spotifygtk_artwork_viewer_present (GTK_WIDGET (button),
+    g_object_get_data (G_OBJECT (button), "cover"),
+    g_object_get_data (G_OBJECT (button), "title"));
+  (void) data;
+}
+
+static Release *
+find_release (SpotifyGtkArtistPage *self, const gchar *uri)
+{
+  for (guint i = 0; self->all_releases && i < self->all_releases->len; i++) {
+    Release *release = g_ptr_array_index (self->all_releases, i);
+    if (g_strcmp0 (release->uri, uri) == 0) return release;
+  }
+  return NULL;
+}
+
+static void
+release_play_clicked (GtkButton *button, SpotifyGtkArtistPage *self)
+{
+  Release *release = find_release (self, g_object_get_data (G_OBJECT (button), "uri"));
+  if (release && release->tracks->len)
+    g_signal_emit_by_name (self->releases_list, "track-activated",
+                           g_ptr_array_index (release->tracks, 0));
+}
+
+static void
+release_save_clicked (GtkButton *button, SpotifyGtkArtistPage *self)
+{
+  const gchar *uri = g_object_get_data (G_OBJECT (button), "uri");
+  if (self->release_action) {
+    gboolean saved = self->release_action (uri, TRUE, self->release_action_data);
+    gtk_button_set_label (button, saved ? "Saved" : "Save");
+  }
+}
+
+static GtkWidget *
+release_header_new (const SpotifyNativeTrack *track, gpointer data)
+{
+  SpotifyGtkArtistPage *self = data;
+  if (!track->section_title || self->compact) return NULL;
+  Release *release = find_release (self, track->album_uri);
+  if (!release) return NULL;
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 16);
+  gtk_widget_add_css_class (header, "artist-release-header");
+  gtk_widget_set_margin_top (header, 20);
+  gtk_widget_set_margin_bottom (header, 12);
+  GtkWidget *hero = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 24);
+  GtkWidget *frame = gtk_overlay_new ();
+  gtk_widget_set_size_request (frame, ARTIST_RELEASE_COVER_PX,
+                               ARTIST_RELEASE_COVER_PX);
+  gtk_widget_set_overflow (frame, GTK_OVERFLOW_HIDDEN);
+  gtk_widget_add_css_class (frame, "artist-release-cover");
+  gtk_overlay_set_child (GTK_OVERLAY (frame), gtk_box_new (GTK_ORIENTATION_VERTICAL, 0));
+  GtkPicture *picture = GTK_PICTURE (gtk_picture_new ());
+  gtk_picture_set_can_shrink (picture, TRUE);
+  gtk_picture_set_content_fit (picture, GTK_CONTENT_FIT_COVER);
+  gtk_overlay_add_overlay (GTK_OVERLAY (frame), GTK_WIDGET (picture));
+  GtkWidget *cover = gtk_button_new ();
+  gtk_widget_add_css_class (cover, "artwork-open");
+  gtk_widget_set_tooltip_text (cover, "View artwork");
+  gtk_button_set_child (GTK_BUTTON (cover), frame);
+  g_object_set_data_full (G_OBJECT (cover), "cover", g_strdup (release->cover_id), g_free);
+  g_object_set_data_full (G_OBJECT (cover), "title", g_strdup (release->name), g_free);
+  g_signal_connect (cover, "clicked", G_CALLBACK (release_cover_clicked), NULL);
+  gtk_box_append (GTK_BOX (hero), cover);
+  GtkWidget *text = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_set_valign (text, GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand (text, TRUE);
+  GtkWidget *kind = gtk_label_new (KIND_LABELS[release_kind_of (release)]);
+  gtk_label_set_xalign (GTK_LABEL (kind), 0);
+  gtk_widget_add_css_class (kind, "dim-text");
+  gtk_box_append (GTK_BOX (text), kind);
+  GtkWidget *title = gtk_label_new (release->name);
+  gtk_label_set_xalign (GTK_LABEL (title), 0);
+  gtk_label_set_ellipsize (GTK_LABEL (title), PANGO_ELLIPSIZE_END);
+  gtk_widget_add_css_class (title, "title-text");
+  gtk_box_append (GTK_BOX (text), title);
+  GtkWidget *actions = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 16);
+  GtkWidget *play = gtk_button_new_with_label ("Play");
+  gtk_widget_add_css_class (play, "context-play");
+  g_object_set_data_full (G_OBJECT (play), "uri", g_strdup (release->uri), g_free);
+  g_signal_connect_object (play, "clicked", G_CALLBACK (release_play_clicked), self, 0);
+  gtk_box_append (GTK_BOX (actions), play);
+  gboolean saved = self->release_action && self->release_action (
+    release->uri, FALSE, self->release_action_data);
+  GtkWidget *save = gtk_button_new_with_label (saved ? "Saved" : "Save");
+  gtk_widget_add_css_class (save, "flat");
+  gtk_widget_set_sensitive (save, self->release_action != NULL);
+  g_object_set_data_full (G_OBJECT (save), "uri", g_strdup (release->uri), g_free);
+  g_signal_connect_object (save, "clicked", G_CALLBACK (release_save_clicked), self, 0);
+  gtk_box_append (GTK_BOX (actions), save);
+  gint64 duration = 0;
+  for (guint i = 0; i < release->tracks->len; i++)
+    duration += MAX (((SpotifyNativeTrack *) g_ptr_array_index (release->tracks, i))->duration_ms, 0);
+  g_autofree gchar *metadata = g_strdup_printf ("%d · %u tracks · %" G_GINT64_FORMAT " min",
+    release->year, release->tracks->len, duration / 60000);
+  GtkWidget *meta = gtk_label_new (metadata);
+  gtk_widget_add_css_class (meta, "dim-text");
+  gtk_label_set_xalign (GTK_LABEL (meta), 0);
+  gtk_label_set_ellipsize (GTK_LABEL (meta), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand (meta, TRUE);
+  gtk_box_append (GTK_BOX (actions), meta);
+  gtk_box_append (GTK_BOX (text), actions);
+  gtk_box_append (GTK_BOX (hero), text);
+  gtk_box_append (GTK_BOX (header), hero);
+  gtk_box_append (GTK_BOX (header), gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
+  ReleaseArt *art = g_new0 (ReleaseArt, 1);
+  art->picture = picture;
+  art->viewport = self->scroller;
+  art->cover = g_strdup (release->cover_id);
+  g_object_set_data_full (G_OBJECT (header), "release-art", art, release_art_free);
+  g_signal_connect (header, "map", G_CALLBACK (release_header_map), NULL);
+  g_signal_connect (header, "unmap", G_CALLBACK (release_header_unmap), NULL);
+  GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->scroller));
+  g_signal_connect_object (adj, "value-changed", G_CALLBACK (scan_release_art), header, G_CONNECT_SWAPPED);
+  g_signal_connect_object (adj, "changed", G_CALLBACK (scan_release_art), header, G_CONNECT_SWAPPED);
+  return header;
+}
 
 typedef struct {
   GWeakRef page;
@@ -411,6 +615,8 @@ apply_release_sort (SpotifyGtkArtistPage *self)
     for (guint j = 0; j < r->tracks->len; j++) {
       SpotifyNativeTrack *track = spotifygtk_native_track_copy (
         g_ptr_array_index (r->tracks, j));
+      g_free (track->album_uri);
+      track->album_uri = g_strdup (r->uri);
       if (j == 0) {
         track->section_title = g_strdup (r->name);
         track->section_detail = g_strdup (meta);
@@ -424,6 +630,30 @@ apply_release_sort (SpotifyGtkArtistPage *self)
   gboolean empty = (ordered->len == 0);
   gtk_label_set_text (self->releases_status, empty ? "No releases here." : "");
   gtk_widget_set_visible (GTK_WIDGET (self->releases_status), empty);
+}
+
+static void
+artist_layout_changed (SpotifyGtkSettings *settings, SpotifyGtkArtistPage *self)
+{
+  gboolean compact = spotifygtk_settings_get_compact_mode (settings);
+  if (self->compact == compact) return;
+  self->compact = compact;
+  /* Compact mode affects release sections only. The artist banner, Follow
+   * action and top tracks remain available above the discography in both. */
+  spotifygtk_track_list_set_show_cover (self->releases_list, compact);
+  spotifygtk_track_list_set_show_album (self->releases_list, compact);
+  spotifygtk_track_list_set_section_factory (self->releases_list,
+    compact ? NULL : release_header_new, self);
+  apply_release_sort (self);
+}
+
+void
+spotifygtk_artist_page_set_release_action (SpotifyGtkArtistPage *self,
+                                           SpotifyGtkArtistReleaseActionFunc fn,
+                                           gpointer user_data)
+{
+  self->release_action = fn;
+  self->release_action_data = user_data;
 }
 
 /* Show the direction on the active button only, as Liked Songs does. */
@@ -501,6 +731,14 @@ on_discography_loaded (GObject *source, GAsyncResult *result, gpointer user_data
     return;
   }
 
+  spotifygtk_artist_page_set_releases (self, releases);
+}
+
+void
+spotifygtk_artist_page_set_releases (SpotifyGtkArtistPage *self, GPtrArray *releases)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ARTIST_PAGE (self));
+  g_return_if_fail (releases != NULL);
   g_clear_pointer (&self->all_releases, g_ptr_array_unref);
   self->all_releases = g_ptr_array_new_with_free_func (release_free);
 
@@ -837,6 +1075,7 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
    * the room to be it.
    */
   GtkWidget *hero = gtk_overlay_new ();
+  self->hero = hero;
   gtk_widget_add_css_class (hero, "artist-hero");
   gtk_widget_set_hexpand (hero, TRUE);
   /* Covering overflows the allocation by design; clip it, and to the rounded
@@ -880,7 +1119,8 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   /* Most played. */
   /* Not "Popular" -- that is the other client's word for this, and the whole
    * point of the page is not to be a copy of it. */
-  gtk_box_append (GTK_BOX (content), section_heading ("Top tracks"));
+  self->top_heading = section_heading ("Top tracks");
+  gtk_box_append (GTK_BOX (content), self->top_heading);
 
   self->list = spotifygtk_track_list_new ();
   spotifygtk_track_list_set_inline (self->list, TRUE);
@@ -949,6 +1189,11 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
   gtk_box_append (GTK_BOX (self), scroller);
+
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  self->compact = !spotifygtk_settings_get_compact_mode (settings);
+  artist_layout_changed (settings, self);
+  g_signal_connect_object (settings, "changed", G_CALLBACK (artist_layout_changed), self, 0);
 
   GtkWidget *vsb = gtk_scrolled_window_get_vscrollbar (
     GTK_SCROLLED_WINDOW (scroller));

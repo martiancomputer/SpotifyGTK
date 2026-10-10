@@ -755,6 +755,15 @@ test_account_and_actions (void)
   settle ();
   g_assert_nonnull (find_label (GTK_WIDGET (page), "Account"));
   g_assert_null (find_label (GTK_WIDGET (page), "User"));
+  GtkWidget *compact_label = find_label (GTK_WIDGET (page), "Compact mode");
+  g_assert_nonnull (compact_label);
+  GtkWidget *compact_switch = find_type (gtk_widget_get_parent (
+    gtk_widget_get_parent (compact_label)), GTK_TYPE_SWITCH);
+  g_assert_nonnull (compact_switch);
+  gtk_switch_set_active (GTK_SWITCH (compact_switch), TRUE);
+  g_assert_true (spotifygtk_settings_get_compact_mode (spotifygtk_settings_get_default ()));
+  gtk_switch_set_active (GTK_SWITCH (compact_switch), FALSE);
+  g_assert_false (spotifygtk_settings_get_compact_mode (spotifygtk_settings_get_default ()));
   g_assert_false (gtk_widget_get_sensitive (button_for (GTK_WIDGET (page), "Customize Home")));
   const gchar *actions[] = { "Log out", "Clear cache", "Reset", "Sign in" };
   for (guint i = 0; i < G_N_ELEMENTS (actions); i++) {
@@ -775,6 +784,7 @@ test_account_and_actions (void)
 static void
 test_artist_follow_alignment (void)
 {
+  spotifygtk_settings_set_compact_mode (spotifygtk_settings_get_default (), TRUE);
   GtkWidget *window = gtk_window_new ();
   gtk_window_set_default_size (GTK_WINDOW (window), 1200, 780);
   SpotifyGtkArtistPage *page = spotifygtk_artist_page_new ();
@@ -793,6 +803,165 @@ test_artist_follow_alignment (void)
                   h.origin.x + h.size.width);
   g_assert_cmpfloat (fabs (f.origin.x + f.size.width - h.origin.x - h.size.width), <=, 1);
   gtk_window_destroy (GTK_WINDOW (window));
+}
+
+static gboolean
+fixture_release_action (const gchar *uri, gboolean toggle, gpointer data)
+{
+  gboolean *saved = data;
+  g_assert_true (g_str_has_prefix (uri, "spotify:album:"));
+  if (toggle) *saved = !*saved;
+  return *saved;
+}
+
+static void
+fixture_release_play (SpotifyGtkTrackList *list, gpointer track, gpointer data)
+{
+  gchar **uri = data;
+  g_free (*uri);
+  *uri = g_strdup (((SpotifyNativeTrack *) track)->uri);
+  (void) list;
+}
+
+static void
+fixture_release_wire (SpotifyGtkTrackList *list, gpointer data)
+{
+  g_signal_connect (list, "track-activated", G_CALLBACK (fixture_release_play), data);
+}
+
+static void
+test_artist_release_layout (void)
+{
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  spotifygtk_settings_set_compact_mode (settings, FALSE);
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1100, 800);
+  SpotifyGtkArtistPage *page = spotifygtk_artist_page_new ();
+  g_autofree gchar *played_uri = NULL;
+  spotifygtk_artist_page_set_following (page, FALSE);
+  spotifygtk_artist_page_set_list_wire (page, fixture_release_wire, &played_uri);
+  gboolean saved = FALSE;
+  spotifygtk_artist_page_set_release_action (page, fixture_release_action, &saved);
+  g_autoptr(GPtrArray) releases = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_release_free);
+  for (guint i = 0; i < 2; i++) {
+    SpotifyNativeRelease *release = g_new0 (SpotifyNativeRelease, 1);
+    release->uri = g_strdup_printf ("spotify:album:000000000000000000000%u", i);
+    release->name = g_strdup_printf ("Fixture release %u", i);
+    release->year = 2026 - i;
+    release->type = SPOTIFY_ALBUM_TYPE_ALBUM;
+    release->tracks = g_ptr_array_new_with_free_func ((GDestroyNotify) spotifygtk_native_track_free);
+    for (guint j = 0; j < 2; j++) {
+      SpotifyNativeTrack track = { .name = "Fixture track", .artists = "Fixture artist",
+        .duration_ms = 180000, .album_uri = release->uri };
+      g_autofree gchar *uri = g_strdup_printf ("spotify:track:00000000000000000000%u%u", i, j);
+      track.uri = uri;
+      g_ptr_array_add (release->tracks, spotifygtk_native_track_copy (&track));
+    }
+    g_ptr_array_add (releases, release);
+  }
+  spotifygtk_artist_page_set_releases (page, releases);
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkWidget *header = find_class (GTK_WIDGET (page), "artist-release-header");
+  g_assert_nonnull (header);
+  g_assert_true (gtk_widget_get_visible (find_class (GTK_WIDGET (page), "artist-hero")));
+  g_assert_true (gtk_widget_get_visible (GTK_WIDGET (spotifygtk_artist_page_get_list (page))));
+  g_assert_nonnull (find_label (GTK_WIDGET (page), "Top tracks"));
+  g_assert_true (gtk_widget_get_visible (button_for (GTK_WIDGET (page), "Follow")));
+  GtkWidget *cover = find_class (header, "artist-release-cover");
+  graphene_rect_t rect = bounds (cover, window);
+  g_assert_cmpfloat (rect.size.width, ==, 226);
+  g_assert_cmpfloat (rect.size.height, ==, 226);
+  g_assert_cmpint (gtk_widget_get_overflow (cover), ==, GTK_OVERFLOW_HIDDEN);
+  g_signal_emit_by_name (button_for (header, "Save"), "clicked");
+  g_assert_true (saved);
+  g_assert_nonnull (button_for (header, "Saved"));
+  g_signal_emit_by_name (button_for (header, "Play"), "clicked");
+  g_assert_cmpstr (played_uri, ==, "spotify:track:0000000000000000000000");
+  const SpotifyGtkTheme themes[] = { SPOTIFYGTK_THEME_LIGHT, SPOTIFYGTK_THEME_DARK_PLUS };
+  for (guint i = 0; i < G_N_ELEMENTS (themes); i++) {
+    apply_theme (themes[i]); settle ();
+    save_preview (window, i ? "artist-releases-dark-plus.png" : "artist-releases-light.png");
+  }
+  /* GTK's item hover must not paint the large release header above track 1. */
+  GtkWidget *scroller = find_type (GTK_WIDGET (page), GTK_TYPE_SCROLLED_WINDOW);
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller));
+  gtk_adjustment_set_value (vadj, gtk_adjustment_get_value (vadj) +
+    bounds (header, scroller).origin.y - 20);
+  settle ();
+  header = find_class (GTK_WIDGET (page), "artist-release-header");
+  GtkWidget *row = gtk_widget_get_parent (header);
+  GtkWidget *item = gtk_widget_get_parent (row);
+  GtkWidget *body = find_class (row, "track-body");
+  GtkWidget *second_item = gtk_widget_get_next_sibling (item);
+  g_assert_nonnull (second_item);
+  g_assert_true (gtk_widget_has_css_class (item, "compound-track-item"));
+  for (guint i = 0; i < G_N_ELEMENTS (themes); i++) {
+    apply_theme (themes[i]);
+    gtk_widget_set_state_flags (item, GTK_STATE_FLAG_PRELIGHT, FALSE);
+    gtk_widget_set_state_flags (body, GTK_STATE_FLAG_PRELIGHT, FALSE);
+    gtk_widget_set_state_flags (second_item, GTK_STATE_FLAG_PRELIGHT, FALSE);
+    settle ();
+    g_autoptr(GdkTexture) hovered = render (window);
+    graphene_rect_t h = bounds (header, window), b = bounds (body, window);
+    assert_pixel (hovered, h.origin.x + h.size.width - 30, h.origin.y + 25,
+                  i ? 0 : 255);
+    graphene_rect_t second = bounds (second_item, window);
+    g_assert_cmpfloat (fabs (b.origin.x - second.origin.x), <=, 1);
+    g_assert_cmpfloat (fabs (b.size.width - second.size.width), <=, 1);
+    g_assert_cmpfloat (fabs (b.size.height - second.size.height), <=, 1);
+    /* Compare the real standard row, including both far corners: no inset,
+     * no shorter band, no extra rounding, and no custom darker hover color. */
+    gint stride = gdk_texture_get_width (hovered) * 4;
+    g_autofree guint8 *pixels = g_malloc (stride * gdk_texture_get_height (hovered));
+    gdk_texture_download (hovered, pixels, stride);
+    const gint xs[] = { 0, 2, (gint) b.size.width - 160, (gint) b.size.width - 1 };
+    const gint ys[] = { 0, 2, (gint) b.size.height / 2, (gint) b.size.height - 1 };
+    for (guint x = 0; x < G_N_ELEMENTS (xs); x++)
+      for (guint y = 0; y < G_N_ELEMENTS (ys); y++)
+        for (guint c = 0; c < 3; c++) {
+          guint8 first_pixel = pixels[((gint) b.origin.y + ys[y]) * stride +
+            ((gint) b.origin.x + xs[x]) * 4 + c];
+          guint8 second_pixel = pixels[((gint) second.origin.y + ys[y]) * stride +
+            ((gint) second.origin.x + xs[x]) * 4 + c];
+          if (ABS (first_pixel - second_pixel) > 1)
+            g_test_message ("hover theme=%u x=%d y=%d channel=%u first=%u second=%u",
+                            i, xs[x], ys[y], c, first_pixel, second_pixel);
+          g_assert_cmpint (ABS (first_pixel - second_pixel), <=, 1);
+        }
+    gtk_widget_unset_state_flags (item, GTK_STATE_FLAG_PRELIGHT);
+    gtk_widget_unset_state_flags (body, GTK_STATE_FLAG_PRELIGHT);
+    gtk_widget_unset_state_flags (second_item, GTK_STATE_FLAG_PRELIGHT);
+  }
+  GWeakRef old_header;
+  g_weak_ref_init (&old_header, header);
+  GtkPicture *picture = GTK_PICTURE (find_type (header, GTK_TYPE_PICTURE));
+  g_autoptr(GBytes) bytes = g_bytes_new_take (g_malloc0 (320 * 320 * 4), 320 * 320 * 4);
+  GdkTexture *texture = gdk_memory_texture_new (320, 320, GDK_MEMORY_R8G8B8A8, bytes, 320 * 4);
+  GWeakRef old_texture;
+  g_weak_ref_init (&old_texture, texture);
+  gtk_picture_set_paintable (picture, GDK_PAINTABLE (texture));
+  g_object_unref (texture);
+  spotifygtk_settings_set_compact_mode (settings, TRUE);
+  settle ();
+  g_assert_null (find_class (GTK_WIDGET (page), "artist-release-header"));
+  g_assert_true (gtk_widget_get_visible (find_class (GTK_WIDGET (page), "artist-hero")));
+  g_autoptr(GObject) previous = g_weak_ref_get (&old_header);
+  g_assert_null (previous);
+  g_weak_ref_clear (&old_header);
+  g_autoptr(GObject) previous_texture = g_weak_ref_get (&old_texture);
+  g_assert_null (previous_texture);
+  g_weak_ref_clear (&old_texture);
+  spotifygtk_settings_set_compact_mode (settings, FALSE);
+  settle ();
+  g_assert_nonnull (find_class (GTK_WIDGET (page), "artist-release-header"));
+  gtk_window_set_default_size (GTK_WINDOW (window), 680, 600);
+  settle ();
+  gtk_window_destroy (GTK_WINDOW (window));
+  settle ();
+  spotifygtk_settings_set_compact_mode (settings, TRUE);
 }
 
 static void
@@ -910,6 +1079,7 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/cards/shared-library-search-design", test_shared_card_design);
   g_test_add_func ("/ui/settings/account-actions", test_account_and_actions);
   g_test_add_func ("/ui/artist/follow-alignment", test_artist_follow_alignment);
+  g_test_add_func ("/ui/artist/release-layout", test_artist_release_layout);
   g_test_add_func ("/ui/liked/mixed-dates", test_liked_mixed_dates);
   g_test_add_func ("/ui/playlist/overlay-delete-mapping", test_overlay_delete_mapping);
   g_test_add_func ("/ui/now-playing/navigation", test_panel_navigation);

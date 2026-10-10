@@ -407,7 +407,7 @@ on_detail_view_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
 {
   SpotifyGtkSettingsPage *self = user_data;
   spotifygtk_settings_set_compact_mode (self->settings,
-                                        !gtk_switch_get_active (sw));
+                                        gtk_switch_get_active (sw));
   (void) pspec;
 }
 
@@ -674,14 +674,14 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
 
   GtkWidget *detail_view = gtk_switch_new ();
   gtk_switch_set_active (GTK_SWITCH (detail_view),
-    !spotifygtk_settings_get_compact_mode (self->settings));
+    spotifygtk_settings_get_compact_mode (self->settings));
   g_signal_connect (detail_view, "notify::active",
                     G_CALLBACK (on_detail_view_toggled), self);
   gtk_box_append (GTK_BOX (interface_group),
-                  build_row ("Expanded album and playlist view",
-                             "On shows a large cover, release details, and a numbered list. "
-                             "Off keeps the compact header and artwork in track rows. "
-                             "Search results follow the same view choice.",
+                  build_row ("Compact mode",
+                             "On keeps compact headers and artwork in track rows. "
+                             "Off shows large covers and release details for albums, "
+                             "playlists, and artist releases. Search follows the same choice.",
                              detail_view));
 
   GtkWidget *separate_playlists = gtk_switch_new ();

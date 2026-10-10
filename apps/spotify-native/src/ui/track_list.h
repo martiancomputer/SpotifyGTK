@@ -21,6 +21,13 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list,
                       SPOTIFYGTK, TRACK_LIST, GtkBox)
 
 /* Borrow the shared set of liked URIs. Not copied -- consulted on bind. */
+typedef GtkWidget *(*SpotifyGtkTrackSectionFunc) (const SpotifyNativeTrack *track,
+                                                   gpointer user_data);
+/* Configure before replacing the model. Headers live only with pooled rows. */
+void spotifygtk_track_list_set_section_factory (SpotifyGtkTrackList *self,
+                                                SpotifyGtkTrackSectionFunc fn,
+                                                gpointer user_data);
+
 void spotifygtk_track_list_set_liked_set (SpotifyGtkTrackList *self, GHashTable *set);
 
 /* Repaint hearts for rows currently on screen, after the shared set changes. */

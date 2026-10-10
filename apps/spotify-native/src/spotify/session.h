@@ -93,6 +93,7 @@ SpotifyNativeSession *spotifygtk_native_session_new (void);
 /*
  * Begin signing in. Returns immediately; watch "state-changed".
  * Calling this while already connecting or ready is a no-op.
+ * After logout or failure, reuses the worker with fresh stored credentials.
  */
 void spotifygtk_native_session_start (SpotifyNativeSession *self);
 
@@ -116,9 +117,7 @@ void spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
 /*
  * Drop the connection and sign in again.
  *
- * start() returns early once its thread exists, so there was no way back from
- * a dropped AP link: everything riding on it failed silently for the life of
- * the process.
+ * Unlike start(), this also replaces an already connecting or ready transport.
  */
 void spotifygtk_native_session_reconnect (SpotifyNativeSession *self);
 /* Disconnect account transport without destroying cached page models. The

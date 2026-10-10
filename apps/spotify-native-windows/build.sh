@@ -16,7 +16,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/../spotify-native"
 BUILD="$HERE/build"
 DIST="$BUILD/dist"
-CROSS="$HERE/cross/mingw-w64-x86_64.ini"
+CROSS="${SPOTIFYGTK_CROSS_FILE:-$HERE/cross/mingw-w64-x86_64.ini}"
 
 bundle=false
 [[ "${1:-}" == "--bundle" ]] && bundle=true
@@ -32,17 +32,17 @@ else
     echo "       build under MSYS2 UCRT64 instead (see README.md)." >&2
     exit 1
   }
-  setup_args=(--cross-file "$CROSS")
+  setup_args=(--cross-file "$CROSS" --native-file "$HERE/cross/linux-build-tools.ini")
 fi
 
-if [[ ! -d "$BUILD" ]]; then
+if [[ ! -f "$BUILD/meson-private/coredata.dat" ]]; then
   meson setup "$BUILD" "$SRC" "${setup_args[@]}"
 else
   # Reconfiguring keeps an existing build dir usable after option changes.
   meson setup --reconfigure "$BUILD" "$SRC" "${setup_args[@]}"
 fi
 
-meson compile -C "$BUILD"
+meson compile -C "$BUILD" spotify-native
 echo "==> built: $BUILD/src/spotify-native.exe"
 
 $bundle || exit 0
@@ -108,6 +108,33 @@ mkdir -p "$DIST/lib/gio/modules"
 cp -n "$prefix/lib/gio/modules/"*.dll "$DIST/lib/gio/modules/" 2>/dev/null || true
 cp -n "$prefix/lib/gio/modules/giomodule.cache" "$DIST/lib/gio/modules/" 2>/dev/null || true
 cp -rn "$prefix/lib/gdk-pixbuf-2.0"   "$DIST/lib/"             2>/dev/null || true
+if [[ ! -s "$DIST/lib/gio/modules/giomodule.cache" ]]; then
+  if [[ -n "${MSYSTEM:-}" ]]; then
+    "$prefix/bin/gio-querymodules.exe" "$DIST/lib/gio/modules"
+  elif command -v wine >/dev/null 2>&1; then
+    WINEPREFIX="${SPOTIFYGTK_WINE_PREFIX:-$HERE/tools-build/wine-prefix}" WINEDEBUG=-all \
+      wine "$prefix/bin/gio-querymodules.exe" "$DIST/lib/gio/modules"
+  fi
+fi
+
+# Generate a relocatable image-loader cache. The query utility emits relative
+# module paths on Windows; discard its diagnostic comments, which contain the
+# build machine's absolute path. Wine runs only this command-line utility when
+# cross-building, not the application or a Windows virtual machine.
+pixbuf_cache="$DIST/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+if [[ -n "${MSYSTEM:-}" ]]; then
+  "$prefix/bin/gdk-pixbuf-query-loaders.exe" | sed '/^#/d;s/\r$//' > "$pixbuf_cache"
+elif command -v wine >/dev/null 2>&1; then
+  WINEPREFIX="${SPOTIFYGTK_WINE_PREFIX:-$HERE/tools-build/wine-prefix}" WINEDEBUG=-all \
+    wine "$prefix/bin/gdk-pixbuf-query-loaders.exe" | sed '/^#/d;s/\r$//' > "$pixbuf_cache"
+elif [[ -s "$pixbuf_cache" ]]; then
+  sed '/^#/d;s/\r$//' "$pixbuf_cache" > "$pixbuf_cache.tmp"
+  mv "$pixbuf_cache.tmp" "$pixbuf_cache"
+else
+  echo 'error: a relocatable pixbuf loader cache is required; install Wine or supply one' >&2
+  exit 1
+fi
+[[ -s "$pixbuf_cache" ]] || { echo 'error: image loader cache is empty' >&2; exit 1; }
 
 # A name is ours to ship only if it exists in the MinGW prefix. That is also
 # what keeps Windows' own DLLs out: kernel32 and the api-ms-win-* stubs are not
@@ -163,7 +190,33 @@ done
 mkdir -p "$DIST/share/glib-2.0/schemas" "$DIST/share/icons"
 cp -rn "$prefix/share/icons/Adwaita"           "$DIST/share/icons/"        2>/dev/null || true
 cp -rn "$prefix/share/icons/hicolor"           "$DIST/share/icons/"        2>/dev/null || true
+cp -rn "$prefix/share/icons/AdwaitaLegacy"     "$DIST/share/icons/"        2>/dev/null || true
+mkdir -p "$DIST/share/icons/hicolor/scalable/apps"
+cp "$SRC/data/com.github.spotifygtk.SpotifyNative.svg" \
+  "$DIST/share/icons/hicolor/scalable/apps/"
 cp -rn "$prefix/share/glib-2.0/schemas/"*.compiled "$DIST/share/glib-2.0/schemas/" 2>/dev/null || true
+cp -f "$prefix/share/glib-2.0/schemas/"*.xml "$DIST/share/glib-2.0/schemas/"
+glib-compile-schemas "$DIST/share/glib-2.0/schemas"
+
+# Fonts are private application resources, not fonts installed on the user's
+# machine. A release can supply a licensed font tree (including its notices)
+# instead of relying on the build machine's desktop fonts.
+font_source="${SPOTIFYGTK_BUNDLE_FONTS:-$prefix/share/fonts}"
+[[ -d "$font_source" ]] || {
+  echo "error: no bundled fonts; set SPOTIFYGTK_BUNDLE_FONTS to a licensed font tree" >&2
+  exit 1
+}
+mkdir -p "$DIST/share/fonts" "$DIST/etc/fonts" "$DIST/share/licenses"
+cp -R "$font_source/." "$DIST/share/fonts/"
+cp "$HERE/fonts.conf" "$DIST/etc/fonts/fonts.conf"
+if [[ -d "$prefix/share/licenses" ]]; then
+  cp -R "$prefix/share/licenses/." "$DIST/share/licenses/"
+fi
+cp "$HERE/../../LICENSE" "$DIST/share/licenses/SpotifyGTK-LICENSE"
+cp "$HERE/../../THIRD_PARTY_LICENSES" "$DIST/share/licenses/SpotifyGTK-THIRD-PARTY-LICENSES"
+if [[ -f "$prefix/../runtime-packages.json" ]]; then
+  cp "$prefix/../runtime-packages.json" "$DIST/share/licenses/runtime-packages.json"
+fi
 
 # GnuTLS in the MSYS2 glib-networking module is compiled with the build
 # environment's absolute trust-store path.  That path is not present when
@@ -171,12 +224,25 @@ cp -rn "$prefix/share/glib-2.0/schemas/"*.compiled "$DIST/share/glib-2.0/schemas
 # would otherwise reach the OAuth callback and then fail its token exchange
 # with "Unacceptable TLS certificate".  The application attaches this file to
 # every libsoup session; keep it under dist/etc so it follows the executable.
-if [[ -f "$prefix/etc/ssl/certs/ca-bundle.crt" ]]; then
+if [[ -s "$prefix/etc/ssl/certs/ca-bundle.crt" ]]; then
   mkdir -p "$DIST/etc/ssl/certs"
   cp -f "$prefix/etc/ssl/certs/ca-bundle.crt" "$DIST/etc/ssl/certs/ca-bundle.crt"
   echo "==> bundled CA database: etc/ssl/certs/ca-bundle.crt"
+elif [[ -z "${MSYSTEM:-}" ]] && command -v wine >/dev/null 2>&1; then
+  # Repository archives contain an empty placeholder until the ca-certificates
+  # post-install hook runs. Extract the Mozilla anchors using the package's
+  # own trust tool, never the build machine's potentially customised CA set.
+  mkdir -p "$DIST/etc/ssl/certs"
+  WINEPREFIX="${SPOTIFYGTK_WINE_PREFIX:-$HERE/tools-build/wine-prefix}" WINEDEBUG=-all \
+    wine "$prefix/bin/trust.exe" extract --format=pem-bundle \
+      --filter=ca-anchors --overwrite --purpose server-auth \
+      "$DIST/etc/ssl/certs/ca-bundle.crt"
+  [[ -s "$DIST/etc/ssl/certs/ca-bundle.crt" ]] || {
+    echo 'error: extracting the public CA database failed' >&2; exit 1;
+  }
 else
-  echo "warning: $prefix/etc/ssl/certs/ca-bundle.crt not found; portable HTTPS may fail certificate verification" >&2
+  echo 'error: public CA database missing; run update-ca-trust in MSYS2' >&2
+  exit 1
 fi
 
-echo "==> $DIST ready (installer packaging is not implemented)"
+echo "==> $DIST ready for package-msix.sh"

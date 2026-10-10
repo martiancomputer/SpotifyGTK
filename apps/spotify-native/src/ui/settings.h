@@ -111,8 +111,8 @@ gboolean spotifygtk_settings_get_aggressive_filtering (SpotifyGtkSettings *self)
 void     spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
                                                        gboolean enabled);
 
-/* Keep the original compact album/playlist layout by default. Expanded mode
- * adds artwork and metadata above the same virtualized track list. */
+/* Compact mode keeps the original detail layouts by default. Turning it off
+ * adds large release artwork above album, playlist, and artist track lists. */
 gboolean spotifygtk_settings_get_compact_mode (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_compact_mode (SpotifyGtkSettings *self,
                                                gboolean enabled);

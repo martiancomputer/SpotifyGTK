@@ -34,6 +34,7 @@ if enable_gui
       include_directories: [config_inc, include_directories('.'), spotify_connect_inc],
       dependencies: all_deps + [gtk4_dep, adw_dep],
       c_args: ['-DSPOTIFYGTK_ENGINE_LIBRARY'],
+      win_subsystem: 'windows',
       install: true,
     )
   else
@@ -43,6 +44,7 @@ if enable_gui
       include_directories: [config_inc, include_directories('.'), spotify_connect_inc],
       dependencies: all_deps + [gtk4_dep],
       c_args: ['-DSPOTIFYGTK_ENGINE_LIBRARY'],
+      win_subsystem: 'windows',
       install: true,
     )
   endif

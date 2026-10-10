@@ -1,4 +1,10 @@
 if get_option('tests')
+  test_session_lifecycle = executable('test-session-lifecycle',
+    'test_session_lifecycle.c', spotify_proto_support_sources, runtime_sources,
+    include_directories: [config_inc, include_directories('../src')],
+    dependencies: all_deps,
+  )
+  test('session-login-lifecycle', test_session_lifecycle, timeout: 15)
   test_lyrics_lookup = executable('test-lyrics-lookup',
     'test_lyrics_lookup.c', '../src/ui/lyrics_lookup.c',
     include_directories: [include_directories('../src')],

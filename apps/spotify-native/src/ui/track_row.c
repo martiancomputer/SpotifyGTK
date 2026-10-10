@@ -46,6 +46,7 @@ struct _SpotifyGtkTrackRow {
   GtkLabel *section_title;
   GtkLabel *section_detail;
   GtkWidget *section_row;
+  GtkWidget *section_widget;
   GtkWidget *status_slot;   /* holds duration OR the equaliser */
   GtkLabel *duration_label;
   GtkWidget *like_icon;     /* indicator only, not a control */
@@ -641,12 +642,17 @@ spotifygtk_track_row_init (SpotifyGtkTrackRow *self)
   g_signal_connect (self->play_btn, "clicked", G_CALLBACK (on_play_btn_clicked), self);
 
   /* Reveal the action buttons only while the pointer is over the row. */
+  GtkWidget *body = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class (body, "track-body");
+  gtk_box_append (GTK_BOX (body), GTK_WIDGET (self->root_box));
   GtkEventController *motion = gtk_event_controller_motion_new ();
   g_signal_connect (motion, "enter", G_CALLBACK (on_row_hover_enter), self);
   g_signal_connect (motion, "leave", G_CALLBACK (on_row_hover_leave), self);
-  gtk_widget_add_controller (GTK_WIDGET (self), motion);
+  /* Release headers can share this pooled item, but must not reveal the
+   * first track's controls or invalidate its hover state themselves. */
+  gtk_widget_add_controller (body, motion);
 
-  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->root_box));
+  gtk_box_append (GTK_BOX (self), body);
 }
 
 SpotifyGtkTrackRow *
@@ -774,6 +780,22 @@ spotifygtk_track_row_set_number (SpotifyGtkTrackRow *self, gint track_number)
      * indent, which made unnumbered lists sit further right than numbered
      * ones. */
     gtk_widget_set_visible (GTK_WIDGET (self->track_num), FALSE);
+  }
+}
+
+void
+spotifygtk_track_row_set_section_widget (SpotifyGtkTrackRow *self, GtkWidget *header)
+{
+  if (self->section_widget)
+    gtk_box_remove (GTK_BOX (self), self->section_widget);
+  self->section_widget = header;
+  if (header)
+    gtk_widget_add_css_class (GTK_WIDGET (self), "release-track-row");
+  else
+    gtk_widget_remove_css_class (GTK_WIDGET (self), "release-track-row");
+  if (header) {
+    gtk_box_prepend (GTK_BOX (self), header);
+    gtk_widget_set_visible (self->section_row, FALSE);
   }
 }
 

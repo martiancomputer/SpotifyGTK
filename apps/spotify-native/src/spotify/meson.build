@@ -1,4 +1,5 @@
-spotify_proto_sources = files(
+# Headless lifecycle tests include session.c with offline transport fixtures.
+spotify_proto_support_sources = files(
   'home_feed.c',
   'catalog_cache.c',
   'catalog_snapshot.c',
@@ -13,7 +14,6 @@ spotify_proto_sources = files(
   'login5.c',
   'apresolve.c',
   'spclient.c',
-  'session.c',
   'ap.c',
   'mercury.c',
   'playlist.c',
@@ -22,3 +22,4 @@ spotify_proto_sources = files(
   'connect.c',
   'connect_options.c',
 )
+spotify_proto_sources = spotify_proto_support_sources + files('session.c')

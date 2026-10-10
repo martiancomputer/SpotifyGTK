@@ -23,7 +23,7 @@ into a build directory here.
 | Audio output | `../spotify-native/src/audio/output_wasapi.c` | Real WASAPI shared-mode backend. The POSIX backends are not compiled on Windows and vice versa (`src/audio/meson.build`). |
 | Client-token platform block | `../spotify-native/src/spotify/clienttoken.c` | `NativeDesktopWindowsData` (oneof field 4, integers) instead of `NativeDesktopLinuxData` (field 5, uname strings). Not cosmetic — the wrong shape returns HTTP 400. |
 | Backend probe order | `../spotify-native/src/audio/output.c` | WASAPI is the whole candidate list, not a fallback. |
-| Link deps | `../spotify-native/meson.build` | `ole32` for COM; PulseAudio/ALSA/PipeWire are not looked for. |
+| Link deps | `../spotify-native/meson.build` | `ole32` for COM, `ksuser` for audio GUIDs, and `gdi32` for private fonts; PulseAudio/ALSA/PipeWire are not looked for. |
 
 ## Building and running it on Windows
 
@@ -170,8 +170,64 @@ every compile error without a Windows machine:
 A GTK4 application on Windows needs more than its own `.exe`: the DLL closure,
 the Adwaita icon theme (the UI uses `*-symbolic` icons throughout), gdk-pixbuf
 loaders, compiled GSettings schemas, GIO's module cache, and a CA certificate
-bundle. `./build.sh --bundle` assembles those into `build/dist/`. Turning that
-into an installer (NSIS/MSIX) is not done.
+bundle. `./build.sh --bundle` assembles those into `build/dist/`, together with
+private application fonts and license notices. `package-msix.sh` creates and
+self-signs an x64 MSIX using Microsoft's native Linux packer and osslsigncode.
+No Windows VM is needed for this packaging path.
+
+### Linux-only MSIX build
+
+Install a MinGW-w64 compiler supporting `-mcrtdll=ucrt`, Meson, Ninja,
+pkg-config, host GLib build tools, CMake, a C++ compiler, ICU development
+headers, Git, Python 3.11 or newer, libarchive's `bsdtar`, OpenSSL,
+osslsigncode with APPX support, librsvg's `rsvg-convert`, and Wine. Wine runs
+only command-line module-cache and public CA extraction utilities; it does
+not run a virtual machine or test the GUI.
+
+Run from this directory:
+
+```bash
+python3 fetch-msys-runtime.py tools-build/msys-runtime
+bash build-msix-tool.sh
+bash prepare-msix-assets.sh
+
+export prefix="$PWD/tools-build/msys-runtime/ucrt64"
+export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
+export PKG_CONFIG_SYSROOT_DIR="$PWD/tools-build/msys-runtime"
+export SPOTIFYGTK_CROSS_FILE="$PWD/cross/msys2-ucrt64-linux.ini"
+# Supply a licensed tree containing Adwaita/, noto/, noto-cjk/ and their notices.
+# Include Noto Color Emoji in the Noto tree for emoji coverage.
+export SPOTIFYGTK_BUNDLE_FONTS="<licensed-font-tree>"
+
+meson setup build ../spotify-native \
+  --cross-file "$SPOTIFYGTK_CROSS_FILE" \
+  --native-file cross/linux-build-tools.ini \
+  -Dtests=false -Dverbose_logging=false -Dbuildtype=release
+bash build.sh --bundle
+x86_64-w64-mingw32-strip --strip-unneeded build/dist/spotify-native.exe
+bash package-msix.sh
+```
+
+`fetch-msys-runtime.py` downloads the official UCRT64 repository's dependency
+closure, verifies archive SHA256 values, and extracts it locally without
+installing packages on the host. `build-msix-tool.sh` pins the upstream packer
+revision. The runtime inventory records library versions; a later download
+can contain newer MSYS2 packages.
+
+The output is in ignored `out/`. Distribute only the signed
+`SpotifyGTK_<version>_x64.msix`, `SpotifyGTK.cer`, `INSTALL-MSIX.md`, and
+`SHA256SUMS.txt`. Do not distribute the unsigned intermediate or staging tree.
+Set `SPOTIFYGTK_MSIX_VERSION` to a four-component version for subsequent builds.
+
+The first signing run creates a neutral `CN=SpotifyGTK` self-signed code-signing
+identity in ignored `.signing/`, with a three-year certificate. Keep that
+directory private and back it up securely: upgrades must use the same publisher
+identity. No private key or PFX is copied to the output. This is not a publicly
+trusted or Spotify-issued signature. The recipient explicitly installs the
+public CER into **Local Machine → Trusted People**, then installs the MSIX;
+see [installation instructions](INSTALL-MSIX.md). Do not import it into the
+Trusted Root store. Signing and verification do not establish that Windows
+deployment, playback, or rendering has been tested.
 
 The DLL closure is walked to a fixpoint rather than in one pass, because the
 modules are loaded with dlopen and nothing links them: a walk starting at the
@@ -265,10 +321,9 @@ Concrete catches from the port, each of which broke something real:
 - `cairo_select_font_face ("Sans", …)` in `ui/eq_graph.c` resolves via
   fontconfig on Linux; on Windows Cairo falls back to whatever it picks.
   Rendering that text through Pango instead would be more correct.
-- No installer. `build/dist/` is a portable directory; turning it into NSIS or
-  MSIX is not done.
-- The cross-compile path below is a compile check only — no binary produced that
-  way has been run.
+- The Linux cross-build now produces a self-signed MSIX, with cryptographic and
+  package-integrity verification. Installing this newly cross-built package
+  and checking its GUI/audio on Windows remains a separate validation step.
 
 ### Reproducing the compile check without MSYS2
 

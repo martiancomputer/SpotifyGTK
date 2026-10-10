@@ -15,6 +15,35 @@
 
 #ifdef G_OS_WIN32
 #include <windows.h>
+
+/* Register bundled fonts for this process only. Pango's Windows font backend
+ * does not discover a private share/fonts directory on its own. No system
+ * font installation, registry write, or administrator privilege is needed. */
+static void
+register_private_fonts (const gchar *directory)
+{
+  g_autoptr(GDir) dir = g_dir_open (directory, 0, NULL);
+  if (!dir)
+    return;
+  const gchar *name;
+  while ((name = g_dir_read_name (dir))) {
+    g_autofree gchar *path = g_build_filename (directory, name, NULL);
+    if (g_file_test (path, G_FILE_TEST_IS_DIR)) {
+      register_private_fonts (path);
+      continue;
+    }
+    g_autofree gchar *lower = g_ascii_strdown (name, -1);
+    if (!g_str_has_suffix (lower, ".ttf") &&
+        !g_str_has_suffix (lower, ".otf") &&
+        !g_str_has_suffix (lower, ".ttc"))
+      continue;
+    g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+    if (wide)
+      AddFontResourceExW ((LPCWSTR) wide, FR_PRIVATE, NULL);
+  }
+}
+
+static gsize portable_fonts_initialized;
 #endif
 
 static GMutex   log_mutex;      /* the writer runs on whatever thread logged */
@@ -75,6 +104,26 @@ spotifygtk_runtime_init (void)
   g_autofree gchar *directory = executable_dir ();
   if (!directory)
     return;
+
+  if (g_once_init_enter (&portable_fonts_initialized)) {
+    g_autofree gchar *fonts =
+      g_build_filename (directory, "share", "fonts", NULL);
+    register_private_fonts (fonts);
+    g_once_init_leave (&portable_fonts_initialized, 1);
+  }
+
+  if (!g_getenv ("XDG_DATA_DIRS")) {
+    g_autofree gchar *share = g_build_filename (directory, "share", NULL);
+    if (g_file_test (share, G_FILE_TEST_IS_DIR))
+      g_setenv ("XDG_DATA_DIRS", share, FALSE);
+  }
+
+  if (!g_getenv ("FONTCONFIG_FILE")) {
+    g_autofree gchar *config =
+      g_build_filename (directory, "etc", "fonts", "fonts.conf", NULL);
+    if (g_file_test (config, G_FILE_TEST_IS_REGULAR))
+      g_setenv ("FONTCONFIG_FILE", config, FALSE);
+  }
 
   if (!g_getenv ("GIO_MODULE_DIR")) {
     g_autofree gchar *modules =

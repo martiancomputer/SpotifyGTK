@@ -4064,6 +4064,14 @@ on_context_action (const gchar *uri, const gchar *kind, gpointer user_data)
     spotifygtk_playlist_remove (m, user, uri, on_playlist_removed, self);
 }
 
+static gboolean
+on_artist_release_action (const gchar *uri, gboolean toggle, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  if (toggle) on_context_action (uri, "Album", self);
+  return album_is_saved (self, uri);
+}
+
 static void
 on_artist_follow_toggled (const gchar *artist_uri, gpointer user_data)
 {
@@ -6203,6 +6211,18 @@ static const gchar *theme_body =
   "  transition: background-color 120ms ease; }"
   ".list-row:hover { background-color: @bg_hover_row; }"
   ".list-row:selected { background-color: @bg_selected_row; }"
+  /* A virtualized release header shares an item with its first track.
+   * Never paint the GtkListView item's full (header + track) hover rectangle. */
+  ".track-listview > row.compound-track-item,"
+  " .track-listview > row.compound-track-item:hover,"
+  " .track-listview > row.compound-track-item:active,"
+  " .track-listview > row.compound-track-item:selected"
+  " { background: transparent; box-shadow: none; padding: 0; }"
+  /* Match Adwaita's ordinary row padding and hover exactly, but apply them
+   * only to the track surface, not to its preceding release header. */
+  ".release-track-row > .track-body { border-radius: 0; padding: 2px; }"
+  ".release-track-row > .track-body:hover"
+  " { background-color: color-mix(in srgb, currentColor 4%, transparent); }"
   ".art-thumb { background-color: @art_bg; border-radius: 6px;"
   "  color: @art_glyph; }"
   ".art-large { background-color: @art_bg; border-radius: 12px;"
@@ -6389,6 +6409,7 @@ static const gchar *theme_body =
   ".context-play { background-color: @fg_strong; color: @bg_content;"
   "  border-radius: 8px; font-weight: 700; padding: 5px 16px; }"
   ".context-play:hover { opacity: 0.85; }"
+  ".artist-release-cover { border-radius: 8px; background-color: @bg_hover; }"
   ".destructive-hover:hover label { color: #ffffff; }"
 
   "scrollbar { background-color: transparent; border: none; }"
@@ -6998,6 +7019,8 @@ spotifygtk_native_window_constructed (GObject *object)
                                               on_context_action, self);
   spotifygtk_artist_page_set_follow_handler (self->artist_page,
                                              on_artist_follow_toggled, self);
+  spotifygtk_artist_page_set_release_action (self->artist_page,
+                                              on_artist_release_action, self);
 
   g_signal_connect (self->playback_bar, "seek",
                     G_CALLBACK (on_seek_requested), self);

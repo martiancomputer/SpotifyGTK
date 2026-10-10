@@ -29,6 +29,8 @@ struct _SpotifyGtkTrackList {
   GtkBox parent_instance;
 
   GtkLabel    *status;
+  SpotifyGtkTrackSectionFunc section_factory;
+  gpointer section_data;
   GtkListView *list;
   GListStore  *store;
   GtkWidget   *page_header; /* owned; first virtual item scrolls with rows */
@@ -843,7 +845,9 @@ on_list_item_position (GObject *object, GParamSpec *pspec, gpointer user_data)
 
   if (self->numbered && SPOTIFYGTK_IS_TRACK_ROW (child))
     spotifygtk_track_row_set_number (SPOTIFYGTK_TRACK_ROW (child),
-      (gint) gtk_list_item_get_position (list_item) + 1 -
+      self->section_factory && gtk_list_item_get_item (list_item)
+      ? (gint) spotifygtk_track_item_get_number (gtk_list_item_get_item (list_item))
+      : (gint) gtk_list_item_get_position (list_item) + 1 -
       (gint) header_prefix_len (self));
   if (SPOTIFYGTK_IS_TRACK_ROW (child))
     g_object_set_data (G_OBJECT (child), "row-position",
@@ -987,11 +991,22 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
 
   spotifygtk_track_row_set_native_track (row,
     spotifygtk_track_item_get_track (item), 0);
+  spotifygtk_track_row_set_section_widget (row, self->section_factory
+    ? self->section_factory (spotifygtk_track_item_get_track (item), self->section_data)
+    : NULL);
+  GtkWidget *container = gtk_widget_get_parent (GTK_WIDGET (row));
+  if (container) {
+    if (gtk_widget_has_css_class (GTK_WIDGET (row), "release-track-row"))
+      gtk_widget_add_css_class (container, "compound-track-item");
+    else
+      gtk_widget_remove_css_class (container, "compound-track-item");
+  }
   spotifygtk_track_row_set_show_album (row, self->show_album);
   spotifygtk_track_row_set_show_type (row, self->show_type);
   spotifygtk_track_row_set_number (row,
-    self->numbered ? (gint) position + 1 -
-                     (gint) header_prefix_len (self) : 0);
+    self->numbered ? (self->section_factory
+      ? (gint) spotifygtk_track_item_get_number (item)
+      : (gint) position + 1 - (gint) header_prefix_len (self)) : 0);
 
   /* Kept whether or not the list is numbered: the playlist removal needs the
    * row, and it is position-based. */
@@ -1053,6 +1068,9 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
   g_object_set_data (G_OBJECT (row), "changed-handler", NULL);
   g_object_set_data (G_OBJECT (row), "bound-item", NULL);
   g_object_set_data (G_OBJECT (row), "overscan-retained", NULL);
+  spotifygtk_track_row_set_section_widget (row, NULL);
+  GtkWidget *container = gtk_widget_get_parent (GTK_WIDGET (row));
+  if (container) gtk_widget_remove_css_class (container, "compound-track-item");
   if (self->velocity_overscan)
     spotifygtk_track_row_release_cover (row);
   g_ptr_array_remove_fast (self->bound_rows, row);
@@ -1063,6 +1081,15 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
    * here; an idle per unbind only adds work during rapid reverse scrolling. */
 
   (void) factory;
+}
+
+void
+spotifygtk_track_list_set_section_factory (SpotifyGtkTrackList *self,
+                                           SpotifyGtkTrackSectionFunc fn,
+                                           gpointer user_data)
+{
+  self->section_factory = fn;
+  self->section_data = user_data;
 }
 
 /* === Activation === */
@@ -1740,13 +1767,17 @@ set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow
    */
   GPtrArray *items = g_ptr_array_new_full (tracks->len, g_object_unref);
 
+  guint section_number = 0;
   for (guint i = 0; i < tracks->len; i++) {
     const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
     if (!track || !track->uri)
       continue;
+    if (self->section_factory && track->section_title) section_number = 0;
+    section_number++;
+    guint number = self->section_factory ? section_number : items->len + 1;
     g_ptr_array_add (items, borrow
-      ? spotifygtk_track_item_new_borrowed (track, items->len + 1)
-      : spotifygtk_track_item_new (track, items->len + 1));
+      ? spotifygtk_track_item_new_borrowed (track, number)
+      : spotifygtk_track_item_new (track, number));
   }
 
   gint64 splice_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;

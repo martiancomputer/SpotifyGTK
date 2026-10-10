@@ -42,12 +42,22 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkArtistPage, spotifygtk_artist_page,
                       SPOTIFYGTK, ARTIST_PAGE, GtkBox)
 
 SpotifyGtkArtistPage *spotifygtk_artist_page_new (void);
+/* Render an immutable catalogue snapshot; retains its track arrays. */
+void spotifygtk_artist_page_set_releases (SpotifyGtkArtistPage *self,
+                                          GPtrArray *releases);
+/* Query/toggle the window-owned saved-album state. */
+typedef gboolean (*SpotifyGtkArtistReleaseActionFunc) (const gchar *uri,
+                                                       gboolean toggle,
+                                                       gpointer user_data);
+void spotifygtk_artist_page_set_release_action (SpotifyGtkArtistPage *self,
+                                                SpotifyGtkArtistReleaseActionFunc fn,
+                                                gpointer user_data);
 
 /*
  * Called for every track list this page creates.
  *
- * The releases are expanded in place, so the page builds a list per release
- * after the window has finished wiring the ones it owns. Without this those
+ * The releases share one virtualized list, wired after the window has
+ * finished wiring the top-tracks list. Without this those
  * rows would play but have no context menu, no like, and no play-context --
  * the same rows behaving differently depending which section they are in.
  */
