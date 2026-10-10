@@ -19,6 +19,7 @@ ui_component_sources = ui_resources + files(
   'sidebar.c',
   'playback_bar.c',
   'now_playing_panel.c',
+  'lyrics_lookup.c',
   'settings.c',
   'settings_page.c',
   'cover_loader.c',

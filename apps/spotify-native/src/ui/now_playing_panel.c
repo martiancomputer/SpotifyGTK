@@ -9,6 +9,7 @@
 #include <string.h>
 #include <libsoup/soup.h>
 #include "settings.h"
+#include "lyrics_lookup.h"
 #include "spotify/track_meta.h"
 #include "spotify/home_feed.h"
 
@@ -78,6 +79,7 @@ typedef struct {
   GWeakRef panel;                   /* do not retain a closed window */
   guint generation;
   SoupMessage *message;              /* online status and Retry-After */
+  gboolean search;                   /* one bounded fallback after exact miss */
 } LyricsRequest;
 
 static void
@@ -120,6 +122,7 @@ static guint signals[N_SIGNALS];
 static void on_lyrics_setting_changed (SpotifyGtkSettings *settings,
                                        gpointer user_data);
 static void lyrics_begin_load (SpotifyGtkNowPlayingPanel *self);
+static void lyrics_send_online (LyricsRequest *request, gboolean search);
 static void lyrics_update_line (SpotifyGtkNowPlayingPanel *self);
 static gboolean lyrics_center_tick (GtkWidget *widget, GdkFrameClock *clock,
                                     gpointer user_data);
@@ -381,7 +384,11 @@ on_lower_view_changed (GtkStack *stack, GParamSpec *pspec,
 static void
 on_lyrics_retry_clicked (GtkButton *button, gpointer user_data)
 {
-  lyrics_begin_load (user_data);
+  SpotifyGtkNowPlayingPanel *self = user_data;
+  LyricsCacheEntry *cached = self->lyrics_uri
+    ? g_hash_table_lookup (self->lyrics_cache, self->lyrics_uri) : NULL;
+  if (cached) cached->expires_us = 0;
+  lyrics_begin_load (self);
   (void) button;
 }
 
@@ -843,7 +850,7 @@ lyrics_install (SpotifyGtkNowPlayingPanel *self, GPtrArray *lines,
     gtk_widget_set_visible (self->lyrics_timed_scroller, FALSE);
     gtk_widget_set_visible (self->lyrics_plain_scroller, TRUE);
   } else {
-    lyrics_show_status (self, "No lyrics available for this recording");
+    lyrics_show_retry_status (self, "No matching lyrics found on LRCLIB");
   }
 }
 
@@ -904,8 +911,12 @@ lyrics_online_finished (GObject *source, GAsyncResult *result,
     return;
   }
   if (status == SOUP_STATUS_NOT_FOUND) {
+    if (!request->search) {
+      lyrics_send_online (request, TRUE);
+      return;
+    }
     lyrics_cache_put (self, NULL, NULL); /* short-lived negative result */
-    lyrics_show_status (self, "No lyrics available for this recording");
+    lyrics_show_retry_status (self, "No matching lyrics found on LRCLIB");
     lyrics_request_free (request);
     return;
   }
@@ -923,32 +934,59 @@ lyrics_online_finished (GObject *source, GAsyncResult *result,
     return;
   }
   g_autoptr(JsonParser) parser = json_parser_new ();
-  if (!json_parser_load_from_data (parser, data, (gssize) length, NULL) ||
-      !JSON_NODE_HOLDS_OBJECT (json_parser_get_root (parser))) {
+  if (!json_parser_load_from_data (parser, data, (gssize) length, NULL)) {
     lyrics_show_status (self, "Lyrics response was unreadable");
     lyrics_request_free (request);
     return;
   }
-  JsonObject *object = json_node_get_object (json_parser_get_root (parser));
-  if (json_object_has_member (object, "duration") &&
-      JSON_NODE_HOLDS_VALUE (json_object_get_member (object, "duration"))) {
-    gint64 reported = json_object_get_int_member (object, "duration");
-    gint64 expected = (self->lyrics_duration_ms + 500) / 1000;
-    if (reported > 0 && llabs (reported - expected) > 2) {
-      lyrics_show_status (self, "Lyrics match a different recording");
+  JsonNode *root = json_parser_get_root (parser);
+  JsonObject *object = NULL;
+  if (request->search && root && JSON_NODE_HOLDS_ARRAY (root)) {
+    object = spotifygtk_lyrics_select_match (json_node_get_array (root),
+      self->lyrics_title, self->lyrics_artist, self->lyrics_album,
+      self->lyrics_duration_ms);
+    if (!object) {
+      lyrics_cache_put (self, NULL, NULL);
+      lyrics_show_retry_status (self, "No matching lyrics found on LRCLIB");
+      lyrics_request_free (request);
+      return;
+    }
+  } else if (!request->search && root && JSON_NODE_HOLDS_OBJECT (root)) {
+    object = json_node_get_object (root);
+  } else {
+    lyrics_show_retry_status (self, "Lyrics response was unreadable");
+    lyrics_request_free (request);
+    return;
+  }
+  JsonNode *duration_node = json_object_get_member (object, "duration");
+  if (duration_node && JSON_NODE_HOLDS_VALUE (duration_node) &&
+      (json_node_get_value_type (duration_node) == G_TYPE_DOUBLE ||
+       json_node_get_value_type (duration_node) == G_TYPE_INT64)) {
+    gdouble reported = json_node_get_double (duration_node);
+    gdouble expected = self->lyrics_duration_ms / 1000.0;
+    if (!isfinite (reported) || reported <= 0 || fabs (reported - expected) > 2) {
+      if (!request->search) {
+        lyrics_send_online (request, TRUE);
+        return;
+      }
+      lyrics_show_retry_status (self, "Lyrics match a different recording");
       lyrics_request_free (request);
       return;
     }
   }
-  const gchar *synced = json_object_has_member (object, "syncedLyrics") &&
-                        JSON_NODE_HOLDS_VALUE (json_object_get_member (object,
-                                                                       "syncedLyrics"))
-    ? json_object_get_string_member (object, "syncedLyrics") : NULL;
-  const gchar *plain = json_object_has_member (object, "plainLyrics") &&
-                       JSON_NODE_HOLDS_VALUE (json_object_get_member (object,
-                                                                      "plainLyrics"))
-    ? json_object_get_string_member (object, "plainLyrics") : NULL;
+  JsonNode *synced_node = json_object_get_member (object, "syncedLyrics");
+  JsonNode *plain_node = json_object_get_member (object, "plainLyrics");
+  const gchar *synced = synced_node && JSON_NODE_HOLDS_VALUE (synced_node) &&
+    json_node_get_value_type (synced_node) == G_TYPE_STRING
+      ? json_node_get_string (synced_node) : NULL;
+  const gchar *plain = plain_node && JSON_NODE_HOLDS_VALUE (plain_node) &&
+    json_node_get_value_type (plain_node) == G_TYPE_STRING
+      ? json_node_get_string (plain_node) : NULL;
   g_autoptr(GPtrArray) lines = spotifygtk_lrc_parse (synced);
+  if (!request->search && lines->len == 0 && (!plain || !*plain)) {
+    lyrics_send_online (request, TRUE);
+    return;
+  }
   lyrics_cache_put (self, lines, plain);
   lyrics_install (self, lines, plain);
   lyrics_request_free (request);
@@ -988,6 +1026,19 @@ lyrics_start_online (LyricsRequest *request)
     return;
   }
 
+  lyrics_send_online (request, FALSE);
+}
+
+static void
+lyrics_send_online (LyricsRequest *request, gboolean search)
+{
+  g_autoptr(SpotifyGtkNowPlayingPanel) self = g_weak_ref_get (&request->panel);
+  if (!lyrics_request_current (request, self)) {
+    lyrics_request_free (request);
+    return;
+  }
+  request->search = search;
+
   g_autofree gchar *primary_artist = g_strdup (self->lyrics_artist);
   gchar *separator = strstr (primary_artist, ", ");
   if (separator)
@@ -997,9 +1048,15 @@ lyrics_start_online (LyricsRequest *request)
   g_autofree gchar *album = g_uri_escape_string (
     self->lyrics_album ? self->lyrics_album : "", NULL, FALSE);
   gint64 duration = CLAMP ((self->lyrics_duration_ms + 500) / 1000, 1, 3600);
-  g_autofree gchar *url = g_strdup_printf (
-    "https://lrclib.net/api/get?track_name=%s&artist_name=%s&album_name=%s"
-    "&duration=%" G_GINT64_FORMAT, title, artist, album, duration);
+  /* Search by title and primary artist, then validate every candidate locally.
+   * LRCLIB often stores featured credits differently from Spotify. The exact
+   * endpoint alone treats those harmless differences as missing recordings. */
+  g_autofree gchar *url = search
+    ? g_strdup_printf ("https://lrclib.net/api/search?track_name=%s&artist_name=%s",
+                        title, artist)
+    : g_strdup_printf (
+        "https://lrclib.net/api/get?track_name=%s&artist_name=%s&album_name=%s"
+        "&duration=%" G_GINT64_FORMAT, title, artist, album, duration);
   g_autoptr(SoupMessage) message = soup_message_new (SOUP_METHOD_GET, url);
   if (!message) {
     lyrics_show_status (self, "Lyrics lookup could not start");
@@ -1010,7 +1067,7 @@ lyrics_start_online (LyricsRequest *request)
     "User-Agent", "SpotifyGTK/0.1 (https://github.com/martiancomputer/SpotifyGTK)");
   if (!self->lyrics_session)
     self->lyrics_session = soup_session_new ();
-  request->message = g_object_ref (message);
+  g_set_object (&request->message, message);
   lyrics_show_status (self, "Finding lyrics…");
   soup_session_send_and_read_async (self->lyrics_session, message,
     G_PRIORITY_DEFAULT, self->lyrics_cancellable,

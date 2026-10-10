@@ -1,4 +1,10 @@
 if get_option('tests')
+  test_lyrics_lookup = executable('test-lyrics-lookup',
+    'test_lyrics_lookup.c', '../src/ui/lyrics_lookup.c',
+    include_directories: [include_directories('../src')],
+    dependencies: [glib_dep, json_glib_dep, m_dep],
+  )
+  test('lyrics-lookup', test_lyrics_lookup, timeout: 10)
   test_home_feed = executable('test-home-feed',
     'test_home_feed.c', '../src/spotify/home_feed.c', '../src/spotify/catalog_cache.c',
     include_directories: [include_directories('../src')],
