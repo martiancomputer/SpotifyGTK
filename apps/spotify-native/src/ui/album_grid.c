@@ -44,26 +44,6 @@
 #include <math.h>
 
 #define CARD_ART_PX     176   /* on-screen card art size */
-/*
- * Decode at roughly 2x the on-screen size. At 180 against a 150px card there
- * was almost no headroom, so any downscaling GTK did landed on nearly
- * one-to-one pixels and the art looked soft -- and on a HiDPI display the
- * card is physically 2x its logical size, so the source was genuinely below
- * the panel resolution. Spotify already hands us the largest variant it has
- * (see dup_largest_cover_id), so this costs download bandwidth we were
- * spending anyway; what it does cost is texture memory, ~4x per cached cover.
- */
-/*
- * Decode size for a card.
- *
- * At 1x, retain the existing 2x source headroom so cards remain sharp when a
- * shelf stretches them beyond their nominal width. At HiDPI, the scale factor
- * already supplies that density: multiplying by both 2 and scale made a
- * 176-logical-pixel card decode at 704px on a 2x display. Each ordinary RGB
- * cover then occupied about 1.5 MB and every scroll decoded four times as many
- * pixels as it displayed. Use whichever is larger -- 2x headroom or native
- * display density -- rather than stacking the two multipliers.
- */
 static gint
 card_decode_px (GtkWidget *widget)
 {
@@ -76,6 +56,42 @@ card_decode_px (GtkWidget *widget)
   return CARD_ART_PX * MAX (1, scale);
 }
 #define CARD_WIDTH      (CARD_ART_PX + 24)
+#define CARD_TITLE_PX    24
+#define CARD_SUBTITLE_PX 20
+#define CARD_GAP_PX     8
+
+/* A virtual grid must not derive row geometry from the text currently bound
+ * to its recycled children. Even an absolute Pango line height can have
+ * different extents when fallback fonts have different baselines. Give the
+ * cover and each one-line caption their own fixed slot instead. Text remains
+ * a normal GtkLabel, with ellipsization and accessibility intact. */
+static void
+card_column_measure (GtkWidget *widget, GtkOrientation orientation,
+                     gint for_size, gint *minimum, gint *natural,
+                     gint *minimum_baseline, gint *natural_baseline)
+{
+  *minimum = *natural = orientation == GTK_ORIENTATION_HORIZONTAL
+    ? CARD_ART_PX
+    : CARD_ART_PX + CARD_TITLE_PX + CARD_SUBTITLE_PX + 2 * CARD_GAP_PX;
+  *minimum_baseline = *natural_baseline = -1;
+  (void) widget; (void) for_size;
+}
+
+static void
+card_column_allocate (GtkWidget *widget, gint width, gint height, gint baseline)
+{
+  const gint slots[] = {CARD_ART_PX, CARD_TITLE_PX, CARD_SUBTITLE_PX};
+  GtkWidget *child = gtk_widget_get_first_child (widget);
+  gint y = 0;
+  for (guint i = 0; child && i < G_N_ELEMENTS (slots); i++) {
+    graphene_point_t point = GRAPHENE_POINT_INIT (0, y);
+    gtk_widget_allocate (child, width, slots[i], -1,
+                         gsk_transform_translate (NULL, &point));
+    y += slots[i] + CARD_GAP_PX;
+    child = gtk_widget_get_next_sibling (child);
+  }
+  (void) height; (void) baseline;
+}
 
 /* Vertical space a shelf card needs beyond the art itself: 8+8 box margins,
  * two 8px gaps, a title row and an artist row, plus the button's own padding
@@ -179,6 +195,12 @@ struct _SpotifyGtkAlbumGrid {
   gboolean       window_valid;
   guint          window_first;  /* inclusive model positions */
   guint          window_last;   /* exclusive model positions */
+  gboolean       trace;
+  guint          trace_id;
+  guint          trace_bind, trace_same_bind, trace_unbind, trace_reset;
+  guint          trace_load, trace_release, trace_scroll, trace_reversal;
+  gdouble        trace_value;
+  gint           trace_direction;
 
   SpotifyGtkAlbumPinQuery pin_query;
   gpointer                pin_query_data;
@@ -199,6 +221,45 @@ static gboolean card_near_viewport (SpotifyGtkAlbumGrid *self, GtkWidget *card);
 static gboolean card_near_allocated_viewport (SpotifyGtkAlbumGrid *self,
                                                GtkWidget *card);
 static gboolean on_grid_settled (gpointer user_data);
+
+static gboolean
+trace_grid (gpointer data)
+{
+  SpotifyGtkAlbumGrid *self = data;
+  if (!gtk_widget_get_mapped (self->scroller) ||
+      !(self->trace_scroll || self->trace_bind || self->trace_load))
+    return G_SOURCE_CONTINUE;
+  gint minima[4] = {G_MAXINT, G_MAXINT, G_MAXINT, G_MAXINT};
+  gint maxima[4] = {0};
+  guint painted = 0, hidden_sub = 0;
+  for (guint i = 0; i < self->bound_cards->len; i++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+    GtkWidget *parts[] = {gtk_widget_get_parent (card),
+      g_object_get_data (G_OBJECT (card), "art"),
+      g_object_get_data (G_OBJECT (card), "title"),
+      g_object_get_data (G_OBJECT (card), "sub")};
+    painted += g_object_get_data (G_OBJECT (card), "cover-shown") != NULL;
+    hidden_sub += !gtk_widget_get_visible (parts[3]);
+    for (guint p = 0; p < G_N_ELEMENTS (parts); p++) {
+      gint minimum, natural;
+      gtk_widget_measure (parts[p], GTK_ORIENTATION_VERTICAL,
+        MAX (1, gtk_widget_get_width (parts[p])), &minimum, &natural, NULL, NULL);
+      minima[p] = MIN (minima[p], minimum);
+      maxima[p] = MAX (maxima[p], minimum);
+    }
+  }
+  g_message ("grid-trace: value=%.2f upper=%.0f page=%.0f bound=%u painted=%u hidden-sub=%u"
+    " bind=%u same-bind=%u unbind=%u reset=%u load=%u release=%u scroll=%u reversals=%u"
+    " row=%d:%d art=%d:%d title=%d:%d subtitle=%d:%d",
+    gtk_adjustment_get_value (self->vadj), gtk_adjustment_get_upper (self->vadj),
+    gtk_adjustment_get_page_size (self->vadj), self->bound_cards->len, painted, hidden_sub,
+    self->trace_bind, self->trace_same_bind, self->trace_unbind, self->trace_reset,
+    self->trace_load, self->trace_release, self->trace_scroll, self->trace_reversal,
+    minima[0], maxima[0], minima[1], maxima[1], minima[2], maxima[2], minima[3], maxima[3]);
+  self->trace_bind = self->trace_same_bind = self->trace_unbind = self->trace_reset = 0;
+  self->trace_load = self->trace_release = self->trace_scroll = self->trace_reversal = 0;
+  return G_SOURCE_CONTINUE;
+}
 
 static gint
 shelf_card_width (SpotifyGtkAlbumGrid *self, guint position)
@@ -288,18 +349,34 @@ grid_model_window (SpotifyGtkAlbumGrid *self, guint *first_out, guint *last_out,
                        MAX (gtk_adjustment_get_lower (self->vadj), upper - page));
 
   if (self->wrap) {
-    guint columns = CLAMP (
-      (guint) MAX (1.0, floor ((gdouble) gtk_widget_get_width (self->scroller)
-                               / CARD_WIDTH)), 2, 8);
+    /* The scroller also includes the page gutters and scrollbar. Neither is
+     * part of GridView's column allocation. Use a realised cell when possible
+     * rather than guessing a different column count at a width boundary. */
+    gint cell_width = CARD_WIDTH;
+    gint row_minimum = CARD_ART_PX + CARD_TITLE_PX + CARD_SUBTITLE_PX +
+                        2 * CARD_GAP_PX + 16;
+    for (guint i = 0; i < self->bound_cards->len; i++) {
+      GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
+      GtkWidget *cell = gtk_widget_get_parent (card);
+      if (!cell || gtk_widget_get_width (cell) <= 0)
+        continue;
+      cell_width = gtk_widget_get_width (cell);
+      gtk_widget_measure (cell, GTK_ORIENTATION_VERTICAL, cell_width,
+                          &row_minimum, NULL, NULL, NULL);
+      break;
+    }
+    guint columns = CLAMP ((guint) MAX (1.0,
+      round ((gdouble) gtk_widget_get_width (self->view) / cell_width)), 2, 8);
     guint rows = (n + columns - 1) / columns;
     /* During the first allocation GTK temporarily reports an upper bound only
      * about one viewport high even though all model rows already exist.
      * Dividing that provisional value by row count produced a fictitious
      * 10-20px row, classified nearly all 290 albums as visible and queued 241
-     * covers. A row cannot physically be shorter than its 176px art plus the
-     * card's text/margin allowance; use that as the geometry trust floor. */
+     * covers. Use the actual card minimum as the trust floor, not the larger
+     * shelf clearance: an overestimate drifts away from visible rows farther
+     * down a long Library and suppresses their artwork requests. */
     gdouble row_extent = MAX (upper / MAX (rows, 1u),
-                              (gdouble) (CARD_ART_PX + SHELF_TEXT_ALLOWANCE));
+                              (gdouble) row_minimum);
     if (row_extent < 1.0)
       return FALSE;
 
@@ -416,9 +493,8 @@ card_retry_cover (GtkWidget *card, gboolean settled)
  * GtkGridView keeps far more cards bound than it shows, exactly as the list
  * does with rows, and a shelf holds a hundred. Retrying art for every bound
  * card decoded 350 covers on the home page against the thirty or so on
- * screen -- at 352x352 that is 165 MB of pixels, which is most of what this
- * process holds. Card art is the expensive kind: memory goes as the square of
- * the decode size, and cards decode at twice their nominal width on purpose.
+ * screen. Card art is the expensive kind: memory goes as the square of the
+ * decode size, especially at HiDPI scale factors.
  *
  * Both axes, because a shelf scrolls sideways and the page scrolls down.
  */
@@ -456,6 +532,9 @@ card_release_cover (GtkWidget *card)
 
   if (!g_object_get_data (G_OBJECT (card), "cover-shown"))
     return;
+  SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
+    gtk_widget_get_ancestor (card, SPOTIFYGTK_TYPE_ALBUM_GRID);
+  if (grid && grid->trace) grid->trace_release++;
 
   GtkWidget *art = g_object_get_data (G_OBJECT (card), "art");
   if (art) {
@@ -668,6 +747,15 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
 
   self->scrolling = TRUE;
   self->last_scroll_us = g_get_monotonic_time ();
+  if (self->trace) {
+    gdouble value = gtk_adjustment_get_value (adj);
+    gdouble delta = value - self->trace_value;
+    gint direction = delta > 1 ? 1 : delta < -1 ? -1 : 0;
+    self->trace_scroll++;
+    self->trace_reversal += direction && self->trace_direction && direction != self->trace_direction;
+    if (direction) self->trace_direction = direction;
+    self->trace_value = value;
+  }
 
   /* A wrapped grid needs a row destination, not a flat moving range. Update
    * only when a wheel event changes that destination row; animation frames in
@@ -691,9 +779,10 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
         /* Do not retain every destination crossed by a long eased gesture.
          * A final settle eventually contracted them, but by then one Library
          * fling could leave 82 textures for 25 mapped cards and saturate the
-         * renderer. Preserve cards GTK says are currently on-screen; release
-         * everything outside both that viewport and the new landing window. */
-        if (!gtk_widget_get_mapped (card))
+         * renderer. GTK maps its entire realised pool, including offscreen
+         * cells. Preserve the allocated viewport plus its reverse-scroll
+         * buffer; release everything outside that and the new landing window. */
+        if (!card_near_allocated_viewport (self, card))
           card_release_cover (card);
         continue;
       }
@@ -758,6 +847,9 @@ on_card_cover_loaded (GdkTexture *texture, gpointer user_data)
   }
 
   gtk_image_set_from_paintable (art, GDK_PAINTABLE (texture));
+  SpotifyGtkAlbumGrid *grid = (SpotifyGtkAlbumGrid *)
+    gtk_widget_get_ancestor (GTK_WIDGET (art), SPOTIFYGTK_TYPE_ALBUM_GRID);
+  if (grid && grid->trace) grid->trace_load++;
 
   if (card)
     g_object_set_data (G_OBJECT (card), "cover-shown", GINT_TO_POINTER (1));
@@ -954,6 +1046,9 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_widget_add_controller (card, GTK_EVENT_CONTROLLER (secondary));
 
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_layout_manager (box, gtk_custom_layout_new (
+    NULL, card_column_measure, card_column_allocate));
+  gtk_widget_set_overflow (box, GTK_OVERFLOW_HIDDEN);
   /* The button owns activation and its context menu. Its display-only
    * artwork and labels should not churn descendant hover states as cards
    * move beneath a stationary pointer. */
@@ -984,6 +1079,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   GtkWidget *title = gtk_label_new ("");
   gtk_widget_add_css_class (title, "media-card-title");
   gtk_label_set_xalign (GTK_LABEL (title), 0.0);
+  gtk_label_set_single_line_mode (GTK_LABEL (title), TRUE);
   gtk_label_set_ellipsize (GTK_LABEL (title), PANGO_ELLIPSIZE_END);
   gtk_label_set_max_width_chars (GTK_LABEL (title), 18);
   gtk_box_append (GTK_BOX (box), title);
@@ -991,6 +1087,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   GtkWidget *sub = gtk_label_new ("");
   gtk_widget_add_css_class (sub, "media-card-subtitle");
   gtk_label_set_xalign (GTK_LABEL (sub), 0.0);
+  gtk_label_set_single_line_mode (GTK_LABEL (sub), TRUE);
   gtk_label_set_ellipsize (GTK_LABEL (sub), PANGO_ELLIPSIZE_END);
   gtk_label_set_max_width_chars (GTK_LABEL (sub), 20);
   gtk_box_append (GTK_BOX (box), sub);
@@ -1019,6 +1116,11 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   SpotifyGtkAlbumItem *item = gtk_list_item_get_item (list_item);
   if (!card || !item)
     return;
+  if (self->trace) {
+    self->trace_bind++;
+    self->trace_same_bind += g_strcmp0 (
+      g_object_get_data (G_OBJECT (card), "album-uri"), item->uri) == 0;
+  }
 
   card_apply_item (self, card, item);
   guint position = gtk_list_item_get_position (list_item);
@@ -1056,36 +1158,31 @@ card_apply_item (SpotifyGtkAlbumGrid *self, GtkWidget *card, SpotifyGtkAlbumItem
 
   gtk_label_set_text (GTK_LABEL (title), item->name ? item->name : "Unknown album");
   gtk_label_set_text (GTK_LABEL (sub), item->artist ? item->artist : "");
-  gtk_widget_set_visible (sub, item->artist && *item->artist);
+  /* Empty metadata must occupy the same caption slot as resolved metadata.
+   * GridView estimates offscreen rows from the realised card heights. */
+  gtk_widget_set_visible (sub, TRUE);
 
   g_object_set_data_full (G_OBJECT (card), "album-uri", g_strdup (item->uri), g_free);
   g_object_set_data_full (G_OBJECT (card), "album-name", g_strdup (item->name), g_free);
 
-  /* Reset to the placeholder first: this card may still be showing the cover of
-   * whichever album it was last bound to. */
-  gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
-  gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
+  /* Resolving metadata is not a new artwork binding. Preserve both a displayed
+   * cover and its in-flight request when the cover identity is unchanged.
+   * Otherwise an innocuous title update flashes image -> placeholder -> image.
+   * Cancel before installing a different identity, so a late result cannot
+   * paint onto a card that now represents another cover. */
+  if (g_strcmp0 (g_object_get_data (G_OBJECT (card), "cover-id"),
+                 item->cover_id) != 0) {
+    if (self->trace && g_object_get_data (G_OBJECT (card), "cover-shown"))
+      self->trace_reset++;
+    card_release_cover (card);
+    g_object_set_data (G_OBJECT (card), "cover-failures", NULL);
+    g_object_set_data_full (G_OBJECT (card), "cover-id",
+                            g_strdup (item->cover_id), g_free);
+  }
 
-  g_object_set_data (G_OBJECT (card), "cover-shown", NULL);
-  g_object_set_data (G_OBJECT (card), "cover-failures", NULL);
-  g_object_set_data_full (G_OBJECT (card), "cover-id",
-                          g_strdup (item->cover_id), g_free);
-
-  /*
-   * Ask when the card is mapped, not when it is bound.
-   *
-   * GtkGridView binds far more cards than it shows -- a shelf holds a hundred
-   * and the home page bound 350 against the thirty on screen, every one of
-   * them decoding a 352x352 texture. At half a megabyte each that was 165 MB
-   * of pixels, most of what this process holds, for art nobody could see.
-   *
-   * Mapping is GTK's own answer to "is this on screen", and it arrives at
-   * exactly the right moment: a card that scrolls into view is mapped, and
-   * one that never does is never decoded. Requesting on bind could not tell
-   * the difference, and filtering on bind is worse than useless -- a card is
-   * not mapped *yet* at that point, so it would suppress everything and
-   * nothing would bring it back on a page that does not scroll.
-   */
+  /* Binding (and even mapping) includes a large offscreen pool. Let the
+   * coalesced viewport scan select covers after GTK allocates the new cards;
+   * do not eagerly decode every item or inspect a recycled card's old bounds. */
   if (item->cover_id && *item->cover_id)
     schedule_grid_settle (self);
 }
@@ -1095,6 +1192,7 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
 {
   SpotifyGtkAlbumGrid *self = user_data;
   GtkWidget *card = gtk_list_item_get_child (list_item);
+  if (self->trace) self->trace_unbind++;
   if (card && self->bound_cards)
     g_ptr_array_remove_fast (self->bound_cards, card);
   if (!card)
@@ -1103,17 +1201,10 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
   g_object_set_data (G_OBJECT (card), "bound-album-item", NULL);
   g_object_set_data (G_OBJECT (card), "bound-position", NULL);
 
-  /* Clearing the data fires cancel_and_unref, stopping an in-flight decode. */
-  g_object_set_data (G_OBJECT (card), "cover-cancel", NULL);
-
   /* Drop this card's reference on the texture. Without it a recycled card would
    * keep the old cover alive, and the retained set would grow with everything
    * ever scrolled past rather than with what is on screen. */
-  GtkWidget *art = g_object_get_data (G_OBJECT (card), "art");
-  if (art) {
-    gtk_image_set_from_icon_name (GTK_IMAGE (art), "media-optical-symbolic");
-    gtk_image_set_pixel_size (GTK_IMAGE (art), CARD_ART_PX);
-  }
+  card_release_cover (card);
   (void) factory; (void) user_data;
 }
 
@@ -1542,6 +1633,10 @@ spotifygtk_album_grid_dispose (GObject *object)
   SpotifyGtkAlbumGrid *self = SPOTIFYGTK_ALBUM_GRID (object);
 
   /* The settle timer holds a plain pointer to this grid. */
+  if (self->trace_id) {
+    g_source_remove (self->trace_id);
+    self->trace_id = 0;
+  }
   if (self->settle_id) {
     g_source_remove (self->settle_id);
     self->settle_id = 0;
@@ -1731,6 +1826,9 @@ album_grid_new (gboolean wrap)
                     G_CALLBACK (on_grid_geometry_changed), self);
 
   self->bound_cards = g_ptr_array_new ();
+  self->trace = wrap && g_getenv ("SPOTIFY_GRID_TRACE") != NULL;
+  if (self->trace)
+    self->trace_id = g_timeout_add (500, trace_grid, self);
   self->vadj = wrap
     ? gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller))
     : gtk_scrolled_window_get_hadjustment (GTK_SCROLLED_WINDOW (scroller));
