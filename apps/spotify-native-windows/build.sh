@@ -35,6 +35,10 @@ else
   setup_args=(--cross-file "$CROSS" --native-file "$HERE/cross/linux-build-tools.ini")
 fi
 
+if [[ -n "${SPOTIFYGTK_EXTRA_LINK_DIR:-}" ]]; then
+  setup_args+=("-Dc_link_args=-mwindows,-L${SPOTIFYGTK_EXTRA_LINK_DIR}")
+fi
+
 if [[ ! -f "$BUILD/meson-private/coredata.dat" ]]; then
   meson setup "$BUILD" "$SRC" "${setup_args[@]}"
 else

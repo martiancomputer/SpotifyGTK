@@ -115,6 +115,7 @@ jobs:
           export prefix="$base/ucrt64"
           export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/share/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$base"
+          export SPOTIFYGTK_EXTRA_LINK_DIR="$prefix/lib"
           export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/llvm-mingw-ucrt64-linux.ini"
           bash apps/spotify-native-windows/build.sh
           test "$(PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" PKG_CONFIG_SYSROOT_DIR="$PKG_CONFIG_SYSROOT_DIR" pkg-config --variable=libdir gtk4)" = /ucrt64/lib
