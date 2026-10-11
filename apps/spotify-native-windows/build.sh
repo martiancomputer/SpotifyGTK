@@ -36,7 +36,7 @@ else
 fi
 
 if [[ -n "${SPOTIFYGTK_EXTRA_LINK_DIR:-}" ]]; then
-  setup_args+=("-Dc_link_args=-mwindows,-L${SPOTIFYGTK_EXTRA_LINK_DIR}")
+  setup_args+=("-Dc_link_args=['-mwindows','-L${SPOTIFYGTK_EXTRA_LINK_DIR}']")
 fi
 
 if [[ ! -f "$BUILD/meson-private/coredata.dat" ]]; then
