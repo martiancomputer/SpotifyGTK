@@ -134,39 +134,43 @@ if source not in text:
     raise SystemExit('Pinned GTK AppImage path patch no longer matches linuxdeploy plugin.')
 text = text.replace(source, target, 1)
 
-# Ubuntu's newer multiarch layout keeps GDK Pixbuf loaders under /usr/lib even
-# though the library directory is /usr/lib/<multiarch>. Discover the installed
-# loader directory rather than assuming it is relative to GTK's library dir.
-source = '''gdk_pixbuf_binarydir="$(get_pkgconf_variable "gdk_pixbuf_binarydir" "gdk-pixbuf-2.0" "$gdk_libdir/gdk-pixbuf-2.0/2.10.0")"'''
-target = '''gdk_pixbuf_binarydir="$(get_pkgconf_variable "gdk_pixbuf_binarydir" "gdk-pixbuf-2.0" "$(find /usr/lib -type d -path '*/gdk-pixbuf-2.0/2.10.0' -print -quit)")"'''
-if source not in text:
-    raise SystemExit('GDK Pixbuf AppImage path patch no longer matches linuxdeploy plugin.')
-text = text.replace(source, target, 1)
-
-# Some pkg-config files retain a binarydir path from the pre-multiarch layout;
-# if that advertised directory is stale, fall back to the installed loaders.
-fallback = '''if [ ! -d "$gdk_pixbuf_binarydir" ]; then
+start_marker = 'echo "Installing GDK PixBufs"\n'
+end_marker = 'sed -i "s|$gdk_pixbuf_moduledir/||g" "$APPDIR/${gdk_pixbuf_cache_file/$LD_GTK_LIBRARY_PATH//usr/lib}"\n'
+start = text.find(start_marker)
+end = text.find(end_marker, start)
+if start < 0 or end < 0:
+    raise SystemExit('GDK Pixbuf AppImage section no longer matches linuxdeploy plugin.')
+end += len(end_marker)
+replacement = '''LD_GTK_LIBRARY_PATH="/usr/lib"
+echo "Installing GDK PixBufs"
+gdk_libdir="$(get_pkgconf_variable "libdir" "gdk-pixbuf-2.0" "$LD_GTK_LIBRARY_PATH")"
+gdk_pixbuf_binarydir="$(get_pkgconf_variable "gdk_pixbuf_binarydir" "gdk-pixbuf-2.0" "$gdk_libdir/gdk-pixbuf-2.0/2.10.0")"
+if [ ! -d "$gdk_pixbuf_binarydir" ]; then
     gdk_pixbuf_binarydir="$(find /usr/lib -type d -path '*/gdk-pixbuf-2.0/2.10.0' -print -quit)"
-fi'''
-text = text.replace(target, target + '\n' + fallback, 1)
-
-for variable, suffix in (
-    ('gdk_pixbuf_cache_file', 'loaders.cache'),
-    ('gdk_pixbuf_moduledir', 'loaders'),
-):
-    source = f'''{variable}="$(get_pkgconf_variable "{variable}" "gdk-pixbuf-2.0" "$gdk_pixbuf_binarydir/{suffix}")"'''
-    target = f'''{variable}="$gdk_pixbuf_binarydir/{suffix}"'''
-    if source not in text:
-        raise SystemExit(f'GDK Pixbuf AppImage {variable} patch no longer matches linuxdeploy plugin.')
-    text = text.replace(source, target, 1)
-
-# Keep copy_lib_tree and the module-cache rewrite rooted at /usr/lib so both
-# multiarch and non-multiarch loader paths map correctly into AppDir/usr/lib.
-source = 'echo "Installing GDK PixBufs"'
-target = 'LD_GTK_LIBRARY_PATH="/usr/lib"\necho "Installing GDK PixBufs"'
-if source not in text:
-    raise SystemExit('GDK Pixbuf AppImage root patch no longer matches linuxdeploy plugin.')
-text = text.replace(source, target, 1)
+fi
+if [ -n "$gdk_pixbuf_binarydir" ] && [ -d "$gdk_pixbuf_binarydir" ]; then
+    gdk_pixbuf_cache_file="$gdk_pixbuf_binarydir/loaders.cache"
+    gdk_pixbuf_moduledir="$gdk_pixbuf_binarydir/loaders"
+    gdk_pixbuf_query="$(search_tool "gdk-pixbuf-query-loaders" "gdk-pixbuf-2.0")"
+    copy_lib_tree "$gdk_pixbuf_binarydir" "$APPDIR/"
+    cat >> "$HOOKFILE" <<EOF
+export GDK_PIXBUF_MODULE_FILE="\\$APPDIR/${gdk_pixbuf_cache_file/$LD_GTK_LIBRARY_PATH//usr/lib}"
+EOF
+    if [ -x "$gdk_pixbuf_query" ]; then
+        echo "Updating pixbuf cache in $APPDIR/${gdk_pixbuf_cache_file/$LD_GTK_LIBRARY_PATH//usr/lib}"
+        "$gdk_pixbuf_query" > "$APPDIR/${gdk_pixbuf_cache_file/$LD_GTK_LIBRARY_PATH//usr/lib}"
+    else
+        echo "WARNING: gdk-pixbuf-query-loaders not found"
+    fi
+    if [ ! -f "$APPDIR/${gdk_pixbuf_cache_file/$LD_GTK_LIBRARY_PATH//usr/lib}" ]; then
+        echo "WARNING: loaders.cache file is missing"
+    fi
+    sed -i "s|$gdk_pixbuf_moduledir/||g" "$APPDIR/${gdk_pixbuf_cache_file/$LD_GTK_LIBRARY_PATH//usr/lib}"
+else
+    echo "No legacy GDK Pixbuf modules found; relying on the system GDK Pixbuf backend."
+fi
+'''
+text = text[:start] + replacement + text[end:]
 plugin.write_text(text)
 PY
 
