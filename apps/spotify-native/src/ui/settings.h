@@ -107,6 +107,19 @@ SpotifyGtkRenderer spotifygtk_settings_get_renderer (SpotifyGtkSettings *self);
 void               spotifygtk_settings_set_renderer (SpotifyGtkSettings *self,
                                                       SpotifyGtkRenderer renderer);
 
+#ifdef __linux__
+/* Optional enhanced GDK frame-clock ceiling. Stock GTK retains native pacing
+ * regardless of this saved value; zero means Default. */
+guint spotifygtk_settings_get_frame_rate (SpotifyGtkSettings *self);
+void  spotifygtk_settings_set_frame_rate (SpotifyGtkSettings *self, guint fps);
+guint spotifygtk_settings_get_ui_scale (SpotifyGtkSettings *self);
+gboolean spotifygtk_settings_get_ui_scale_custom (SpotifyGtkSettings *self);
+/* Percent relative to the desktop scale, 25..300, or 0 for Default.
+ * Custom is persisted separately so Custom 100% stays Custom after restart. */
+void spotifygtk_settings_set_ui_scale (SpotifyGtkSettings *self,
+                                       guint percent, gboolean custom);
+#endif
+
 gboolean spotifygtk_settings_get_aggressive_filtering (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,
                                                        gboolean enabled);

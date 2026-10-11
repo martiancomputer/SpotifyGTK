@@ -1,0 +1,3 @@
+[submodule "gtk4-enhanced"]
+	path = dependencies/gtk4-enhanced
+	url = https://github.com/martiancomputer/GTK4-Enhanced.git

@@ -1,4 +1,7 @@
 #include "dialog_host.h"
+#ifdef __linux__
+#include "presentation_view.h"
+#endif
 
 void
 spotifygtk_dialog_prepare (AdwDialog *dialog)
@@ -120,6 +123,9 @@ on_visible_dialog (AdwApplicationWindow *window, GParamSpec *pspec, gpointer dat
   AdwDialog *dialog = adw_application_window_get_visible_dialog (window);
   if (!dialog || g_object_get_data (G_OBJECT (dialog), "dialog-host-bound")) return;
   g_object_set_data (G_OBJECT (dialog), "dialog-host-bound", GINT_TO_POINTER (1));
+#ifdef __linux__
+  spotifygtk_presentation_wrap_dialog (dialog);
+#endif
   /* AdwDialog limits event propagation to its own subtree. Window-level
    * handlers never see real modal pointer events, even though direct signal
    * emission in a unit test appeared to work. Keep the modal barrier and

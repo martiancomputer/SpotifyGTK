@@ -36,6 +36,10 @@
 #include "device_playlists.h"
 #include "playlist_create_dialog.h"
 #include "dialog_host.h"
+#ifdef __linux__
+#include "presentation_view.h"
+#include "frame_policy.h"
+#endif
 #include "settings_page.h"
 #include "spotify/native_auth.h"
 #include "settings.h"
@@ -123,6 +127,9 @@ struct _SpotifyGtkNativeWindow {
   GdkFrameClock *cover_release_clock;
   gulong cover_release_handler;
   GtkWidget *window_title;       /* centered header label, borrowed */
+#ifdef __linux__
+  GtkWidget *presentation_base;  /* owned across live wrapper replacement */
+#endif
   /* Every track list wired through wire_track_list(), so a liked mark can be
    * fanned out to all of them: one track can be on screen in more than one
    * list at a time. Borrowed -- the lists belong to their pages. */
@@ -6670,6 +6677,30 @@ on_decoration_layout_changed (GtkHeaderBar *header)
   sync_decoration_layout (header);
 }
 
+#ifdef __linux__
+static void
+on_presentation_scale_changed (SpotifyGtkSettings *settings, SpotifyGtkNativeWindow *self)
+{
+  if (!self->presentation_base) return;
+  guint percent = spotifygtk_settings_get_ui_scale (settings);
+  gboolean native = percent == 0 || percent == 100;
+  GtkWidget *current = adw_application_window_get_content (ADW_APPLICATION_WINDOW (self));
+  if (native == (current == self->presentation_base)) return;
+  GtkWidget *focus = gtk_window_get_focus (GTK_WINDOW (self));
+  if (focus) g_object_ref (focus);
+  g_object_ref (current);
+  adw_application_window_set_content (ADW_APPLICATION_WINDOW (self), NULL);
+  if (current != self->presentation_base) spotifygtk_presentation_detach (current);
+  adw_application_window_set_content (ADW_APPLICATION_WINDOW (self),
+    spotifygtk_presentation_wrap (self->presentation_base));
+  g_object_unref (current);
+  if (focus) {
+    gtk_widget_grab_focus (focus);
+    g_object_unref (focus);
+  }
+}
+#endif
+
 static void
 spotifygtk_native_window_constructed (GObject *object)
 {
@@ -7053,7 +7084,14 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_box_append (GTK_BOX (window_content), header_handle);
   gtk_widget_set_vexpand (shell, TRUE);
   gtk_box_append (GTK_BOX (window_content), shell);
+#ifdef __linux__
+  self->presentation_base = g_object_ref_sink (window_content);
+  adw_application_window_set_content (ADW_APPLICATION_WINDOW (self),
+    spotifygtk_presentation_wrap (window_content));
+  g_signal_connect_object (settings, "changed", G_CALLBACK (on_presentation_scale_changed), self, 0);
+#else
   adw_application_window_set_content (ADW_APPLICATION_WINDOW (self), window_content);
+#endif
   spotifygtk_dialog_host_bind (ADW_APPLICATION_WINDOW (self));
   mpris_start (self);
 
@@ -7145,6 +7183,9 @@ spotifygtk_native_window_dispose (GObject *object)
   }
   g_clear_pointer (&self->loading_sources, g_hash_table_unref);
   g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
+#ifdef __linux__
+  g_clear_object (&self->presentation_base);
+#endif
   if (self->auth)
     g_signal_handlers_disconnect_by_data (self->auth, self);
   if (self->session) {
@@ -7239,6 +7280,9 @@ on_window_realize (GtkWidget *widget, gpointer user_data)
 static void
 spotifygtk_native_window_init (SpotifyGtkNativeWindow *self)
 {
+#ifdef __linux__
+  spotifygtk_frame_policy_bind (GTK_WIDGET (self));
+#endif
   g_signal_connect (self, "realize", G_CALLBACK (on_window_realize), NULL);
 
   self->context_index = -1;

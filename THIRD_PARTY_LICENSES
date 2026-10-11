@@ -2,6 +2,23 @@ SpotifyGTK incorporates code derived from the following third-party
 projects. Each is reproduced under the terms of its own license below.
 
 ================================================================================
+GTK4-Enhanced (optional GTK 4.24.1 runtime)
+================================================================================
+Source:     https://github.com/martiancomputer/GTK4-Enhanced
+Upstream:   https://gitlab.gnome.org/GNOME/gtk
+Used in:    dependencies/gtk4-enhanced (pinned Git submodule)
+Nature:     Independently maintained GTK fork with an opt-in private GDK
+            frame-rate policy. Built separately and dynamically linked by
+            the optional Linux experiment; system GTK remains a fallback.
+License:    LGPL-2.1-or-later, subject to component-specific notices.
+
+The submodule retains GTK's COPYING, AUTHORS and individual source notices.
+The precise upstream revision and modifications are documented in its
+UPSTREAM.md and FRAME_POLICY.md. Distributions bundling this modified runtime
+must retain applicable notices and provide corresponding source as required
+by the component licenses. SpotifyGTK's license does not replace GTK's license.
+
+================================================================================
 shannon (Rust crate, v0.2.0)
 ================================================================================
 Source:     https://crates.io/crates/shannon

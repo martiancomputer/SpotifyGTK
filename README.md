@@ -178,6 +178,55 @@ everywhere, restrict it to Now Playing, or disable it; persistent caching and
 aggressive bounded loading can be switched or cleared live. Settings also shows
 the signed-in display name, account id, product tier and avatar.
 
+On Linux, Settings → Performance offers live interface scaling: Default,
+Custom, 25%, 50%, 75%, 100%, 150% or 300%. Custom scale accepts whole percentages
+from 25% through 300%, applied with the Apply button. Scaling changes text,
+artwork, spacing and controls together, relative to the desktop's existing
+scale. Overflow uses overlay scrollbars without wrapping the whole application
+in a scrolling viewport. Default and 100% use the original native widget
+hierarchy, with no scaling wrapper. The artwork viewer still fits its image to
+the window.
+
+Frame-rate choices (Default, 30, 60, 120, 144, 240 and 360 FPS) remain stored,
+but the control is disabled on stock GTK. With the optional GTK4-Enhanced
+runtime it enables an experimental per-window GDK rendering ceiling. Default
+uses upstream pacing; explicit values never force redraws or bypass vsync.
+The compositor and display can impose a lower presented rate. There is no
+app-side snapshot cache, frame-skipping workaround, or redraw timer. Both
+preferences survive restart. These controls are not yet enabled on Windows.
+
+### Optional enhanced GTK experiment (Linux)
+
+The pinned `dependencies/gtk4-enhanced` submodule follows GTK 4.24.1. This updates
+GTK rather than downgrading libadwaita; host libadwaita remains in use. Install
+the fork's documented build dependencies (including GLib 2.89.3+, Pango 1.58+,
+GLib development tools and SassC) before building:
+
+```sh
+git submodule update --init dependencies/gtk4-enhanced
+./packaging/build-enhanced-gtk.sh
+./packaging/run-enhanced-gtk.sh
+```
+
+The script builds GTK first into `_stage/gtk4-enhanced/usr`, then builds the
+client in `apps/spotify-native/enhanced-build`. It does not install system
+libraries, fetch CI jobs, alter Windows packaging, or replace the normal
+`apps/spotify-native/build` client. Close the running client before switching
+runtimes. Run the normal client for a stock-GTK rollback.
+
+Advanced local builds can override `GTK_ENHANCED_SOURCE`,
+`GTK_ENHANCED_BUILD`, `GTK_ENHANCED_PREFIX`, `GTK_CONSUMER_BUILD` and
+`GTK_BUILD_JOBS`. `GTK_ENHANCED_NATIVE_FILE` selects local Meson tooling;
+never commit that machine-specific file. Reuse the same prefix/build overrides
+with the launch script. Generated build paths are local artifacts, not public
+project configuration. Introspection generation is disabled for this C-only
+experiment; this is not a general-purpose GTK distribution package.
+
+Inspect `ldd apps/spotify-native/enhanced-build/src/spotify-native` and the live
+process's loaded-library map to confirm the fork is actually loaded. A submodule
+or a selected FPS number alone is not evidence of runtime use or physical
+120/144/240/360 Hz presentation. No transparency implementation is included.
+
 Windows is supported and plays through WASAPI — sign-in, streaming and
 playback are all verified on real hardware. Build it with
 [the Windows instructions](apps/spotify-native-windows/README.md#building-and-running-it-on-windows),
@@ -194,6 +243,7 @@ Per-subsystem status, architecture and measured performance live in
 apps/spotify-connect/   Web API control client (HTTP + JSON only) -- own README
 apps/spotify-native/    The player: protocol, audio engine, GTK4 interface
 apps/spotify-native-windows/   Windows toolchain and packaging
+dependencies/gtk4-enhanced/    Optional pinned GTK source fork (Linux experiment)
 research/               Protocol findings, internals, legal position
 ```
 

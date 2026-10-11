@@ -3,6 +3,9 @@
  */
 
 #include "settings.h"
+#ifdef __linux__
+#include "presentation_policy.h"
+#endif
 
 #include <glib/gstdio.h>
 #include <string.h>
@@ -18,6 +21,11 @@ struct _SpotifyGtkSettings {
   SpotifyGtkSampleFormat sample_format;
   SpotifyGtkResamplerMode resampler_mode;
   SpotifyGtkRenderer   renderer;
+#ifdef __linux__
+  guint frame_rate;
+  guint ui_scale;
+  gboolean ui_scale_custom;
+#endif
 
   gboolean eq_enabled;
   gboolean aggressive_filtering;
@@ -101,6 +109,17 @@ load (SpotifyGtkSettings *self)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "resampler-mode", NULL);
   self->renderer = (SpotifyGtkRenderer)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "renderer", NULL);
+#ifdef __linux__
+  gint fps = g_key_file_get_integer (kf, SETTINGS_GROUP, "frame-rate", NULL);
+  if (fps >= 0 && spotifygtk_presentation_valid_fps ((guint) fps))
+    self->frame_rate = (guint) fps;
+  gint scale = g_key_file_get_integer (kf, SETTINGS_GROUP, "ui-scale", NULL);
+  gboolean custom = g_key_file_get_boolean (kf, SETTINGS_GROUP, "ui-scale-custom", NULL);
+  if (scale >= 0 && spotifygtk_presentation_valid_scale ((guint) scale, custom)) {
+    self->ui_scale = (guint) scale;
+    self->ui_scale_custom = custom;
+  }
+#endif
 
   self->eq_enabled = g_key_file_get_boolean (kf, SETTINGS_GROUP, "eq-enabled", NULL);
   self->aggressive_filtering =
@@ -238,6 +257,11 @@ save (SpotifyGtkSettings *self)
   g_key_file_remove_key (kf, SETTINGS_GROUP, "aggressive-media", NULL);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "scroll-smoothness",
                           (gint) self->scroll_smoothness);
+#ifdef __linux__
+  g_key_file_set_integer (kf, SETTINGS_GROUP, "frame-rate", (gint) self->frame_rate);
+  g_key_file_set_integer (kf, SETTINGS_GROUP, "ui-scale", (gint) self->ui_scale);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "ui-scale-custom", self->ui_scale_custom);
+#endif
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "shuffle", self->shuffle);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "repeat", (gint) self->repeat);
   g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains,
@@ -421,6 +445,52 @@ DEFINE_SETTING (sample_rate, SpotifyGtkSampleRate, sample_rate, SPOTIFYGTK_SAMPL
 DEFINE_SETTING (sample_format, SpotifyGtkSampleFormat, sample_format, SPOTIFYGTK_SAMPLE_FORMAT_32)
 DEFINE_SETTING (resampler_mode, SpotifyGtkResamplerMode, resampler_mode, SPOTIFYGTK_RESAMPLER_LINEAR)
 DEFINE_SETTING (renderer,    SpotifyGtkRenderer,   renderer,    SPOTIFYGTK_RENDERER_CAIRO)
+
+#ifdef __linux__
+guint
+spotifygtk_settings_get_frame_rate (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), 0);
+  return self->frame_rate;
+}
+
+void
+spotifygtk_settings_set_frame_rate (SpotifyGtkSettings *self, guint fps)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (!spotifygtk_presentation_valid_fps (fps) || self->frame_rate == fps) return;
+  self->frame_rate = fps;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
+guint
+spotifygtk_settings_get_ui_scale (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), 0);
+  return self->ui_scale;
+}
+
+gboolean
+spotifygtk_settings_get_ui_scale_custom (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  return self->ui_scale_custom;
+}
+
+void
+spotifygtk_settings_set_ui_scale (SpotifyGtkSettings *self, guint percent, gboolean custom)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  custom = !!custom;
+  if (!spotifygtk_presentation_valid_scale (percent, custom) ||
+      (self->ui_scale == percent && self->ui_scale_custom == custom)) return;
+  self->ui_scale = percent;
+  self->ui_scale_custom = custom;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+#endif
 
 guint
 spotifygtk_settings_get_lyrics_font_size (SpotifyGtkSettings *self)

@@ -33,10 +33,16 @@ if get_option('tests')
   )
   test('catalog-cache', test_catalog_cache, timeout: 15)
   if enable_gui
+    dialog_presentation_test_sources = []
+    if host_machine.system() == 'linux'
+      dialog_presentation_test_sources = files(
+        '../src/ui/presentation_view.c', '../src/ui/settings.c',
+      )
+    endif
     test_artwork_viewer = executable('test-artwork-viewer',
-      'test_artwork_viewer.c',
+      'test_artwork_viewer.c', dialog_presentation_test_sources,
       include_directories: [config_inc, include_directories('../src')],
-      dependencies: [gtk4_dep, adw_check],
+      dependencies: [gtk4_dep, adw_check, m_dep],
     )
     test('artwork-viewer', test_artwork_viewer, timeout: 15)
     test_ui_refinements = executable('test-ui-refinements',
@@ -57,9 +63,9 @@ if get_option('tests')
     )
     test('pending-artist-playlist-cards', test_pending_cards, timeout: 10)
     test_playlist_create_dialog = executable('test-playlist-create-dialog',
-      'test_playlist_create_dialog.c',
+      'test_playlist_create_dialog.c', dialog_presentation_test_sources,
       include_directories: [config_inc, include_directories('../src')],
-      dependencies: [gtk4_dep, adw_check],
+      dependencies: [gtk4_dep, adw_check, m_dep],
     )
     test('playlist-create-wizard', test_playlist_create_dialog, timeout: 10)
     test_shuffle_toggle = executable('test-shuffle-toggle',
@@ -129,6 +135,15 @@ if get_option('tests')
     dependencies: [glib_dep, gio_dep],
   )
   test('settings', test_settings)
+
+  if host_machine.system() == 'linux'
+    test_presentation_policy = executable('test-presentation-policy',
+      'test_presentation_policy.c',
+      include_directories: [include_directories('../src')],
+      dependencies: [glib_dep, m_dep],
+    )
+    test('presentation-policy', test_presentation_policy)
+  endif
 
   if have_local_av
     test_local_catalog = executable('test-local-catalog',

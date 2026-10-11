@@ -1,6 +1,7 @@
 # Meson build dirs
 build/
 _build/
+/_stage/
 builddir/
 # librespot reference repository (external, not part of project)
 librespot-repo/

@@ -26,6 +26,8 @@ local playlist overlays must not be uploaded as Spotify tracks.
 - `apps/spotify-connect/`: separate HTTP/JSON control client, not the player.
 - `research/`: protocol findings, architecture, and legal context.
 - `packaging/`: distribution packaging support.
+- `dependencies/gtk4-enhanced/`: optional pinned GTK fork, built into an isolated
+  runtime for the Linux frame-rate experiment; never replace system libraries.
 - `README.md`, `LICENSE`, and `THIRD_PARTY_LICENSES`: public project guidance,
   licensing, and upstream attribution.
 
