@@ -39,6 +39,7 @@ meson setup "${gtk_setup_args[@]}" "$gtk_build" "$gtk_source" \
   "-Dc_args=['-mcrtdll=ucrt','-D_UCRT','-ffile-prefix-map=$gtk_project_root=.','-ffile-prefix-map=$gtk_source=gtk4-enhanced']" \
   "-Dc_link_args=['-mcrtdll=ucrt','-mwindows','-L$gtk_base/ucrt64/lib']" \
   -Ddocumentation=false -Dman-pages=false -Dintrospection=disabled \
+  -Dmedia-gstreamer=disabled \
   -Dbuild-demos=false -Dbuild-examples=false \
   -Dbuild-tests=false -Dbuild-testsuite=false
 meson compile -C "$gtk_build" -j "$gtk_jobs"

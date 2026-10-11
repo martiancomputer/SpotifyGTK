@@ -30,7 +30,7 @@ jobs:
             libx11-dev libxext-dev libxrender-dev libxinerama-dev libxrandr-dev libxcursor-dev libxi-dev \
             libxfixes-dev libxcomposite-dev libxdamage-dev libdrm-dev libvulkan-dev libjpeg-dev libpng-dev \
             libtiff-dev libsoup-3.0-dev libjson-glib-dev libogg-dev libvorbis-dev libssl-dev libpulse-dev \
-            libasound2-dev libsecret-1-dev desktop-file-utils
+            libasound2-dev libsecret-1-dev desktop-file-utils sassc libsass-dev glslc patchelf
           python3 -m pip install --user --break-system-packages meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build pinned GTK fork
@@ -99,7 +99,7 @@ jobs:
             libharfbuzz-dev libepoxy-dev libgraphene-1.0-dev libxkbcommon-dev libwayland-dev \
             wayland-protocols libx11-dev libxext-dev libxrender-dev libxinerama-dev libxrandr-dev \
             libxcursor-dev libxi-dev libxfixes-dev libxcomposite-dev libxdamage-dev libdrm-dev \
-            libvulkan-dev libjpeg-dev libpng-dev libtiff-dev fonts-noto-core \
+            libvulkan-dev libjpeg-dev libpng-dev libtiff-dev sassc libsass-dev fonts-noto-core \
             fonts-noto-cjk fonts-noto-color-emoji
           python3 -m pip install --user --break-system-packages meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

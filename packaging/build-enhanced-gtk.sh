@@ -35,9 +35,9 @@ gtk_setup_args=()
 [[ ! -f "$GTK_ENHANCED_BUILD/meson-private/coredata.dat" ]] || gtk_setup_args=(--reconfigure)
 meson setup "${gtk_setup_args[@]}" "$GTK_ENHANCED_BUILD" "$GTK_ENHANCED_SOURCE" \
   "${gtk_native_args[@]}" --prefix="$GTK_ENHANCED_PREFIX" --libdir=lib \
-  --buildtype=debugoptimized --wrap-mode=nofallback \
+  --buildtype=debugoptimized --wrap-mode=default \
   -Ddocumentation=false -Dman-pages=false -Dintrospection=disabled \
-  -Dbuild-demos=false -Dbuild-examples=false \
+  -Dbuild-demos=false -Dbuild-examples=false -Dmedia-gstreamer=disabled \
   -Dbuild-tests=false -Dbuild-testsuite=false
 meson compile -C "$GTK_ENHANCED_BUILD" -j "$GTK_BUILD_JOBS"
 meson install -C "$GTK_ENHANCED_BUILD" --no-rebuild

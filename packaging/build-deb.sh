@@ -49,10 +49,17 @@ meson setup "$BUILD" "$APP" \
 meson compile -C "$BUILD" >/dev/null
 DESTDIR="$STAGE" meson install -C "$BUILD" --quiet >/dev/null
 
-# Bundle only GTK's core shared library. Its lower-level dependencies (GLib,
-# Pango, Cairo, etc.) are declared from the ELF dependency closure below.
+# Carry GTK plus the complete shared-library runtime directory. GTK's lower-
+# level dependencies (GLib, Pango, Cairo, etc.) may come from pinned Meson wraps
+# on older builders, so the package must not bind to a mismatched system ABI.
 mkdir -p "$STAGE/usr/lib/spotifygtk/gtk"
-cp -a "$GTK_ENHANCED_PREFIX/lib"/libgtk-4.so* "$STAGE/usr/lib/spotifygtk/gtk/"
+cp -a "$GTK_ENHANCED_PREFIX/lib"/lib*.so* "$STAGE/usr/lib/spotifygtk/gtk/"
+command -v patchelf >/dev/null || { echo 'patchelf is required to make bundled libraries relocatable.' >&2; exit 1; }
+while IFS= read -r -d '' library; do
+  patchelf --set-rpath '$ORIGIN' "$library"
+done < <(find "$STAGE/usr/lib/spotifygtk/gtk" -type f -name 'lib*.so*' -print0)
+patchelf --set-rpath '$ORIGIN/../lib/spotifygtk/gtk' "$STAGE/usr/bin/spotify-native"
+patchelf --set-rpath '$ORIGIN/../lib/spotifygtk/gtk' "$STAGE/usr/bin/spotify-native-harness"
 gtk_license_dir="$STAGE/usr/share/licenses/GTK4-Enhanced"
 mkdir -p "$gtk_license_dir"
 for notice in COPYING AUTHORS UPSTREAM.md FRAME_POLICY.md; do
@@ -63,6 +70,16 @@ for notice in COPYING AUTHORS UPSTREAM.md FRAME_POLICY.md; do
 done
 printf 'Corresponding source: https://github.com/martiancomputer/GTK4-Enhanced\nRevision: %s\n' \
   "$(git -C "$ROOT/dependencies/gtk4-enhanced" rev-parse HEAD)" > "$gtk_license_dir/SOURCE.txt"
+wrapped_sources="$ROOT/_build/gtk4-enhanced/subprojects"
+if [[ -d "$wrapped_sources" ]]; then
+  while IFS= read -r -d '' notice; do
+    relative="${notice#"$wrapped_sources"/}"
+    destination="$gtk_license_dir/Dependencies/${relative%/*}"
+    mkdir -p "$destination"
+    cp "$notice" "$destination/"
+  done < <(find "$wrapped_sources" -mindepth 2 -maxdepth 3 -type f \
+    \( -iname COPYING -o -iname LICENSE -o -iname 'LICENSE.*' \) -print0)
+fi
 
 # Runtime dependencies, resolved from what the binary actually links rather
 # than from a hand-written list that drifts. shlibdeps needs the control file
