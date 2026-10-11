@@ -132,7 +132,25 @@ source = 'export GTK_PATH="\\$APPDIR/${gtk4_path/$LD_GTK_LIBRARY_PATH//usr/lib}"
 target = 'export GTK_PATH="\\$APPDIR/usr/lib/gtk-4.0"'
 if source not in text:
     raise SystemExit('Pinned GTK AppImage path patch no longer matches linuxdeploy plugin.')
-plugin.write_text(text.replace(source, target, 1))
+text = text.replace(source, target, 1)
+
+# Ubuntu's newer multiarch layout keeps GDK Pixbuf loaders under /usr/lib even
+# though the library directory is /usr/lib/<multiarch>. Discover the installed
+# loader directory rather than assuming it is relative to GTK's library dir.
+source = '''gdk_pixbuf_binarydir="$(get_pkgconf_variable "gdk_pixbuf_binarydir" "gdk-pixbuf-2.0" "$gdk_libdir/gdk-pixbuf-2.0/2.10.0")"'''
+target = '''gdk_pixbuf_binarydir="$(get_pkgconf_variable "gdk_pixbuf_binarydir" "gdk-pixbuf-2.0" "$(find /usr/lib -type d -path '*/gdk-pixbuf-2.0/2.10.0' -print -quit)")"'''
+if source not in text:
+    raise SystemExit('GDK Pixbuf AppImage path patch no longer matches linuxdeploy plugin.')
+text = text.replace(source, target, 1)
+
+# Keep copy_lib_tree and the module-cache rewrite rooted at /usr/lib so both
+# multiarch and non-multiarch loader paths map correctly into AppDir/usr/lib.
+source = 'echo "Installing GDK PixBufs"'
+target = 'LD_GTK_LIBRARY_PATH="/usr/lib"\necho "Installing GDK PixBufs"'
+if source not in text:
+    raise SystemExit('GDK Pixbuf AppImage root patch no longer matches linuxdeploy plugin.')
+text = text.replace(source, target, 1)
+plugin.write_text(text)
 PY
 
 # CI runners have no FUSE, so the tools must unpack themselves rather than
