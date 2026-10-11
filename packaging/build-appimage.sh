@@ -184,10 +184,12 @@ export OUTPUT="$OUT/spotifygtk-${VERSION}-release-linux-arch-x86-64.appimage"
 # plugin guesses and can bundle GTK3 alongside, which bloats the image and can
 # load the wrong theme engine at runtime.
 # Keep GTK's own icon theme (used by controls), but do not package the
-# unfinished SpotifyGTK application icon. linuxdeploy can produce an AppImage
-# without an --icon-file; desktop shells will use their generic fallback.
+# unfinished SpotifyGTK application icon. AppImage launchers still require an
+# Icon key, so use the standard generic executable icon until the final art is
+# ready.
 rm -f "$APPDIR/usr/share/icons/hicolor/scalable/apps/$ID.svg"
-sed -i '/^Icon=/d' "$APPDIR/usr/share/applications/$ID.desktop"
+sed -i 's/^Icon=.*/Icon=application-x-executable/' \
+  "$APPDIR/usr/share/applications/$ID.desktop"
 DEPLOY_GTK_VERSION=4 "$TOOLS/linuxdeploy" \
   --appdir "$APPDIR" \
   --plugin gtk \
