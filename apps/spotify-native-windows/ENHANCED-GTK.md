@@ -24,17 +24,18 @@ From this directory, after installing Python 3, `zstd`, libarchive's
 ```sh
 python3 fetch-msys-runtime.py tools-build/msys-runtime \
   --cached-database --extra-package vulkan-headers
+export PATH="$(bash fetch-llvm-mingw.sh):$PATH"
 bash build-enhanced-gtk.sh
 export prefix="$PWD/tools-build/gtk4-enhanced-runtime/ucrt64"
 export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="$PWD/tools-build/gtk4-enhanced-runtime"
-export SPOTIFYGTK_CROSS_FILE="$PWD/cross/msys2-ucrt64-linux.ini"
+export SPOTIFYGTK_CROSS_FILE="$PWD/cross/llvm-mingw-ucrt64-linux.ini"
 export SPOTIFYGTK_BUNDLE_FONTS="<licensed-font-tree>"
 windows_project_root="$(cd ../.. && pwd)"
 meson setup --reconfigure --clearcache build ../spotify-native \
   --cross-file "$SPOTIFYGTK_CROSS_FILE" --native-file cross/linux-build-tools.ini \
   --buildtype=release -Dtests=false -Dverbose_logging=false \
-  "-Dc_args=['-mcrtdll=ucrt','-D_UCRT','-ffile-prefix-map=$windows_project_root=.']"
+  "-Dc_args=['-D_UCRT','-ffile-prefix-map=$windows_project_root=.']"
 bash build.sh --bundle
 x86_64-w64-mingw32-strip --strip-unneeded \
   build/dist/spotify-native.exe build/dist/libgtk-4-1.dll

@@ -32,12 +32,12 @@ fi
 gtk_setup_args=()
 [[ ! -f "$gtk_build/meson-private/coredata.dat" ]] || gtk_setup_args=(--reconfigure --clearcache)
 meson setup "${gtk_setup_args[@]}" "$gtk_build" "$gtk_source" \
-  --cross-file "$gtk_windows_root/cross/msys2-ucrt64-linux.ini" \
+  --cross-file "$gtk_windows_root/cross/llvm-mingw-ucrt64-linux.ini" \
   "${gtk_tool_args[@]}" \
   "${gtk_native_args[@]}" --prefix=/ucrt64 --libdir=lib \
   --buildtype=release --wrap-mode=nofallback \
-  "-Dc_args=['-mcrtdll=ucrt','-D_UCRT','-ffile-prefix-map=$gtk_project_root=.','-ffile-prefix-map=$gtk_source=gtk4-enhanced']" \
-  "-Dc_link_args=['-mcrtdll=ucrt','-mwindows','-L$gtk_base/ucrt64/lib']" \
+  "-Dc_args=['-D_UCRT','-ffile-prefix-map=$gtk_project_root=.','-ffile-prefix-map=$gtk_source=gtk4-enhanced']" \
+  "-Dc_link_args=['-mwindows','-L$gtk_base/ucrt64/lib']" \
   -Ddocumentation=false -Dman-pages=false -Dintrospection=disabled \
   -Dmedia-gstreamer=disabled \
   -Dbuild-demos=false -Dbuild-examples=false \

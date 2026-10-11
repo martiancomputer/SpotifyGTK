@@ -82,8 +82,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y \
             build-essential ninja-build pkg-config python3 python3-pip gettext \
-            mingw-w64 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
-            wine wine64 osslsigncode \
+            curl wine wine64 osslsigncode \
             libarchive-tools zstd \
             libglib2.0-dev libadwaita-1-dev libgdk-pixbuf-2.0-dev \
             libcairo2-dev libpango1.0-dev libharfbuzz-dev libepoxy-dev sassc libsass-dev \
@@ -96,6 +95,13 @@ jobs:
 
       - name: Fetch the isolated UCRT64 build SDK
         run: python3 apps/spotify-native-windows/fetch-msys-runtime.py apps/spotify-native-windows/tools-build/msys-runtime
+      - name: Cache the pinned LLVM-MinGW UCRT toolchain
+        uses: actions/cache@v4
+        with:
+          path: apps/spotify-native-windows/tools-build/llvm-mingw-20261006
+          key: llvm-mingw-ucrt-20261006-x86_64
+      - name: Install the pinned LLVM-MinGW UCRT toolchain
+        run: bash apps/spotify-native-windows/fetch-llvm-mingw.sh >> "$GITHUB_PATH"
 
       - name: Build the pinned Windows GTK fork
         env:
@@ -109,7 +115,7 @@ jobs:
           export prefix="$base/ucrt64"
           export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/share/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$base"
-          export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/msys2-ucrt64-linux.ini"
+          export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/llvm-mingw-ucrt64-linux.ini"
           bash apps/spotify-native-windows/build.sh
           test "$(PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" PKG_CONFIG_SYSROOT_DIR="$PKG_CONFIG_SYSROOT_DIR" pkg-config --variable=libdir gtk4)" = /ucrt64/lib
           objdump -p apps/spotify-native-windows/build/src/spotify-native.exe | grep -i 'DLL Name: libgtk-4-1.dll'

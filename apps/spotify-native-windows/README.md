@@ -181,7 +181,7 @@ For the optional high-refresh tester package, build the pinned GTK fork and
 enable the shared FPS control as described in [ENHANCED-GTK.md](ENHANCED-GTK.md).
 The stock-SDK workflow below retains upstream GTK frame pacing.
 
-Install a MinGW-w64 compiler supporting `-mcrtdll=ucrt`, Meson, Ninja,
+Install the pinned LLVM-MinGW UCRT toolchain with `fetch-llvm-mingw.sh`, Meson, Ninja,
 pkg-config, host GLib build tools, CMake, a C++ compiler, ICU development
 headers, Git, Python 3.11 or newer, `zstd`, libarchive's `bsdtar`, OpenSSL,
 osslsigncode with APPX support, librsvg's `rsvg-convert`, and Wine. Wine runs
@@ -192,13 +192,14 @@ Run from this directory:
 
 ```bash
 python3 fetch-msys-runtime.py tools-build/msys-runtime
+export PATH="$(bash fetch-llvm-mingw.sh):$PATH"
 bash build-msix-tool.sh
 bash prepare-msix-assets.sh
 
 export prefix="$PWD/tools-build/msys-runtime/ucrt64"
 export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="$PWD/tools-build/msys-runtime"
-export SPOTIFYGTK_CROSS_FILE="$PWD/cross/msys2-ucrt64-linux.ini"
+export SPOTIFYGTK_CROSS_FILE="$PWD/cross/llvm-mingw-ucrt64-linux.ini"
 # Supply a licensed tree containing Adwaita/, noto/, noto-cjk/ and their notices.
 # Include Noto Color Emoji in the Noto tree for emoji coverage.
 export SPOTIFYGTK_BUNDLE_FONTS="<licensed-font-tree>"

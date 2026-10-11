@@ -92,8 +92,8 @@ jobs:
       - name: Install Windows cross-build and MSIX tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y build-essential ninja-build pkg-config python3 python3-pip gettext \
-            mingw-w64 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine wine64 osslsigncode \
+          sudo apt-get install -y build-essential ninja-build pkg-config python3 python3-pip gettext curl \
+            wine wine64 osslsigncode \
             libarchive-tools zstd cmake libicu-dev libxerces-c-dev librsvg2-bin openssl \
             libglib2.0-dev libadwaita-1-dev libgdk-pixbuf-2.0-dev libcairo2-dev libpango1.0-dev \
             libharfbuzz-dev libepoxy-dev libgraphene-1.0-dev libxkbcommon-dev libwayland-dev \
@@ -105,6 +105,13 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Fetch the isolated UCRT64 SDK
         run: python3 apps/spotify-native-windows/fetch-msys-runtime.py apps/spotify-native-windows/tools-build/msys-runtime
+      - name: Cache the pinned LLVM-MinGW UCRT toolchain
+        uses: actions/cache@v4
+        with:
+          path: apps/spotify-native-windows/tools-build/llvm-mingw-20261006
+          key: llvm-mingw-ucrt-20261006-x86_64
+      - name: Install the pinned LLVM-MinGW UCRT toolchain
+        run: bash apps/spotify-native-windows/fetch-llvm-mingw.sh >> "$GITHUB_PATH"
       - name: Build pinned Windows GTK fork
         env:
           GTK_BUILD_JOBS: 2
@@ -141,7 +148,7 @@ jobs:
           export prefix="$base/ucrt64"
           export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/share/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$base"
-          export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/msys2-ucrt64-linux.ini"
+          export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/llvm-mingw-ucrt64-linux.ini"
           export SPOTIFYGTK_REQUIRE_ENHANCED_GTK=1
           bash apps/spotify-native-windows/build.sh --bundle
           x86_64-w64-mingw32-strip --strip-unneeded apps/spotify-native-windows/build/dist/spotify-native.exe
