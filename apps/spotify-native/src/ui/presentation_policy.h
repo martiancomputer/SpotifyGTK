@@ -16,7 +16,14 @@ spotifygtk_presentation_valid_scale (guint percent, gboolean custom)
 {
   if (custom) return percent >= 25 && percent <= 300;
   return percent == 0 || percent == 25 || percent == 50 || percent == 75 ||
-         percent == 100 || percent == 150 || percent == 300;
+         percent == 90 || percent == 100 || percent == 150 || percent == 300;
+}
+
+static inline guint
+spotifygtk_presentation_step_scale (guint percent, gboolean increase)
+{
+  int current = percent ? (int) MIN (percent, 300) : 100;
+  return (guint) CLAMP (current + (increase ? 10 : -10), 25, 300);
 }
 
 static inline double

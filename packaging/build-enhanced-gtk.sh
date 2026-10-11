@@ -7,8 +7,10 @@ GTK_PROJECT_DIR="$(cd "$GTK_SCRIPT_DIR/.." && pwd)"
 GTK_ENHANCED_SOURCE="${GTK_ENHANCED_SOURCE:-$GTK_PROJECT_DIR/dependencies/gtk4-enhanced}"
 GTK_ENHANCED_BUILD="${GTK_ENHANCED_BUILD:-$GTK_PROJECT_DIR/_build/gtk4-enhanced}"
 GTK_ENHANCED_PREFIX="${GTK_ENHANCED_PREFIX:-$GTK_PROJECT_DIR/_stage/gtk4-enhanced/usr}"
-GTK_CONSUMER_BUILD="${GTK_CONSUMER_BUILD:-$GTK_PROJECT_DIR/apps/spotify-native/enhanced-build}"
+GTK_CONSUMER_BUILD="${GTK_CONSUMER_BUILD:-$GTK_PROJECT_DIR/apps/spotify-native/build}"
 GTK_BUILD_JOBS="${GTK_BUILD_JOBS:-4}"
+GTK_CONSUMER_TESTS="${GTK_CONSUMER_TESTS:-true}"
+GTK_ALLOW_OLD_LIBADWAITA="${GTK_ALLOW_OLD_LIBADWAITA:-false}"
 GTK_ENHANCED_SOURCE="$(realpath -m "$GTK_ENHANCED_SOURCE")"
 GTK_ENHANCED_PREFIX="$(realpath -m "$GTK_ENHANCED_PREFIX")"
 
@@ -46,12 +48,17 @@ if [[ "$(pkg-config --variable=libdir gtk4)" != "$GTK_ENHANCED_PREFIX/lib" ]]; t
   exit 1
 fi
 gtk_setup_args=()
-[[ ! -f "$GTK_CONSUMER_BUILD/meson-private/coredata.dat" ]] || gtk_setup_args=(--reconfigure)
+[[ ! -f "$GTK_CONSUMER_BUILD/meson-private/coredata.dat" ]] || gtk_setup_args=(--reconfigure --clearcache)
+# An existing normal build may have cached stock GTK at the same version.
+# Clear dependency resolution before switching it to the staged fork.
 meson setup "${gtk_setup_args[@]}" "$GTK_CONSUMER_BUILD" "$GTK_PROJECT_DIR/apps/spotify-native" \
   --native-file "$GTK_PROJECT_DIR/apps/spotify-native/build-profiles/stable.ini" \
+  --buildtype=release -Dverbose_logging=false -Dtests="$GTK_CONSUMER_TESTS" \
+  -Dallow_old_libadwaita="$GTK_ALLOW_OLD_LIBADWAITA" \
   "-Dc_link_args=-Wl,-rpath,$GTK_ENHANCED_PREFIX/lib"
-meson compile -C "$GTK_CONSUMER_BUILD" -j "$GTK_BUILD_JOBS"
+meson compile -C "$GTK_CONSUMER_BUILD" -j "$GTK_BUILD_JOBS" spotify-native
 
 printf 'Built with GTK %s; libadwaita %s (host runtime retained).\n' \
   "$(pkg-config --modversion gtk4)" "$(pkg-config --modversion libadwaita-1)"
-echo 'Launch with packaging/run-enhanced-gtk.sh; the stock build is unchanged.'
+echo 'Built apps/spotify-native/build by default; existing desktop launchers use this executable.'
+echo 'The enhanced GTK runtime is isolated; system toolkit libraries are unchanged.'

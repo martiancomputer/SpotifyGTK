@@ -107,7 +107,6 @@ SpotifyGtkRenderer spotifygtk_settings_get_renderer (SpotifyGtkSettings *self);
 void               spotifygtk_settings_set_renderer (SpotifyGtkSettings *self,
                                                       SpotifyGtkRenderer renderer);
 
-#ifdef __linux__
 /* Optional enhanced GDK frame-clock ceiling. Stock GTK retains native pacing
  * regardless of this saved value; zero means Default. */
 guint spotifygtk_settings_get_frame_rate (SpotifyGtkSettings *self);
@@ -118,7 +117,20 @@ gboolean spotifygtk_settings_get_ui_scale_custom (SpotifyGtkSettings *self);
  * Custom is persisted separately so Custom 100% stays Custom after restart. */
 void spotifygtk_settings_set_ui_scale (SpotifyGtkSettings *self,
                                        guint percent, gboolean custom);
-#endif
+
+typedef enum {
+  SPOTIFYGTK_SHORTCUT_SCALE_UP,
+  SPOTIFYGTK_SHORTCUT_SCALE_DOWN,
+  SPOTIFYGTK_SHORTCUT_PLAY_PAUSE,
+  SPOTIFYGTK_SHORTCUT_COUNT
+} SpotifyGtkShortcut;
+const gchar *spotifygtk_settings_get_shortcut (SpotifyGtkSettings *self, SpotifyGtkShortcut action);
+/* NULL restores the action's default. Callers validate GTK accelerators. */
+void spotifygtk_settings_set_shortcut (SpotifyGtkSettings *self, SpotifyGtkShortcut action,
+                                      const gchar *accelerator);
+guint spotifygtk_settings_get_volume (SpotifyGtkSettings *self);
+void spotifygtk_settings_set_volume (SpotifyGtkSettings *self, guint percent);
+void spotifygtk_settings_flush (SpotifyGtkSettings *self);
 
 gboolean spotifygtk_settings_get_aggressive_filtering (SpotifyGtkSettings *self);
 void     spotifygtk_settings_set_aggressive_filtering (SpotifyGtkSettings *self,

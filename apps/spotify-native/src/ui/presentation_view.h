@@ -2,7 +2,7 @@
 
 #include <adwaita.h>
 
-/* Linux-only, live whole-content zoom using native GTK drawing.
+/* Live whole-content zoom using native GTK drawing on Linux and Windows.
  * Overflow at large zoom remains reachable instead of clipping controls. */
 GtkWidget *spotifygtk_presentation_wrap (GtkWidget *child);
 /* Release the content from one of our non-default wrappers before reparenting

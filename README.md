@@ -178,14 +178,27 @@ everywhere, restrict it to Now Playing, or disable it; persistent caching and
 aggressive bounded loading can be switched or cleared live. Settings also shows
 the signed-in display name, account id, product tier and avatar.
 
-On Linux, Settings → Performance offers live interface scaling: Default,
-Custom, 25%, 50%, 75%, 100%, 150% or 300%. Custom scale accepts whole percentages
+On Linux and Windows, Settings → Interface offers live interface scaling: Default,
+Custom, 25%, 50%, 75%, 90%, 100%, 150% or 300%. Custom scale accepts whole percentages
 from 25% through 300%, applied with the Apply button. Scaling changes text,
 artwork, spacing and controls together, relative to the desktop's existing
 scale. Overflow uses overlay scrollbars without wrapping the whole application
 in a scrolling viewport. Default and 100% use the original native widget
 hierarchy, with no scaling wrapper. The artwork viewer still fits its image to
-the window.
+the window. Interface also contains a keybind manager for increasing scale,
+decreasing scale, and play/pause. Click an action's shortcut, then press its new
+combination; Escape cancels, and conflicts are rejected. Defaults are Ctrl++
+(Ctrl+= and keypad + also work), Ctrl+-, and Space. Scaling steps by ten
+percentage points within 25–300%. Play/pause does not steal input from text boxes;
+otherwise it takes priority over focused buttons and sliders. F11
+toggles fullscreen; Escape leaves fullscreen when no dialog is open.
+
+Volume uses the existing perceptual curve, native slider dragging, one-percent
+arrow steps and ten-percent page steps. It is saved to the same settings INI
+after a brief debounce and flushed when the window closes, including mute.
+Narrow windows automatically hide side panes to fit snapped/tiled layouts.
+Windows packages load the bundled Adwaita Sans interface faces explicitly into
+Pango, with Noto Sans for the platform's default font and bundled fallbacks.
 
 Frame-rate choices (Default, 30, 60, 120, 144, 240 and 360 FPS) remain stored,
 but the control is disabled on stock GTK. With the optional GTK4-Enhanced
@@ -193,7 +206,9 @@ runtime it enables an experimental per-window GDK rendering ceiling. Default
 uses upstream pacing; explicit values never force redraws or bypass vsync.
 The compositor and display can impose a lower presented rate. There is no
 app-side snapshot cache, frame-skipping workaround, or redraw timer. Both
-preferences survive restart. These controls are not yet enabled on Windows.
+preferences survive restart. Enhanced Windows tester packages also enable the
+frame-rate control. See the
+[Windows enhanced-GTK packaging guide](apps/spotify-native-windows/ENHANCED-GTK.md).
 
 ### Optional enhanced GTK experiment (Linux)
 
@@ -208,11 +223,24 @@ git submodule update --init dependencies/gtk4-enhanced
 ./packaging/run-enhanced-gtk.sh
 ```
 
-The script builds GTK first into `_stage/gtk4-enhanced/usr`, then builds the
-client in `apps/spotify-native/enhanced-build`. It does not install system
-libraries, fetch CI jobs, alter Windows packaging, or replace the normal
-`apps/spotify-native/build` client. Close the running client before switching
-runtimes. Run the normal client for a stock-GTK rollback.
+The script builds GTK first into `_stage/gtk4-enhanced/usr`, then reconfigures
+and builds the normal client in `apps/spotify-native/build`. It clears cached
+dependency resolution so an existing stock-GTK build switches to the fork,
+uses release optimization with verbose diagnostics disabled, and embeds the
+staged library's runtime search path. Existing desktop launchers therefore use
+the enhanced runtime without pointing to a separate application build directory.
+System libraries remain unchanged. The release workflow uses this fork for
+Linux packages and the separate UCRT64 cross-build for Windows packages.
+Close the running client before switching runtimes.
+
+To switch the same build directory back to stock GTK, clear its dependency
+cache and remove the staged runtime search path, then rebuild:
+
+```sh
+env -u PKG_CONFIG_PATH -u LD_LIBRARY_PATH meson setup --reconfigure --clearcache \
+  apps/spotify-native/build apps/spotify-native -Dc_link_args=[]
+meson compile -C apps/spotify-native/build
+```
 
 Advanced local builds can override `GTK_ENHANCED_SOURCE`,
 `GTK_ENHANCED_BUILD`, `GTK_ENHANCED_PREFIX`, `GTK_CONSUMER_BUILD` and
@@ -222,7 +250,7 @@ with the launch script. Generated build paths are local artifacts, not public
 project configuration. Introspection generation is disabled for this C-only
 experiment; this is not a general-purpose GTK distribution package.
 
-Inspect `ldd apps/spotify-native/enhanced-build/src/spotify-native` and the live
+Inspect `ldd apps/spotify-native/build/src/spotify-native` and the live
 process's loaded-library map to confirm the fork is actually loaded. A submodule
 or a selected FPS number alone is not evidence of runtime use or physical
 120/144/240/360 Hz presentation. No transparency implementation is included.

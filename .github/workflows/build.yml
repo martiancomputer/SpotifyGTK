@@ -6,193 +6,140 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
-  spotify-connect:
-    name: spotify-connect (${{ matrix.profile }}, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # 22.04 is not a target: it ships libadwaita 1.1.7 and both apps
-          # require >= 1.4, which no amount of CI setup can work around. It was
-          # in this matrix while the README claimed 22.04 support, and both were
-          # wrong together.
-          - profile: stable
-            os: ubuntu-24.04
-          - profile: nightly
-            os: ubuntu-24.04
-
+  linux:
+    name: Linux (pinned GTK fork)
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Install dependencies
+      - name: Install GTK build and application dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            ninja-build pkg-config \
-            libgtk-4-dev libadwaita-1-dev \
-            libsoup-3.0-dev libjson-glib-dev \
-            libsecret-1-dev libglib2.0-dev \
-            libjpeg-turbo8-dev
+            build-essential ninja-build pkg-config python3 python3-pip gettext \
+            libglib2.0-dev libadwaita-1-dev libgdk-pixbuf-2.0-dev \
+            libcairo2-dev libpango1.0-dev libharfbuzz-dev libepoxy-dev \
+            libgraphene-1.0-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            libx11-dev libxext-dev libxrender-dev libxinerama-dev libxrandr-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxcomposite-dev libxdamage-dev \
+            libdrm-dev libvulkan-dev libjpeg-dev libpng-dev libtiff-dev \
+            libsoup-3.0-dev libjson-glib-dev libogg-dev libvorbis-dev \
+            libssl-dev libpulse-dev libasound2-dev libsecret-1-dev
 
-      # Ubuntu 22.04 ships Meson 0.61 and the project needs >= 1.0, so take it
-      # from pip rather than apt. That is also what a 22.04 user has to do, so
-      # the CI environment matches the one the README documents.
       - name: Install Meson
         run: |
-          pip install --user meson
+          python3 -m pip install --user --break-system-packages meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Install nightly-only dependencies
-        if: matrix.profile == 'nightly'
-        run: sudo apt-get install -y libva-dev libva-drm2
+      - name: Build the pinned GTK fork and native application
+        env:
+          GTK_BUILD_JOBS: 2
+          GTK_CONSUMER_TESTS: 'false'
+          GTK_ALLOW_OLD_LIBADWAITA: 'true'
+        run: packaging/build-enhanced-gtk.sh
 
-      - name: Configure (Meson)
-        working-directory: apps/spotify-connect
-        run: meson setup build --native-file build-profiles/${{ matrix.profile }}.ini -Dtests=true
+      - name: Verify the application uses the pinned GTK build
+        run: |
+          export PKG_CONFIG_PATH="$GITHUB_WORKSPACE/_stage/gtk4-enhanced/usr/lib/pkgconfig"
+          test "$(pkg-config --variable=libdir gtk4)" = "$GITHUB_WORKSPACE/_stage/gtk4-enhanced/usr/lib"
+          test "$(pkg-config --modversion gtk4)" = "$(sed -n "s/.*version: '\([^']*\)'.*/\1/p" dependencies/gtk4-enhanced/meson.build | head -1)"
+          readelf -d apps/spotify-native/build/src/spotify-native | grep -F "$GITHUB_WORKSPACE/_stage/gtk4-enhanced/usr/lib"
 
-      - name: Build
-        working-directory: apps/spotify-connect
-        run: ninja -C build
+      - name: Build native engine tests without UI tests
+        run: |
+          meson setup _build/native-tests apps/spotify-native \
+            --native-file apps/spotify-native/build-profiles/stable.ini \
+            --buildtype=debugoptimized -Denable_gui=false -Dtests=true
+          meson compile -C _build/native-tests
+          meson test -C _build/native-tests --print-errorlogs
 
-      - name: Run tests
-        working-directory: apps/spotify-connect
-        run: meson test -C build --print-errorlogs
+      - name: Build and test Spotify Connect against the pinned GTK fork
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/_stage/gtk4-enhanced/usr/lib/pkgconfig
+        run: |
+          meson setup apps/spotify-connect/build apps/spotify-connect \
+            --native-file apps/spotify-connect/build-profiles/stable.ini \
+            --buildtype=debugoptimized -Dtests=true
+          test "$(pkg-config --variable=libdir gtk4)" = "$GITHUB_WORKSPACE/_stage/gtk4-enhanced/usr/lib"
+          meson compile -C apps/spotify-connect/build
+          meson test -C apps/spotify-connect/build --print-errorlogs
 
-      - name: Upload build artifacts
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: spotify-connect-logs-${{ matrix.profile }}-${{ matrix.os }}
-          path: apps/spotify-connect/build/meson-logs/
+          name: linux-build-logs
+          path: |
+            apps/spotify-native/build/meson-logs/
+            _build/native-tests/meson-logs/
+            apps/spotify-connect/build/meson-logs/
 
-  spotify-native:
-    name: spotify-native (${{ matrix.profile }})
+  windows-cross:
+    name: Windows (pinned GTK fork, UCRT64)
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [stable, nightly]
-
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Install dependencies
+      - name: Install cross-build tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            ninja-build pkg-config \
-            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev \
-            libgtk-4-dev libadwaita-1-dev \
-            libogg-dev libvorbis-dev \
-            libssl-dev libpulse-dev libasound2-dev
-
-      # Ubuntu 22.04 ships Meson 0.61 and the project needs >= 1.0, so take it
-      # from pip rather than apt. That is also what a 22.04 user has to do, so
-      # the CI environment matches the one the README documents.
-      - name: Install Meson
-        run: |
-          pip install --user meson
+            build-essential ninja-build pkg-config python3 python3-pip gettext \
+            mingw-w64 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+            wine wine64 osslsigncode \
+            libglib2.0-dev libadwaita-1-dev libgdk-pixbuf-2.0-dev \
+            libcairo2-dev libpango1.0-dev libharfbuzz-dev libepoxy-dev \
+            libgraphene-1.0-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            libx11-dev libxext-dev libxrender-dev libxinerama-dev libxrandr-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxcomposite-dev libxdamage-dev \
+            libdrm-dev libvulkan-dev libjpeg-dev libpng-dev libtiff-dev
+          python3 -m pip install --user --break-system-packages meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Install nightly-only dependencies
-        if: matrix.profile == 'nightly'
-        run: sudo apt-get install -y libpipewire-0.3-dev
+      - name: Fetch the isolated UCRT64 build SDK
+        run: python3 apps/spotify-native-windows/fetch-msys-runtime.py apps/spotify-native-windows/tools-build/msys-runtime
 
-      # allow_old_gtk because the runner has GTK 4.14 and the UI is laid out
-      # against 4.22. This job compiles and runs tests; it never looks at a
-      # window, so the layout difference the floor guards against cannot affect
-      # what it verifies. A build meant for a person to use must not set this.
-      - name: Configure (Meson)
-        working-directory: apps/spotify-native
+      - name: Build the pinned Windows GTK fork
+        env:
+          GTK_BUILD_JOBS: 2
+        run: bash apps/spotify-native-windows/build-enhanced-gtk.sh
+
+      - name: Build Windows application against the pinned GTK fork
         run: |
-          meson setup build --native-file build-profiles/${{ matrix.profile }}.ini \
-            -Dtests=true -Dallow_old_gtk=true
+          root="$GITHUB_WORKSPACE"
+          base="$root/apps/spotify-native-windows/tools-build/gtk4-enhanced-runtime"
+          export prefix="$base/ucrt64"
+          export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/share/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR="$base"
+          export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/msys2-ucrt64-linux.ini"
+          bash apps/spotify-native-windows/build.sh
+          test "$(PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" PKG_CONFIG_SYSROOT_DIR="$PKG_CONFIG_SYSROOT_DIR" pkg-config --variable=libdir gtk4)" = /ucrt64/lib
+          objdump -p apps/spotify-native-windows/build/src/spotify-native.exe | grep -i 'DLL Name: libgtk-4-1.dll'
 
-      - name: Build
-        working-directory: apps/spotify-native
-        run: ninja -C build
-
-      - name: Run tests
-        working-directory: apps/spotify-native
-        run: meson test -C build --print-errorlogs
-
-      - name: Upload build artifacts
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: spotify-native-logs-${{ matrix.profile }}
-          path: apps/spotify-native/build/meson-logs/
-
-  spotify-native-windows:
-    name: spotify-native (windows, msys2 ucrt64)
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # UCRT64 rather than MINGW64: it is what the port's README documents and
-      # what its dependency list is written against. MSVC is not a target.
-      - name: Set up MSYS2 (UCRT64)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-meson
-            mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-glib2
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-libsoup3
-            mingw-w64-ucrt-x86_64-json-glib
-            mingw-w64-ucrt-x86_64-openssl
-            mingw-w64-ucrt-x86_64-libogg
-            mingw-w64-ucrt-x86_64-libvorbis
-
-      # No native file: the audio backend on Windows is WASAPI, chosen by
-      # host_machine rather than by profile, so stable and nightly would
-      # configure the same build.
-      #
-      # allow_old_gtk for the reason the Linux job gives -- this compiles and
-      # runs tests, and never puts a window on screen, so the layout floor
-      # cannot affect what it verifies. It also keeps the job from going red
-      # over whichever GTK MSYS2 happens to ship that week.
-      - name: Configure (Meson)
-        working-directory: apps/spotify-native
-        run: meson setup build -Dtests=true -Dallow_old_gtk=true
-
-      - name: Build
-        working-directory: apps/spotify-native
-        run: ninja -C build
-
-      - name: Run tests
-        working-directory: apps/spotify-native
-        run: meson test -C build --print-errorlogs
-
-      - name: Upload build artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: spotify-native-logs-windows
-          path: apps/spotify-native/build/meson-logs/
+          name: windows-cross-build-logs
+          path: apps/spotify-native-windows/build/meson-logs/
 
   lint:
     name: Lint (cppcheck)
     runs-on: ubuntu-24.04
-
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          submodules: recursive
       - name: Install cppcheck
         run: sudo apt-get install -y cppcheck
-
       - name: Run cppcheck
         run: |
           cppcheck \

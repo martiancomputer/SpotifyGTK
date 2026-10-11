@@ -4,7 +4,7 @@ set -euo pipefail
 GTK_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GTK_PROJECT_DIR="$(cd "$GTK_SCRIPT_DIR/.." && pwd)"
 GTK_ENHANCED_PREFIX="${GTK_ENHANCED_PREFIX:-$GTK_PROJECT_DIR/_stage/gtk4-enhanced/usr}"
-GTK_CONSUMER_BUILD="${GTK_CONSUMER_BUILD:-$GTK_PROJECT_DIR/apps/spotify-native/enhanced-build}"
+GTK_CONSUMER_BUILD="${GTK_CONSUMER_BUILD:-$GTK_PROJECT_DIR/apps/spotify-native/build}"
 if [[ "$(uname -s)" != Linux ]]; then
   echo 'The enhanced runtime experiment is currently Linux-only.' >&2
   exit 1

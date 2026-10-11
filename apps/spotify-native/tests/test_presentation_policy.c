@@ -9,7 +9,7 @@ test_ranges (void)
   g_assert_false (spotifygtk_presentation_valid_fps (29));
   g_assert_false (spotifygtk_presentation_valid_fps (31));
   g_assert_false (spotifygtk_presentation_valid_fps (361));
-  const guint scale[] = { 0, 25, 50, 75, 100, 150, 300 };
+  const guint scale[] = { 0, 25, 50, 75, 90, 100, 150, 300 };
   for (guint i = 0; i < G_N_ELEMENTS (scale); i++)
     g_assert_true (spotifygtk_presentation_valid_scale (scale[i], FALSE));
   for (guint percent = 25; percent <= 300; percent++)
@@ -18,6 +18,11 @@ test_ranges (void)
   g_assert_false (spotifygtk_presentation_valid_scale (24, TRUE));
   g_assert_false (spotifygtk_presentation_valid_scale (301, TRUE));
   g_assert_false (spotifygtk_presentation_valid_scale (125, FALSE));
+  g_assert_cmpuint (spotifygtk_presentation_step_scale (0, TRUE), ==, 110);
+  g_assert_cmpuint (spotifygtk_presentation_step_scale (0, FALSE), ==, 90);
+  g_assert_cmpuint (spotifygtk_presentation_step_scale (25, FALSE), ==, 25);
+  g_assert_cmpuint (spotifygtk_presentation_step_scale (300, TRUE), ==, 300);
+  g_assert_cmpuint (spotifygtk_presentation_step_scale (90, TRUE), ==, 100);
 }
 
 static void

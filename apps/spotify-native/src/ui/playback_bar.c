@@ -21,7 +21,7 @@
 
 /* Side columns are fixed and equal so the transport controls sit in the
  * true centre of the window regardless of how long the track name is. */
-#define SIDE_COLUMN_WIDTH 260
+#define SIDE_COLUMN_WIDTH 160
 #define ART_SIZE           56
 
 struct _SpotifyGtkPlaybackBar {
@@ -44,6 +44,7 @@ struct _SpotifyGtkPlaybackBar {
 
   /* Right: volume + queue */
   GtkScale  *volume_scale;
+  GtkImage  *volume_icon;
   GtkButton *queue_btn;
 
   /* Toggles */
@@ -253,7 +254,13 @@ on_bar_track_secondary_pressed (GtkGestureClick *gesture, gint n_press,
 static void
 on_volume_changed (GtkRange *range, gpointer user_data)
 {
-  g_signal_emit (user_data, signals[VOLUME_CHANGED], 0, (gint) gtk_range_get_value (range));
+  SpotifyGtkPlaybackBar *self = user_data;
+  gint percent = (gint) gtk_range_get_value (range);
+  g_autofree gchar *tooltip = g_strdup_printf ("Volume: %d%%", percent);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (range), tooltip);
+  gtk_image_set_from_icon_name (self->volume_icon, percent == 0 ? "audio-volume-muted-symbolic" :
+    percent < 34 ? "audio-volume-low-symbolic" : percent < 67 ? "audio-volume-medium-symbolic" : "audio-volume-high-symbolic");
+  g_signal_emit (user_data, signals[VOLUME_CHANGED], 0, percent);
 }
 
 static gchar *format_time (gint64 ms);
@@ -521,8 +528,8 @@ static GtkWidget *
 build_centre_column (SpotifyGtkPlaybackBar *self)
 {
   GtkWidget *column = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
-  gtk_widget_set_hexpand (column, FALSE);
-  gtk_widget_set_halign (column, GTK_ALIGN_CENTER);
+  gtk_widget_set_hexpand (column, TRUE);
+  gtk_widget_set_halign (column, GTK_ALIGN_FILL);
   gtk_widget_set_valign (column, GTK_ALIGN_CENTER);
   /* Sits the transport cluster a little lower in the bar. */
   gtk_widget_set_margin_top (column, 6);
@@ -588,7 +595,8 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
 
   /* --- Progress row --- */
   GtkWidget *progress_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 10);
-  gtk_widget_set_halign (progress_row, GTK_ALIGN_CENTER);
+  gtk_widget_set_halign (progress_row, GTK_ALIGN_FILL);
+  gtk_widget_set_hexpand (progress_row, TRUE);
 
   self->elapsed_label = GTK_LABEL (gtk_label_new ("0:00"));
   gtk_widget_add_css_class (GTK_WIDGET (self->elapsed_label), "time-label");
@@ -599,7 +607,8 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
   self->progress_scale = GTK_SCALE (gtk_scale_new_with_range (GTK_ORIENTATION_HORIZONTAL,
                                                               0.0, 1.0, 0.001));
   gtk_scale_set_draw_value (self->progress_scale, FALSE);
-  gtk_widget_set_size_request (GTK_WIDGET (self->progress_scale), 420, -1);
+  gtk_widget_set_size_request (GTK_WIDGET (self->progress_scale), 160, -1);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->progress_scale), TRUE);
   gtk_widget_set_valign (GTK_WIDGET (self->progress_scale), GTK_ALIGN_CENTER);
   g_signal_connect (self->progress_scale, "value-changed", G_CALLBACK (on_seek_changed), self);
 
@@ -614,7 +623,12 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
   gtk_label_set_xalign (self->duration_label, 0.0);
   gtk_box_append (GTK_BOX (progress_row), GTK_WIDGET (self->duration_label));
 
-  gtk_box_append (GTK_BOX (column), progress_row);
+  GtkWidget *progress_clamp = adw_clamp_new ();
+  adw_clamp_set_maximum_size (ADW_CLAMP (progress_clamp), 520);
+  adw_clamp_set_tightening_threshold (ADW_CLAMP (progress_clamp), 300);
+  adw_clamp_set_child (ADW_CLAMP (progress_clamp), progress_row);
+  gtk_widget_set_hexpand (progress_clamp, TRUE);
+  gtk_box_append (GTK_BOX (column), progress_clamp);
   return column;
 }
 
@@ -628,16 +642,24 @@ build_right_column (SpotifyGtkPlaybackBar *self)
   gtk_widget_set_hexpand (box, FALSE);
 
   GtkWidget *icon = gtk_image_new_from_icon_name ("audio-volume-high-symbolic");
+  self->volume_icon = GTK_IMAGE (icon);
   gtk_widget_add_css_class (icon, "dim-text");
   gtk_box_append (GTK_BOX (box), icon);
 
   self->volume_scale = GTK_SCALE (gtk_scale_new_with_range (GTK_ORIENTATION_HORIZONTAL,
                                                             0.0, 100.0, 1.0));
   gtk_scale_set_draw_value (self->volume_scale, FALSE);
+  gtk_scale_set_digits (self->volume_scale, 0);
+  gtk_scale_set_has_origin (self->volume_scale, TRUE);
+  gtk_range_set_round_digits (GTK_RANGE (self->volume_scale), 0);
+  gtk_range_set_increments (GTK_RANGE (self->volume_scale), 1, 10);
+  gtk_widget_add_css_class (GTK_WIDGET (self->volume_scale), "volume-scale");
+  gtk_accessible_update_property (GTK_ACCESSIBLE (self->volume_scale),
+    GTK_ACCESSIBLE_PROPERTY_LABEL, "Volume", -1);
   gtk_range_set_value (GTK_RANGE (self->volume_scale), 100.0);
-  gtk_widget_set_size_request (GTK_WIDGET (self->volume_scale), 120, -1);
+  gtk_widget_set_size_request (GTK_WIDGET (self->volume_scale), 120, 32);
   gtk_widget_set_valign (GTK_WIDGET (self->volume_scale), GTK_ALIGN_CENTER);
-  gtk_widget_set_tooltip_text (GTK_WIDGET (self->volume_scale), "Volume");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->volume_scale), "Volume: 100%");
   g_signal_connect (self->volume_scale, "value-changed", G_CALLBACK (on_volume_changed), self);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->volume_scale));
 
@@ -804,6 +826,10 @@ spotifygtk_playback_bar_set_volume (SpotifyGtkPlaybackBar *self, gint percent)
   g_signal_handlers_block_by_func (self->volume_scale, on_volume_changed, self);
   gtk_range_set_value (GTK_RANGE (self->volume_scale), CLAMP (percent, 0, 100));
   g_signal_handlers_unblock_by_func (self->volume_scale, on_volume_changed, self);
+  g_autofree gchar *tooltip = g_strdup_printf ("Volume: %d%%", CLAMP (percent, 0, 100));
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->volume_scale), tooltip);
+  gtk_image_set_from_icon_name (self->volume_icon, percent <= 0 ? "audio-volume-muted-symbolic" :
+    percent < 34 ? "audio-volume-low-symbolic" : percent < 67 ? "audio-volume-medium-symbolic" : "audio-volume-high-symbolic");
 }
 
 void

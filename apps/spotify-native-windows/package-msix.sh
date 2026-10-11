@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 package_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-package_version="${SPOTIFYGTK_MSIX_VERSION:-0.1.0.0}"
+package_version="${SPOTIFYGTK_MSIX_VERSION:-1.1.0.0}"
 package_bundle="${SPOTIFYGTK_BUNDLE_DIR:-$package_root/build/dist}"
 package_output="${SPOTIFYGTK_MSIX_OUTPUT:-$package_root/out}"
 package_signing="${SPOTIFYGTK_SIGNING_DIR:-$package_root/.signing}"
@@ -11,8 +11,10 @@ package_tool="${MAKEMSIX:-$package_root/tools-build/msix-sdk-build/bin/makemsix}
 [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
   echo 'MSIX version must have four numeric components.' >&2; exit 1;
 }
-package_unsigned="$package_output/SpotifyGTK_${package_version}_x64.unsigned.msix"
-package_signed="$package_output/SpotifyGTK_${package_version}_x64.msix"
+package_release_version="${package_version%.*}"
+package_unsigned="$package_output/.spotifygtk-${package_version}-unsigned.msix"
+package_signed="$package_output/spotifygtk-${package_release_version}-release-windows-x86-64.msix"
+package_certificate="$package_output/spotifygtk-${package_release_version}-release-windows-x86-64.cer"
 if [[ -e "$package_unsigned" || -e "$package_signed" ]]; then
   echo 'Output already exists; increase SPOTIFYGTK_MSIX_VERSION or use a fresh SPOTIFYGTK_MSIX_OUTPUT directory.' >&2
   exit 1
@@ -27,6 +29,22 @@ done
 [[ -d "$package_bundle/share/icons/Adwaita" && -d "$package_bundle/share/fonts/Adwaita" ]] || {
   echo 'Adwaita icons and fonts must be bundled.' >&2; exit 1;
 }
+for font in Adwaita/AdwaitaSans-Regular.ttf Adwaita/AdwaitaSans-Italic.ttf \
+            noto/NotoSans-Regular.ttf noto/NotoSans-Bold.ttf \
+            noto/NotoSans-Italic.ttf noto/NotoSans-BoldItalic.ttf; do
+  [[ -s "$package_bundle/share/fonts/$font" ]] || {
+    echo "Missing required Linux-matching interface font: $font" >&2; exit 1;
+  }
+done
+if [[ "${SPOTIFYGTK_REQUIRE_ENHANCED_GTK:-0}" == 1 ]]; then
+  for policy_binary in libgtk-4-1.dll spotify-native.exe; do
+    for policy_key in gtk4-enhanced-frame-policy-version gtk4-enhanced-max-fps-v1; do
+      LC_ALL=C grep -aqF "$policy_key" "$package_bundle/$policy_binary" || {
+        echo "Missing enhanced GTK frame-policy integration: $policy_binary" >&2; exit 1;
+      }
+    done
+  done
+fi
 if find "$package_bundle" -type f \( -iname '*.log' -o -iname '*.pfx' -o \
   -iname '*.key' -o -iname '*.pem' -o -iname '*.env' -o -iname '*credentials*' \) -print -quit | read -r _; then
   echo 'Private/debug files found in the runtime bundle; refusing to package.' >&2
@@ -60,6 +78,31 @@ chmod 700 "$package_signing"
 package_stage="$(mktemp -d "$package_output/stage.XXXXXXXX")"
 cp -R "$package_bundle/." "$package_stage/"
 cp -R "$package_root/build/msix-assets" "$package_stage/Assets"
+# MSIX manifests require several logo PNGs. Publish transparent placeholders
+# until the app receives its finalized visual identity; do not ship the
+# temporary art present in prior test builds. Preserve each required size.
+python3 - "$package_stage/Assets" <<'PY'
+from pathlib import Path
+import struct
+import sys
+import zlib
+
+assets = Path(sys.argv[1])
+def chunk(kind, payload):
+    return struct.pack('>I', len(payload)) + kind + payload + struct.pack('>I', zlib.crc32(kind + payload))
+for path in assets.glob('*.png'):
+    data = path.read_bytes()
+    if data[:8] != b'\x89PNG\r\n\x1a\n':
+        raise SystemExit(f'Invalid MSIX logo PNG: {path.name}')
+    width, height = struct.unpack('>II', data[16:24])
+    # RGBA scanlines, fully transparent; no rasterized branding is included.
+    scanline = b'\x00' + bytes(width * 4)
+    raw = scanline * height
+    png = (b'\x89PNG\r\n\x1a\n' +
+           chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)) +
+           chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
+    path.write_bytes(png)
+PY
 sed "s/@VERSION@/$package_version/g" "$package_root/AppxManifest.xml.in" > "$package_stage/AppxManifest.xml"
 
 # Generate once and reuse for upgrades. Only the public certificate is copied
@@ -75,7 +118,7 @@ if [[ ! -e "$package_key" && ! -e "$package_cert" ]]; then
 fi
 [[ -s "$package_key" && -s "$package_cert" ]] || { echo 'Incomplete signing identity.' >&2; exit 1; }
 openssl x509 -in "$package_cert" -checkend 86400 -noout
-openssl x509 -in "$package_cert" -outform DER -out "$package_output/SpotifyGTK.cer"
+openssl x509 -in "$package_cert" -outform DER -out "$package_certificate"
 "$package_tool" pack -d "$package_stage" -p "$package_unsigned"
 osslsigncode sign -certs "$package_cert" -key "$package_key" -h sha256 \
   -n SpotifyGTK -in "$package_unsigned" -out "$package_signed"
@@ -83,9 +126,10 @@ osslsigncode verify -CAfile "$package_cert" -in "$package_signed"
 cp "$package_root/INSTALL-MSIX.md" "$package_output/INSTALL-MSIX.md"
 (
   cd "$package_output"
-  sha256sum "SpotifyGTK_${package_version}_x64.msix" SpotifyGTK.cer > SHA256SUMS.txt
+  sha256sum "$(basename "$package_signed")" "$(basename "$package_certificate")" > SHA256SUMS.txt
 )
-chmod 644 "$package_signed" "$package_output/SpotifyGTK.cer" \
+rm -f "$package_unsigned"
+chmod 644 "$package_signed" "$package_certificate" \
   "$package_output/INSTALL-MSIX.md" "$package_output/SHA256SUMS.txt"
 echo "Signed MSIX and public certificate: $package_output"
 echo 'Keep .signing private. Distribute only the MSIX, CER, instructions and checksums.'

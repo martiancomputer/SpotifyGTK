@@ -33,12 +33,9 @@ if get_option('tests')
   )
   test('catalog-cache', test_catalog_cache, timeout: 15)
   if enable_gui
-    dialog_presentation_test_sources = []
-    if host_machine.system() == 'linux'
-      dialog_presentation_test_sources = files(
-        '../src/ui/presentation_view.c', '../src/ui/settings.c',
-      )
-    endif
+    dialog_presentation_test_sources = files(
+      '../src/ui/presentation_view.c', '../src/ui/settings.c',
+    )
     test_artwork_viewer = executable('test-artwork-viewer',
       'test_artwork_viewer.c', dialog_presentation_test_sources,
       include_directories: [config_inc, include_directories('../src')],
@@ -136,14 +133,21 @@ if get_option('tests')
   )
   test('settings', test_settings)
 
-  if host_machine.system() == 'linux'
-    test_presentation_policy = executable('test-presentation-policy',
-      'test_presentation_policy.c',
-      include_directories: [include_directories('../src')],
-      dependencies: [glib_dep, m_dep],
+  if enable_gui
+    test_shortcuts = executable('test-shortcuts',
+      'test_shortcuts.c', '../src/ui/shortcuts.c', '../src/ui/settings.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: [gtk4_dep, adw_check, gio_dep],
     )
-    test('presentation-policy', test_presentation_policy)
+    test('shortcuts', test_shortcuts)
   endif
+
+  test_presentation_policy = executable('test-presentation-policy',
+    'test_presentation_policy.c',
+    include_directories: [include_directories('../src')],
+    dependencies: [glib_dep, m_dep],
+  )
+  test('presentation-policy', test_presentation_policy)
 
   if have_local_av
     test_local_catalog = executable('test-local-catalog',

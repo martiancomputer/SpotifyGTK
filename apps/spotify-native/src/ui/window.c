@@ -36,10 +36,10 @@
 #include "device_playlists.h"
 #include "playlist_create_dialog.h"
 #include "dialog_host.h"
-#ifdef __linux__
-#include "presentation_view.h"
 #include "frame_policy.h"
-#endif
+#include "presentation_view.h"
+#include "presentation_policy.h"
+#include "shortcuts.h"
 #include "settings_page.h"
 #include "spotify/native_auth.h"
 #include "settings.h"
@@ -127,9 +127,9 @@ struct _SpotifyGtkNativeWindow {
   GdkFrameClock *cover_release_clock;
   gulong cover_release_handler;
   GtkWidget *window_title;       /* centered header label, borrowed */
-#ifdef __linux__
   GtkWidget *presentation_base;  /* owned across live wrapper replacement */
-#endif
+  GtkWidget *header_handle;
+  GHashTable *held_shortcuts;
   /* Every track list wired through wire_track_list(), so a liked mark can be
    * fanned out to all of them: one track can be on screen in more than one
    * list at a time. Borrowed -- the lists belong to their pages. */
@@ -4229,6 +4229,7 @@ on_volume_changed (SpotifyGtkPlaybackBar *bar, gint percent, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
   spotifygtk_player_service_set_volume (self->player, percent);
+  spotifygtk_settings_set_volume (spotifygtk_settings_get_default (), (guint) CLAMP (percent, 0, 100));
   mpris_emit_player_changed (self, "Volume");
   (void) bar;
 }
@@ -4240,6 +4241,88 @@ on_pause_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
   spotifygtk_player_service_pause (self->player);
   broadcast_playing_uri (self);
   (void) bar;
+}
+
+static gboolean
+on_shortcut_pressed (GtkEventControllerKey *controller, guint key, guint code,
+                     GdkModifierType mods, SpotifyGtkNativeWindow *self)
+{
+  (void) controller;
+  if (g_object_get_data (G_OBJECT (self), "shortcut-recording")) return GDK_EVENT_PROPAGATE;
+  /* Consume repeats too, so a held Space cannot toggle on every repeat or
+   * fall through to a focused button after the first press. */
+  gpointer identity = GUINT_TO_POINTER (code ? code : key);
+  if (g_hash_table_contains (self->held_shortcuts, identity)) return GDK_EVENT_STOP;
+  if (key == GDK_KEY_F11 && !(mods & gtk_accelerator_get_default_mod_mask ())) {
+    g_hash_table_add (self->held_shortcuts, identity);
+    if (gtk_window_is_fullscreen (GTK_WINDOW (self))) gtk_window_unfullscreen (GTK_WINDOW (self));
+    else gtk_window_fullscreen (GTK_WINDOW (self));
+    return GDK_EVENT_STOP;
+  }
+  if (key == GDK_KEY_Escape && gtk_window_is_fullscreen (GTK_WINDOW (self)) &&
+      !adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (self))) {
+    gtk_window_unfullscreen (GTK_WINDOW (self));
+    return GDK_EVENT_STOP;
+  }
+  GtkWidget *focus = gtk_window_get_focus (GTK_WINDOW (self));
+  gboolean typing = spotifygtk_shortcut_is_typing (focus);
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  for (guint action = 0; action < SPOTIFYGTK_SHORTCUT_COUNT; action++) {
+    if (!spotifygtk_shortcut_matches (spotifygtk_settings_get_shortcut (settings, action), key, mods)) continue;
+    if (typing && (action == SPOTIFYGTK_SHORTCUT_PLAY_PAUSE || key == GDK_KEY_space))
+      return GDK_EVENT_PROPAGATE;
+    g_hash_table_add (self->held_shortcuts, identity);
+    if (action == SPOTIFYGTK_SHORTCUT_PLAY_PAUSE) {
+      if (spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING &&
+          !spotifygtk_player_service_is_paused (self->player)) on_pause_clicked (NULL, self);
+      else on_play_clicked (NULL, self);
+    } else {
+      guint percent = spotifygtk_presentation_step_scale (
+        spotifygtk_settings_get_ui_scale (settings), action == SPOTIFYGTK_SHORTCUT_SCALE_UP);
+      spotifygtk_settings_set_ui_scale (settings, percent,
+        !spotifygtk_presentation_valid_scale (percent, FALSE));
+    }
+    return GDK_EVENT_STOP;
+  }
+  return GDK_EVENT_PROPAGATE;
+}
+
+static void
+on_shortcut_released (GtkEventControllerKey *controller, guint key, guint code,
+                      GdkModifierType mods, SpotifyGtkNativeWindow *self)
+{
+  (void) controller; (void) mods;
+  g_hash_table_remove (self->held_shortcuts, GUINT_TO_POINTER (code ? code : key));
+}
+
+static void
+on_window_active_changed (SpotifyGtkNativeWindow *self, GParamSpec *pspec, gpointer unused)
+{
+  (void) pspec; (void) unused;
+  if (self->held_shortcuts && !gtk_window_is_active (GTK_WINDOW (self)))
+    g_hash_table_remove_all (self->held_shortcuts);
+}
+
+static void
+bind_shortcuts (GtkWidget *widget, SpotifyGtkNativeWindow *self)
+{
+  GtkEventController *keys = gtk_event_controller_key_new ();
+  gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_CAPTURE);
+  g_signal_connect_object (keys, "key-pressed", G_CALLBACK (on_shortcut_pressed), self, 0);
+  g_signal_connect_object (keys, "key-released", G_CALLBACK (on_shortcut_released), self, 0);
+  gtk_widget_add_controller (widget, keys);
+}
+
+static void
+on_shortcut_dialog_changed (SpotifyGtkNativeWindow *self, GParamSpec *pspec, gpointer unused)
+{
+  (void) pspec; (void) unused;
+  if (!self->held_shortcuts) return;
+  g_hash_table_remove_all (self->held_shortcuts);
+  AdwDialog *dialog = adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (self));
+  if (!dialog || g_object_get_data (G_OBJECT (dialog), "shortcuts-bound")) return;
+  g_object_set_data (G_OBJECT (dialog), "shortcuts-bound", GINT_TO_POINTER (1));
+  bind_shortcuts (GTK_WIDGET (dialog), self);
 }
 
 static void
@@ -4447,6 +4530,7 @@ mpris_set_property (GDBusConnection *connection, const gchar *sender,
     gint percent = (gint) CLAMP (g_variant_get_double (value) * 100.0, 0.0, 100.0);
     spotifygtk_player_service_set_volume (self->player, percent);
     spotifygtk_playback_bar_set_volume (self->playback_bar, percent);
+    spotifygtk_settings_set_volume (spotifygtk_settings_get_default (), (guint) percent);
     mpris_emit_player_changed (self, "Volume");
     return TRUE;
   }
@@ -6320,6 +6404,10 @@ static const gchar *theme_body =
   "scale slider { background-color: @knob; min-width: 12px;"
   "  min-height: 12px; border-radius: 6px; margin: 0; }"
   "scale:disabled slider { background-color: @knob_muted; }"
+  ".volume-scale { padding: 8px 4px; }"
+  ".volume-scale slider { min-width: 14px; min-height: 14px; border-radius: 7px;"
+  " margin: -5px 0; padding: 0; border: 0; box-shadow: none; }"
+  ".volume-scale:hover highlight, .volume-scale:focus highlight { background-color: @accent; }"
 
   /* ── Text selection ────────────────────────────────────────── */
   /* One selection colour everywhere: the search entry, and any selectable
@@ -6677,7 +6765,6 @@ on_decoration_layout_changed (GtkHeaderBar *header)
   sync_decoration_layout (header);
 }
 
-#ifdef __linux__
 static void
 on_presentation_scale_changed (SpotifyGtkSettings *settings, SpotifyGtkNativeWindow *self)
 {
@@ -6699,7 +6786,14 @@ on_presentation_scale_changed (SpotifyGtkSettings *settings, SpotifyGtkNativeWin
     g_object_unref (focus);
   }
 }
-#endif
+
+static void
+on_fullscreen_changed (SpotifyGtkNativeWindow *self, GParamSpec *pspec, gpointer unused)
+{
+  (void) pspec; (void) unused;
+  if (self->header_handle)
+    gtk_widget_set_visible (self->header_handle, !gtk_window_is_fullscreen (GTK_WINDOW (self)));
+}
 
 static void
 spotifygtk_native_window_constructed (GObject *object)
@@ -6721,6 +6815,7 @@ spotifygtk_native_window_constructed (GObject *object)
 
   /* Create core services */
   self->player = spotifygtk_player_service_new ();
+  spotifygtk_player_service_set_volume (self->player, (gint) spotifygtk_settings_get_volume (settings));
   spotifygtk_player_service_set_local_path_resolver (
     self->player, spotifygtk_local_catalog_dup_track_path);
   self->session = spotifygtk_native_session_new ();
@@ -6794,6 +6889,7 @@ spotifygtk_native_window_constructed (GObject *object)
   /* Keep the same header, but inside the native dialog host rather than
    * outside it as GtkWindow:titlebar. Only the main header is a drag handle. */
   GtkWidget *header_handle = gtk_window_handle_new ();
+  self->header_handle = header_handle;
   gtk_window_handle_set_child (GTK_WINDOW_HANDLE (header_handle), header);
 
   /* Horizontal paned: sidebar | (content | queue) */
@@ -7015,6 +7111,7 @@ spotifygtk_native_window_constructed (GObject *object)
 
   /* Playback bar (80px) */
   self->playback_bar = spotifygtk_playback_bar_new ();
+  spotifygtk_playback_bar_set_volume (self->playback_bar, (gint) spotifygtk_settings_get_volume (settings));
   /* No fixed height. The bar gained a second row (progress under the
    * transport buttons), and an 80px request clipped it against the bottom
    * of the window -- it now sizes to its content. */
@@ -7084,15 +7181,30 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_box_append (GTK_BOX (window_content), header_handle);
   gtk_widget_set_vexpand (shell, TRUE);
   gtk_box_append (GTK_BOX (window_content), shell);
-#ifdef __linux__
   self->presentation_base = g_object_ref_sink (window_content);
   adw_application_window_set_content (ADW_APPLICATION_WINDOW (self),
     spotifygtk_presentation_wrap (window_content));
   g_signal_connect_object (settings, "changed", G_CALLBACK (on_presentation_scale_changed), self, 0);
-#else
-  adw_application_window_set_content (ADW_APPLICATION_WINDOW (self), window_content);
-#endif
   spotifygtk_dialog_host_bind (ADW_APPLICATION_WINDOW (self));
+  self->held_shortcuts = g_hash_table_new (g_direct_hash, g_direct_equal);
+  bind_shortcuts (GTK_WIDGET (self), self);
+  g_signal_connect (self, "notify::is-active", G_CALLBACK (on_window_active_changed), NULL);
+  g_signal_connect (self, "notify::visible-dialog", G_CALLBACK (on_shortcut_dialog_changed), NULL);
+  g_signal_connect (self, "notify::fullscreened", G_CALLBACK (on_fullscreen_changed), NULL);
+  /* Breakpoints negotiate a small minimum BEFORE the window manager tiles
+   * the native surface. Hiding side panes only after allocation is too late:
+   * the old combined minimum prevented half-screen snapping on Windows. */
+  gtk_widget_set_size_request (GTK_WIDGET (self), 600, 400);
+  AdwBreakpoint *sidebar_breakpoint = adw_breakpoint_new (
+    adw_breakpoint_condition_parse ("max-width: 1150px"));
+  adw_breakpoint_add_setters (sidebar_breakpoint, G_OBJECT (self->sidebar), "visible", FALSE, NULL);
+  adw_application_window_add_breakpoint (ADW_APPLICATION_WINDOW (self), sidebar_breakpoint);
+  AdwBreakpoint *panel_breakpoint = adw_breakpoint_new (
+    adw_breakpoint_condition_parse ("max-width: 1050px"));
+  adw_breakpoint_add_setters (panel_breakpoint,
+    G_OBJECT (self->sidebar), "visible", FALSE,
+    G_OBJECT (self->now_playing_panel), "visible", FALSE, NULL);
+  adw_application_window_add_breakpoint (ADW_APPLICATION_WINDOW (self), panel_breakpoint);
   mpris_start (self);
 
   self->queue_expanded = TRUE;
@@ -7183,9 +7295,10 @@ spotifygtk_native_window_dispose (GObject *object)
   }
   g_clear_pointer (&self->loading_sources, g_hash_table_unref);
   g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
-#ifdef __linux__
   g_clear_object (&self->presentation_base);
-#endif
+  g_clear_pointer (&self->held_shortcuts, g_hash_table_unref);
+  self->header_handle = NULL;
+  spotifygtk_settings_flush (spotifygtk_settings_get_default ());
   if (self->auth)
     g_signal_handlers_disconnect_by_data (self->auth, self);
   if (self->session) {
@@ -7280,9 +7393,7 @@ on_window_realize (GtkWidget *widget, gpointer user_data)
 static void
 spotifygtk_native_window_init (SpotifyGtkNativeWindow *self)
 {
-#ifdef __linux__
   spotifygtk_frame_policy_bind (GTK_WIDGET (self));
-#endif
   g_signal_connect (self, "realize", G_CALLBACK (on_window_realize), NULL);
 
   self->context_index = -1;

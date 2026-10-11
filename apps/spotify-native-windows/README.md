@@ -177,6 +177,10 @@ No Windows VM is needed for this packaging path.
 
 ### Linux-only MSIX build
 
+For the optional high-refresh tester package, build the pinned GTK fork and
+enable the shared FPS control as described in [ENHANCED-GTK.md](ENHANCED-GTK.md).
+The stock-SDK workflow below retains upstream GTK frame pacing.
+
 Install a MinGW-w64 compiler supporting `-mcrtdll=ucrt`, Meson, Ninja,
 pkg-config, host GLib build tools, CMake, a C++ compiler, ICU development
 headers, Git, Python 3.11 or newer, libarchive's `bsdtar`, OpenSSL,

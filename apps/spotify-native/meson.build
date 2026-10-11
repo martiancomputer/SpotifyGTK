@@ -1,5 +1,5 @@
 project('spotify-native', 'c',
-  version: '0.1.0',
+  version: '1.1.0',
   meson_version: '>= 1.0.0',
   default_options: [
     'warning_level=2',
@@ -51,6 +51,7 @@ png_dep        = dependency('libpng',  required: enable_gui)
 # off than none at all.
 gtk_designed_for = '4.22.4'
 adw_designed_for = '1.9.0'
+allow_old_libadwaita = get_option('allow_old_libadwaita')
 
 if gtk4_dep.found() and not get_option('allow_old_gtk')
   if gtk4_dep.version().version_compare('< ' + gtk_designed_for)
@@ -62,14 +63,17 @@ if gtk4_dep.found() and not get_option('allow_old_gtk')
     )
   endif
 
-  # Checked alongside GTK because libadwaita draws much of what differs --
-  # entries, popovers, the header bar -- so a new GTK with an old libadwaita
-  # lands in the same place.
+endif
+
+# libadwaita is a separate dependency from GTK. A build may use the pinned GTK
+# fork while the runner supplies an older libadwaita, so keep its compatibility
+# override separate from allow_old_gtk.
+if gtk4_dep.found() and not allow_old_libadwaita
   adw_check = dependency('libadwaita-1', version: '>= 1.4', required: false)
   if adw_check.found() and adw_check.version().version_compare('< ' + adw_designed_for)
     error(
       'libadwaita ' + adw_check.version() + ' is older than ' + adw_designed_for + ', which the UI is laid out against.\n' +
-      '  Build anyway with:  meson setup build -Dallow_old_gtk=true'
+      '  Build anyway with:  meson setup build -Dallow_old_libadwaita=true'
     )
   endif
 endif

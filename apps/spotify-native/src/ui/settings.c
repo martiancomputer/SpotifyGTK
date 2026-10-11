@@ -3,9 +3,7 @@
  */
 
 #include "settings.h"
-#ifdef __linux__
 #include "presentation_policy.h"
-#endif
 
 #include <glib/gstdio.h>
 #include <string.h>
@@ -21,11 +19,12 @@ struct _SpotifyGtkSettings {
   SpotifyGtkSampleFormat sample_format;
   SpotifyGtkResamplerMode resampler_mode;
   SpotifyGtkRenderer   renderer;
-#ifdef __linux__
   guint frame_rate;
   guint ui_scale;
   gboolean ui_scale_custom;
-#endif
+  guint volume;
+  guint volume_save_source;
+  gchar *shortcuts[SPOTIFYGTK_SHORTCUT_COUNT];
 
   gboolean eq_enabled;
   gboolean aggressive_filtering;
@@ -63,11 +62,17 @@ G_DEFINE_FINAL_TYPE (SpotifyGtkSettings, spotifygtk_settings, G_TYPE_OBJECT)
 
 enum { CHANGED, LOCAL_FILES_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
+static void save (SpotifyGtkSettings *self);
+
+static const gchar *shortcut_keys[] = { "shortcut-scale-up", "shortcut-scale-down", "shortcut-play-pause" };
+static const gchar *shortcut_defaults[] = { "<Control>plus", "<Control>minus", "space" };
 
 static void
 spotifygtk_settings_finalize (GObject *object)
 {
   SpotifyGtkSettings *self = SPOTIFYGTK_SETTINGS (object);
+  spotifygtk_settings_flush (self);
+  for (guint i = 0; i < SPOTIFYGTK_SHORTCUT_COUNT; i++) g_free (self->shortcuts[i]);
   g_clear_pointer (&self->path, g_free);
   g_clear_pointer (&self->pins, g_ptr_array_unref);
   g_clear_pointer (&self->local_directories, g_ptr_array_unref);
@@ -109,7 +114,6 @@ load (SpotifyGtkSettings *self)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "resampler-mode", NULL);
   self->renderer = (SpotifyGtkRenderer)
     g_key_file_get_integer (kf, SETTINGS_GROUP, "renderer", NULL);
-#ifdef __linux__
   gint fps = g_key_file_get_integer (kf, SETTINGS_GROUP, "frame-rate", NULL);
   if (fps >= 0 && spotifygtk_presentation_valid_fps ((guint) fps))
     self->frame_rate = (guint) fps;
@@ -119,7 +123,18 @@ load (SpotifyGtkSettings *self)
     self->ui_scale = (guint) scale;
     self->ui_scale_custom = custom;
   }
-#endif
+  if (g_key_file_has_key (kf, SETTINGS_GROUP, "volume", NULL)) {
+    g_autoptr(GError) error = NULL;
+    gint volume = g_key_file_get_integer (kf, SETTINGS_GROUP, "volume", &error);
+    if (!error && volume >= 0 && volume <= 100) self->volume = (guint) volume;
+  }
+  for (guint i = 0; i < SPOTIFYGTK_SHORTCUT_COUNT; i++) {
+    g_autofree gchar *shortcut = g_key_file_get_string (kf, SETTINGS_GROUP, shortcut_keys[i], NULL);
+    if (shortcut && *shortcut && strlen (shortcut) < 128 && !strpbrk (shortcut, "\r\n")) {
+      g_free (self->shortcuts[i]);
+      self->shortcuts[i] = g_steal_pointer (&shortcut);
+    }
+  }
 
   self->eq_enabled = g_key_file_get_boolean (kf, SETTINGS_GROUP, "eq-enabled", NULL);
   self->aggressive_filtering =
@@ -257,11 +272,12 @@ save (SpotifyGtkSettings *self)
   g_key_file_remove_key (kf, SETTINGS_GROUP, "aggressive-media", NULL);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "scroll-smoothness",
                           (gint) self->scroll_smoothness);
-#ifdef __linux__
   g_key_file_set_integer (kf, SETTINGS_GROUP, "frame-rate", (gint) self->frame_rate);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "ui-scale", (gint) self->ui_scale);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "ui-scale-custom", self->ui_scale_custom);
-#endif
+  g_key_file_set_integer (kf, SETTINGS_GROUP, "volume", (gint) self->volume);
+  for (guint i = 0; i < SPOTIFYGTK_SHORTCUT_COUNT; i++)
+    g_key_file_set_string (kf, SETTINGS_GROUP, shortcut_keys[i], self->shortcuts[i]);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "shuffle", self->shuffle);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "repeat", (gint) self->repeat);
   g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains,
@@ -329,6 +345,9 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->page_crossfade = TRUE;
   self->lyrics_font_size = 19;
   self->scroll_smoothness = 50;
+  self->volume = 100;
+  for (guint i = 0; i < SPOTIFYGTK_SHORTCUT_COUNT; i++)
+    self->shortcuts[i] = g_strdup (shortcut_defaults[i]);
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
   self->local_directories = g_ptr_array_new_with_free_func (g_free);
   self->unavailable = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
@@ -446,7 +465,6 @@ DEFINE_SETTING (sample_format, SpotifyGtkSampleFormat, sample_format, SPOTIFYGTK
 DEFINE_SETTING (resampler_mode, SpotifyGtkResamplerMode, resampler_mode, SPOTIFYGTK_RESAMPLER_LINEAR)
 DEFINE_SETTING (renderer,    SpotifyGtkRenderer,   renderer,    SPOTIFYGTK_RENDERER_CAIRO)
 
-#ifdef __linux__
 guint
 spotifygtk_settings_get_frame_rate (SpotifyGtkSettings *self)
 {
@@ -490,7 +508,64 @@ spotifygtk_settings_set_ui_scale (SpotifyGtkSettings *self, guint percent, gbool
   save (self);
   g_signal_emit (self, signals[CHANGED], 0);
 }
-#endif
+
+static gboolean
+save_volume (gpointer data)
+{
+  SpotifyGtkSettings *self = data;
+  self->volume_save_source = 0;
+  save (self);
+  return G_SOURCE_REMOVE;
+}
+
+void
+spotifygtk_settings_flush (SpotifyGtkSettings *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (!self->volume_save_source) return;
+  g_clear_handle_id (&self->volume_save_source, g_source_remove);
+  save (self);
+}
+
+guint
+spotifygtk_settings_get_volume (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), 100);
+  return self->volume;
+}
+
+void
+spotifygtk_settings_set_volume (SpotifyGtkSettings *self, guint percent)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if (percent > 100 || percent == self->volume) return;
+  self->volume = percent;
+  /* Do not write the INI or restyle every page on every drag event. */
+  g_clear_handle_id (&self->volume_save_source, g_source_remove);
+  self->volume_save_source = g_timeout_add (250, save_volume, self);
+}
+
+const gchar *
+spotifygtk_settings_get_shortcut (SpotifyGtkSettings *self, SpotifyGtkShortcut action)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), NULL);
+  return (guint) action < SPOTIFYGTK_SHORTCUT_COUNT ? self->shortcuts[action] : NULL;
+}
+
+void
+spotifygtk_settings_set_shortcut (SpotifyGtkSettings *self, SpotifyGtkShortcut action,
+                                const gchar *accelerator)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  if ((guint) action >= SPOTIFYGTK_SHORTCUT_COUNT) return;
+  if (!accelerator) accelerator = shortcut_defaults[action];
+  if (!*accelerator || strlen (accelerator) >= 128 || strpbrk (accelerator, "\r\n") ||
+      g_strcmp0 (self->shortcuts[action], accelerator) == 0) return;
+  g_free (self->shortcuts[action]);
+  self->shortcuts[action] = g_strdup (accelerator);
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
 
 guint
 spotifygtk_settings_get_lyrics_font_size (SpotifyGtkSettings *self)

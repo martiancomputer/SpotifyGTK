@@ -9,6 +9,9 @@
 #include "ui/cover_loader.h"
 #include "ui/settings.h"
 #include "ui/frame_stats.h"
+#ifdef G_OS_WIN32
+#include <glib/gwin32.h>
+#endif
 
 static gboolean
 stats_tick (gpointer data)
@@ -59,6 +62,28 @@ static void
 on_activate (GtkApplication *app, gpointer user_data)
 {
   adw_init ();
+#ifdef G_OS_WIN32
+  /* GDI private registration alone does not populate Pango's DirectWrite
+   * collection. Load the same UI faces used by the Linux CSS into Pango. */
+  static gboolean fonts_loaded;
+  if (!fonts_loaded) {
+    g_autofree gchar *module_dir = g_win32_get_package_installation_directory_of_module (NULL);
+    static const gchar *faces[] = {
+      "Adwaita/AdwaitaSans-Regular.ttf", "Adwaita/AdwaitaSans-Italic.ttf",
+      "noto/NotoSans-Regular.ttf", "noto/NotoSans-Bold.ttf",
+      "noto/NotoSans-Italic.ttf", "noto/NotoSans-BoldItalic.ttf"
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (faces); i++) {
+      g_autofree gchar *path = g_build_filename (module_dir, "share", "fonts", faces[i], NULL);
+      g_autoptr(GError) error = NULL;
+      if (!pango_font_map_add_font_file (pango_cairo_font_map_get_default (), path, &error))
+        g_warning ("Could not load a bundled interface font: %s", error ? error->message : "unsupported backend");
+    }
+    g_object_set (gtk_settings_get_default (), "gtk-font-name", "Noto Sans 10",
+      "gtk-primary-button-warps-slider", TRUE, NULL);
+    fonts_loaded = TRUE;
+  }
+#endif
 
   /* GtkApplication is single-instance, so launching again while one is
    * running routes here rather than starting a new process. Building a

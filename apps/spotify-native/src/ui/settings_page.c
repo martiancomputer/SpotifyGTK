@@ -16,9 +16,8 @@
 #include "eq_graph.h"
 #include "smooth_scroll.h"
 #include "cover_loader.h"
-#ifdef __linux__
 #include "frame_policy.h"
-#endif
+#include "shortcuts.h"
 
 struct _SpotifyGtkSettingsPage {
   GtkBox parent_instance;
@@ -35,10 +34,9 @@ struct _SpotifyGtkSettingsPage {
   GtkWidget          *local_directories_box;
   guint               scroll_commit_source;
   guint               pending_scroll_smoothness;
-#ifdef __linux__
   GtkWidget          *custom_scale_row;
   GtkSpinButton      *custom_scale;
-#endif
+  GtkDropDown        *scale_dropdown;
 };
 
 /* The stored array and the filter must agree on how many bands there are. */
@@ -317,9 +315,11 @@ build_row (const gchar *title, const gchar *subtitle, GtkWidget *control)
 
   gtk_box_append (GTK_BOX (row), text);
 
-  gtk_widget_set_valign (control, GTK_ALIGN_CENTER);
-  gtk_widget_set_margin_end (control, 16);
-  gtk_box_append (GTK_BOX (row), control);
+  if (control) {
+    gtk_widget_set_valign (control, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_end (control, 16);
+    gtk_box_append (GTK_BOX (row), control);
+  }
 
   return row;
 }
@@ -409,9 +409,7 @@ on_aggressive_filtering_toggled (GtkSwitch *sw, GParamSpec *pspec,
   (void) pspec;
 }
 
-#ifdef __linux__
 static const guint frame_rates[] = { 0, 30, 60, 120, 144, 240, 360 };
-static const guint interface_scales[] = { 0, 0, 25, 50, 75, 100, 150, 300 };
 
 static void
 on_frame_rate_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer data)
@@ -422,6 +420,36 @@ on_frame_rate_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer data)
     spotifygtk_settings_set_frame_rate (self->settings, frame_rates[selected]);
   (void) pspec;
 }
+
+static void
+on_frame_rate_map (GtkWidget *dropdown, gpointer data)
+{
+  gboolean available = spotifygtk_frame_policy_supported (dropdown);
+  gtk_widget_set_sensitive (dropdown, available);
+  gtk_widget_set_tooltip_text (dropdown, available
+    ? "Experimental GDK frame-rate ceiling. Actual presentation is limited by the display and compositor."
+    : "Stock GTK detected: native frame pacing is unchanged. Your saved choice is retained.");
+  (void) data;
+}
+
+static void
+build_frame_rate_settings (SpotifyGtkSettingsPage *self, GtkWidget *group)
+{
+  static const gchar * const fps_options[] = {
+    "Default", "30 FPS", "60 FPS", "120 FPS", "144 FPS", "240 FPS", "360 FPS", NULL
+  };
+  guint selected = 0;
+  for (guint i = 0; i < G_N_ELEMENTS (frame_rates); i++)
+    if (frame_rates[i] == spotifygtk_settings_get_frame_rate (self->settings)) selected = i;
+  GtkWidget *fps = build_dropdown (fps_options, selected, FALSE);
+  g_signal_connect (fps, "map", G_CALLBACK (on_frame_rate_map), NULL);
+  g_signal_connect (fps, "notify::selected", G_CALLBACK (on_frame_rate_changed), self);
+  gtk_box_append (GTK_BOX (group), build_row ("Frame rate",
+    "Experimental with GTK4-Enhanced. Default uses native pacing; other values "
+    "set a ceiling, bounded by your display and compositor. Stock GTK uses native pacing.", fps));
+}
+
+static const guint interface_scales[] = { 0, 0, 25, 50, 75, 90, 100, 150, 300 };
 
 static void
 on_interface_scale_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer data)
@@ -450,42 +478,19 @@ on_custom_scale_apply (GtkButton *button, gpointer data)
 }
 
 static void
-on_frame_rate_map (GtkWidget *dropdown, gpointer data)
-{
-  gboolean available = spotifygtk_frame_policy_supported (dropdown);
-  gtk_widget_set_sensitive (dropdown, available);
-  gtk_widget_set_tooltip_text (dropdown, available
-    ? "Experimental GDK frame-rate ceiling. Actual presentation is limited by the display and compositor."
-    : "Stock GTK detected: native frame pacing is unchanged. Your saved choice is retained.");
-  (void) data;
-}
-
-static void
 build_presentation_settings (SpotifyGtkSettingsPage *self, GtkWidget *group)
 {
-  static const gchar * const fps_options[] = {
-    "Default", "30 FPS", "60 FPS", "120 FPS", "144 FPS", "240 FPS", "360 FPS", NULL
-  };
-  guint selected = 0;
-  for (guint i = 0; i < G_N_ELEMENTS (frame_rates); i++)
-    if (frame_rates[i] == spotifygtk_settings_get_frame_rate (self->settings)) selected = i;
-  GtkWidget *fps = build_dropdown (fps_options, selected, FALSE);
-  g_signal_connect (fps, "map", G_CALLBACK (on_frame_rate_map), NULL);
-  g_signal_connect (fps, "notify::selected", G_CALLBACK (on_frame_rate_changed), self);
-  gtk_box_append (GTK_BOX (group), build_row ("Frame rate",
-    "Experimental with GTK4-Enhanced. Default uses native pacing; other values "
-    "set a ceiling, bounded by your display and compositor. Stock GTK uses native pacing.", fps));
-
   static const gchar * const scale_options[] = {
-    "Default", "Custom", "25%", "50%", "75%", "100%", "150%", "300%", NULL
+    "Default", "Custom", "25%", "50%", "75%", "90%", "100%", "150%", "300%", NULL
   };
   guint percent = spotifygtk_settings_get_ui_scale (self->settings);
   gboolean custom = spotifygtk_settings_get_ui_scale_custom (self->settings);
-  selected = 0;
+  guint selected = 0;
   if (custom) selected = 1;
   else for (guint i = 2; i < G_N_ELEMENTS (interface_scales); i++)
     if (interface_scales[i] == percent) selected = i;
   GtkWidget *scale = build_dropdown (scale_options, selected, TRUE);
+  self->scale_dropdown = GTK_DROP_DOWN (scale);
   gtk_box_append (GTK_BOX (group), build_row ("Interface scale",
     "Resizes text, artwork, spacing and controls together, relative to your "
     "desktop scale. Changes apply immediately. Default adds no extra scaling.", scale));
@@ -507,7 +512,21 @@ build_presentation_settings (SpotifyGtkSettingsPage *self, GtkWidget *group)
   gtk_box_append (GTK_BOX (group), self->custom_scale_row);
   g_signal_connect (scale, "notify::selected", G_CALLBACK (on_interface_scale_changed), self);
 }
-#endif
+
+static void
+sync_interface_scale (SpotifyGtkSettings *settings, SpotifyGtkSettingsPage *self)
+{
+  guint percent = spotifygtk_settings_get_ui_scale (settings);
+  gboolean custom = spotifygtk_settings_get_ui_scale_custom (settings);
+  guint selected = custom ? 1 : 0;
+  if (!custom) for (guint i = 2; i < G_N_ELEMENTS (interface_scales); i++)
+    if (interface_scales[i] == percent) selected = i;
+  g_signal_handlers_block_by_func (self->scale_dropdown, on_interface_scale_changed, self);
+  gtk_drop_down_set_selected (self->scale_dropdown, selected);
+  gtk_widget_set_visible (self->custom_scale_row, custom);
+  gtk_spin_button_set_value (self->custom_scale, percent ? percent : 100);
+  g_signal_handlers_unblock_by_func (self->scale_dropdown, on_interface_scale_changed, self);
+}
 
 static void
 on_detail_view_toggled (GtkSwitch *sw, GParamSpec *pspec, gpointer user_data)
@@ -749,6 +768,12 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
 
   /* ── Interface ─────────────────────────────────────────────── */
   GtkWidget *interface_group = build_group ("Interface");
+  build_presentation_settings (self, interface_group);
+  g_signal_connect_object (self->settings, "changed", G_CALLBACK (sync_interface_scale), self, 0);
+  gtk_box_append (GTK_BOX (interface_group), build_row ("Keybind manager",
+    "Click a shortcut to change it. Scaling changes by 10 percentage points. "
+    "Play/pause takes priority over focused buttons except while typing. F11 toggles fullscreen.", NULL));
+  gtk_box_append (GTK_BOX (interface_group), spotifygtk_shortcuts_editor_new ());
 
   static const gchar * const themes[] = { "Dark", "White", "Milk", "Dark+", NULL };
   GtkWidget *theme_dd = build_dropdown (themes,
@@ -989,9 +1014,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                              "from the environment always takes precedence.",
                              renderer_dd));
 
-#ifdef __linux__
-  build_presentation_settings (self, perf_group);
-#endif
+  build_frame_rate_settings (self, perf_group);
 
   GtkWidget *cache_switch = gtk_switch_new ();
   gtk_switch_set_active (

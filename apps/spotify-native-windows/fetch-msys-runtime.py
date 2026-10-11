@@ -21,13 +21,20 @@ PREFIX = "mingw-w64-ucrt-x86_64-"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--extra-package", action="append", default=[],
+                        help="Additional UCRT64 package name without the architecture prefix")
+    parser.add_argument("--cached-database", action="store_true",
+                        help="Reuse the downloaded repository snapshot without updating versions")
     args = parser.parse_args()
     root = args.directory.resolve()
     root.mkdir(parents=True, exist_ok=True)
     archives = root / "archives"
     archives.mkdir(exist_ok=True)
     database = root / "ucrt64.db"
-    urllib.request.urlretrieve(REPOSITORY + "ucrt64.db", database)
+    if not args.cached_database:
+        urllib.request.urlretrieve(REPOSITORY + "ucrt64.db", database)
+    elif not database.is_file():
+        parser.error("--cached-database requires an existing ucrt64.db")
     packages = {}
     with tarfile.open(database) as archive:
         for member in archive:
@@ -62,6 +69,8 @@ def main():
                  "libogg", "libvorbis", "ffmpeg", "librsvg",
                  "glib-networking", "ca-certificates", "adwaita-icon-theme",
                  "adwaita-icon-theme-legacy"):
+        select(PREFIX + name)
+    for name in args.extra_package:
         select(PREFIX + name)
 
     def fetch(fields):

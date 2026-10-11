@@ -191,9 +191,6 @@ mkdir -p "$DIST/share/glib-2.0/schemas" "$DIST/share/icons"
 cp -rn "$prefix/share/icons/Adwaita"           "$DIST/share/icons/"        2>/dev/null || true
 cp -rn "$prefix/share/icons/hicolor"           "$DIST/share/icons/"        2>/dev/null || true
 cp -rn "$prefix/share/icons/AdwaitaLegacy"     "$DIST/share/icons/"        2>/dev/null || true
-mkdir -p "$DIST/share/icons/hicolor/scalable/apps"
-cp "$SRC/data/com.github.spotifygtk.SpotifyNative.svg" \
-  "$DIST/share/icons/hicolor/scalable/apps/"
 cp -rn "$prefix/share/glib-2.0/schemas/"*.compiled "$DIST/share/glib-2.0/schemas/" 2>/dev/null || true
 cp -f "$prefix/share/glib-2.0/schemas/"*.xml "$DIST/share/glib-2.0/schemas/"
 glib-compile-schemas "$DIST/share/glib-2.0/schemas"
@@ -214,6 +211,21 @@ if [[ -d "$prefix/share/licenses" ]]; then
 fi
 cp "$HERE/../../LICENSE" "$DIST/share/licenses/SpotifyGTK-LICENSE"
 cp "$HERE/../../THIRD_PARTY_LICENSES" "$DIST/share/licenses/SpotifyGTK-THIRD-PARTY-LICENSES"
+if LC_ALL=C grep -aqF 'gtk4-enhanced-frame-policy-version' "$DIST/libgtk-4-1.dll"; then
+  gtk_bundle_source="${GTK_ENHANCED_SOURCE:-$HERE/../../dependencies/gtk4-enhanced}"
+  mkdir -p "$DIST/share/licenses/GTK4-Enhanced"
+  for gtk_notice in COPYING AUTHORS UPSTREAM.md FRAME_POLICY.md; do
+    [[ -s "$gtk_bundle_source/$gtk_notice" ]] || {
+      echo "error: missing enhanced GTK source notice: $gtk_notice" >&2; exit 1;
+    }
+    cp "$gtk_bundle_source/$gtk_notice" "$DIST/share/licenses/GTK4-Enhanced/"
+  done
+  cp "$HERE/ENHANCED-GTK.md" "$DIST/share/licenses/GTK4-Enhanced/WINDOWS.md"
+  {
+    printf 'Corresponding source: https://github.com/martiancomputer/GTK4-Enhanced\nRevision: '
+    git -C "$gtk_bundle_source" rev-parse HEAD
+  } > "$DIST/share/licenses/GTK4-Enhanced/SOURCE.txt"
+fi
 if [[ -f "$prefix/../runtime-packages.json" ]]; then
   cp "$prefix/../runtime-packages.json" "$DIST/share/licenses/runtime-packages.json"
 fi

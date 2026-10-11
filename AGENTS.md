@@ -47,6 +47,10 @@ main README for dependencies, the nightly profile, and GTK version requirements.
 Use `-Denable_gui=false` for an engine-only build. Windows build instructions
 are in `apps/spotify-native-windows/README.md`.
 
+The optional Linux enhanced-GTK script also uses `apps/spotify-native/build`,
+not a separate application output directory. It stages the fork privately and
+clears cached dependencies when reconfiguring that normal build directory.
+
 Add focused regression coverage for behavioral changes and run the relevant
 tests, followed by broader coverage when feasible. UI tests need a working
 display and renderer; report environmental failures separately from product

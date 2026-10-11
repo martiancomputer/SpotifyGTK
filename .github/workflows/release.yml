@@ -1,9 +1,5 @@
 name: Release
 
-# Tagging is what publishes. workflow_dispatch is here so the packaging can be
-# exercised without creating a tag -- the artifacts are built and uploaded to
-# the run, but no release is created, so a broken package cannot become a
-# published one by accident.
 on:
   push:
     tags: ['v*']
@@ -13,84 +9,199 @@ permissions:
   contents: write
 
 jobs:
-  # The AppImage is not built here. It bundles the GTK stack, so the build
-  # host's version becomes the runtime version, and no runner base has the
-  # GTK 4.22 the UI is laid out against -- it would only ever produce the
-  # older-toolkit look. It is built by hand from packaging/build-appimage.sh on
-  # a machine that does, and attached to the release separately.
-  #
-  # The deb has no such problem: it links the system GTK at runtime rather than
-  # bundling it, so where it is built does not decide how it looks. It declares
-  # the version it needs instead.
-  deb:
-    name: deb (ubuntu-24.04)
+  linux:
+    name: Linux Debian package and Arch AppImage (pinned GTK)
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Confirm tag matches application version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(sed -n "s/^ *version: *'\\([^']*\\)'.*/\\1/p" apps/spotify-native/meson.build | head -1)"
+          test "${GITHUB_REF_NAME#v}" = "$version"
+      - name: Install GTK and app build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential ninja-build pkg-config python3 python3-pip gettext curl libfuse2 dpkg-dev \
+            libglib2.0-dev libadwaita-1-dev libgdk-pixbuf-2.0-dev libcairo2-dev libpango1.0-dev libharfbuzz-dev \
+            libepoxy-dev libgraphene-1.0-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            libx11-dev libxext-dev libxrender-dev libxinerama-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxcomposite-dev libxdamage-dev libdrm-dev libvulkan-dev libjpeg-dev libpng-dev \
+            libtiff-dev libsoup-3.0-dev libjson-glib-dev libogg-dev libvorbis-dev libssl-dev libpulse-dev \
+            libasound2-dev libsecret-1-dev desktop-file-utils
+          python3 -m pip install --user --break-system-packages meson
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build pinned GTK fork
+        env:
+          GTK_BUILD_JOBS: 2
+          GTK_CONSUMER_TESTS: 'false'
+          GTK_ALLOW_OLD_LIBADWAITA: 'true'
+        run: packaging/build-enhanced-gtk.sh
+      - name: Build Debian package
+        env:
+          GTK_ENHANCED_PREFIX: ${{ github.workspace }}/_stage/gtk4-enhanced/usr
+        run: packaging/build-deb.sh
+      - name: Build Arch-targeted AppImage
+        env:
+          GTK_ENHANCED_PREFIX: ${{ github.workspace }}/_stage/gtk4-enhanced/usr
+        run: packaging/build-appimage.sh
+      - name: Verify package names and contents
+        run: |
+          version="$(sed -n "s/^ *version: *'\\([^']*\\)'.*/\\1/p" apps/spotify-native/meson.build | head -1)"
+          deb="packaging/out/spotifygtk-${version}-release-linux-debian-x86-64.deb"
+          appimage="packaging/out/spotifygtk-${version}-release-linux-arch-x86-64.appimage"
+          test -f "$deb" && test -x "$appimage"
+          dpkg-deb --field "$deb" Package | grep -Fx spotifygtk
+          dpkg-deb --contents "$deb" | grep -F 'usr/lib/spotifygtk/gtk/libgtk-4.so.1'
+          APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --appimage-extract >/dev/null
+          sha256sum "$deb" "$appimage" > packaging/out/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spotifygtk-linux-release
+          path: |
+            packaging/out/spotifygtk-*-release-linux-debian-x86-64.deb
+            packaging/out/spotifygtk-*-release-linux-arch-x86-64.appimage
+            packaging/out/SHA256SUMS.txt
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotifygtk-linux-release-logs
+          path: |
+            _build/gtk4-enhanced/meson-logs/
+            apps/spotify-native/build/meson-logs/
+            packaging/out/build-deb/meson-logs/
+            packaging/out/build-appimage/meson-logs/
+
+  windows:
+    name: Windows signed MSIX (pinned GTK, x64)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install dependencies
+        with:
+          submodules: recursive
+      - name: Require the existing publisher signing identity
+        env:
+          SIGNING_CERT_B64: ${{ secrets.SPOTIFYGTK_SIGNING_CERT_B64 }}
+          SIGNING_KEY_B64: ${{ secrets.SPOTIFYGTK_SIGNING_KEY_B64 }}
+        run: |
+          test -n "$SIGNING_CERT_B64" || { echo 'Missing SPOTIFYGTK_SIGNING_CERT_B64 repository secret.' >&2; exit 1; }
+          test -n "$SIGNING_KEY_B64" || { echo 'Missing SPOTIFYGTK_SIGNING_KEY_B64 repository secret.' >&2; exit 1; }
+      - name: Install Windows cross-build and MSIX tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y \
-            ninja-build pkg-config dpkg-dev desktop-file-utils \
-            libgtk-4-dev libadwaita-1-dev \
-            libglib2.0-dev libsoup-3.0-dev libjson-glib-dev \
-            libogg-dev libvorbis-dev \
-            libssl-dev libpulse-dev libasound2-dev
-
-      - name: Install Meson
-        run: |
-          pip install --user meson
+          sudo apt-get install -y build-essential ninja-build pkg-config python3 python3-pip gettext \
+            mingw-w64 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 wine wine64 osslsigncode \
+            libarchive-tools cmake libicu-dev libxerces-c-dev librsvg2-bin openssl \
+            libglib2.0-dev libadwaita-1-dev libgdk-pixbuf-2.0-dev libcairo2-dev libpango1.0-dev \
+            libharfbuzz-dev libepoxy-dev libgraphene-1.0-dev libxkbcommon-dev libwayland-dev \
+            wayland-protocols libx11-dev libxext-dev libxrender-dev libxinerama-dev libxrandr-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxcomposite-dev libxdamage-dev libdrm-dev \
+            libvulkan-dev libjpeg-dev libpng-dev libtiff-dev fonts-noto-core \
+            fonts-noto-cjk fonts-noto-color-emoji
+          python3 -m pip install --user --break-system-packages meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Build package
-        run: ./packaging/build-deb.sh
-
-      # The runner cannot satisfy this package's own requirement -- 24.04 has
-      # GTK 4.14 and the package asks for 4.22 -- so a plain apt install would
-      # fail by design and prove nothing. Unpack it with --force-depends
-      # instead: that still verifies the payload lands correctly, while the
-      # dependency line is asserted separately rather than by installing.
-      - name: Verify the package
+      - name: Fetch the isolated UCRT64 SDK
+        run: python3 apps/spotify-native-windows/fetch-msys-runtime.py apps/spotify-native-windows/tools-build/msys-runtime
+      - name: Build pinned Windows GTK fork
+        env:
+          GTK_BUILD_JOBS: 2
+        run: bash apps/spotify-native-windows/build-enhanced-gtk.sh
+      - name: Prepare Linux-matching fonts
         run: |
-          echo "--- declared dependencies ---"
-          dpkg-deb --field ./packaging/out/*.deb Depends | tr ',' '\n' | sed 's/^ *//'
-
-          if ! dpkg-deb --field ./packaging/out/*.deb Depends | grep -q "libgtk-4-1 (>= 4.22"; then
-            echo "::error::package does not require GTK >= 4.22, so it would install where the UI looks wrong"
-            exit 1
-          fi
-
-          sudo dpkg -i --force-depends ./packaging/out/*.deb
-          dpkg -L spotifygtk
-          desktop-file-validate /usr/share/applications/com.github.spotifygtk.SpotifyNative.desktop
-          test -x /usr/bin/spotify-native
-          echo "payload correct; dependency floor present"
-
+          fonts="$RUNNER_TEMP/spotifygtk-fonts"
+          mkdir -p "$fonts/Adwaita" "$fonts/noto" "$fonts/noto-cjk" "$fonts/noto-emoji" "$fonts/licenses"
+          adwaita_archive="$RUNNER_TEMP/adwaita-fonts-49.0.tar.xz"
+          curl -fsSL https://download.gnome.org/sources/adwaita-fonts/49/adwaita-fonts-49.0.tar.xz -o "$adwaita_archive"
+          curl -fsSL https://download.gnome.org/sources/adwaita-fonts/49/adwaita-fonts-49.0.sha256sum -o "$adwaita_archive.sha256sum"
+          (cd "$RUNNER_TEMP" && sha256sum --check "$(basename "$adwaita_archive.sha256sum")")
+          mkdir -p "$RUNNER_TEMP/adwaita-fonts"
+          tar -xf "$adwaita_archive" -C "$RUNNER_TEMP/adwaita-fonts"
+          adwaita="$(find "$RUNNER_TEMP/adwaita-fonts" -name AdwaitaSans-Regular.ttf -print -quit)"
+          test -n "$adwaita"
+          adwaita_dir="$(dirname "$adwaita")"
+          cp "$adwaita_dir"/AdwaitaSans-*.ttf "$fonts/Adwaita/"
+          find "$RUNNER_TEMP/adwaita-fonts" -iname 'LICENSE*' -type f -exec cp '{}' "$fonts/licenses/adwaita-fonts.LICENSE" \; -quit
+          noto_dir="$(dirname "$(find /usr/share/fonts -name NotoSans-Regular.ttf -print -quit)")"
+          test -d "$noto_dir"
+          cp "$noto_dir"/NotoSans-{Regular,Bold,Italic,BoldItalic}.ttf "$fonts/noto/"
+          cp -R /usr/share/fonts/opentype/noto/. "$fonts/noto-cjk/" 2>/dev/null || true
+          cp -R /usr/share/fonts/truetype/noto/. "$fonts/noto-emoji/" 2>/dev/null || true
+          cp /usr/share/doc/fonts-adwaita/copyright "$fonts/licenses/adwaita-fonts.LICENSE"
+          cp /usr/share/doc/fonts-noto-core/copyright "$fonts/licenses/noto-fonts.LICENSE"
+          cp /usr/share/doc/fonts-noto-cjk/copyright "$fonts/licenses/noto-fonts-cjk.LICENSE" 2>/dev/null || true
+          cp /usr/share/doc/fonts-noto-color-emoji/copyright "$fonts/licenses/noto-fonts-emoji.LICENSE" 2>/dev/null || true
+          echo "SPOTIFYGTK_BUNDLE_FONTS=$fonts" >> "$GITHUB_ENV"
+      - name: Build and bundle Windows app with pinned GTK
+        run: |
+          root="$GITHUB_WORKSPACE"
+          base="$root/apps/spotify-native-windows/tools-build/gtk4-enhanced-runtime"
+          export prefix="$base/ucrt64"
+          export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/share/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR="$base"
+          export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/msys2-ucrt64-linux.ini"
+          export SPOTIFYGTK_REQUIRE_ENHANCED_GTK=1
+          bash apps/spotify-native-windows/build.sh --bundle
+          x86_64-w64-mingw32-strip --strip-unneeded apps/spotify-native-windows/build/dist/spotify-native.exe
+      - name: Sign and package MSIX
+        env:
+          SIGNING_CERT_B64: ${{ secrets.SPOTIFYGTK_SIGNING_CERT_B64 }}
+          SIGNING_KEY_B64: ${{ secrets.SPOTIFYGTK_SIGNING_KEY_B64 }}
+        run: |
+          signing=apps/spotify-native-windows/.signing
+          install -d -m 700 "$signing"
+          printf '%s' "$SIGNING_CERT_B64" | base64 -d > "$signing/certificate.pem"
+          printf '%s' "$SIGNING_KEY_B64" | base64 -d > "$signing/private-key.pem"
+          chmod 600 "$signing/certificate.pem" "$signing/private-key.pem"
+          bash apps/spotify-native-windows/build-msix-tool.sh
+          SPOTIFYGTK_REQUIRE_ENHANCED_GTK=1 SPOTIFYGTK_MSIX_VERSION=1.1.0.0 \
+            bash apps/spotify-native-windows/package-msix.sh
+          test -f apps/spotify-native-windows/out/spotifygtk-1.1.0-release-windows-x86-64.msix
+          test -f apps/spotify-native-windows/out/spotifygtk-1.1.0-release-windows-x86-64.cer
       - uses: actions/upload-artifact@v4
         with:
-          name: deb
-          path: packaging/out/*.deb
+          name: spotifygtk-windows-release
+          path: |
+            apps/spotify-native-windows/out/spotifygtk-*-release-windows-x86-64.msix
+            apps/spotify-native-windows/out/spotifygtk-*-release-windows-x86-64.cer
+            apps/spotify-native-windows/out/SHA256SUMS.txt
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotifygtk-windows-release-logs
+          path: |
+            apps/spotify-native-windows/build/meson-logs/
+            apps/spotify-native-windows/tools-build/gtk4-enhanced-build/meson-logs/
 
   publish:
-    name: Publish release
-    needs: [deb]
+    name: Publish SpotifyGTK 1.1 release
+    needs: [linux, windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
-      # Needed for the notes file; the artifacts alone are not a checkout.
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
-        with: { path: dist }
-
-      - name: Create release
+        with:
+          name: spotifygtk-linux-release
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: spotifygtk-windows-release
+          path: dist
+      - name: Publish named release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          find dist -type f | sort
+          version="${GITHUB_REF_NAME#v}"
+          test "$version" = '1.1.0'
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "SpotifyGTK $GITHUB_REF_NAME" \
+            --title 'SpotifyGTK 1.1' \
             --notes-file packaging/release-notes.md \
-            $(find dist -type f)
+            "dist/spotifygtk-${version}-release-linux-debian-x86-64.deb" \
+            "dist/spotifygtk-${version}-release-linux-arch-x86-64.appimage" \
+            "dist/spotifygtk-${version}-release-windows-x86-64.msix" \
+            "dist/spotifygtk-${version}-release-windows-x86-64.cer"

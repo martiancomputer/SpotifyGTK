@@ -9,7 +9,8 @@ Upstream:   https://gitlab.gnome.org/GNOME/gtk
 Used in:    dependencies/gtk4-enhanced (pinned Git submodule)
 Nature:     Independently maintained GTK fork with an opt-in private GDK
             frame-rate policy. Built separately and dynamically linked by
-            the optional Linux experiment; system GTK remains a fallback.
+            the optional Linux experiment and enhanced Windows tester
+            packages; stock GTK remains a fallback.
 License:    LGPL-2.1-or-later, subject to component-specific notices.
 
 The submodule retains GTK's COPYING, AUTHORS and individual source notices.

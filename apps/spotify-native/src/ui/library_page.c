@@ -1048,8 +1048,12 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
 
   /* Match the sort controls elsewhere: caption plus a linked segmented group,
    * pushed to the right edge of the content area. */
-  GtkWidget *view_controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  GtkWidget *view_controls = adw_wrap_box_new ();
+  adw_wrap_box_set_child_spacing (ADW_WRAP_BOX (view_controls), 12);
+  adw_wrap_box_set_line_spacing (ADW_WRAP_BOX (view_controls), 8);
   gtk_widget_set_margin_bottom (view_controls, 4);
+  GtkWidget *filter_controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  gtk_widget_set_hexpand (filter_controls, TRUE);
 
   self->filter_entry = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
   gtk_search_entry_set_placeholder_text (self->filter_entry, "Filter library");
@@ -1058,20 +1062,19 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   gtk_widget_set_size_request (GTK_WIDGET (self->filter_entry), 340, -1);
   g_signal_connect (self->filter_entry, "search-changed",
                     G_CALLBACK (on_filter_changed), self);
-  gtk_box_append (GTK_BOX (view_controls), GTK_WIDGET (self->filter_entry));
+  gtk_box_append (GTK_BOX (filter_controls), GTK_WIDGET (self->filter_entry));
   gtk_widget_set_valign (self->new_playlist_button, GTK_ALIGN_CENTER);
-  gtk_box_append (GTK_BOX (view_controls), self->new_playlist_button);
-
-  GtkWidget *view_spacer = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_hexpand (view_spacer, TRUE);
-  gtk_box_append (GTK_BOX (view_controls), view_spacer);
+  gtk_box_append (GTK_BOX (filter_controls), self->new_playlist_button);
+  adw_wrap_box_append (ADW_WRAP_BOX (view_controls), filter_controls);
+  GtkWidget *sort_controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
 
   GtkWidget *view_caption = gtk_label_new ("Sort by");
   gtk_widget_add_css_class (view_caption, "dim-text");
   gtk_widget_set_valign (view_caption, GTK_ALIGN_CENTER);
-  gtk_box_append (GTK_BOX (view_controls), view_caption);
+  gtk_box_append (GTK_BOX (sort_controls), view_caption);
 
-  GtkWidget *view_group = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *view_group = adw_wrap_box_new ();
+  adw_wrap_box_set_line_spacing (ADW_WRAP_BOX (view_group), 4);
   gtk_widget_add_css_class (view_group, "linked");
   gtk_widget_set_valign (view_group, GTK_ALIGN_CENTER);
   const gchar *view_names[] = {
@@ -1086,9 +1089,10 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
                                    GTK_TOGGLE_BUTTON (self->view_buttons[0]));
     g_signal_connect (button, "toggled", G_CALLBACK (on_view_clicked), self);
     self->view_buttons[i] = button;
-    gtk_box_append (GTK_BOX (view_group), button);
+    adw_wrap_box_append (ADW_WRAP_BOX (view_group), button);
   }
-  gtk_box_append (GTK_BOX (view_controls), view_group);
+  gtk_box_append (GTK_BOX (sort_controls), view_group);
+  adw_wrap_box_append (ADW_WRAP_BOX (view_controls), sort_controls);
   gtk_box_append (GTK_BOX (header), view_controls);
 
   self->header_revealer = gtk_revealer_new ();

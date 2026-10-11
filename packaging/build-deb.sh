@@ -2,11 +2,9 @@
 #
 # build-deb.sh — build a .deb of spotify-native.
 #
-# A deb links against the system's GTK stack rather than bundling it, so it is
-# small (a few hundred KB) but only installs where those libraries are new
-# enough. libadwaita >= 1.4 is the binding constraint, which is Ubuntu 24.04,
-# Debian 13 or later. Ubuntu 22.04 ships 1.1 and is not a target -- see the
-# README. For distributions older than that, the AppImage is the answer.
+# The package carries the pinned GTK fork so GTK version differences on the
+# target distro cannot change the app layout. Other OS libraries remain distro
+# dependencies. Build the fork first with packaging/build-enhanced-gtk.sh.
 #
 #   ./packaging/build-deb.sh            # builds into packaging/out/
 #
@@ -17,10 +15,22 @@ ROOT="$(cd "$HERE/.." && pwd)"
 APP="$ROOT/apps/spotify-native"
 OUT="$HERE/out"
 STAGE="$OUT/deb-root"
+GTK_ENHANCED_PREFIX="${GTK_ENHANCED_PREFIX:-$ROOT/_stage/gtk4-enhanced/usr}"
+
+[[ -s "$GTK_ENHANCED_PREFIX/lib/pkgconfig/gtk4.pc" ]] || {
+  echo 'Build the pinned GTK fork first with packaging/build-enhanced-gtk.sh.' >&2
+  exit 1
+}
+export PKG_CONFIG_PATH="$GTK_ENHANCED_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+export LD_LIBRARY_PATH="$GTK_ENHANCED_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+test "$(pkg-config --variable=libdir gtk4)" = "$GTK_ENHANCED_PREFIX/lib" || {
+  echo 'Release build did not resolve GTK from the pinned fork.' >&2
+  exit 1
+}
 
 VERSION="$(sed -n "s/^ *version: *'\\([^']*\\)'.*/\\1/p" "$APP/meson.build" | head -1)"
 ARCH="$(dpkg --print-architecture)"
-PKG="spotifygtk_${VERSION}_${ARCH}"
+PKG="spotifygtk-${VERSION}-release-linux-debian-x86-64"
 
 echo "==> building spotify-native $VERSION ($ARCH)"
 
@@ -31,19 +41,28 @@ mkdir -p "$STAGE/DEBIAN"
 # whatever the working build directory happens to hold.
 BUILD="$OUT/build-deb"
 rm -rf "$BUILD"
-# allow_old_gtk is set deliberately, and only here.
-#
-# A deb links the system GTK at runtime rather than bundling it, so the version
-# present on the *build* host does not decide how the installed app looks -- the
-# version on the user's machine does. Building against older headers is safe
-# because nothing in this tree uses API newer than 4.14; the floor exists to
-# stop someone running a build that will look wrong, which for a deb is settled
-# by the dependency below rather than by the builder.
 meson setup "$BUILD" "$APP" \
   --native-file "$APP/build-profiles/stable.ini" \
-  --prefix /usr --buildtype release -Dallow_old_gtk=true >/dev/null
+  --prefix /usr --buildtype release -Dtests=false \
+  -Dallow_old_libadwaita=true \
+  "-Dc_link_args=-Wl,-rpath,/usr/lib/spotifygtk/gtk" >/dev/null
 meson compile -C "$BUILD" >/dev/null
 DESTDIR="$STAGE" meson install -C "$BUILD" --quiet >/dev/null
+
+# Bundle only GTK's core shared library. Its lower-level dependencies (GLib,
+# Pango, Cairo, etc.) are declared from the ELF dependency closure below.
+mkdir -p "$STAGE/usr/lib/spotifygtk/gtk"
+cp -a "$GTK_ENHANCED_PREFIX/lib"/libgtk-4.so* "$STAGE/usr/lib/spotifygtk/gtk/"
+gtk_license_dir="$STAGE/usr/share/licenses/GTK4-Enhanced"
+mkdir -p "$gtk_license_dir"
+for notice in COPYING AUTHORS UPSTREAM.md FRAME_POLICY.md; do
+  [[ -s "$ROOT/dependencies/gtk4-enhanced/$notice" ]] || {
+    echo "Missing pinned GTK notice: $notice" >&2; exit 1;
+  }
+  cp "$ROOT/dependencies/gtk4-enhanced/$notice" "$gtk_license_dir/"
+done
+printf 'Corresponding source: https://github.com/martiancomputer/GTK4-Enhanced\nRevision: %s\n' \
+  "$(git -C "$ROOT/dependencies/gtk4-enhanced" rev-parse HEAD)" > "$gtk_license_dir/SOURCE.txt"
 
 # Runtime dependencies, resolved from what the binary actually links rather
 # than from a hand-written list that drifts. shlibdeps needs the control file
@@ -67,27 +86,21 @@ Description: Native Spotify client written in C
  protocol level, so a free account cannot play regardless of client.
 EOF
 
-# GTK_RUNTIME_MIN, not what the build host happened to have.
-#
-# shlibdeps derives the constraint from the symbols used, which on a 24.04
-# builder produces "libgtk-4-1 (>= 4.14)" -- true for linking and wrong for
-# this application, whose layout needs 4.22. Raising it means the package
-# refuses to install where it would look wrong instead of installing and
-# disappointing. Ubuntu 24.04 is below that line; the AppImage is the answer
-# there.
-GTK_RUNTIME_MIN="4.22"
-
 if command -v dpkg-shlibdeps >/dev/null; then
-  ( cd "$STAGE" && dpkg-shlibdeps -O "usr/bin/spotify-native" 2>/dev/null ) \
-    | sed 's/^shlibs:Depends=/Depends: /' \
-    | sed "s/libgtk-4-1 (>= [0-9.]*)/libgtk-4-1 (>= $GTK_RUNTIME_MIN)/" \
-    | sed "s/libadwaita-1-0 (>= [0-9.]*)/libadwaita-1-0 (>= 1.9)/" >> "$STAGE/DEBIAN/control" || {
+  ( cd "$STAGE" && dpkg-shlibdeps -l"$STAGE/usr/lib/spotifygtk/gtk" -O \
+      usr/bin/spotify-native usr/bin/spotify-native-harness 2>/dev/null ) \
+    | sed 's/^shlibs:Depends=/Depends: /' >> "$STAGE/DEBIAN/control" || {
       echo "    dpkg-shlibdeps failed; falling back to a declared list" >&2
-      echo "Depends: libgtk-4-1 (>= $GTK_RUNTIME_MIN), libadwaita-1-0 (>= 1.9), libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3, libssl3 | libssl3t64" >> "$STAGE/DEBIAN/control"
+      echo "Depends: libadwaita-1-0, libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3, libssl3 | libssl3t64" >> "$STAGE/DEBIAN/control"
     }
 else
-  echo "Depends: libgtk-4-1 (>= $GTK_RUNTIME_MIN), libadwaita-1-0 (>= 1.9), libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3" >> "$STAGE/DEBIAN/control"
+  echo "Depends: libadwaita-1-0, libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3" >> "$STAGE/DEBIAN/control"
 fi
+
+# Avoid using the system app icon until the finalized design is ready. GTK's
+# symbolic theme assets remain bundled separately in portable formats.
+sed -i '/^Icon=/d' "$STAGE/usr/share/applications/"*.desktop
+rm -f "$STAGE/usr/share/icons/hicolor/scalable/apps/com.github.spotifygtk.SpotifyNative.svg"
 
 # Trigger the caches a desktop needs refreshed; without these the launcher
 # entry and icon do not appear until something else happens to rebuild them.
@@ -98,6 +111,7 @@ EOF
 
 find "$STAGE" -type d -exec chmod 755 {} +
 find "$STAGE/usr" -type f -exec chmod 644 {} + 2>/dev/null || true
+find "$STAGE/usr/lib/spotifygtk/gtk" -type f -name 'libgtk-4.so*' -exec chmod 755 {} +
 chmod 755 "$STAGE"/usr/bin/* 2>/dev/null || true
 
 dpkg-deb --build --root-owner-group "$STAGE" "$OUT/$PKG.deb" >/dev/null

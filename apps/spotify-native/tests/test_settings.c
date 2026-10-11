@@ -37,10 +37,17 @@ test_online_lyrics_opt_in (void)
                    SPOTIFYGTK_SAMPLE_FORMAT_16);
   g_assert_cmpint (spotifygtk_settings_get_resampler_mode (first), ==,
                    SPOTIFYGTK_RESAMPLER_POLYPHASE);
-#ifdef __linux__
   g_assert_cmpuint (spotifygtk_settings_get_frame_rate (first), ==, 0);
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (first), ==, 0);
   g_assert_false (spotifygtk_settings_get_ui_scale_custom (first));
+  g_assert_cmpuint (spotifygtk_settings_get_volume (first), ==, 100);
+  spotifygtk_settings_set_volume (first, 37);
+  spotifygtk_settings_set_volume (first, 101);
+  spotifygtk_settings_flush (first);
+  spotifygtk_settings_set_shortcut (first, SPOTIFYGTK_SHORTCUT_SCALE_UP, "<Control>F2");
+  g_assert_cmpstr (spotifygtk_settings_get_shortcut (first, SPOTIFYGTK_SHORTCUT_PLAY_PAUSE), ==, "space");
+  spotifygtk_settings_set_ui_scale (first, 90, FALSE);
+  g_assert_cmpuint (spotifygtk_settings_get_ui_scale (first), ==, 90);
   const guint rates[] = { 30, 60, 120, 144, 240, 360 };
   for (guint i = 0; i < G_N_ELEMENTS (rates); i++) {
     spotifygtk_settings_set_frame_rate (first, rates[i]);
@@ -56,7 +63,6 @@ test_online_lyrics_opt_in (void)
   spotifygtk_settings_set_ui_scale (first, 137, FALSE);
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (first), ==, 137);
   g_assert_true (spotifygtk_settings_get_ui_scale_custom (first));
-#endif
   spotifygtk_settings_set_lyrics_font_size (first, 28);
   spotifygtk_settings_set_lyrics_font_size (first, 29);
   g_assert_cmpuint (spotifygtk_settings_get_lyrics_font_size (first), ==, 28);
@@ -73,13 +79,16 @@ test_online_lyrics_opt_in (void)
 
   g_autoptr(SpotifyGtkSettings) second =
     g_object_new (SPOTIFYGTK_TYPE_SETTINGS, NULL);
-#ifdef __linux__
+  g_assert_cmpuint (spotifygtk_settings_get_volume (second), ==, 37);
+  g_assert_cmpstr (spotifygtk_settings_get_shortcut (second, SPOTIFYGTK_SHORTCUT_SCALE_UP), ==, "<Control>F2");
+  spotifygtk_settings_set_shortcut (second, SPOTIFYGTK_SHORTCUT_SCALE_UP, NULL);
+  spotifygtk_settings_set_volume (second, 0);
+  spotifygtk_settings_flush (second);
   g_assert_cmpuint (spotifygtk_settings_get_frame_rate (second), ==, 360);
+  spotifygtk_settings_set_frame_rate (second, 0);
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (second), ==, 137);
   g_assert_true (spotifygtk_settings_get_ui_scale_custom (second));
-  spotifygtk_settings_set_frame_rate (second, 0);
   spotifygtk_settings_set_ui_scale (second, 0, FALSE);
-#endif
   g_assert_true (spotifygtk_settings_get_online_lyrics (second));
   g_assert_false (spotifygtk_settings_get_compact_mode (second));
   g_assert_false (spotifygtk_settings_get_show_playlists_separately (second));
@@ -103,7 +112,8 @@ test_online_lyrics_opt_in (void)
   spotifygtk_settings_set_resampler_mode (second, SPOTIFYGTK_RESAMPLER_POLYPHASE);
   g_autoptr(SpotifyGtkSettings) third =
     g_object_new (SPOTIFYGTK_TYPE_SETTINGS, NULL);
-#ifdef __linux__
+  g_assert_cmpuint (spotifygtk_settings_get_volume (third), ==, 0);
+  g_assert_cmpstr (spotifygtk_settings_get_shortcut (third, SPOTIFYGTK_SHORTCUT_SCALE_UP), ==, "<Control>plus");
   g_assert_cmpuint (spotifygtk_settings_get_frame_rate (third), ==, 0);
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (third), ==, 0);
   g_assert_false (spotifygtk_settings_get_ui_scale_custom (third));
@@ -111,7 +121,6 @@ test_online_lyrics_opt_in (void)
   g_autoptr(SpotifyGtkSettings) custom = g_object_new (SPOTIFYGTK_TYPE_SETTINGS, NULL);
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (custom), ==, 100);
   g_assert_true (spotifygtk_settings_get_ui_scale_custom (custom));
-#endif
   g_assert_false (spotifygtk_settings_get_online_lyrics (third));
   g_assert_true (spotifygtk_settings_get_compact_mode (third));
   g_assert_true (spotifygtk_settings_get_show_playlists_separately (third));
@@ -128,7 +137,6 @@ test_online_lyrics_opt_in (void)
     temporary, "spotify-native", "settings.ini", NULL);
   g_autofree gchar *config_dir = g_build_filename (
     temporary, "spotify-native", NULL);
-#ifdef __linux__
   g_autoptr(GKeyFile) corrupt = g_key_file_new ();
   const gint invalid[] = { -1, 1, 24, 301, G_MAXINT };
   for (guint i = 0; i < G_N_ELEMENTS (invalid); i++) {
@@ -142,7 +150,6 @@ test_online_lyrics_opt_in (void)
     g_assert_cmpuint (spotifygtk_settings_get_ui_scale (invalid_settings), ==, 0);
     g_assert_false (spotifygtk_settings_get_ui_scale_custom (invalid_settings));
   }
-#endif
   g_assert_cmpint (g_remove (config), ==, 0);
   g_assert_cmpint (g_rmdir (config_dir), ==, 0);
   g_assert_cmpint (g_rmdir (temporary), ==, 0);

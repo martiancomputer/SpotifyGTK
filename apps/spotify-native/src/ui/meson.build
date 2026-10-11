@@ -16,6 +16,9 @@ ui_component_sources = ui_resources + files(
   'artwork_viewer.c',
   'page_stack.c',
   'frame_stats.c',
+  'frame_policy.c',
+  'presentation_view.c',
+  'shortcuts.c',
   'sidebar.c',
   'playback_bar.c',
   'now_playing_panel.c',
@@ -41,7 +44,4 @@ ui_component_sources = ui_resources + files(
   'artist_page.c',
 )
 
-if host_machine.system() == 'linux'
-  ui_component_sources += files('presentation_view.c', 'frame_policy.c')
-endif
 ui_sources = ui_component_sources + files('window.c')

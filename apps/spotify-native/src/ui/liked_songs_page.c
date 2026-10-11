@@ -593,19 +593,19 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
    * theme's own styling, so it inherits whatever the rest of the app is
    * wearing instead of introducing a look of its own.
    */
-  GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  GtkWidget *controls = adw_wrap_box_new ();
+  adw_wrap_box_set_child_spacing (ADW_WRAP_BOX (controls), 12);
+  adw_wrap_box_set_line_spacing (ADW_WRAP_BOX (controls), 8);
   self->controls = controls;
   gtk_widget_set_margin_bottom (controls, 4);
-  gtk_box_append (GTK_BOX (controls), GTK_WIDGET (self->filter_entry));
-
-  GtkWidget *spacer = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_hexpand (spacer, TRUE);
-  gtk_box_append (GTK_BOX (controls), spacer);
+  gtk_widget_set_hexpand (GTK_WIDGET (self->filter_entry), TRUE);
+  adw_wrap_box_append (ADW_WRAP_BOX (controls), GTK_WIDGET (self->filter_entry));
+  GtkWidget *sort_controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
 
   GtkWidget *sort_caption = gtk_label_new ("Sort by");
   gtk_widget_add_css_class (sort_caption, "dim-text");
   gtk_widget_set_valign (sort_caption, GTK_ALIGN_CENTER);
-  gtk_box_append (GTK_BOX (controls), sort_caption);
+  gtk_box_append (GTK_BOX (sort_controls), sort_caption);
 
   GtkWidget *sort_group = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_add_css_class (sort_group, "linked");
@@ -619,7 +619,8 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
     gtk_box_append (GTK_BOX (sort_group), b);
     self->sort_buttons[i] = b;
   }
-  gtk_box_append (GTK_BOX (controls), sort_group);
+  gtk_box_append (GTK_BOX (sort_controls), sort_group);
+  adw_wrap_box_append (ADW_WRAP_BOX (controls), sort_controls);
   gtk_box_append (GTK_BOX (self), controls);
 
   /* Newest first is what the collection already arrives as, so the default
