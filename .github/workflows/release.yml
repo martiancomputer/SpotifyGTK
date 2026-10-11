@@ -99,7 +99,7 @@ jobs:
             libharfbuzz-dev libepoxy-dev libgraphene-1.0-dev libxkbcommon-dev libwayland-dev \
             wayland-protocols libx11-dev libxext-dev libxrender-dev libxinerama-dev libxrandr-dev \
             libxcursor-dev libxi-dev libxfixes-dev libxcomposite-dev libxdamage-dev libdrm-dev \
-            libvulkan-dev libjpeg-dev libpng-dev libtiff-dev sassc libsass-dev fonts-noto-core \
+            libvulkan-dev glslc libjpeg-dev libpng-dev libtiff-dev sassc libsass-dev fonts-noto-core \
             fonts-noto-cjk fonts-noto-color-emoji
           python3 -m pip install --user --break-system-packages meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
