@@ -94,7 +94,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Fetch the isolated UCRT64 build SDK
-        run: python3 apps/spotify-native-windows/fetch-msys-runtime.py apps/spotify-native-windows/tools-build/msys-runtime
+        run: python3 apps/spotify-native-windows/fetch-msys-runtime.py apps/spotify-native-windows/tools-build/msys-runtime --extra-package vulkan-headers
       - name: Cache the pinned LLVM-MinGW UCRT toolchain
         uses: actions/cache@v4
         with:
