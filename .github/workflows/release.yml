@@ -136,7 +136,6 @@ jobs:
           cp "$noto_dir"/NotoSans-{Regular,Bold,Italic,BoldItalic}.ttf "$fonts/noto/"
           cp -R /usr/share/fonts/opentype/noto/. "$fonts/noto-cjk/" 2>/dev/null || true
           cp -R /usr/share/fonts/truetype/noto/. "$fonts/noto-emoji/" 2>/dev/null || true
-          cp /usr/share/doc/fonts-adwaita/copyright "$fonts/licenses/adwaita-fonts.LICENSE"
           cp /usr/share/doc/fonts-noto-core/copyright "$fonts/licenses/noto-fonts.LICENSE"
           cp /usr/share/doc/fonts-noto-cjk/copyright "$fonts/licenses/noto-fonts-cjk.LICENSE" 2>/dev/null || true
           cp /usr/share/doc/fonts-noto-color-emoji/copyright "$fonts/licenses/noto-fonts-emoji.LICENSE" 2>/dev/null || true
