@@ -7,6 +7,7 @@ before extraction. Does not install host packages or execute Windows binaries.
 import argparse
 import concurrent.futures
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -36,7 +37,9 @@ def main():
     elif not database.is_file():
         parser.error("--cached-database requires an existing ucrt64.db")
     packages = {}
-    with tarfile.open(database) as archive:
+    database_tar = subprocess.run(["zstd", "-dc", str(database)],
+                                  check=True, capture_output=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(database_tar), mode="r:") as archive:
         for member in archive:
             if not member.name.endswith("/desc"):
                 continue

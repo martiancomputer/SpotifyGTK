@@ -183,7 +183,7 @@ The stock-SDK workflow below retains upstream GTK frame pacing.
 
 Install a MinGW-w64 compiler supporting `-mcrtdll=ucrt`, Meson, Ninja,
 pkg-config, host GLib build tools, CMake, a C++ compiler, ICU development
-headers, Git, Python 3.11 or newer, libarchive's `bsdtar`, OpenSSL,
+headers, Git, Python 3.11 or newer, `zstd`, libarchive's `bsdtar`, OpenSSL,
 osslsigncode with APPX support, librsvg's `rsvg-convert`, and Wine. Wine runs
 only command-line module-cache and public CA extraction utilities; it does
 not run a virtual machine or test the GUI.

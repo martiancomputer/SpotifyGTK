@@ -18,8 +18,8 @@ through no-clobber copying. Preserve the stock SDK and previous packages.
 
 ## Build
 
-From this directory, after fetching the documented MSYS2 SDK and providing
-GTK's native Linux build tools:
+From this directory, after installing Python 3, `zstd`, libarchive's
+`bsdtar`, and GTK's native Linux build tools:
 
 ```sh
 python3 fetch-msys-runtime.py tools-build/msys-runtime \
