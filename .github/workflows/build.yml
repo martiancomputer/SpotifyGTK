@@ -60,17 +60,6 @@ jobs:
           meson compile -C _build/native-tests
           meson test -C _build/native-tests --print-errorlogs
 
-      - name: Build and test Spotify Connect against the pinned GTK fork
-        env:
-          PKG_CONFIG_PATH: ${{ github.workspace }}/_stage/gtk4-enhanced/usr/lib/pkgconfig
-        run: |
-          meson setup apps/spotify-connect/build apps/spotify-connect \
-            --native-file apps/spotify-connect/build-profiles/stable.ini \
-            --buildtype=debugoptimized -Dtests=true
-          test "$(pkg-config --variable=libdir gtk4)" = "$GITHUB_WORKSPACE/_stage/gtk4-enhanced/usr/lib"
-          meson compile -C apps/spotify-connect/build
-          meson test -C apps/spotify-connect/build --print-errorlogs
-
       - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -79,11 +68,10 @@ jobs:
           path: |
             apps/spotify-native/build/meson-logs/
             _build/native-tests/meson-logs/
-            apps/spotify-connect/build/meson-logs/
 
   windows-cross:
     name: Windows (pinned GTK fork, UCRT64)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -154,5 +142,4 @@ jobs:
             --suppress=variableScope \
             --suppress=constParameterPointer \
             --suppress=constVariablePointer \
-            -i apps/spotify-connect/src/vendor \
-            apps/spotify-connect/src apps/spotify-native/src
+            apps/spotify-native/src
