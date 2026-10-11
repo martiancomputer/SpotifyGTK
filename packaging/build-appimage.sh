@@ -190,6 +190,14 @@ export OUTPUT="$OUT/spotifygtk-${VERSION}-release-linux-arch-x86-64.appimage"
 rm -f "$APPDIR/usr/share/icons/hicolor/scalable/apps/$ID.svg"
 sed -i 's/^Icon=.*/Icon=application-x-executable/' \
   "$APPDIR/usr/share/applications/$ID.desktop"
+generic_icon="$(find /usr/share/icons -type f \
+  -path '*/mimetypes/application-x-executable.png' -print -quit 2>/dev/null)"
+if [[ -z "$generic_icon" ]]; then
+  echo 'error: the generic Adwaita executable icon is unavailable' >&2
+  exit 1
+fi
+install -D "$generic_icon" \
+  "$APPDIR/usr/share/icons/hicolor/256x256/apps/application-x-executable.png"
 DEPLOY_GTK_VERSION=4 "$TOOLS/linuxdeploy" \
   --appdir "$APPDIR" \
   --plugin gtk \

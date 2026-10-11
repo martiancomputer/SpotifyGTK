@@ -244,6 +244,14 @@ if [[ -s "$prefix/etc/ssl/certs/ca-bundle.crt" ]]; then
   mkdir -p "$DIST/etc/ssl/certs"
   cp -f "$prefix/etc/ssl/certs/ca-bundle.crt" "$DIST/etc/ssl/certs/ca-bundle.crt"
   echo "==> bundled CA database: etc/ssl/certs/ca-bundle.crt"
+elif [[ -z "${MSYSTEM:-}" && -s /etc/ssl/certs/ca-certificates.crt ]]; then
+  # Cross-build runners already have the distro's public trust bundle. The
+  # MSYS2 archive ships empty placeholders until its Windows post-install hook
+  # runs, so use the host's standard public CA set rather than a customised
+  # developer trust store or an uninitialized package database.
+  mkdir -p "$DIST/etc/ssl/certs"
+  cp -f /etc/ssl/certs/ca-certificates.crt "$DIST/etc/ssl/certs/ca-bundle.crt"
+  echo "==> bundled runner CA database: etc/ssl/certs/ca-bundle.crt"
 elif [[ -z "${MSYSTEM:-}" ]] && command -v wine >/dev/null 2>&1; then
   # Repository archives contain an empty placeholder until the ca-certificates
   # post-install hook runs. Extract the Mozilla anchors using the package's
