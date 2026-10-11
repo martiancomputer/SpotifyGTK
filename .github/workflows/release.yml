@@ -147,6 +147,7 @@ jobs:
           export prefix="$base/ucrt64"
           export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig:$prefix/share/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$base"
+          export LDFLAGS="-L$prefix/lib${LDFLAGS:+ $LDFLAGS}"
           export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/llvm-mingw-ucrt64-linux.ini"
           export SPOTIFYGTK_REQUIRE_ENHANCED_GTK=1
           bash apps/spotify-native-windows/build.sh --bundle
