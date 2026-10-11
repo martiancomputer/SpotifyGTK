@@ -33,6 +33,8 @@ else
     exit 1
   }
   setup_args=(--cross-file "$CROSS" --native-file "$HERE/cross/linux-build-tools.ini")
+  project_root="$(cd "$HERE/../.." && pwd)"
+  setup_args+=("-Dc_args=['-D_UCRT','-ffile-prefix-map=$project_root=.']")
 fi
 
 if [[ -n "${SPOTIFYGTK_EXTRA_LINK_DIR:-}" ]]; then
