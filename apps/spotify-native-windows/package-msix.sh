@@ -77,10 +77,9 @@ mkdir -p "$package_output" "$package_signing"
 chmod 700 "$package_signing"
 package_stage="$(mktemp -d "$package_output/stage.XXXXXXXX")"
 cp -R "$package_bundle/." "$package_stage/"
-cp -R "$package_root/build/msix-assets" "$package_stage/Assets"
-# MSIX manifests require several logo PNGs. Publish transparent placeholders
-# until the app receives its finalized visual identity; do not ship the
-# temporary art present in prior test builds. Preserve each required size.
+mkdir -p "$package_stage/Assets"
+# MSIX manifests require logo PNGs. Generate transparent placeholders until
+# the finalized visual identity is ready; do not bundle the temporary icon.
 python3 - "$package_stage/Assets" <<'PY'
 from pathlib import Path
 import struct
@@ -90,18 +89,17 @@ import zlib
 assets = Path(sys.argv[1])
 def chunk(kind, payload):
     return struct.pack('>I', len(payload)) + kind + payload + struct.pack('>I', zlib.crc32(kind + payload))
-for path in assets.glob('*.png'):
-    data = path.read_bytes()
-    if data[:8] != b'\x89PNG\r\n\x1a\n':
-        raise SystemExit(f'Invalid MSIX logo PNG: {path.name}')
-    width, height = struct.unpack('>II', data[16:24])
+for name, size in [('StoreLogo.png', 50), ('Square44x44Logo.png', 44),
+                   ('Square150x150Logo.png', 150), ('Square44x44Logo.scale-200.png', 88),
+                   ('Square150x150Logo.scale-200.png', 300)]:
+    width = height = size
     # RGBA scanlines, fully transparent; no rasterized branding is included.
     scanline = b'\x00' + bytes(width * 4)
     raw = scanline * height
     png = (b'\x89PNG\r\n\x1a\n' +
            chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)) +
            chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
-    path.write_bytes(png)
+    (assets / name).write_bytes(png)
 PY
 sed "s/@VERSION@/$package_version/g" "$package_root/AppxManifest.xml.in" > "$package_stage/AppxManifest.xml"
 
