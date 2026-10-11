@@ -143,6 +143,23 @@ if source not in text:
     raise SystemExit('GDK Pixbuf AppImage path patch no longer matches linuxdeploy plugin.')
 text = text.replace(source, target, 1)
 
+# Some pkg-config files retain a binarydir path from the pre-multiarch layout;
+# if that advertised directory is stale, fall back to the installed loaders.
+fallback = '''if [ ! -d "$gdk_pixbuf_binarydir" ]; then
+    gdk_pixbuf_binarydir="$(find /usr/lib -type d -path '*/gdk-pixbuf-2.0/2.10.0' -print -quit)"
+fi'''
+text = text.replace(target, target + '\n' + fallback, 1)
+
+for variable, suffix in (
+    ('gdk_pixbuf_cache_file', 'loaders.cache'),
+    ('gdk_pixbuf_moduledir', 'loaders'),
+):
+    source = f'''{variable}="$(get_pkgconf_variable "{variable}" "gdk-pixbuf-2.0" "$gdk_pixbuf_binarydir/{suffix}")"'''
+    target = f'''{variable}="$gdk_pixbuf_binarydir/{suffix}"'''
+    if source not in text:
+        raise SystemExit(f'GDK Pixbuf AppImage {variable} patch no longer matches linuxdeploy plugin.')
+    text = text.replace(source, target, 1)
+
 # Keep copy_lib_tree and the module-cache rewrite rooted at /usr/lib so both
 # multiarch and non-multiarch loader paths map correctly into AppDir/usr/lib.
 source = 'echo "Installing GDK PixBufs"'

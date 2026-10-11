@@ -28,6 +28,8 @@ on_api_response (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   RequestClosure    *cl   = user_data;
   g_autoptr(GError)  err  = NULL;
+  g_autoptr(JsonParser) parser = NULL;
+  g_autoptr(GError) parse_err = NULL;
 
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
 
@@ -48,8 +50,7 @@ on_api_response (GObject *source, GAsyncResult *result, gpointer user_data)
             cl->method, cl->url, status, reason ? reason : "", len);
 
   JsonObject *root = NULL;
-  g_autoptr(JsonParser) parser = json_parser_new ();
-  g_autoptr(GError) parse_err = NULL;
+  parser = json_parser_new ();
 
   if (len > 0) {
     if (json_parser_load_from_data (parser, body, (gssize) len, &parse_err)) {
