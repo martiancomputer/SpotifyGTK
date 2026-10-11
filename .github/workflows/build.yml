@@ -96,6 +96,7 @@ jobs:
             build-essential ninja-build pkg-config python3 python3-pip gettext \
             mingw-w64 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
             wine wine64 osslsigncode \
+            libarchive-tools \
             libglib2.0-dev libadwaita-1-dev libgdk-pixbuf-2.0-dev \
             libcairo2-dev libpango1.0-dev libharfbuzz-dev libepoxy-dev sassc libsass-dev \
             libgraphene-1.0-dev libxkbcommon-dev libwayland-dev wayland-protocols \
