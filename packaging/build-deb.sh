@@ -106,12 +106,12 @@ EOF
 if command -v dpkg-shlibdeps >/dev/null; then
   ( cd "$STAGE" && dpkg-shlibdeps -l"$STAGE/usr/lib/spotifygtk/gtk" -O \
       usr/bin/spotify-native usr/bin/spotify-native-harness 2>/dev/null ) \
-    | sed 's/^shlibs:Depends=/Depends: /' >> "$STAGE/DEBIAN/control" || {
+    | sed 's/^shlibs:Depends=/Depends: glib-networking, /' >> "$STAGE/DEBIAN/control" || {
       echo "    dpkg-shlibdeps failed; falling back to a declared list" >&2
-      echo "Depends: libadwaita-1-0, libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3, libssl3 | libssl3t64" >> "$STAGE/DEBIAN/control"
+      echo "Depends: glib-networking, libadwaita-1-0, libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3, libssl3 | libssl3t64" >> "$STAGE/DEBIAN/control"
     }
 else
-  echo "Depends: libadwaita-1-0, libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3" >> "$STAGE/DEBIAN/control"
+  echo "Depends: glib-networking, libadwaita-1-0, libsoup-3.0-0, libjson-glib-1.0-0, libogg0, libvorbis0a, libvorbisfile3" >> "$STAGE/DEBIAN/control"
 fi
 
 # Avoid using the system app icon until the finalized design is ready. GTK's

@@ -93,7 +93,9 @@ fetch () {  # fetch <url> <dest>
 # The Windows bundle shipped with exactly this bug and so did the first
 # AppImage; both looked fine until something tried to talk to an HTTPS endpoint.
 GIO_SRC="$(pkg-config --variable=giomoduledir gio-2.0 2>/dev/null || true)"
-[ -d "$GIO_SRC" ] || GIO_SRC="/usr/lib/$(uname -m)-linux-gnu/gio/modules"
+if [ -z "$GIO_SRC" ] || ! compgen -G "$GIO_SRC/libgio*.so" >/dev/null; then
+  GIO_SRC="/usr/lib/$(uname -m)-linux-gnu/gio/modules"
+fi
 if [ -d "$GIO_SRC" ] && ls "$GIO_SRC"/libgio*.so >/dev/null 2>&1; then
   mkdir -p "$APPDIR/usr/lib/gio/modules"
   cp -v "$GIO_SRC"/libgio*.so "$APPDIR/usr/lib/gio/modules/" | sed 's/^/    /'
