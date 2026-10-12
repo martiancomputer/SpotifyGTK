@@ -40,6 +40,7 @@ fi
 if [[ -n "${SPOTIFYGTK_EXTRA_LINK_DIR:-}" ]]; then
   setup_args+=("-Dc_link_args=['-mwindows','-L${SPOTIFYGTK_EXTRA_LINK_DIR}']")
 fi
+setup_args+=(--buildtype=release)
 
 if [[ ! -f "$BUILD/meson-private/coredata.dat" ]]; then
   meson setup "$BUILD" "$SRC" "${setup_args[@]}"
