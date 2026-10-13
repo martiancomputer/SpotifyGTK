@@ -77,6 +77,25 @@ measurements. Documentation-only changes do not require rebuilding the app.
   or rewrite published history without explicit authorization.
 - Retain required license notices and document upstream sources when porting code.
 
+## Severity-based commit and push cadence
+
+The following is standing authorization for pushes after the required
+verification and privacy checks:
+
+- Critical fixes or features: push immediately, including all queued local
+  commits in that push.
+- Medium fixes or features: commit locally and push the queue when four local
+  commits have accumulated since the last push.
+- Low fixes or features: bundle them into the next scheduled or explicit push.
+
+An explicit request to push overrides batching. Classify severity by user
+impact; a severity supplied by the user takes precedence. Keep commits coherent
+and do not split work artificially to reach the four-commit threshold. Count
+queued commits against the branch's upstream tracking reference. When work
+spans a dependency fork and this repository, push the dependency commit before
+pushing the consumer's updated submodule pin. Report the chosen severity and
+whether work is queued or pushed in the handoff.
+
 ## Commit and push privacy rules
 
 1. Never commit personally identifying or machine-specific information: real
