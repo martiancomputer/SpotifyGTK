@@ -108,6 +108,11 @@ gboolean spotifygtk_cover_get_deferred (void);
  * issued while scrolling costs nothing. */
 void spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px);
 
+/* Prefer an already cached alternate size of the same known artwork over
+ * downloading a missing thumbnail. Returns an owned copy of the chosen id. */
+gchar *spotifygtk_cover_select_source (const gchar *preferred,
+                                      const gchar *fallback);
+
 /*
  * Log what the cover path has been doing: how often the cache answered, how
  * long fetches and decodes took, how large the images are.

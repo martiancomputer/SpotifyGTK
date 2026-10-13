@@ -40,6 +40,7 @@
 #include "context_menu.h"
 #include "cover_loader.h"
 #include "smooth_scroll.h"
+#include "widget_layout.h"
 #include "spotify/track_meta.h"
 #include <math.h>
 
@@ -57,7 +58,7 @@ card_decode_px (GtkWidget *widget)
 }
 #define CARD_WIDTH      (CARD_ART_PX + 24)
 #define CARD_TITLE_PX    24
-#define CARD_SUBTITLE_PX 20
+#define CARD_SUBTITLE_PX 24
 #define CARD_GAP_PX     8
 
 /* A virtual grid must not derive row geometry from the text currently bound
@@ -84,8 +85,14 @@ card_column_allocate (GtkWidget *widget, gint width, gint height, gint baseline)
   GtkWidget *child = gtk_widget_get_first_child (widget);
   gint y = 0;
   for (guint i = 0; child && i < G_N_ELEMENTS (slots); i++) {
+    gint minimum_width = 0, minimum_height = 0;
+    gtk_widget_measure (child, GTK_ORIENTATION_HORIZONTAL, -1,
+                        &minimum_width, NULL, NULL, NULL);
+    gint child_width = MAX (width, minimum_width);
+    spotifygtk_widget_measure_fit (child, GTK_ORIENTATION_VERTICAL, child_width,
+                                    &minimum_height, NULL, NULL, NULL);
     graphene_point_t point = GRAPHENE_POINT_INIT (0, y);
-    gtk_widget_allocate (child, width, slots[i], -1,
+    gtk_widget_allocate (child, child_width, MAX (slots[i], minimum_height), -1,
                          gsk_transform_translate (NULL, &point));
     y += slots[i] + CARD_GAP_PX;
     child = gtk_widget_get_next_sibling (child);
@@ -170,6 +177,8 @@ struct _SpotifyGtkAlbumGrid {
   gboolean    home_style;
   gboolean    shelf_snapping;
   gint        shelf_width;
+  gint        shelf_minimum;
+  gint        shelf_row_minimum; /* style floor, independent of bound text */
   guint       shelf_columns;
 
   GtkWidget  *scroller;   /* borrowed: owned by the box */
@@ -242,7 +251,7 @@ trace_grid (gpointer data)
     hidden_sub += !gtk_widget_get_visible (parts[3]);
     for (guint p = 0; p < G_N_ELEMENTS (parts); p++) {
       gint minimum, natural;
-      gtk_widget_measure (parts[p], GTK_ORIENTATION_VERTICAL,
+      spotifygtk_widget_measure_fit (parts[p], GTK_ORIENTATION_VERTICAL,
         MAX (1, gtk_widget_get_width (parts[p])), &minimum, &natural, NULL, NULL);
       minima[p] = MIN (minima[p], minimum);
       maxima[p] = MAX (maxima[p], minimum);
@@ -288,16 +297,22 @@ update_shelf_widths (SpotifyGtkAlbumGrid *self)
   if (!self->full_card_shelf || !self->scroller)
     return;
   gint width = gtk_widget_get_width (self->scroller);
-  if (width <= 0 || width == self->shelf_width)
-    return;
+  if (width <= 0) return;
+  gint minimum = MAX (CARD_WIDTH, self->shelf_row_minimum);
+  width = MAX (width, minimum);
+  if (width == self->shelf_width && minimum == self->shelf_minimum) return;
   self->shelf_width = width;
-  self->shelf_columns = MAX (1u, (guint) (width / CARD_WIDTH));
+  self->shelf_minimum = minimum;
+  self->shelf_columns = spotifygtk_layout_columns (width, minimum);
   for (guint i = 0; self->bound_cards && i < self->bound_cards->len; i++) {
     GtkWidget *card = g_ptr_array_index (self->bound_cards, i);
     gpointer encoded = g_object_get_data (G_OBJECT (card), "bound-position");
     if (encoded)
       gtk_widget_set_size_request (card,
-        shelf_card_width (self, GPOINTER_TO_UINT (encoded) - 1), -1);
+        spotifygtk_layout_card_request (
+          shelf_card_width (self, GPOINTER_TO_UINT (encoded) - 1),
+          GPOINTER_TO_INT (g_object_get_data (G_OBJECT (card), "row-minimum-width")),
+          CARD_WIDTH), -1);
   }
 }
 
@@ -361,12 +376,12 @@ grid_model_window (SpotifyGtkAlbumGrid *self, guint *first_out, guint *last_out,
       if (!cell || gtk_widget_get_width (cell) <= 0)
         continue;
       cell_width = gtk_widget_get_width (cell);
-      gtk_widget_measure (cell, GTK_ORIENTATION_VERTICAL, cell_width,
+      spotifygtk_widget_measure_fit (cell, GTK_ORIENTATION_VERTICAL, cell_width,
                           &row_minimum, NULL, NULL, NULL);
       break;
     }
     guint columns = CLAMP ((guint) MAX (1.0,
-      round ((gdouble) gtk_widget_get_width (self->view) / cell_width)), 2, 8);
+      round ((gdouble) gtk_widget_get_width (self->view) / cell_width)), 1, 8);
     guint rows = (n + columns - 1) / columns;
     /* During the first allocation GTK temporarily reports an upper bound only
      * about one viewport high even though all model rows already exist.
@@ -467,19 +482,9 @@ card_retry_cover (GtkWidget *card, gboolean settled)
     return;
   }
 
-  /* GridView recycles several cards per animation frame. Starting a decode
-   * from each bind keeps the worker pool and Vulkan texture uploads busy for
-   * cards that have already left the viewport. The settle pass below retries
-   * the small visible set once motion stops. */
-  if (grid && grid->scrolling) {
-    guint first, last;
-    gboolean smooth = FALSE;
-    /* A touchpad/scrollbar has no stable destination, so retain the established
-     * settle behavior. An eased wheel does have one: permit only that bounded
-     * destination-row window to decode while motion is active. */
-    if (!grid_model_window (grid, &first, &last, &smooth) || !smooth)
-      return;
-  }
+  /* The bounded model window above applies to every input source. Waiting for
+   * a scrollbar/touchpad to settle leaves newly visible cards blank throughout
+   * the gesture, even when their encoded artwork is already on disk. */
 
   GCancellable *cancel = g_cancellable_new ();
   g_object_set_data_full (G_OBJECT (card), "cover-cancel", cancel, cancel_and_unref);
@@ -757,13 +762,11 @@ on_grid_scrolled (GtkAdjustment *adj, gpointer user_data)
     self->trace_value = value;
   }
 
-  /* A wrapped grid needs a row destination, not a flat moving range. Update
-   * only when a wheel event changes that destination row; animation frames in
-   * between do no ownership work. Existing covers are released by the settle
-   * pass, after they have actually left the viewport. */
+  /* Update only when the bounded row window changes, for wheel, touchpad and
+   * scrollbar input alike. Animation frames within a row do no ownership
+   * work. Retain visible covers while warming the approaching rows. */
   guint first, last;
-  gboolean smooth = FALSE;
-  if (grid_model_window (self, &first, &last, &smooth) && smooth &&
+  if (grid_model_window (self, &first, &last, NULL) &&
       (!self->window_valid || first != self->window_first ||
        last != self->window_last)) {
     self->window_valid = TRUE;
@@ -1102,6 +1105,16 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   gtk_list_item_set_selectable (list_item, FALSE);
   gtk_list_item_set_activatable (list_item, FALSE);
   gtk_list_item_set_child (list_item, card);
+  /* Capture the real row minimum before a shelf assigns a stretched button
+   * request. Measuring that stretched request again would feed yesterday's
+   * slot size back into tomorrow's column count. GTK includes both widget
+   * margins and CSS boxes in this baseline measurement. */
+  GtkWidget *cell = gtk_widget_get_parent (card);
+  gint row_minimum = CARD_WIDTH;
+  gtk_widget_measure (cell ? cell : card, GTK_ORIENTATION_HORIZONTAL, -1,
+                      &row_minimum, NULL, NULL, NULL);
+  g_object_set_data (G_OBJECT (card), "row-minimum-width", GINT_TO_POINTER (row_minimum));
+  self->shelf_row_minimum = MAX (self->shelf_row_minimum, row_minimum);
   (void) factory;
 }
 
@@ -1124,8 +1137,6 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
 
   card_apply_item (self, card, item);
   guint position = gtk_list_item_get_position (list_item);
-  if (!self->wrap && position != GTK_INVALID_LIST_POSITION)
-    gtk_widget_set_size_request (card, shelf_card_width (self, position), -1);
   g_object_set_data (G_OBJECT (card), "bound-position",
                      position == GTK_INVALID_LIST_POSITION
                        ? NULL : GUINT_TO_POINTER (position + 1));
@@ -1134,6 +1145,15 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
 
   if (!g_ptr_array_find (self->bound_cards, card, NULL))
     g_ptr_array_add (self->bound_cards, card);
+  if (!self->wrap && position != GTK_INVALID_LIST_POSITION) {
+    update_shelf_widths (self);
+    gint width = shelf_card_width (self, position);
+    if (self->full_card_shelf)
+      width = spotifygtk_layout_card_request (width,
+        GPOINTER_TO_INT (g_object_get_data (G_OBJECT (card), "row-minimum-width")),
+        CARD_WIDTH);
+    gtk_widget_set_size_request (card, width, -1);
+  }
 
   /* A recycled GridView child can still be mapped and carry its previous
    * allocation while bind installs the next item.  Looking at its bounds here
@@ -1743,7 +1763,7 @@ album_grid_new (gboolean wrap)
 
   if (wrap) {
     view = gtk_grid_view_new (GTK_SELECTION_MODEL (model), factory);
-    gtk_grid_view_set_min_columns (GTK_GRID_VIEW (view), 2);
+    gtk_grid_view_set_min_columns (GTK_GRID_VIEW (view), 1);
     gtk_grid_view_set_max_columns (GTK_GRID_VIEW (view), 8);
     gtk_widget_add_css_class (view, "album-gridview");
 

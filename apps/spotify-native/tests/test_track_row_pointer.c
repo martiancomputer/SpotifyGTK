@@ -1,5 +1,10 @@
 #include "../src/ui/track_row.c"
 
+gchar *spotifygtk_cover_select_source (const gchar *preferred, const gchar *fallback)
+{
+  return g_strdup (preferred ? preferred : fallback);
+}
+
 /* Pointer routing does not need artwork or network access. */
 void
 spotifygtk_cover_load_deferrable (const gchar *id, gint pixels,

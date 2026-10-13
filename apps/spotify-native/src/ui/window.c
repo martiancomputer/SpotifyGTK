@@ -194,6 +194,7 @@ struct _SpotifyGtkNativeWindow {
    * now-playing. Both would overwrite what the click already put on screen.
    */
   gchar      *awaiting_uri;
+  gboolean    suppress_outgoing_position; /* manual pick, not gapless read-ahead */
   guint64     collection_sub;   /* Mercury subscription for external changes */
 
   SpotifyGtkHomePage *home_page;
@@ -1235,6 +1236,7 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
    * emits when the sink actually reaches it.
    */
   remember_display_track (self, track);
+  self->suppress_outgoing_position = !handover;
 
   /*
    * Render now unless this is a handover.
@@ -5401,9 +5403,10 @@ on_player_position_changed (SpotifyNativePlayerService *player,
    * true at, so a controller extrapolates between our reports. */
   self->last_position_ms = position_ms;
 
-  /* The position still belongs to the outgoing track; painting it against the
-   * new track's duration is what made the old song appear to start playing. */
-  if (self->awaiting_uri)
+  /* Only a manual pick has already replaced the displayed track. During
+   * natural read-ahead the outgoing song is still displayed and audible, so
+   * keep its position moving until the sink announces the handover. */
+  if (self->awaiting_uri && self->suppress_outgoing_position)
     return;
 
   spotifygtk_native_window_set_progress (self, position_ms,

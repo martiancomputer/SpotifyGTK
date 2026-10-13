@@ -100,11 +100,6 @@ void spotifygtk_track_list_set_page_header (SpotifyGtkTrackList *self,
 void spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self,
                                               GPtrArray           *tracks);
 
-/* As above, but each item borrows its track from the array.  The caller must
- * keep every track alive until this list is cleared or populated again. */
-void spotifygtk_track_list_set_borrowed_native_tracks (SpotifyGtkTrackList *self,
-                                                       GPtrArray           *tracks);
-
 /* Search-only album and playlist rows in the same virtual list as songs.
  * NULL removes them; snapshot() continues to return playable tracks only. */
 void spotifygtk_track_list_set_search_contexts (SpotifyGtkTrackList *self,

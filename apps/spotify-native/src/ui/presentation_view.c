@@ -1,6 +1,7 @@
 #include "presentation_view.h"
 #include "presentation_policy.h"
 #include "settings.h"
+#include "widget_layout.h"
 
 /* A layout transform, not a second renderer or GtkViewport. GTK must snapshot
  * dirty children on every native frame; withholding those snapshots puts its
@@ -60,7 +61,7 @@ presentation_measure (GtkWidget *widget, GtkOrientation orientation, int for_siz
   SpotifyGtkPresentationView *self = (SpotifyGtkPresentationView *) widget;
   int min = 0, nat = 0;
   if (self->child)
-    gtk_widget_measure (self->child, orientation,
+    spotifygtk_widget_measure_fit (self->child, orientation,
       for_size < 0 ? -1 : (int) floor (for_size / self->scale), &min, &nat, NULL, NULL);
   /* Expose overflow without an outer GtkViewport negotiating natural sizes
    * against the virtualized page scrollers. */
@@ -96,7 +97,7 @@ presentation_allocate (GtkWidget *widget, int width, int height, int baseline)
   gtk_widget_measure (self->child, GTK_ORIENTATION_HORIZONTAL, -1,
                       &minimum_width, NULL, NULL, NULL);
   int logical_width = spotifygtk_presentation_logical_extent (width, self->scale, minimum_width);
-  gtk_widget_measure (self->child, GTK_ORIENTATION_VERTICAL, logical_width,
+  spotifygtk_widget_measure_fit (self->child, GTK_ORIENTATION_VERTICAL, logical_width,
                       &minimum_height, NULL, NULL, NULL);
   int logical_height = spotifygtk_presentation_logical_extent (height, self->scale, minimum_height);
 

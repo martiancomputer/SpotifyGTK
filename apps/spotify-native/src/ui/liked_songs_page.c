@@ -315,7 +315,7 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
     rebuild_sorted (self);
 
   if (!query || !*query) {
-    spotifygtk_track_list_set_borrowed_native_tracks (self->list, self->sorted_tracks);
+    spotifygtk_track_list_set_native_tracks (self->list, self->sorted_tracks);
     if (self->sorted_tracks->len == 0)
       spotifygtk_track_list_set_status (self->list, "No liked songs yet.");
     queue_sort_alignment (self);
@@ -336,7 +336,7 @@ apply_filter (SpotifyGtkLikedSongsPage *self)
   }
 
   /* Already in sort order: filtering a sorted list preserves it. */
-  spotifygtk_track_list_set_borrowed_native_tracks (self->list, filtered);
+  spotifygtk_track_list_set_native_tracks (self->list, filtered);
   if (filtered->len == 0)
     spotifygtk_track_list_set_status (self->list, "No matches.");
   queue_sort_alignment (self);
@@ -526,7 +526,7 @@ spotifygtk_liked_songs_page_dispose (GObject *object)
     g_cancellable_cancel (self->in_flight);
   g_clear_object (&self->in_flight);
   g_clear_object (&self->session);
-  /* Borrowed TrackItems must go before the page-owned tracks they reference. */
+  /* Detach the rows before releasing the page's source collection. */
   spotifygtk_track_list_clear (self->list);
   g_clear_pointer (&self->all_tracks, g_ptr_array_unref);
   g_clear_pointer (&self->sorted_tracks, g_ptr_array_unref);
@@ -921,7 +921,8 @@ spotifygtk_liked_songs_page_remove_track (SpotifyGtkLikedSongsPage *self,
   if (self->haystacks)    g_hash_table_remove (self->haystacks, t);
   if (self->collate_keys) g_hash_table_remove (self->collate_keys, t);
 
-  /* The list item borrows t, so remove it before releasing page ownership. */
+  /* Remove the visible entry before releasing the page's source track. GTK
+   * may retain the old item for focus; its metadata remains independently owned. */
   if (visible >= 0)
     spotifygtk_track_list_remove_position (self->list, (guint) visible);
   g_ptr_array_remove_index (self->all_tracks, at);

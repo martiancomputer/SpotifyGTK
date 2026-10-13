@@ -867,8 +867,9 @@ spotifygtk_track_row_set_native_track (SpotifyGtkTrackRow       *self,
    * thrown away once per row. Falls back to the large one when the album offers
    * only a single size.
    */
-  row_request_cover (self, track->cover_id_small ? track->cover_id_small
-                                                 : track->cover_id);
+  g_autofree gchar *cover = spotifygtk_cover_select_source (
+    track->cover_id_small, track->cover_id);
+  row_request_cover (self, cover);
 }
 
 /*

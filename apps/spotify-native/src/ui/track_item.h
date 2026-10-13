@@ -19,15 +19,10 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (SpotifyGtkTrackItem, spotifygtk_track_item,
                       SPOTIFYGTK, TRACK_ITEM, GObject)
 
-/* Takes its own copy of `track`; the caller keeps ownership of theirs. */
+/* Owns its metadata independently of `track`. Equal strings are shared by
+ * reference across items and released when their final item is destroyed. */
 SpotifyGtkTrackItem *spotifygtk_track_item_new (const SpotifyNativeTrack *track,
                                                 guint number);
-
-/* Borrows track for the lifetime of the item.  Intended for page-owned model
- * arrays which outlive their GtkListStore; avoids duplicating every metadata
- * string merely to box a large collection for GtkListView. */
-SpotifyGtkTrackItem *spotifygtk_track_item_new_borrowed (const SpotifyNativeTrack *track,
-                                                         guint number);
 
 const SpotifyNativeTrack *spotifygtk_track_item_get_track  (SpotifyGtkTrackItem *self);
 guint                     spotifygtk_track_item_get_number (SpotifyGtkTrackItem *self);

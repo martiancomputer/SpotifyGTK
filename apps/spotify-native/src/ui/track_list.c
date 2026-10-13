@@ -877,7 +877,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
   SpotifyGtkTrackList *self = user_data;
   gtk_widget_set_margin_start (row, self->row_margin_start);
   gtk_widget_set_margin_end (row, self->row_margin_end);
-  g_signal_connect (row, "map", G_CALLBACK (on_track_row_mapped), self);
+  g_signal_connect_object (row, "map", G_CALLBACK (on_track_row_mapped), self, 0);
   if (self->trace_scroll)
     g_signal_connect_object (row, "hover-changed",
                              G_CALLBACK (on_row_hover_changed), self, 0);
@@ -887,7 +887,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
    * time, so it follows the row through recycling. */
   GtkGesture *click = gtk_gesture_click_new ();
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (click), GDK_BUTTON_SECONDARY);
-  g_signal_connect (click, "pressed", G_CALLBACK (on_row_secondary_pressed), user_data);
+  g_signal_connect_object (click, "pressed", G_CALLBACK (on_row_secondary_pressed), self, 0);
   gtk_widget_add_controller (row, GTK_EVENT_CONTROLLER (click));
 
   /*
@@ -896,8 +896,8 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
    * the property. Connected here rather than in bind: the list item is pooled,
    * so a per-bind connect would stack up a handler per recycle.
    */
-  g_signal_connect (list_item, "notify::position",
-                    G_CALLBACK (on_list_item_position), user_data);
+  g_signal_connect_object (list_item, "notify::position",
+                           G_CALLBACK (on_list_item_position), self, 0);
 
   gtk_list_item_set_child (list_item, row);
   /* The empty-page sentinel needs no painted row, but recycled list items
@@ -1036,7 +1036,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   g_object_set_data (G_OBJECT (row), "changed-handler", GSIZE_TO_POINTER (changed));
 
   if (!g_object_get_data (G_OBJECT (row), "play-connected")) {
-    g_signal_connect (row, "play-clicked", G_CALLBACK (on_row_play_clicked), self);
+    g_signal_connect_object (row, "play-clicked", G_CALLBACK (on_row_play_clicked), self, 0);
     g_object_set_data (G_OBJECT (row), "play-connected", GINT_TO_POINTER (1));
   }
 
@@ -1129,6 +1129,19 @@ spotifygtk_track_list_dispose (GObject *object)
   self->vadj = NULL;
   self->viewport_scroller = NULL;
   spotifygtk_cover_set_deferred (FALSE);
+  /* GTK can retain focused list items beyond removal from the widget tree.
+   * Cancel artwork and detach the factory while our binding bookkeeping is
+   * still alive. A later focus cleanup must not call into a disposed list. */
+  if (self->list) {
+    spotifygtk_track_list_release_covers (self);
+    GtkListItemFactory *factory = gtk_list_view_get_factory (self->list);
+    if (factory)
+      g_signal_handlers_disconnect_by_data (factory, self);
+    gtk_list_view_set_model (self->list, NULL);
+    gtk_list_view_set_factory (self->list, NULL);
+    self->list = NULL;
+    self->scroller = NULL;
+  }
   g_clear_pointer (&self->bound_rows, g_ptr_array_unref);
 
   g_clear_object (&self->page_header);
@@ -1227,21 +1240,26 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
   self->store = g_list_store_new (SPOTIFYGTK_TYPE_TRACK_ITEM);
 
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
-  g_signal_connect (factory, "setup",  G_CALLBACK (factory_setup),  self);
+  g_signal_connect_object (factory, "setup", G_CALLBACK (factory_setup), self, 0);
   self->bound_rows = g_ptr_array_new ();
-  g_signal_connect (factory, "bind",   G_CALLBACK (factory_bind),   self);
-  g_signal_connect (factory, "unbind", G_CALLBACK (factory_unbind), self);
+  g_signal_connect_object (factory, "bind", G_CALLBACK (factory_bind), self, 0);
+  g_signal_connect_object (factory, "unbind", G_CALLBACK (factory_unbind), self, 0);
 
   /* No-selection: the list is a play surface, not a picker, so there is no
    * persistent selection highlight. Single-click activation makes one click
    * on a row play it, matching the old GtkListBox behaviour. */
   GtkNoSelection *model = gtk_no_selection_new (G_LIST_MODEL (g_object_ref (self->store)));
   self->list = GTK_LIST_VIEW (gtk_list_view_new (GTK_SELECTION_MODEL (model), factory));
+  /* Optional fork capability. Stock GTK keeps its normal retained pool. */
+  if (GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (self->list),
+        "gtk4-enhanced-list-pool-version")) == 1)
+    g_object_set_data (G_OBJECT (self->list),
+      "gtk4-enhanced-list-pool-budget-v1", GUINT_TO_POINTER (96));
   gtk_list_view_set_single_click_activate (self->list, TRUE);
 
   gtk_widget_add_css_class (GTK_WIDGET (self->list), "track-listview");
   gtk_widget_set_margin_end (GTK_WIDGET (self->list), 2);
-  g_signal_connect (self->list, "activate", G_CALLBACK (on_list_activate), self);
+  g_signal_connect_object (self->list, "activate", G_CALLBACK (on_list_activate), self, 0);
 
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), GTK_WIDGET (self->list));
   gtk_box_append (GTK_BOX (self), scroller);
@@ -1736,8 +1754,8 @@ spotifygtk_track_list_set_show_cover (SpotifyGtkTrackList *self, gboolean show)
 
 
 
-static void
-set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow)
+void
+spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
   gint64 build_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;
@@ -1775,9 +1793,7 @@ set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow
     if (self->section_factory && track->section_title) section_number = 0;
     section_number++;
     guint number = self->section_factory ? section_number : items->len + 1;
-    g_ptr_array_add (items, borrow
-      ? spotifygtk_track_item_new_borrowed (track, number)
-      : spotifygtk_track_item_new (track, number));
+    g_ptr_array_add (items, spotifygtk_track_item_new (track, number));
   }
 
   gint64 splice_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;
@@ -1812,19 +1828,6 @@ set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks, gboolean borrow
    */
   if (shown > 0 && self->settle_id == 0)
     self->settle_id = g_timeout_add (SETTLE_MS, on_scroll_settled, self);
-}
-
-void
-spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *tracks)
-{
-  set_native_tracks (self, tracks, FALSE);
-}
-
-void
-spotifygtk_track_list_set_borrowed_native_tracks (SpotifyGtkTrackList *self,
-                                                   GPtrArray           *tracks)
-{
-  set_native_tracks (self, tracks, TRUE);
 }
 
 static SpotifyGtkTrackItem *

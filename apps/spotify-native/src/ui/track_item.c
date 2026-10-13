@@ -7,8 +7,7 @@
 struct _SpotifyGtkTrackItem {
   GObject parent_instance;
 
-  SpotifyNativeTrack track;   /* owned copy, unless borrowed_track is set */
-  const SpotifyNativeTrack *borrowed_track;
+  SpotifyNativeTrack track;   /* owned metadata; strings are ref-counted */
   guint    number;
   gboolean playing;
   gboolean paused;
@@ -23,29 +22,17 @@ static void
 spotifygtk_track_item_finalize (GObject *object)
 {
   SpotifyGtkTrackItem *self = SPOTIFYGTK_TRACK_ITEM (object);
-  if (!self->borrowed_track) {
-    g_free (self->track.uri);
-    g_free (self->track.name);
-    g_free (self->track.artists);
-    g_free (self->track.album);
-    g_free (self->track.cover_id);
-    g_free (self->track.cover_id_small);
-    g_free (self->track.album_uri);
-    g_free (self->track.artist_uri);
-    g_free (self->track.section_title);
-    g_free (self->track.section_detail);
-  }
+  g_clear_pointer (&self->track.uri, g_ref_string_release);
+  g_clear_pointer (&self->track.name, g_ref_string_release);
+  g_clear_pointer (&self->track.artists, g_ref_string_release);
+  g_clear_pointer (&self->track.album, g_ref_string_release);
+  g_clear_pointer (&self->track.cover_id, g_ref_string_release);
+  g_clear_pointer (&self->track.cover_id_small, g_ref_string_release);
+  g_clear_pointer (&self->track.album_uri, g_ref_string_release);
+  g_clear_pointer (&self->track.artist_uri, g_ref_string_release);
+  g_clear_pointer (&self->track.section_title, g_ref_string_release);
+  g_clear_pointer (&self->track.section_detail, g_ref_string_release);
   G_OBJECT_CLASS (spotifygtk_track_item_parent_class)->finalize (object);
-}
-
-SpotifyGtkTrackItem *
-spotifygtk_track_item_new_borrowed (const SpotifyNativeTrack *track, guint number)
-{
-  g_return_val_if_fail (track != NULL, NULL);
-  SpotifyGtkTrackItem *self = g_object_new (SPOTIFYGTK_TYPE_TRACK_ITEM, NULL);
-  self->number = number;
-  self->borrowed_track = track;
-  return self;
 }
 
 static void
@@ -67,19 +54,25 @@ spotifygtk_track_item_init (SpotifyGtkTrackItem *self)
 SpotifyGtkTrackItem *
 spotifygtk_track_item_new (const SpotifyNativeTrack *track, guint number)
 {
+  g_return_val_if_fail (track != NULL, NULL);
   SpotifyGtkTrackItem *self = g_object_new (SPOTIFYGTK_TYPE_TRACK_ITEM, NULL);
   self->number = number;
-  self->track.uri         = g_strdup (track->uri);
-  self->track.name        = g_strdup (track->name);
-  self->track.artists     = g_strdup (track->artists);
-  self->track.album       = g_strdup (track->album);
-  self->track.cover_id    = g_strdup (track->cover_id);
-  self->track.cover_id_small = g_strdup (track->cover_id_small);
-  self->track.album_uri   = g_strdup (track->album_uri);
-  self->track.artist_uri  = g_strdup (track->artist_uri);
+  /* GTK can retain a focused item after a model splice, until focus is moved
+   * during a later frame. Borrowing a page-owned track therefore outlives the
+   * source on unlike, refresh or navigation. Own every field, and share equal
+   * strings across replacement/filtered models instead of duplicating them
+   * on each keystroke. Interned ref strings disappear with their last owner. */
+  self->track.uri         = track->uri ? g_ref_string_new_intern (track->uri) : NULL;
+  self->track.name        = track->name ? g_ref_string_new_intern (track->name) : NULL;
+  self->track.artists     = track->artists ? g_ref_string_new_intern (track->artists) : NULL;
+  self->track.album       = track->album ? g_ref_string_new_intern (track->album) : NULL;
+  self->track.cover_id    = track->cover_id ? g_ref_string_new_intern (track->cover_id) : NULL;
+  self->track.cover_id_small = track->cover_id_small ? g_ref_string_new_intern (track->cover_id_small) : NULL;
+  self->track.album_uri   = track->album_uri ? g_ref_string_new_intern (track->album_uri) : NULL;
+  self->track.artist_uri  = track->artist_uri ? g_ref_string_new_intern (track->artist_uri) : NULL;
   self->track.release_year = track->release_year;
-  self->track.section_title = g_strdup (track->section_title);
-  self->track.section_detail = g_strdup (track->section_detail);
+  self->track.section_title = track->section_title ? g_ref_string_new_intern (track->section_title) : NULL;
+  self->track.section_detail = track->section_detail ? g_ref_string_new_intern (track->section_detail) : NULL;
   self->track.duration_ms = track->duration_ms;
   self->track.liked_at = track->liked_at;
   self->track.device_index = track->device_index;
@@ -91,7 +84,7 @@ const SpotifyNativeTrack *
 spotifygtk_track_item_get_track (SpotifyGtkTrackItem *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_TRACK_ITEM (self), NULL);
-  return self->borrowed_track ? self->borrowed_track : &self->track;
+  return &self->track;
 }
 
 guint

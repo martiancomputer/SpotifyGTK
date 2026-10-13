@@ -7,6 +7,7 @@
 #include <string.h>
 #include <setjmp.h>
 #include <math.h>
+#include <utime.h>
 #include <jpeglib.h>
 #include <png.h>
 #ifdef G_OS_WIN32
@@ -286,6 +287,17 @@ disk_cache_path (const gchar *cover_id)
   if (!cover_id || !*cover_id)
     return NULL;
   if (spotifygtk_image_uri_allowed (cover_id)) {
+    /* The Home feed and catalogue can name the same immutable image by URL
+     * or by hex id. Share one disk entry across those surfaces. */
+    g_autoptr(GUri) uri = g_uri_parse (cover_id, G_URI_FLAGS_NONE, NULL);
+    const gchar *path = g_uri_get_path (uri);
+    if (g_ascii_strcasecmp (g_uri_get_host (uri), "i.scdn.co") == 0 &&
+        !g_uri_get_query (uri) && g_str_has_prefix (path, "/image/")) {
+      const gchar *id = path + strlen ("/image/");
+      gboolean hex = *id != '\0';
+      for (const gchar *p = id; *p; p++) hex &= g_ascii_isxdigit (*p);
+      if (hex) return disk_cache_path (id);
+    }
     g_autofree gchar *hash = g_compute_checksum_for_string (G_CHECKSUM_SHA256, cover_id, -1);
     return g_build_filename (g_get_user_cache_dir (), "spotifygtk", "images", hash, NULL);
   }
@@ -297,11 +309,25 @@ disk_cache_path (const gchar *cover_id)
                            cover_id, NULL);
 }
 
+static gchar *
+disk_cache_read_path (const gchar *cover_id)
+{
+  g_autofree gchar *path = disk_cache_path (cover_id);
+  if (path && g_file_test (path, G_FILE_TEST_IS_REGULAR))
+    return g_steal_pointer (&path);
+  /* Keep artwork saved under the previous URL-hash scheme usable offline. */
+  g_autofree gchar *url = spotifygtk_cover_build_url (cover_id);
+  if (!url) return NULL;
+  g_autofree gchar *hash = g_compute_checksum_for_string (G_CHECKSUM_SHA256, url, -1);
+  g_autofree gchar *legacy = g_build_filename (
+    g_get_user_cache_dir (), "spotifygtk", "images", hash, NULL);
+  return g_file_test (legacy, G_FILE_TEST_IS_REGULAR)
+    ? g_steal_pointer (&legacy) : NULL;
+}
+
 static void
 disk_cache_write (const gchar *cover_id, GBytes *bytes)
 {
-  if (!caching_enabled ())
-    return;
   g_autofree gchar *path = disk_cache_path (cover_id);
   if (!path || !bytes)
     return;
@@ -461,6 +487,7 @@ static struct {
  * fixes that ordering without predicting anything.
  */
 #define COVER_MAX_INFLIGHT 6
+#define COVER_MAX_DISK_INFLIGHT 4
 
 /* Ceiling on queued-but-not-issued fetches. Read-ahead is the only thing that
  * can outrun the drain, and a backlog older than this is for rows long gone. */
@@ -470,13 +497,19 @@ typedef struct {
   gchar *cache_key;
   gint   target_px;
   gboolean playback;
+  gchar *disk_path;
 } QueuedFetch;
 
 static GQueue cover_queue = G_QUEUE_INIT;   /* QueuedFetch*, newest at the tail */
 static guint  cover_active = 0;
+/* Cached images must remain available while every network slot is stalled.
+ * Keep a separate, bounded decode lane instead of queueing disk hits behind
+ * downloads. This adds no process-wide decoded texture retention. */
+static GQueue cover_disk_queue = G_QUEUE_INIT;
+static guint cover_disk_active = 0;
 
 static void issue_fetch (const gchar *cache_key, gint target_px,
-                         gboolean playback);
+                         gboolean playback, const gchar *disk_path);
 static void on_cover_fetched (GObject *source, GAsyncResult *result, gpointer user_data);
 
 static void
@@ -485,6 +518,7 @@ queued_fetch_free (QueuedFetch *q)
   if (!q)
     return;
   g_free (q->cache_key);
+  g_free (q->disk_path);
   g_free (q);
 }
 
@@ -506,15 +540,19 @@ queued_fetch_free (QueuedFetch *q)
 static void
 promote_queued (const gchar *cache_key)
 {
-  for (GList *l = cover_queue.head; l; l = l->next) {
-    QueuedFetch *q = l->data;
-    if (g_strcmp0 (q->cache_key, cache_key) != 0)
-      continue;
-    if (l == cover_queue.tail)
-      return;                       /* already next to be taken */
-    g_queue_unlink (&cover_queue, l);
-    g_queue_push_tail_link (&cover_queue, l);
-    return;
+  GQueue *queues[] = { &cover_disk_queue, &cover_queue };
+  for (guint i = 0; i < G_N_ELEMENTS (queues); i++) {
+    GQueue *queue = queues[i];
+    for (GList *l = queue->head; l; l = l->next) {
+      QueuedFetch *q = l->data;
+      if (g_strcmp0 (q->cache_key, cache_key) != 0)
+        continue;
+      if (l == queue->tail)
+        return;
+      g_queue_unlink (queue, l);
+      g_queue_push_tail_link (queue, l);
+      return;
+    }
   }
 }
 
@@ -533,36 +571,33 @@ cover_pump (void)
     return;
   pumping = TRUE;
 
-  guint cap = COVER_MAX_INFLIGHT;
-  while (!g_queue_is_empty (&cover_queue)) {
-    QueuedFetch *next = g_queue_peek_tail (&cover_queue);
-    /* Current-track artwork must not wait behind a full batch of speculative
-     * or grid work. Two reserve slots cover the panel and playback bar. */
-    if (cover_active >= cap &&
-        (!next->playback || cover_active >= cap + 2))
-      break;
+  GQueue *queues[] = { &cover_disk_queue, &cover_queue };
+  for (guint lane = 0; lane < G_N_ELEMENTS (queues); lane++) {
+    GQueue *queue = queues[lane];
+    guint *active = lane == 0 ? &cover_disk_active : &cover_active;
+    guint cap = lane == 0 ? COVER_MAX_DISK_INFLIGHT : COVER_MAX_INFLIGHT;
+    while (!g_queue_is_empty (queue)) {
+      QueuedFetch *next = g_queue_peek_tail (queue);
+      /* Reserve two slots for the current-track panel and playback bar. */
+      if (*active >= cap && (!next->playback || *active >= cap + 2))
+        break;
 
-    QueuedFetch *q = g_queue_pop_tail (&cover_queue);
-    if (!q)
-      break;
+      QueuedFetch *q = g_queue_pop_tail (queue);
+      if (!q)
+        break;
+      /* Retire cancelled waiters and their in-flight key together. Otherwise
+       * future subscribers would join work that will never be issued. */
+      if (waiters_all_cancelled (q->cache_key)) {
+        cover_stats.dropped++;
+        drop_waiters (q->cache_key);
+        queued_fetch_free (q);
+        continue;
+      }
 
-    /* Every waiter for this cover has gone -- the rows were recycled while it
-     * sat in the queue. Dropping it here is the whole point of queueing in our
-     * own code rather than libsoup's, where it could not be reconsidered.
-     *
-     * complete_waiters() rather than a bare drop, so the in_flight entry goes
-     * with it: leaving the key behind would make every later request for the
-     * same art join a fetch that is never going to run. */
-    if (waiters_all_cancelled (q->cache_key)) {
-      cover_stats.dropped++;
-      drop_waiters (q->cache_key);
+      (*active)++;
+      issue_fetch (q->cache_key, q->target_px, q->playback, q->disk_path);
       queued_fetch_free (q);
-      continue;
     }
-
-    cover_active++;
-    issue_fetch (q->cache_key, q->target_px, q->playback);
-    queued_fetch_free (q);
   }
 
   pumping = FALSE;
@@ -634,10 +669,10 @@ spotifygtk_cover_log_stats (const gchar *context)
   g_message ("cover stats (%s): %u served from disk without a request",
              context ? context : "", cover_stats.disk_hits);
   g_message ("cover stats (%s): %u dropped before issue, %u queued now, "
-             "peak queue %u, %u in flight (cap %d)",
+             "peak queue %u, %u network and %u disk jobs in flight",
              context ? context : "", cover_stats.dropped,
-             g_queue_get_length (&cover_queue), cover_stats.peak_queue,
-             cover_active, COVER_MAX_INFLIGHT);
+             g_queue_get_length (&cover_queue) + g_queue_get_length (&cover_disk_queue),
+             cover_stats.peak_queue, cover_active, cover_disk_active);
 
   /* The number that answers "is artwork where the memory goes": decoded
    * pixels still mapped, against the process's own dirty pages. */
@@ -689,6 +724,11 @@ spotifygtk_cover_prefetch (const gchar *cover_id, gint target_px)
 {
   if (!cover_id || !*cover_id || cover_deferred)
     return;
+  /* Prefetch warms compressed disk data. Re-decoding an already cached file
+   * only to discard its texture consumes the same worker slots visible rows
+   * need, and no longer serves a purpose without a strong texture cache. */
+  g_autofree gchar *cached = caching_enabled () ? disk_cache_read_path (cover_id) : NULL;
+  if (cached) return;
   cover_load_internal (cover_id, target_px, NULL, prefetch_discard, NULL,
                        TRUE, TRUE, FALSE);
 }
@@ -752,6 +792,7 @@ ensure_initialised (void)
   cover_session = soup_session_new_with_options (
     "max-conns-per-host", conns,
     "max-conns", MAX (conns, 24),
+    "timeout", 10u,
     NULL);
   spotifygtk_soup_session_configure_tls (cover_session);
   g_message ("cover: session using %u connections per host", conns);
@@ -863,6 +904,13 @@ static void
 decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable *cancellable)
 {
   GBytes *bytes = task_data;
+  const gchar *write_id = g_object_get_data (G_OBJECT (task), "cache-write-id");
+  if (bytes && write_id)
+    disk_cache_write (write_id, bytes);
+  if (g_object_get_data (G_OBJECT (task), "cache-only")) {
+    g_task_return_pointer (task, NULL, NULL);
+    return;
+  }
   gint target_px = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (task), "target-px"));
   g_autoptr(GBytes) from_disk = NULL;
 
@@ -878,17 +926,21 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
         return;
       }
     } else {
-      gchar *data = NULL;
-      gsize  len  = 0;
-      if (!path || !g_file_get_contents (path, &data, &len, NULL) || len == 0) {
-        g_free (data);
+      from_disk = read_local_cover_bounded (path);
+      if (!from_disk) {
         g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
                                  "cover not readable from the disk cache");
         return;
       }
-      from_disk = g_bytes_new_take (data, len);
     }
     bytes = from_disk;
+    if (!g_object_get_data (G_OBJECT (task), "local-source")) {
+      const gchar *path = g_object_get_data (G_OBJECT (task), "disk-path");
+      /* Startup pruning should retain recently used covers, rather than
+       * deleting frequently viewed files solely because they were fetched
+       * long ago. This filesystem update runs alongside the worker read. */
+      g_utime (path, NULL);
+    }
   }
 
   gsize encoded_len = 0;
@@ -903,6 +955,11 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
                             &source_w, &source_h, &source_channels,
                             &decoded_len);
   if (!decoded) {
+    /* A truncated cache entry must get a fresh download rather than poison
+     * every revisit. Local-file artwork is user data and is never removed. */
+    const gchar *path = g_object_get_data (G_OBJECT (task), "disk-path");
+    if (path && !g_object_get_data (G_OBJECT (task), "local-source"))
+      g_unlink (path);
     g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                              "cover is not a valid JPEG or PNG");
     return;
@@ -988,6 +1045,13 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autofree gchar *cache_key = user_data;
   g_autoptr(GError) error = NULL;
   g_autoptr(GdkTexture) texture = g_task_propagate_pointer (G_TASK (result), &error);
+  gboolean disk = g_object_get_data (G_OBJECT (result), "disk-source") != NULL;
+  if (disk) cover_disk_active--; else cover_active--;
+  if (g_object_get_data (G_OBJECT (result), "cache-only")) {
+    complete_waiters (cache_key, NULL);
+    cover_pump ();
+    return;
+  }
 
   gint64 *started_us = g_object_get_data (G_OBJECT (result), "decode-start-us");
   gint64 decode_us = started_us ? g_get_monotonic_time () - *started_us : 0;
@@ -1003,8 +1067,18 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
     cover_stats.failures++;
     g_debug ("cover %s: decode failed: %s", cache_key,
              error ? error->message : "unknown");
-    complete_waiters (cache_key, NULL);
-    cover_active--;
+    if (disk && !g_object_get_data (G_OBJECT (result), "local-source") &&
+        !waiters_all_cancelled (cache_key)) {
+      /* The file may also disappear during startup pruning. Retry through
+       * the network lane without discarding the original subscribers. */
+      QueuedFetch *q = g_new0 (QueuedFetch, 1);
+      q->cache_key = g_strdup (cache_key);
+      q->target_px = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (result), "target-px"));
+      q->playback = g_object_get_data (G_OBJECT (result), "playback") != NULL;
+      g_queue_push_tail (&cover_queue, q);
+    } else {
+      complete_waiters (cache_key, NULL);
+    }
     cover_pump ();
     return;
   }
@@ -1015,13 +1089,13 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
    * decode if the user reverses direction. */
 
   complete_waiters (cache_key, texture);
-  cover_active--;
   cover_pump ();
   (void) source;
 }
 
 static void
-issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
+issue_fetch (const gchar *cache_key, gint target_px, gboolean playback,
+             const gchar *disk_path)
 {
   g_autofree gchar *cover_id = g_strdup (cache_key);
   gchar *at = strrchr (cover_id, '@');
@@ -1034,10 +1108,7 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
    * what stalls artwork later in a session.
    */
   gboolean local = g_str_has_prefix (cover_id, "local:");
-  g_autofree gchar *disk = local
-    ? spotifygtk_local_catalog_dup_art_path (cover_id)
-    : caching_enabled () ? disk_cache_path (cover_id) : NULL;
-  if (disk && g_file_test (disk, G_FILE_TEST_EXISTS)) {
+  if (disk_path) {
     cover_stats.disk_hits++;
     GTask *task = g_task_new (NULL, NULL, on_cover_decoded, g_strdup (cache_key));
     g_task_set_priority (task, playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW);
@@ -1046,10 +1117,11 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback)
     g_object_set_data_full (G_OBJECT (task), "decode-start-us",
                             decode_start, g_free);
     g_object_set_data (G_OBJECT (task), "disk-source", GINT_TO_POINTER (1));
+    g_object_set_data (G_OBJECT (task), "playback", GINT_TO_POINTER (playback));
     if (local)
       g_object_set_data (G_OBJECT (task), "local-source", GINT_TO_POINTER (1));
     g_object_set_data (G_OBJECT (task), "target-px", GINT_TO_POINTER (target_px));
-    g_object_set_data_full (G_OBJECT (task), "disk-path", g_steal_pointer (&disk), g_free);
+    g_object_set_data_full (G_OBJECT (task), "disk-path", g_strdup (disk_path), g_free);
     g_task_run_in_thread (task, decode_in_thread);
     g_object_unref (task);
 
@@ -1143,27 +1215,13 @@ finish_cover_fetch (FetchClosure *fetch, GBytes *bytes, GError *error)
     return;
   }
 
-  /* Keep it, so this id costs a file read next time and never the queue. */
-  {
-    g_autofree gchar *id = g_strdup (cache_key);
-    gchar *at = strrchr (id, '@');
-    if (at) *at = '\0';
-    disk_cache_write (id, bytes);
-  }
-
   /* Decode off the main thread. The bytes and target size ride along; the
    * key is the callback's user_data. */
-  if (waiters_all_cancelled (cache_key)) {
-    complete_waiters (cache_key, NULL);
-    g_bytes_unref (bytes);
-    g_free (cache_key);
-    g_clear_object (&fetch->message);
-    g_free (fetch);
-    cover_active--;
-    cover_pump ();
-    return;
-  }
   GTask *task = g_task_new (NULL, NULL, on_cover_decoded, cache_key);
+  /* Keep successfully downloaded bytes even if the row left the viewport,
+   * but avoid decoding pixels nobody will display. */
+  if (waiters_all_cancelled (cache_key))
+    g_object_set_data (G_OBJECT (task), "cache-only", GINT_TO_POINTER (1));
   g_task_set_priority (task, fetch->playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW);
   /* Carried on the task rather than accumulated in decode_in_thread: that runs
    * on a worker and every other counter here is written from the main thread,
@@ -1176,6 +1234,12 @@ finish_cover_fetch (FetchClosure *fetch, GBytes *bytes, GError *error)
   g_object_set_data_full (G_OBJECT (task), "decode-start-us",
                           decode_start, g_free);
   g_object_set_data (G_OBJECT (task), "target-px", GINT_TO_POINTER (target_px));
+  if (caching_enabled ()) {
+    gchar *id = g_strdup (cache_key);
+    gchar *at = strrchr (id, '@');
+    if (at) *at = '\0';
+    g_object_set_data_full (G_OBJECT (task), "cache-write-id", id, g_free);
+  }
   g_task_set_task_data (task, bytes, (GDestroyNotify) g_bytes_unref);
   g_task_run_in_thread (task, decode_in_thread);
   g_object_unref (task);
@@ -1372,6 +1436,9 @@ cover_load_internal (const gchar          *cover_id,
   q->cache_key = g_strdup (cache_key);
   q->target_px = target_px;
   q->playback = playback_surface;
+  q->disk_path = local ? spotifygtk_local_catalog_dup_art_path (cover_id)
+    : caching_enabled () ? disk_cache_read_path (cover_id) : NULL;
+  GQueue *queue = q->disk_path ? &cover_disk_queue : &cover_queue;
 
   /*
    * The queue is drained from the tail, newest first -- right for a scroll,
@@ -1387,7 +1454,7 @@ cover_load_internal (const gchar          *cover_id,
    * anyone is looking at is waiting.
    */
   if (speculative) {
-    g_queue_push_head (&cover_queue, q);
+    g_queue_push_head (queue, q);
 
     /*
      * Bound the speculative backlog.
@@ -1399,8 +1466,8 @@ cover_load_internal (const gchar          *cover_id,
      * dropped, so their in-flight entry is retired instead of leaving an id
      * that every later request would join and wait on forever.
      */
-    while (g_queue_get_length (&cover_queue) > COVER_QUEUE_MAX) {
-      QueuedFetch *old = g_queue_pop_head (&cover_queue);
+    while (g_queue_get_length (queue) > COVER_QUEUE_MAX) {
+      QueuedFetch *old = g_queue_pop_head (queue);
       if (!old)
         break;
       cover_stats.dropped++;
@@ -1408,11 +1475,26 @@ cover_load_internal (const gchar          *cover_id,
       queued_fetch_free (old);
     }
   } else {
-    g_queue_push_tail (&cover_queue, q);
+    g_queue_push_tail (queue, q);
   }
-  if (g_queue_get_length (&cover_queue) > cover_stats.peak_queue)
-    cover_stats.peak_queue = g_queue_get_length (&cover_queue);
+  cover_stats.peak_queue = MAX (cover_stats.peak_queue,
+    g_queue_get_length (&cover_queue) + g_queue_get_length (&cover_disk_queue));
   cover_pump ();
+}
+
+gchar *
+spotifygtk_cover_select_source (const gchar *preferred, const gchar *fallback)
+{
+  if (!preferred || !*preferred) return g_strdup (fallback);
+  if (caching_enabled () && fallback && *fallback &&
+      g_strcmp0 (preferred, fallback) != 0) {
+    g_autofree gchar *primary = disk_cache_read_path (preferred);
+    if (!primary) {
+      g_autofree gchar *secondary = disk_cache_read_path (fallback);
+      if (secondary) return g_strdup (fallback);
+    }
+  }
+  return g_strdup (preferred);
 }
 
 /*

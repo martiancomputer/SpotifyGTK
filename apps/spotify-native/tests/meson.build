@@ -1,4 +1,16 @@
 if get_option('tests')
+  test_layout_policy = executable('test-layout-policy',
+    'test_layout_policy.c',
+    include_directories: [include_directories('../src')],
+    dependencies: [glib_dep],
+  )
+  test('layout-policy', test_layout_policy, timeout: 10)
+  test_track_item_lifetime = executable('test-track-item-lifetime',
+    'test_track_item_lifetime.c', '../src/ui/track_item.c',
+    include_directories: [include_directories('../src')],
+    dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
+  )
+  test('track-item-lifetime', test_track_item_lifetime, timeout: 10)
   test_session_lifecycle = executable('test-session-lifecycle',
     'test_session_lifecycle.c', spotify_proto_support_sources, runtime_sources,
     include_directories: [config_inc, include_directories('../src')],
@@ -33,6 +45,12 @@ if get_option('tests')
   )
   test('catalog-cache', test_catalog_cache, timeout: 15)
   if enable_gui
+    test_cover_cache = executable('test-cover-cache',
+      'test_cover_cache.c', '../src/ui/settings.c',
+      include_directories: [config_inc, include_directories('../src')],
+      dependencies: all_deps + [gtk4_dep, adw_check],
+    )
+    test('artwork-disk-cache', test_cover_cache, timeout: 30)
     dialog_presentation_test_sources = files(
       '../src/ui/presentation_view.c', '../src/ui/settings.c',
     )

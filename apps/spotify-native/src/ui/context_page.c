@@ -799,7 +799,7 @@ spotifygtk_context_page_load (SpotifyGtkContextPage *self,
       g_ptr_array_add (tracks, track->display);
     }
     update_expanded_metadata (self, tracks);
-    spotifygtk_track_list_set_borrowed_native_tracks (self->list, tracks);
+    spotifygtk_track_list_set_native_tracks (self->list, tracks);
     spotifygtk_track_list_scroll_to_top (self->list);
     if (tracks->len == 0)
       spotifygtk_track_list_set_status (self->list, "No playable local tracks.");
