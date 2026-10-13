@@ -5733,6 +5733,7 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     if (self->sign_in_banner)
       gtk_widget_set_visible (self->sign_in_banner, FALSE);
     /* Pages that gave up with "Not signed in yet" can load for real now. */
+    spotifygtk_liked_songs_page_set_liked_filter (self->liked_page, NULL);
     spotifygtk_search_page_set_session (self->search_page, session);
     spotifygtk_liked_songs_page_set_session (self->liked_page, session);
     spotifygtk_context_page_set_session (self->context_page, session);
@@ -6947,8 +6948,8 @@ spotifygtk_native_window_constructed (GObject *object)
   g_signal_connect (self->search_page, "loading-changed",
                     G_CALLBACK (on_page_loading_changed), self);
   self->liked_page = spotifygtk_liked_songs_page_new ();
-  spotifygtk_liked_songs_page_set_liked_filter (self->liked_page,
-                                                self->liked_uris);
+  /* The initial set contains only device favorites, not a completed Spotify
+   * collection. Arm the filter only when liked_page_to_ui finishes pagination. */
   spotifygtk_local_favorites_foreach (self->local_favorites,
                                       seed_local_favorite_row, self);
   g_signal_connect (self->liked_page, "loading-changed",

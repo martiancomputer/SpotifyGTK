@@ -3,6 +3,7 @@
  */
 
 #include "liked_songs_page.h"
+#include "spotify/catalog_snapshot.h"
 #include "track_list.h"
 #include "../log_file.h"
 #include "spotify/catalog_cache.h"
@@ -446,26 +447,13 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
    * is known -- which matters, because unliking the last track is precisely
    * when a stale refetch would put it back.
    */
-  if (self->liked_filter) {
-    GPtrArray *kept = g_ptr_array_new_with_free_func (
-      (GDestroyNotify) spotifygtk_native_track_free);
+  {
+    GPtrArray *kept = g_ptr_array_ref (tracks);
     g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
-    guint dropped = 0;
-    for (guint i = 0; i < tracks->len; i++) {
-      SpotifyNativeTrack *t = g_ptr_array_index (tracks, i);
-      if (t && t->uri && g_hash_table_contains (self->liked_filter, t->uri)) {
-        /* load_tracks_finish() hands this callback ownership. Transfer the
-         * matching object instead of deep-copying every string and then
-         * immediately freeing the original array: a full library contains
-         * thousands of these, and that temporary duplicate established an
-         * avoidable allocator high-water mark on every refresh. NULL keeps
-         * the source array's free func from releasing the transferred item. */
-        g_ptr_array_add (kept, t);
-        tracks->pdata[i] = NULL;
-        g_hash_table_add (seen, t->uri);
-      } else {
-        dropped++;
-      }
+    guint dropped = spotifygtk_catalog_tracks_filter (kept, self->liked_filter);
+    for (guint i = 0; i < kept->len; i++) {
+      SpotifyNativeTrack *t = kept->pdata[i];
+      if (t && t->uri) g_hash_table_add (seen, t->uri);
     }
     if (dropped)
       g_message ("liked-page: dropped %u stale row(s) the collection no longer lists",
@@ -492,7 +480,12 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
         continue;
       if (g_hash_table_contains (seen, t->uri))
         continue;
-      if (!g_hash_table_contains (self->liked_filter, t->uri))
+      /* Device favorites are independent of Spotify membership. Preserve
+       * them even when metadata arrives before that membership is known. */
+      gboolean liked = self->liked_filter
+        ? g_hash_table_contains (self->liked_filter, t->uri)
+        : g_str_has_prefix (t->uri, "local:track:");
+      if (!liked)
         continue;
       /* At `carried`, not at 0: these are already newest-first in `previous`,
        * and inserting each at the front would reverse them. */
@@ -504,8 +497,6 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
                  carried);
 
     self->all_tracks = kept;
-  } else {
-    self->all_tracks = g_ptr_array_ref (tracks);
   }
   /* Both derived from the tracks, so they are built here and not touched again
    * until the collection reloads. */
@@ -513,6 +504,8 @@ on_tracks_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   rebuild_sorted (self);
   apply_filter (self);   /* honours whatever is already typed (usually nothing) */
 
+  g_message ("liked-page: loaded %u row(s); membership=%s",
+             self->all_tracks->len, self->liked_filter ? "complete" : "pending");
   self->loaded = TRUE;
 }
 
@@ -724,6 +717,15 @@ spotifygtk_liked_songs_page_set_liked_filter (SpotifyGtkLikedSongsPage *self,
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
   self->liked_filter = liked_uris;
+  /* Metadata and membership arrive independently. If metadata won the race,
+   * reconcile the retained snapshot now instead of leaving loaded=TRUE on a
+   * stale or prematurely emptied page until the next app restart. */
+  guint dropped = spotifygtk_catalog_tracks_filter (self->all_tracks, liked_uris);
+  if (dropped) {
+    clear_track_indexes (self);
+    rebuild_sorted (self);
+    apply_filter (self);
+  }
 }
 
 void

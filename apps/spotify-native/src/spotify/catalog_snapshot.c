@@ -58,6 +58,32 @@ GPtrArray *spotifygtk_catalog_tracks_unpack (GBytes *bytes)
     g_variant_new_from_bytes (G_VARIANT_TYPE (TRACKS_TYPE), bytes, FALSE));
   return g_variant_is_normal_form (value) ? unpack_tracks (value) : NULL;
 }
+static gboolean
+snapshot_contains_track (GHashTable *membership, const SpotifyNativeTrack *track)
+{
+  return track && track->uri && g_hash_table_contains (membership, track->uri);
+}
+
+guint
+spotifygtk_catalog_tracks_filter (GPtrArray *tracks, GHashTable *membership)
+{
+  if (!tracks || !membership) return 0;
+  guint dropped = 0;
+  for (guint i = tracks->len; i > 0;) {
+    if (snapshot_contains_track (membership, tracks->pdata[i - 1])) {
+      i--;
+      continue;
+    }
+    guint end = i;
+    do { i--; } while (i > 0 && !snapshot_contains_track (membership, tracks->pdata[i - 1]));
+    /* Remove stale runs from the end, preserving order and avoiding a splice
+     * per track when a completed empty collection replaces a large snapshot. */
+    g_ptr_array_remove_range (tracks, i, end - i);
+    dropped += end - i;
+  }
+  return dropped;
+}
+
 GBytes *spotifygtk_catalog_releases_pack (GPtrArray *releases)
 {
   GVariantBuilder b;

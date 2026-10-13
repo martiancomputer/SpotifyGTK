@@ -140,6 +140,65 @@ static void test_corrupt (void)
   g_assert_null (spotifygtk_catalog_tracks_unpack (bytes));
   g_assert_null (spotifygtk_catalog_releases_unpack (bytes));
 }
+static GPtrArray *membership_snapshot (void)
+{
+  const gchar *uris[] = { "spotify:track:a", "spotify:track:stale",
+                          "spotify:track:b", "local:track:favorite" };
+  GPtrArray *tracks = g_ptr_array_new_with_free_func ((GDestroyNotify) spotifygtk_native_track_free);
+  for (guint i = 0; i < G_N_ELEMENTS (uris); i++) {
+    SpotifyNativeTrack *track = g_new0 (SpotifyNativeTrack, 1);
+    track->uri = g_strdup (uris[i]);
+    g_ptr_array_add (tracks, track);
+  }
+  return tracks;
+}
+
+static GHashTable *completed_membership (void)
+{
+  GHashTable *set = g_hash_table_new (g_str_hash, g_str_equal);
+  g_hash_table_add (set, "spotify:track:a");
+  g_hash_table_add (set, "spotify:track:b");
+  g_hash_table_add (set, "local:track:favorite");
+  return set;
+}
+
+static void assert_membership_order (GPtrArray *tracks)
+{
+  g_assert_cmpuint (tracks->len, ==, 3);
+  g_assert_cmpstr (((SpotifyNativeTrack *) tracks->pdata[0])->uri, ==, "spotify:track:a");
+  g_assert_cmpstr (((SpotifyNativeTrack *) tracks->pdata[1])->uri, ==, "spotify:track:b");
+  g_assert_cmpstr (((SpotifyNativeTrack *) tracks->pdata[2])->uri, ==, "local:track:favorite");
+}
+
+static void test_membership_metadata_first (void)
+{
+  g_autoptr(GPtrArray) tracks = membership_snapshot ();
+  g_assert_cmpuint (spotifygtk_catalog_tracks_filter (tracks, NULL), ==, 0);
+  g_assert_cmpuint (tracks->len, ==, 4);
+  g_autoptr(GHashTable) complete = completed_membership ();
+  g_assert_cmpuint (spotifygtk_catalog_tracks_filter (tracks, complete), ==, 1);
+  assert_membership_order (tracks);
+}
+
+static void test_membership_first (void)
+{
+  g_autoptr(GHashTable) complete = completed_membership ();
+  g_assert_cmpuint (spotifygtk_catalog_tracks_filter (NULL, complete), ==, 0);
+  g_autoptr(GPtrArray) tracks = membership_snapshot ();
+  g_assert_cmpuint (spotifygtk_catalog_tracks_filter (tracks, complete), ==, 1);
+  assert_membership_order (tracks);
+  g_assert_cmpuint (spotifygtk_catalog_tracks_filter (tracks, complete), ==, 0);
+}
+
+static void test_membership_empty (void)
+{
+  g_autoptr(GPtrArray) tracks = membership_snapshot ();
+  g_assert_cmpuint (spotifygtk_catalog_tracks_filter (tracks, NULL), ==, 0);
+  g_autoptr(GHashTable) empty = g_hash_table_new (g_str_hash, g_str_equal);
+  g_assert_cmpuint (spotifygtk_catalog_tracks_filter (tracks, empty), ==, 4);
+  g_assert_cmpuint (tracks->len, ==, 0);
+}
+
 int main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
@@ -156,5 +215,8 @@ int main (int argc, char **argv)
   g_test_add_func ("/catalog/revision", test_revision);
   g_test_add_func ("/catalog/snapshots", test_snapshots);
   g_test_add_func ("/catalog/corrupt", test_corrupt);
+  g_test_add_func ("/catalog/membership/metadata-first", test_membership_metadata_first);
+  g_test_add_func ("/catalog/membership/membership-first", test_membership_first);
+  g_test_add_func ("/catalog/membership/completed-empty", test_membership_empty);
   return g_test_run ();
 }

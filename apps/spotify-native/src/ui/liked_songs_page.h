@@ -23,8 +23,9 @@ void spotifygtk_liked_songs_page_show_recent (SpotifyGtkLikedSongsPage *self);
 
 void spotifygtk_liked_songs_page_set_session (SpotifyGtkLikedSongsPage *self,
                                               SpotifyNativeSession     *session);
-/* Borrow the window's set of liked URIs, used to drop rows the collection no
- * longer lists. See the implementation for why this is needed. */
+/* Borrow a completed membership snapshot, or NULL while membership is unknown.
+ * A completed empty set is authoritative. Existing metadata is reconciled
+ * immediately if it arrived before membership. */
 void spotifygtk_liked_songs_page_set_liked_filter (SpotifyGtkLikedSongsPage *self,
                                                    GHashTable *liked_uris);
 /* Collection-v2 dates, separate from metadata and device favorites. Values
