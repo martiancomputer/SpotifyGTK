@@ -1,18 +1,18 @@
-# SpotifyGTK 1.1
+# SpotifyGTK 1.1.1
 
-SpotifyGTK 1.1 ships Linux and Windows builds compiled against the repository's
+SpotifyGTK 1.1.1 ships Linux and Windows builds compiled against the repository's
 pinned GTK4-Enhanced source. The Debian package and Windows MSIX carry that GTK
 runtime, so their widget layout does not depend on a system GTK release.
 
 ## Downloads
 
-- `spotifygtk-1.1.0-release-linux-debian-x86-64.deb` — includes the pinned
+- `spotifygtk-1.1.1-release-linux-debian-x86-64.deb` — includes the pinned
   GTK runtime; other operating-system libraries are provided by the distro.
-- `spotifygtk-1.1.0-release-linux-arch-x86-64.appimage` — bundles the pinned
+- `spotifygtk-1.1.1-release-linux-arch-x86-64.appimage` — bundles the pinned
   GTK runtime and runs without depending on a system GTK version.
-- `spotifygtk-1.1.0-release-windows-x86-64.msix` — signed with the established
+- `spotifygtk-1.1.1-release-windows-x86-64.msix` — signed with the established
   SpotifyGTK publisher certificate.
-- `spotifygtk-1.1.0-release-windows-x86-64.cer` — public certificate to
+- `spotifygtk-1.1.1-release-windows-x86-64.cer` — public certificate to
   install into **Trusted People** before installing the MSIX; see
   `INSTALL-MSIX.md`.
 
@@ -21,6 +21,11 @@ required logo slots are transparent placeholders; GTK's interface icon theme
 is included so symbolic controls still render.
 
 ## What's included
+
+- Fixed Windows 11 edge snapping and fullscreen sizing, matched Windows font
+  rendering to the bundled interface fonts, and preserved responsive resizing.
+- Release builds require FFmpeg local-file decoding and verify that the
+  AppImage uses the exact pinned GTK runtime.
 
 - Pinned GTK4-Enhanced with selectable 30, 60, 90, 120, 144, 240 and 360 FPS
   ceilings where the experimental frame clock is enabled.
