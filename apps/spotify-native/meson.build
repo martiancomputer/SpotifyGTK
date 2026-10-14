@@ -87,10 +87,10 @@ vorbisfile_dep = dependency('vorbisfile',    version: '>= 1.3')
 # and AAC, converting decoded blocks to the existing bounded 16-bit PCM sink.
 # Keep it optional so existing builds (including Windows packaging) continue
 # to work when these development libraries have not been installed.
-avformat_dep = dependency('libavformat', required: false)
-avcodec_dep = dependency('libavcodec', required: false)
-avutil_dep = dependency('libavutil', required: false)
-swresample_dep = dependency('libswresample', required: false)
+avformat_dep = dependency('libavformat', required: get_option('local_playback'))
+avcodec_dep = dependency('libavcodec', required: get_option('local_playback'))
+avutil_dep = dependency('libavutil', required: get_option('local_playback'))
+swresample_dep = dependency('libswresample', required: get_option('local_playback'))
 have_local_av = avformat_dep.found() and avcodec_dep.found() and \
                 avutil_dep.found() and swresample_dep.found()
 
@@ -149,6 +149,7 @@ m_dep = cc.find_library('m', required: false)
 if is_windows
   all_deps += cc.find_library('ole32', required: true)
   all_deps += cc.find_library('gdi32', required: true)
+  all_deps += cc.find_library('comctl32', required: true)
   all_deps += cc.find_library('ksuser', required: true)
   if verbose_logging
     all_deps += cc.find_library('psapi', required: true)

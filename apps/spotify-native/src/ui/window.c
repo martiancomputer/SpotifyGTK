@@ -61,9 +61,14 @@
 #include <math.h>
 #include <string.h>
 
-#if defined(SPOTIFYGTK_VERBOSE) && defined(G_OS_WIN32)
+#ifdef G_OS_WIN32
 #include <windows.h>
+#include <windowsx.h>
+#include <commctrl.h>
+#include <gdk/win32/gdkwin32.h>
+#ifdef SPOTIFYGTK_VERBOSE
 #include <psapi.h>
+#endif
 #endif
 
 #define LOADING_PROGRESS_CEILING 0.94
@@ -6799,6 +6804,99 @@ on_fullscreen_changed (SpotifyGtkNativeWindow *self, GParamSpec *pspec, gpointer
     gtk_widget_set_visible (self->header_handle, !gtk_window_is_fullscreen (GTK_WINDOW (self)));
 }
 
+#ifdef G_OS_WIN32
+/* GTK's CSD move gesture uses GDK's simulated drag, which does not enter the
+ * Windows shell move loop (and therefore cannot trigger Aero Snap). Keep the
+ * GTK header, but expose its non-interactive region as a native caption. The
+ * subclass belongs only to this HWND and is removed before the widget dies. */
+static LRESULT CALLBACK
+native_window_proc (HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
+                    UINT_PTR subclass_id, DWORD_PTR data)
+{
+  SpotifyGtkNativeWindow *self = (SpotifyGtkNativeWindow *) data;
+  if (message == WM_NCDESTROY) {
+    RemoveWindowSubclass (hwnd, native_window_proc, subclass_id);
+    return DefSubclassProc (hwnd, message, wparam, lparam);
+  }
+  if (message == WM_NCCALCSIZE && wparam) {
+    /* Native style bits make the window eligible for shell snapping, but GTK
+     * draws the frame. A maximized client must stay inside the work area. */
+    if (IsZoomed (hwnd) && !gtk_window_is_fullscreen (GTK_WINDOW (self))) {
+      MONITORINFO monitor = { .cbSize = sizeof (MONITORINFO) };
+      if (GetMonitorInfoW (MonitorFromWindow (hwnd, MONITOR_DEFAULTTONEAREST), &monitor))
+        ((NCCALCSIZE_PARAMS *) lparam)->rgrc[0] = monitor.rcWork;
+    }
+    return 0;
+  }
+  if (message == WM_NCHITTEST && !gtk_window_is_fullscreen (GTK_WINDOW (self))) {
+    POINT point = { GET_X_LPARAM (lparam), GET_Y_LPARAM (lparam) };
+    RECT client;
+    if (ScreenToClient (hwnd, &point) && GetClientRect (hwnd, &client)) {
+      int scale = gtk_widget_get_scale_factor (GTK_WIDGET (self));
+      /* Let the shell own edge resizing too, rather than GDK's simulated
+       * resize. Do not expose resize edges while maximized. */
+      if (!IsZoomed (hwnd) && gtk_window_get_resizable (GTK_WINDOW (self))) {
+        int border = MAX (1, 6 * scale);
+        gboolean left = point.x < border, right = point.x >= client.right - border;
+        gboolean top = point.y < border, bottom = point.y >= client.bottom - border;
+        if (top) return left ? HTTOPLEFT : right ? HTTOPRIGHT : HTTOP;
+        if (bottom) return left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM;
+        if (left) return HTLEFT;
+        if (right) return HTRIGHT;
+      }
+      GtkWidget *picked = gtk_widget_pick (GTK_WIDGET (self),
+        (double) point.x / scale, (double) point.y / scale, GTK_PICK_DEFAULT);
+      /* Buttons, dialogs and text inputs must retain their GTK interaction.
+       * Test ancestry rather than fixed pixels so interface zoom and DPI work. */
+      for (GtkWidget *widget = picked; widget; widget = gtk_widget_get_parent (widget)) {
+        if (GTK_IS_BUTTON (widget)) {
+          if (gtk_widget_has_css_class (widget, "maximize") &&
+              gtk_widget_is_sensitive (widget))
+            return HTMAXBUTTON;
+          return HTCLIENT;
+        }
+        if (GTK_IS_EDITABLE (widget)) return HTCLIENT;
+        if (widget == self->header_handle) return HTCAPTION;
+      }
+    }
+  }
+  /* Native caption messages must reach Windows, not GTK's gesture handlers.
+   * GDK still receives position/state changes and owns rendering and pacing. */
+  if ((message == WM_NCLBUTTONDOWN || message == WM_NCLBUTTONUP ||
+       message == WM_NCLBUTTONDBLCLK || message == WM_NCRBUTTONUP) &&
+      (wparam == HTCAPTION || wparam == HTMAXBUTTON ||
+       (wparam >= HTLEFT && wparam <= HTBOTTOMRIGHT)))
+    return DefWindowProcW (hwnd, message, wparam, lparam);
+  return DefSubclassProc (hwnd, message, wparam, lparam);
+}
+
+static void
+on_native_window_realize (GtkWidget *widget, gpointer unused)
+{
+  GdkSurface *surface = gtk_native_get_surface (GTK_NATIVE (widget));
+  if (!GDK_IS_WIN32_SURFACE (surface)) return;
+  HWND hwnd = gdk_win32_surface_get_handle (surface);
+  if (!SetWindowSubclass (hwnd, native_window_proc, 1, (DWORD_PTR) widget)) {
+    g_warning ("Could not enable native Windows title-bar integration");
+    return;
+  }
+  LONG_PTR style = GetWindowLongPtrW (hwnd, GWL_STYLE);
+  SetWindowLongPtrW (hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+  SetWindowPos (hwnd, NULL, 0, 0, 0, 0,
+    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+  (void) unused;
+}
+
+static void
+on_native_window_unrealize (GtkWidget *widget, gpointer unused)
+{
+  GdkSurface *surface = gtk_native_get_surface (GTK_NATIVE (widget));
+  if (GDK_IS_WIN32_SURFACE (surface))
+    RemoveWindowSubclass (gdk_win32_surface_get_handle (surface), native_window_proc, 1);
+  (void) unused;
+}
+#endif
+
 static void
 spotifygtk_native_window_constructed (GObject *object)
 {
@@ -6816,6 +6914,10 @@ spotifygtk_native_window_constructed (GObject *object)
 
   gtk_window_set_title (GTK_WINDOW (self), "SpotifyGTK");
   gtk_window_set_default_size (GTK_WINDOW (self), 1800, 900);
+#ifdef G_OS_WIN32
+  g_signal_connect (self, "realize", G_CALLBACK (on_native_window_realize), NULL);
+  g_signal_connect (self, "unrealize", G_CALLBACK (on_native_window_unrealize), NULL);
+#endif
 
   /* Create core services */
   self->player = spotifygtk_player_service_new ();

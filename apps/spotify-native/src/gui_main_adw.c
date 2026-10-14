@@ -29,6 +29,16 @@ log_active_renderer (GtkWidget *widget, gpointer user_data)
   g_message ("renderer: active=%s display=%s",
              renderer ? G_OBJECT_TYPE_NAME (renderer) : "unavailable",
              display ? G_OBJECT_TYPE_NAME (display) : "unavailable");
+  if (g_getenv ("SPOTIFY_FONT_DIAGNOSTICS")) {
+    PangoContext *context = gtk_widget_get_pango_context (widget);
+    const PangoFontDescription *requested = pango_context_get_font_description (context);
+    g_autoptr(PangoFont) font = pango_context_load_font (context, requested);
+    g_autoptr(PangoFontDescription) actual = font ? pango_font_describe (font) : NULL;
+    g_autofree gchar *description = actual ? pango_font_description_to_string (actual) : NULL;
+    g_message ("font-diagnostics: map=%s resolved=%s",
+      G_OBJECT_TYPE_NAME (pango_context_get_font_map (context)),
+      description ? description : "unavailable");
+  }
   spotifygtk_frame_stats_attach (widget);
   (void) user_data;
 }
@@ -81,7 +91,7 @@ on_activate (GtkApplication *app, gpointer user_data)
       if (!pango_font_map_add_font_file (pango_cairo_font_map_get_default (), path, &error))
         g_warning ("Could not load a bundled interface font: %s", error ? error->message : "unsupported backend");
     }
-    g_object_set (gtk_settings_get_default (), "gtk-font-name", "Noto Sans 10",
+    g_object_set (gtk_settings_get_default (), "gtk-font-name", "Adwaita Sans 10",
       "gtk-primary-button-warps-slider", TRUE, NULL);
     fonts_loaded = TRUE;
   }

@@ -63,6 +63,17 @@ timings, cover-cache ownership snapshots, page diagnostics, and a five-second
 process-memory sample tagged with the visible page; normal builds omit that
 timer and logging overhead.
 
+Local-file playback uses FFmpeg's `libavformat`, `libavcodec`, `libavutil`,
+and `libswresample` development libraries. Developer builds detect these
+automatically; use `-Dlocal_playback=enabled` to require them or `disabled` to
+omit local decoding. Release packaging requires them so a missing build
+dependency cannot silently produce an app without local playback.
+
+Linux release packages use the staged `dependencies/gtk4-enhanced` runtime.
+AppImage packaging explicitly deploys those libraries and verifies GTK's ELF
+build ID against the staged fork, including after the final deployment step.
+It does not force X11 or a GTK theme over the application's normal choices.
+
 **Dependencies**
 
 ```bash

@@ -44,6 +44,7 @@ rm -rf "$BUILD"
 meson setup "$BUILD" "$APP" \
   --native-file "$APP/build-profiles/stable.ini" \
   --prefix /usr --buildtype release -Dtests=false \
+  -Dlocal_playback=enabled \
   -Dallow_old_libadwaita=true \
   "-Dc_link_args=-Wl,-rpath,/usr/lib/spotifygtk/gtk" >/dev/null
 meson compile -C "$BUILD" >/dev/null

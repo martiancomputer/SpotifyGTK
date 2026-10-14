@@ -30,7 +30,8 @@ jobs:
             libx11-dev libxext-dev libxrender-dev libxinerama-dev libxrandr-dev libxcursor-dev libxi-dev \
             libxfixes-dev libxcomposite-dev libxdamage-dev libdrm-dev libvulkan-dev libjpeg-dev libpng-dev \
             libtiff-dev libsoup-3.0-dev libjson-glib-dev libogg-dev libvorbis-dev libssl-dev libpulse-dev \
-            libasound2-dev libsecret-1-dev desktop-file-utils sassc libsass-dev glslc patchelf
+            libasound2-dev libsecret-1-dev desktop-file-utils sassc libsass-dev glslc patchelf \
+            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
           python3 -m pip install --user --break-system-packages meson
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build pinned GTK fork

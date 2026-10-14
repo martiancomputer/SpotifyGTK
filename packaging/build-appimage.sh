@@ -48,6 +48,7 @@ rm -rf "$BUILD"
 meson setup "$BUILD" "$APP" \
   --native-file "$APP/build-profiles/stable.ini" \
   --prefix /usr --buildtype release -Dtests=false \
+  -Dlocal_playback=enabled \
   -Dallow_old_libadwaita=true \
   "-Dc_link_args=-Wl,-rpath,$GTK_ENHANCED_PREFIX/lib" >/dev/null
 meson compile -C "$BUILD" >/dev/null
@@ -130,7 +131,7 @@ plugin = Path(sys.argv[1])
 text = plugin.read_text()
 source = 'export GTK_PATH="\\$APPDIR/${gtk4_path/$LD_GTK_LIBRARY_PATH//usr/lib}"'
 target = 'export GTK_PATH="\\$APPDIR/usr/lib/gtk-4.0"'
-if source not in text:
+if source not in text and target not in text:
     raise SystemExit('Pinned GTK AppImage path patch no longer matches linuxdeploy plugin.')
 text = text.replace(source, target, 1)
 
@@ -170,7 +171,8 @@ else
     echo "No legacy GDK Pixbuf modules found; relying on the system GDK Pixbuf backend."
 fi
 '''
-text = text[:start] + replacement + text[end:]
+if replacement not in text:
+    text = text[:start] + replacement + text[end:]
 plugin.write_text(text)
 PY
 
@@ -201,8 +203,49 @@ install -D "$generic_icon" \
 DEPLOY_GTK_VERSION=4 "$TOOLS/linuxdeploy" \
   --appdir "$APPDIR" \
   --plugin gtk \
-  --desktop-file "$APPDIR/usr/share/applications/$ID.desktop" \
-  --output appimage
+  --desktop-file "$APPDIR/usr/share/applications/$ID.desktop"
+
+# The plugin imports host GTK settings, including a forced X11 backend and
+# theme. Neither override is appropriate for this GTK4/libadwaita application:
+# preserve native display selection and the user's app/desktop theme instead.
+sed -i '/^export GDK_BACKEND=/d; /^export GTK_THEME=/d' \
+  "$APPDIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+
+# Resolve staged libraries explicitly, not merely by SONAME through ldd: a
+# plugin's dependency scan can otherwise copy a system library of the same
+# name. Include wrapped lower-level dependencies when the fork stages them.
+pinned_libraries=()
+cp -a "$GTK_ENHANCED_PREFIX/lib"/lib*.so* "$APPDIR/usr/lib/"
+while IFS= read -r -d '' library; do
+  pinned_libraries+=(--library "$library")
+done < <(find "$GTK_ENHANCED_PREFIX/lib" -maxdepth 1 -type f -name 'lib*.so*' -print0)
+"$TOOLS/linuxdeploy" --appdir "$APPDIR" "${pinned_libraries[@]}"
+
+# linuxdeploy may strip or patch ELF files, but preserves the build ID. Check
+# provenance and the loader's actual resolution before emitting a release.
+gtk_build_id () { readelf -n "$1" | sed -n 's/.*Build ID: //p'; }
+staged_id="$(gtk_build_id "$GTK_ENHANCED_PREFIX/lib/libgtk-4.so.1")"
+bundled_id="$(gtk_build_id "$APPDIR/usr/lib/libgtk-4.so.1")"
+[[ -n "$staged_id" && "$staged_id" = "$bundled_id" ]] || {
+  echo 'AppImage GTK build ID does not match the pinned staged library.' >&2; exit 1;
+}
+strings "$APPDIR/usr/lib/libgtk-4.so.1" | grep -Fx 'gtk4-enhanced-frame-policy-version' >/dev/null || {
+  echo 'AppImage contains GTK without the enhanced frame policy.' >&2; exit 1;
+}
+resolved_gtk="$(LD_LIBRARY_PATH="$APPDIR/usr/lib" ldd "$APPDIR/usr/bin/spotify-native" |
+  awk '/libgtk-4.so.1 =>/ {print $3}')"
+[[ "$(realpath "$resolved_gtk")" = "$(realpath "$APPDIR/usr/lib/libgtk-4.so.1")" ]] || {
+  echo 'AppImage runtime resolves GTK outside its bundle.' >&2; exit 1;
+}
+for component in avformat avcodec avutil swresample; do
+  compgen -G "$APPDIR/usr/lib/lib${component}.so.*" >/dev/null || {
+    echo "AppImage is missing the FFmpeg $component runtime." >&2; exit 1;
+  }
+done
+"$TOOLS/linuxdeploy" --appdir "$APPDIR" --output appimage
+[[ "$(gtk_build_id "$APPDIR/usr/lib/libgtk-4.so.1")" = "$staged_id" ]] || {
+  echo 'Final AppImage deployment replaced the pinned GTK library.' >&2; exit 1;
+}
 
 echo "==> $OUTPUT"
 ls -lh "$OUTPUT" | awk '{print "    "$5}'

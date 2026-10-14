@@ -105,10 +105,23 @@ spotifygtk_runtime_init (void)
   if (!directory)
     return;
 
+  /* Use the same Fontconfig/FreeType path as Linux for the private font pack.
+   * The Win32 map can accept a variable font file yet fail to resolve its
+   * family/weights, silently substituting a Windows face. Respect explicit
+   * backend overrides, and retain native registration for that fallback. */
+  g_autofree gchar *font_config =
+    g_build_filename (directory, "etc", "fonts", "fonts.conf", NULL);
+  if (g_file_test (font_config, G_FILE_TEST_IS_REGULAR)) {
+    if (!g_getenv ("FONTCONFIG_FILE"))
+      g_setenv ("FONTCONFIG_FILE", font_config, FALSE);
+    if (!g_getenv ("PANGOCAIRO_BACKEND"))
+      g_setenv ("PANGOCAIRO_BACKEND", "fc", FALSE);
+  }
   if (g_once_init_enter (&portable_fonts_initialized)) {
     g_autofree gchar *fonts =
       g_build_filename (directory, "share", "fonts", NULL);
-    register_private_fonts (fonts);
+    if (g_strcmp0 (g_getenv ("PANGOCAIRO_BACKEND"), "fc") != 0)
+      register_private_fonts (fonts);
     g_once_init_leave (&portable_fonts_initialized, 1);
   }
 
@@ -116,13 +129,6 @@ spotifygtk_runtime_init (void)
     g_autofree gchar *share = g_build_filename (directory, "share", NULL);
     if (g_file_test (share, G_FILE_TEST_IS_DIR))
       g_setenv ("XDG_DATA_DIRS", share, FALSE);
-  }
-
-  if (!g_getenv ("FONTCONFIG_FILE")) {
-    g_autofree gchar *config =
-      g_build_filename (directory, "etc", "fonts", "fonts.conf", NULL);
-    if (g_file_test (config, G_FILE_TEST_IS_REGULAR))
-      g_setenv ("FONTCONFIG_FILE", config, FALSE);
   }
 
   if (!g_getenv ("GIO_MODULE_DIR")) {

@@ -175,6 +175,17 @@ private application fonts and license notices. `package-msix.sh` creates and
 self-signs an x64 MSIX using Microsoft's native Linux packer and osslsigncode.
 No Windows VM is needed for this packaging path.
 
+Packaged builds select Pango's Fontconfig/FreeType backend for the bundled
+Adwaita Sans faces, matching the Linux text stack rather than relying on
+Windows family/variable-font substitution. An explicit `PANGOCAIRO_BACKEND`
+environment override is preserved. `SPOTIFY_FONT_DIAGNOSTICS=1` logs the
+resolved interface face once at startup; it does not install fonts globally.
+
+The main window retains its GTK header, but exposes native caption and resize
+hit tests to Windows. The shell owns drag-to-edge snapping, maximize/restore,
+and caption-button actions; GTK still owns content layout and frame pacing.
+The native subclass is removed when its window is unrealized or destroyed.
+
 ### Linux-only MSIX build
 
 For the optional high-refresh tester package, build the pinned GTK fork and
