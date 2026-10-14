@@ -6197,6 +6197,9 @@ static const gchar *theme_body =
    */
   "window { background-color: @bg_chrome; color: @fg;"
   "  font-family: \"Adwaita Sans\", Inter, Cantarell, sans-serif; }"
+  /* Windows owns the outer frame/shadow; a GTK shadow would inflate the
+   * minimum width enough to reject half-screen snap on a 1280px display. */
+  "window.native-shell-frame { box-shadow: none; }"
 
   /* ── Structure ─────────────────────────────────────────────── */
   "headerbar { background-color: @bg_chrome; box-shadow: none;"
@@ -6805,6 +6808,17 @@ on_fullscreen_changed (SpotifyGtkNativeWindow *self, GParamSpec *pspec, gpointer
 }
 
 #ifdef G_OS_WIN32
+static LRESULT
+native_hit_result (SpotifyGtkNativeWindow *self, int hit)
+{
+  if (g_object_get_data (G_OBJECT (self), "native-window-trace") &&
+      GPOINTER_TO_INT (g_object_get_data (G_OBJECT (self), "native-last-hit")) != hit) {
+    g_message ("native-window: hit=%d", hit);
+    g_object_set_data (G_OBJECT (self), "native-last-hit", GINT_TO_POINTER (hit));
+  }
+  return hit;
+}
+
 /* GTK's CSD move gesture uses GDK's simulated drag, which does not enter the
  * Windows shell move loop (and therefore cannot trigger Aero Snap). Keep the
  * GTK header, but expose its non-interactive region as a native caption. The
@@ -6814,6 +6828,12 @@ native_window_proc (HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
                     UINT_PTR subclass_id, DWORD_PTR data)
 {
   SpotifyGtkNativeWindow *self = (SpotifyGtkNativeWindow *) data;
+  gboolean trace = g_object_get_data (G_OBJECT (self), "native-window-trace") != NULL;
+  if (trace && (message == WM_ENTERSIZEMOVE || message == WM_EXITSIZEMOVE ||
+                message == WM_NCLBUTTONDOWN || message == WM_LBUTTONDOWN ||
+                message == WM_STYLECHANGED))
+    g_message ("native-window: message=0x%x hit=%u style=0x%lx",
+      message, (unsigned) wparam, (unsigned long) GetWindowLongPtrW (hwnd, GWL_STYLE));
   if (message == WM_NCDESTROY) {
     RemoveWindowSubclass (hwnd, native_window_proc, subclass_id);
     return DefSubclassProc (hwnd, message, wparam, lparam);
@@ -6844,20 +6864,25 @@ native_window_proc (HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
         if (left) return HTLEFT;
         if (right) return HTRIGHT;
       }
+      double native_x, native_y;
+      gtk_native_get_surface_transform (GTK_NATIVE (self), &native_x, &native_y);
       GtkWidget *picked = gtk_widget_pick (GTK_WIDGET (self),
-        (double) point.x / scale, (double) point.y / scale, GTK_PICK_DEFAULT);
+        (double) point.x / scale - native_x, (double) point.y / scale - native_y,
+        GTK_PICK_DEFAULT);
       /* Buttons, dialogs and text inputs must retain their GTK interaction.
        * Test ancestry rather than fixed pixels so interface zoom and DPI work. */
       for (GtkWidget *widget = picked; widget; widget = gtk_widget_get_parent (widget)) {
         if (GTK_IS_BUTTON (widget)) {
           if (gtk_widget_has_css_class (widget, "maximize") &&
               gtk_widget_is_sensitive (widget))
-            return HTMAXBUTTON;
-          return HTCLIENT;
+            return native_hit_result (self, HTMAXBUTTON);
+          return native_hit_result (self, HTCLIENT);
         }
-        if (GTK_IS_EDITABLE (widget)) return HTCLIENT;
-        if (widget == self->header_handle) return HTCAPTION;
+        if (GTK_IS_EDITABLE (widget)) return native_hit_result (self, HTCLIENT);
+        if (widget == self->header_handle) return native_hit_result (self, HTCAPTION);
       }
+      if (trace && point.y < 64 * scale)
+        native_hit_result (self, HTCLIENT);
     }
   }
   /* Native caption messages must reach Windows, not GTK's gesture handlers.
@@ -6867,7 +6892,14 @@ native_window_proc (HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
       (wparam == HTCAPTION || wparam == HTMAXBUTTON ||
        (wparam >= HTLEFT && wparam <= HTBOTTOMRIGHT)))
     return DefWindowProcW (hwnd, message, wparam, lparam);
-  return DefSubclassProc (hwnd, message, wparam, lparam);
+  LRESULT result = DefSubclassProc (hwnd, message, wparam, lparam);
+  if (trace && message == WM_GETMINMAXINFO) {
+    MINMAXINFO *limits = (MINMAXINFO *) lparam;
+    g_message ("native-window: limits min=%ldx%ld max=%ldx%ld",
+      limits->ptMinTrackSize.x, limits->ptMinTrackSize.y,
+      limits->ptMaxTrackSize.x, limits->ptMaxTrackSize.y);
+  }
+  return result;
 }
 
 static void
@@ -6876,14 +6908,22 @@ on_native_window_realize (GtkWidget *widget, gpointer unused)
   GdkSurface *surface = gtk_native_get_surface (GTK_NATIVE (widget));
   if (!GDK_IS_WIN32_SURFACE (surface)) return;
   HWND hwnd = gdk_win32_surface_get_handle (surface);
+  g_object_set_data (G_OBJECT (widget), "native-window-trace",
+    g_getenv ("SPOTIFY_WINDOW_DIAGNOSTICS") ? GINT_TO_POINTER (1) : NULL);
   if (!SetWindowSubclass (hwnd, native_window_proc, 1, (DWORD_PTR) widget)) {
     g_warning ("Could not enable native Windows title-bar integration");
     return;
   }
-  LONG_PTR style = GetWindowLongPtrW (hwnd, GWL_STYLE);
-  SetWindowLongPtrW (hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+  /* Update GDK's decoration model, not only the HWND bits. Otherwise its
+   * next layout strips the bits again; fighting WM_STYLECHANGING instead
+   * would make GDK repeatedly adjust the frame on every layout. The native
+   * calculation hook above keeps our GTK header as the visible title bar. */
+  gdk_toplevel_set_decorated (GDK_TOPLEVEL (surface), TRUE);
   SetWindowPos (hwnd, NULL, 0, 0, 0, 0,
     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+  if (g_object_get_data (G_OBJECT (widget), "native-window-trace"))
+    g_message ("native-window: initialized style=0x%lx",
+      (unsigned long) GetWindowLongPtrW (hwnd, GWL_STYLE));
   (void) unused;
 }
 
@@ -6915,6 +6955,7 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_window_set_title (GTK_WINDOW (self), "SpotifyGTK");
   gtk_window_set_default_size (GTK_WINDOW (self), 1800, 900);
 #ifdef G_OS_WIN32
+  gtk_widget_add_css_class (GTK_WIDGET (self), "native-shell-frame");
   g_signal_connect (self, "realize", G_CALLBACK (on_native_window_realize), NULL);
   g_signal_connect (self, "unrealize", G_CALLBACK (on_native_window_unrealize), NULL);
 #endif

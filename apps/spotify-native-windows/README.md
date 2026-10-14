@@ -185,6 +185,9 @@ The main window retains its GTK header, but exposes native caption and resize
 hit tests to Windows. The shell owns drag-to-edge snapping, maximize/restore,
 and caption-button actions; GTK still owns content layout and frame pacing.
 The native subclass is removed when its window is unrealized or destroyed.
+The native decoration state is also registered with GDK so later layout
+updates retain the shell flags. `SPOTIFY_WINDOW_DIAGNOSTICS=1` enables opt-in
+hit-test, move-loop, style and sizing traces; it never generates input.
 
 ### Linux-only MSIX build
 
