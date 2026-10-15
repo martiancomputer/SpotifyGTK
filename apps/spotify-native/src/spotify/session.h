@@ -107,6 +107,35 @@ void spotifygtk_native_session_start (SpotifyNativeSession *self);
  * that has been refused should not be taking orders about what to play. */
 gboolean spotifygtk_native_session_connect_is_active (SpotifyNativeSession *self);
 
+/* A Spotify Connect output available to the signed-in account. */
+typedef struct _SpotifyNativeConnectDevice {
+  gchar *id;
+  gchar *name;
+  gchar *type;
+  gboolean active;
+  gboolean restricted;
+  gboolean local;
+} SpotifyNativeConnectDevice;
+
+void spotifygtk_native_connect_device_free (SpotifyNativeConnectDevice *device);
+
+/* These use the authenticated native Connect session, not the public Web API.
+ * Network work is dispatched on the session worker, not the GTK thread.
+ * Device-list finish returns a GPtrArray of SpotifyNativeConnectDevice* with
+ * a free func set. */
+void spotifygtk_native_session_get_connect_devices (
+  SpotifyNativeSession *self, GCancellable *cancellable,
+  GAsyncReadyCallback callback, gpointer user_data);
+/* Owned snapshot; NULL before the first cluster arrives. */
+GPtrArray *spotifygtk_native_session_dup_connect_devices (SpotifyNativeSession *self);
+GPtrArray *spotifygtk_native_session_get_connect_devices_finish (
+  SpotifyNativeSession *self, GAsyncResult *result, GError **error);
+void spotifygtk_native_session_transfer_to_device (
+  SpotifyNativeSession *self, const gchar *device_id,
+  GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);
+gboolean spotifygtk_native_session_transfer_to_device_finish (
+  SpotifyNativeSession *self, GAsyncResult *result, GError **error);
+
 void spotifygtk_native_session_report_playback (SpotifyNativeSession *self,
                                                 const gchar *track_uri,
                                                 const gchar *context_uri,

@@ -16,12 +16,14 @@
 #include "playback_bar.h"
 #include "cover_loader.h"
 #include "context_menu.h"
+#include "dialog_host.h"
+#include "../spotify/session.h"
 #include "spotify/track_meta.h"
 #include <stdlib.h>
 
 /* Side columns are fixed and equal so the transport controls sit in the
  * true centre of the window regardless of how long the track name is. */
-#define SIDE_COLUMN_WIDTH 160
+#define SIDE_COLUMN_WIDTH 220
 #define ART_SIZE           56
 
 struct _SpotifyGtkPlaybackBar {
@@ -45,7 +47,12 @@ struct _SpotifyGtkPlaybackBar {
   /* Right: volume + queue */
   GtkScale  *volume_scale;
   GtkImage  *volume_icon;
+  GtkButton *connect_btn;
   GtkButton *queue_btn;
+  AdwDialog *connect_dialog;
+  GtkSpinner *connect_spinner;
+  GtkLabel *connect_status;
+  GtkBox *connect_list;
 
   /* Toggles */
   GtkButton *shuffle_btn;
@@ -92,6 +99,9 @@ enum {
   SHUFFLE_MODE_CHANGED,
   REPEAT_CHANGED,
   QUEUE_CLICKED,
+  CONNECT_DEVICES_REQUESTED,
+  CONNECT_DEVICE_SELECTED,
+  CONNECT_PICKER_CLOSED,
   N_SIGNALS
 };
 
@@ -383,6 +393,250 @@ on_seek_changed (GtkRange *range, gpointer user_data)
 
 /* === Construction === */
 
+static const gchar *
+connect_device_icon (const gchar *type)
+{
+  if (g_strcmp0 (type, "smartphone") == 0) return "phone-symbolic";
+  if (g_strcmp0 (type, "speaker") == 0 ||
+      g_strcmp0 (type, "tv") == 0 ||
+      g_strcmp0 (type, "stb") == 0) return "audio-speakers-symbolic";
+  if (g_strcmp0 (type, "computer") == 0) return "computer-symbolic";
+  return "audio-speakers-symbolic";
+}
+
+static void
+clear_connect_rows (SpotifyGtkPlaybackBar *self)
+{
+  if (!self->connect_list) return;
+  GtkWidget *child;
+  while ((child = gtk_widget_get_first_child (GTK_WIDGET (self->connect_list))))
+    gtk_box_remove (self->connect_list, child);
+}
+
+static void
+on_connect_device_row_clicked (GtkButton *button, SpotifyGtkPlaybackBar *self)
+{
+  const gchar *device_id = g_object_get_data (G_OBJECT (button), "connect-device-id");
+  if (!device_id || !self->connect_dialog) return;
+  gtk_widget_set_sensitive (GTK_WIDGET (self->connect_list), FALSE);
+  spotifygtk_playback_bar_set_connect_status (self, "Switching playback…", TRUE);
+  g_signal_emit (self, signals[CONNECT_DEVICE_SELECTED], 0, device_id);
+}
+
+void
+spotifygtk_playback_bar_set_connect_devices (SpotifyGtkPlaybackBar *self,
+                                            GPtrArray *devices)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  if (!self->connect_dialog) return;
+  clear_connect_rows (self);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->connect_list), TRUE);
+
+  for (guint i = 0; devices && i < devices->len; i++) {
+    SpotifyNativeConnectDevice *device = g_ptr_array_index (devices, i);
+    if (!device || !device->id || !*device->id) continue;
+
+    GtkWidget *row = gtk_button_new ();
+    gtk_widget_add_css_class (row, "flat");
+    gtk_widget_add_css_class (row, "connect-device-row");
+    g_object_set_data_full (G_OBJECT (row), "connect-device-id",
+                            g_strdup (device->id), g_free);
+    g_signal_connect_object (row, "clicked",
+                             G_CALLBACK (on_connect_device_row_clicked), self, 0);
+
+    GtkWidget *line = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_set_hexpand (line, TRUE);
+    GtkWidget *icon = gtk_image_new_from_icon_name (
+      device->local ? "audio-speakers-symbolic" :
+      connect_device_icon (device->type));
+    gtk_image_set_pixel_size (GTK_IMAGE (icon), 22);
+    gtk_box_append (GTK_BOX (line), icon);
+
+    GtkWidget *labels = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_hexpand (labels, TRUE);
+    GtkWidget *name = gtk_label_new (device->name && *device->name
+                                       ? device->name : "Spotify Connect device");
+    gtk_label_set_xalign (GTK_LABEL (name), 0.0f);
+    gtk_label_set_ellipsize (GTK_LABEL (name), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class (name, "connect-device-name");
+    gtk_box_append (GTK_BOX (labels), name);
+
+    const gchar *detail = device->restricted ? "Unavailable for control"
+      : device->active ? "Playing here"
+      : device->local ? "This device"
+      : (device->type && *device->type ? device->type : "Spotify Connect");
+    GtkWidget *subtitle = gtk_label_new (detail);
+    gtk_label_set_xalign (GTK_LABEL (subtitle), 0.0f);
+    gtk_label_set_ellipsize (GTK_LABEL (subtitle), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class (subtitle, "connect-device-detail");
+    gtk_box_append (GTK_BOX (labels), subtitle);
+    gtk_box_append (GTK_BOX (line), labels);
+
+    if (device->active) {
+      GtkWidget *active = gtk_image_new_from_icon_name ("object-select-symbolic");
+      gtk_widget_add_css_class (active, "dim-text");
+      gtk_widget_set_tooltip_text (active, "Current playback device");
+      gtk_box_append (GTK_BOX (line), active);
+    }
+    gtk_button_set_child (GTK_BUTTON (row), line);
+    gtk_widget_set_sensitive (row, !device->active && !device->restricted);
+    gtk_box_append (self->connect_list, row);
+  }
+
+  gboolean empty = !devices || devices->len == 0;
+  spotifygtk_playback_bar_set_connect_status (self,
+    empty ? "No Connect devices are available right now."
+          : "Choose a device to transfer playback.", FALSE);
+}
+
+void
+spotifygtk_playback_bar_set_connect_status (SpotifyGtkPlaybackBar *self,
+                                           const gchar *status,
+                                           gboolean loading)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  if (!self->connect_dialog) return;
+  gtk_widget_remove_css_class (GTK_WIDGET (self->connect_status), "error");
+  gtk_label_set_text (self->connect_status, status ? status : "");
+  gtk_widget_set_visible (GTK_WIDGET (self->connect_spinner), loading);
+  if (loading) gtk_spinner_start (self->connect_spinner);
+  else gtk_spinner_stop (self->connect_spinner);
+}
+
+void
+spotifygtk_playback_bar_set_connect_error (SpotifyGtkPlaybackBar *self,
+                                          const gchar *message)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  if (!self->connect_dialog) return;
+  gtk_widget_set_sensitive (GTK_WIDGET (self->connect_list), TRUE);
+  gtk_widget_remove_css_class (GTK_WIDGET (self->connect_status), "success");
+  spotifygtk_playback_bar_set_connect_status (self, message, FALSE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->connect_status), "error");
+}
+
+void
+spotifygtk_playback_bar_close_connect_dialog (SpotifyGtkPlaybackBar *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  if (self->connect_dialog) adw_dialog_close (self->connect_dialog);
+}
+
+void
+spotifygtk_playback_bar_set_connect_enabled (SpotifyGtkPlaybackBar *self,
+                                            gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  gtk_widget_set_sensitive (GTK_WIDGET (self->connect_btn), enabled);
+  gtk_widget_set_tooltip_text (GTK_WIDGET (self->connect_btn), enabled
+    ? "Connect to a device" : "Sign in to use Spotify Connect");
+}
+
+static void
+connect_dialog_closed (AdwDialog *dialog, SpotifyGtkPlaybackBar *self)
+{
+  if (self->connect_dialog == dialog) {
+    self->connect_dialog = NULL;
+    self->connect_spinner = NULL;
+    self->connect_status = NULL;
+    self->connect_list = NULL;
+    g_object_unref (dialog);
+  }
+  g_signal_emit (self, signals[CONNECT_PICKER_CLOSED], 0);
+}
+
+static void
+on_connect_refresh_clicked (GtkButton *button, SpotifyGtkPlaybackBar *self)
+{
+  clear_connect_rows (self);
+  gtk_widget_set_sensitive (GTK_WIDGET (self->connect_list), TRUE);
+  spotifygtk_playback_bar_set_connect_status (self, "Refreshing devices…", TRUE);
+  g_signal_emit (self, signals[CONNECT_DEVICES_REQUESTED], 0);
+  (void) button;
+}
+
+static void
+on_connect_button_clicked (GtkButton *button, SpotifyGtkPlaybackBar *self)
+{
+  if (self->connect_dialog) {
+    adw_dialog_present (self->connect_dialog, GTK_WIDGET (self));
+    return;
+  }
+  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
+  if (!ADW_IS_APPLICATION_WINDOW (root) ||
+      adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (root)))
+    return;
+
+  AdwDialog *dialog = adw_dialog_new ();
+  self->connect_dialog = g_object_ref_sink (dialog);
+  spotifygtk_dialog_prepare (dialog);
+  adw_dialog_set_title (dialog, "Connect to a device");
+  adw_dialog_set_content_width (dialog, 380);
+  adw_dialog_set_content_height (dialog, 430);
+  gtk_widget_add_css_class (GTK_WIDGET (dialog), "connect-device-picker");
+
+  GtkWidget *body = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_set_margin_top (body, 18);
+  gtk_widget_set_margin_bottom (body, 16);
+  gtk_widget_set_margin_start (body, 18);
+  gtk_widget_set_margin_end (body, 18);
+
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget *title = gtk_label_new ("Connect to a device");
+  gtk_widget_add_css_class (title, "dialog-title");
+  gtk_widget_set_hexpand (title, TRUE);
+  gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
+  gtk_box_append (GTK_BOX (header), title);
+  GtkWidget *refresh = gtk_button_new_from_icon_name ("view-refresh-symbolic");
+  gtk_widget_add_css_class (refresh, "flat");
+  gtk_widget_set_tooltip_text (refresh, "Refresh devices");
+  g_signal_connect_object (refresh, "clicked",
+                           G_CALLBACK (on_connect_refresh_clicked), self, 0);
+  gtk_box_append (GTK_BOX (header), refresh);
+  GtkWidget *close = gtk_button_new_from_icon_name ("window-close-symbolic");
+  gtk_widget_add_css_class (close, "flat");
+  gtk_widget_set_tooltip_text (close, "Close");
+  g_signal_connect_swapped (close, "clicked",
+                            G_CALLBACK (adw_dialog_close), dialog);
+  gtk_box_append (GTK_BOX (header), close);
+  gtk_box_append (GTK_BOX (body), header);
+
+  GtkWidget *scroll = gtk_scrolled_window_new ();
+  gtk_widget_set_vexpand (scroll, TRUE);
+  gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroll),
+    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  self->connect_list = GTK_BOX (gtk_box_new (GTK_ORIENTATION_VERTICAL, 4));
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroll),
+                                 GTK_WIDGET (self->connect_list));
+  gtk_box_append (GTK_BOX (body), scroll);
+
+  GtkWidget *status_row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  self->connect_spinner = GTK_SPINNER (gtk_spinner_new ());
+  gtk_widget_set_visible (GTK_WIDGET (self->connect_spinner), FALSE);
+  gtk_box_append (GTK_BOX (status_row), GTK_WIDGET (self->connect_spinner));
+  self->connect_status = GTK_LABEL (gtk_label_new ("Loading devices…"));
+  gtk_label_set_xalign (self->connect_status, 0.0f);
+  gtk_label_set_wrap (self->connect_status, TRUE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->connect_status), "dim-text");
+  gtk_widget_set_hexpand (GTK_WIDGET (self->connect_status), TRUE);
+  gtk_box_append (GTK_BOX (status_row), GTK_WIDGET (self->connect_status));
+  gtk_box_append (GTK_BOX (body), status_row);
+  GtkWidget *hint = gtk_label_new (
+    "Open Spotify on another device using the same account to see it here.");
+  gtk_label_set_wrap (GTK_LABEL (hint), TRUE);
+  gtk_widget_add_css_class (hint, "dim-text");
+  gtk_widget_add_css_class (hint, "small-text");
+  gtk_widget_set_halign (hint, GTK_ALIGN_START);
+  gtk_box_append (GTK_BOX (body), hint);
+
+  adw_dialog_set_child (dialog, body);
+  g_signal_connect_object (dialog, "closed",
+    G_CALLBACK (connect_dialog_closed), self, 0);
+  adw_dialog_present (dialog, GTK_WIDGET (self));
+  g_signal_emit (self, signals[CONNECT_DEVICES_REQUESTED], 0);
+  (void) button;
+}
+
 static void
 spotifygtk_playback_bar_dispose (GObject *object)
 {
@@ -392,6 +646,13 @@ spotifygtk_playback_bar_dispose (GObject *object)
   if (self->progress_tick_id)
     gtk_widget_remove_tick_callback (GTK_WIDGET (self), self->progress_tick_id);
   g_clear_pointer (&self->share_url, g_free);
+  if (self->connect_dialog) {
+    adw_dialog_close (self->connect_dialog);
+    g_clear_object (&self->connect_dialog);
+  }
+  self->connect_spinner = NULL;
+  self->connect_status = NULL;
+  self->connect_list = NULL;
   G_OBJECT_CLASS (spotifygtk_playback_bar_parent_class)->dispose (object);
 }
 
@@ -415,6 +676,13 @@ spotifygtk_playback_bar_class_init (SpotifyGtkPlaybackBarClass *klass)
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 1, G_TYPE_INT64);
   signals[QUEUE_CLICKED] = g_signal_new ("queue-clicked",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[CONNECT_DEVICES_REQUESTED] = g_signal_new ("connect-devices-requested",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[CONNECT_DEVICE_SELECTED] = g_signal_new ("connect-device-selected",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[CONNECT_PICKER_CLOSED] = g_signal_new ("connect-picker-closed",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[LIKE_TOGGLED] = g_signal_new ("like-toggled",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
@@ -662,6 +930,13 @@ build_right_column (SpotifyGtkPlaybackBar *self)
   gtk_widget_set_tooltip_text (GTK_WIDGET (self->volume_scale), "Volume: 100%");
   g_signal_connect (self->volume_scale, "value-changed", G_CALLBACK (on_volume_changed), self);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->volume_scale));
+
+  self->connect_btn = GTK_BUTTON (make_transport_button (
+    "video-display-symbolic", "Sign in to use Spotify Connect",
+    G_CALLBACK (on_connect_button_clicked), self));
+  gtk_widget_set_sensitive (GTK_WIDGET (self->connect_btn), FALSE);
+  gtk_widget_set_margin_start (GTK_WIDGET (self->connect_btn), 2);
+  gtk_box_append (GTK_BOX (box), GTK_WIDGET (self->connect_btn));
 
   self->queue_btn = GTK_BUTTON (make_transport_button (
     "view-list-symbolic", "Show the queue",

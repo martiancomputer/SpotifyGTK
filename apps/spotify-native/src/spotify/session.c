@@ -93,6 +93,7 @@ struct _SpotifyNativeSession {
   gchar   *bearer_token;
   gchar   *client_token;
   gchar   *username;
+  GPtrArray *connect_devices;  /* bounded, owned Connect roster; protected by lock */
   gint64   bearer_expires_at;   /* monotonic; 0 = unknown */
   gboolean stopping;            /* dispose has begun; worker must not start its loop */
   gint     auth_generation;     /* atomic; invalidates delayed sign-in callbacks */
@@ -105,7 +106,8 @@ struct _SpotifyNativeSession {
 
 G_DEFINE_FINAL_TYPE (SpotifyNativeSession, spotifygtk_native_session, G_TYPE_OBJECT)
 
-enum { STATE_CHANGED, TRANSFER_REQUESTED, REMOTE_COMMAND, N_SIGNALS };
+enum { STATE_CHANGED, TRANSFER_REQUESTED, REMOTE_COMMAND, CONNECT_DEVICES_CHANGED,
+       N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 static void on_mercury_transport_timeout (SpotifyMercury *mercury,
@@ -174,6 +176,7 @@ typedef struct {
   guint                 shuffle_mode;
   gboolean              flag;      /* paused */
   gboolean              is_command;
+  gint                  generation;
 } RemoteEvent;
 
 static gboolean
@@ -181,7 +184,10 @@ dispatch_remote (gpointer user_data)
 {
   RemoteEvent *event = user_data;
 
-  if (event->is_command)
+  if (event->generation != g_atomic_int_get (&event->session->auth_generation) ||
+      g_atomic_int_get (&event->session->signed_out)) {
+    /* A command queued before logout belongs to the old account. */
+  } else if (event->is_command)
     g_signal_emit (event->session, signals[REMOTE_COMMAND], 0,
                    event->text, event->number);
   else
@@ -207,6 +213,7 @@ emit_remote (SpotifyNativeSession *self, gboolean is_command,
 
   RemoteEvent *event = g_new0 (RemoteEvent, 1);
   event->session    = g_object_ref (self);
+  event->generation = g_atomic_int_get (&self->auth_generation);
   event->text       = g_strdup (text);
   event->number     = number;
   event->flag       = flag;
@@ -224,6 +231,7 @@ emit_transfer (SpotifyNativeSession *self, const gchar *track_uri,
 
   RemoteEvent *event = g_new0 (RemoteEvent, 1);
   event->session = g_object_ref (self);
+  event->generation = g_atomic_int_get (&self->auth_generation);
   event->text = g_strdup (track_uri);
   event->context_uri = g_strdup (context_uri);
   event->number = position_ms;
@@ -316,6 +324,7 @@ static void on_session_ap_disconnected (SpotifyApSession *ap, GError *error,
  * active_device_id to notice a transfer. */
 static gchar connect_device_id[41];
 static SpotifyNativeSession *dealer_session;
+static gchar *dealer_conn_id;
 
 /* ── Connect: registering this client as a device ───────────────────────────
  *
@@ -699,6 +708,13 @@ on_put_state_done (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GBytes) body =
     soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
   SoupMessage *msg = user_data;
+  /* A late registration response from before logout/reconnect must not
+   * overwrite the replacement account's device roster or ownership. */
+  if (!dealer_session || g_atomic_int_get (&dealer_session->signed_out) ||
+      g_strcmp0 (g_object_get_data (G_OBJECT (msg), "connection-id"), dealer_conn_id) != 0) {
+    g_object_unref (msg);
+    return;
+  }
   guint status = msg ? soup_message_get_status (msg) : 0;
   const gchar *dev_id = msg ? g_object_get_data (G_OBJECT (msg), "device-id") : NULL;
 
@@ -833,6 +849,7 @@ connect_put_state (const gchar *bearer, const gchar *connection_id)
   SoupSession *s = soup_session_new ();
   spotifygtk_soup_session_configure_tls (s);
   g_object_set_data_full (G_OBJECT (msg), "device-id", g_strdup (device_id), g_free);
+  g_object_set_data_full (G_OBJECT (msg), "connection-id", g_strdup (connection_id), g_free);
   soup_session_send_and_read_async (s, msg, G_PRIORITY_DEFAULT, NULL,
                                     on_put_state_done, msg);
   g_object_unref (s);  /* the async operation holds it until completion */
@@ -855,7 +872,6 @@ static SoupWebsocketConnection *dealer_ws;   /* probe only; see connect.md */
 static void dealer_connect (const gchar *bearer);
 static gchar                   *dealer_redial_bearer;
 static guint                    dealer_redial_delay = 1;
-static gchar *dealer_conn_id;
 static gchar *dealer_bearer;
 static guint dealer_ping_id;
 static guint dealer_reput_id;
@@ -1075,25 +1091,157 @@ dealer_handle_transfer_state (SpotifyNativeSession *self,
  * answered. Until that arrives the controller shows "Connecting…" and
  * eventually gives up, which is exactly what it did.
  */
+static JsonObject *
+connect_json_object (JsonObject *object, const gchar *member)
+{
+  JsonNode *node = object ? json_object_get_member (object, member) : NULL;
+  return node && JSON_NODE_HOLDS_OBJECT (node) ? json_node_get_object (node) : NULL;
+}
+
+static const gchar *
+connect_json_string (JsonObject *object, const gchar *member)
+{
+  JsonNode *node = object ? json_object_get_member (object, member) : NULL;
+  return node && JSON_NODE_HOLDS_VALUE (node) &&
+    json_node_get_value_type (node) == G_TYPE_STRING ? json_node_get_string (node) : NULL;
+}
+
+static gint64
+connect_json_number (JsonObject *object, const gchar *member, gint64 fallback)
+{
+  JsonNode *node = object ? json_object_get_member (object, member) : NULL;
+  return node && JSON_NODE_HOLDS_VALUE (node) &&
+    (json_node_get_value_type (node) == G_TYPE_INT64 ||
+     json_node_get_value_type (node) == G_TYPE_BOOLEAN)
+      ? (json_node_get_value_type (node) == G_TYPE_BOOLEAN
+          ? json_node_get_boolean (node) : json_node_get_int (node)) : fallback;
+}
+
+/* Both incoming command JSON and cluster protobufs may be base64+gzip.
+ * Bound the encoded input and decompressed output independently. */
+static GBytes *
+connect_decode_payload (const gchar *encoded, gboolean gzip)
+{
+  if (!encoded || strlen (encoded) > 6 * 1024 * 1024) return NULL;
+  gsize size = 0;
+  g_autofree guint8 *raw = g_base64_decode (encoded, &size);
+  if (!size || size > 4 * 1024 * 1024) return NULL;
+  if (!gzip) return g_bytes_new_take (g_steal_pointer (&raw), size);
+  g_autoptr(GInputStream) input = g_memory_input_stream_new_from_data (raw, size, NULL);
+  g_autoptr(GZlibDecompressor) decoder = g_zlib_decompressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP);
+  g_autoptr(GInputStream) stream = g_converter_input_stream_new (input, G_CONVERTER (decoder));
+  g_autoptr(GByteArray) output = g_byte_array_new ();
+  guint8 chunk[8192];
+  gssize count;
+  while ((count = g_input_stream_read (stream, chunk, sizeof chunk, NULL, NULL)) > 0) {
+    if (output->len + count > 4 * 1024 * 1024) return NULL;
+    g_byte_array_append (output, chunk, count);
+  }
+  if (count < 0 || !output->len) return NULL;
+  return g_byte_array_free_to_bytes (g_steal_pointer (&output));
+}
+
+static gboolean
+connect_envelope_is_gzip (JsonObject *root)
+{
+  return g_strcmp0 (connect_json_string (connect_json_object (root, "headers"),
+                                       "Transfer-Encoding"), "gzip") == 0;
+}
+
+typedef struct {
+  SpotifyNativeSession *session;
+  gint generation;
+  gchar *context_uri;
+  gchar *track_uri;
+  guint index;
+  gint64 position;
+  gboolean paused;
+  guint shuffle_mode;
+} ConnectPlayRequest;
+
+static void
+connect_play_request_free (ConnectPlayRequest *request)
+{
+  g_clear_object (&request->session);
+  g_free (request->context_uri);
+  g_free (request->track_uri);
+  g_free (request);
+}
+
+static ConnectPlayRequest *
+connect_parse_play (SpotifyNativeSession *self, JsonObject *command)
+{
+  JsonObject *context = connect_json_object (command, "context");
+  JsonObject *options = connect_json_object (command, "options");
+  JsonObject *skip = connect_json_object (options, "skip_to");
+  const gchar *context_uri = connect_json_string (context, "uri");
+  const gchar *track_uri = connect_json_string (skip, "track_uri");
+  if (!context_uri || !g_str_has_prefix (context_uri, "spotify:") ||
+      strlen (context_uri) > 256) return NULL;
+  ConnectPlayRequest *request = g_new0 (ConnectPlayRequest, 1);
+  request->session = g_object_ref (self);
+  request->generation = g_atomic_int_get (&self->auth_generation);
+  request->context_uri = g_strdup (context_uri);
+  request->index = (guint) CLAMP (connect_json_number (skip, "track_index", 0), 0, 100000);
+  request->position = MAX (connect_json_number (options, "seek_to", 0), 0);
+  request->paused = connect_json_number (options, "initially_paused", FALSE) != 0;
+  JsonObject *overrides = connect_json_object (options, "player_options_override");
+  request->shuffle_mode = connect_json_number (overrides, "shuffling_context",
+                                               connect_now_shuffle_mode != 0) ? 1 : 0;
+  if (track_uri && g_str_has_prefix (track_uri, "spotify:track:") && strlen (track_uri) <= 256)
+    request->track_uri = g_strdup (track_uri);
+  else if (g_str_has_prefix (context_uri, "spotify:track:"))
+    request->track_uri = g_strdup (context_uri);
+  return request;
+}
+
+static void
+connect_play_resolved (GObject *source, GAsyncResult *result, gpointer data)
+{
+  ConnectPlayRequest *request = data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  if (request->generation == g_atomic_int_get (&request->session->auth_generation) &&
+      !g_atomic_int_get (&request->session->signed_out) && tracks &&
+      request->index < tracks->len) {
+    SpotifyNativeTrack *track = g_ptr_array_index (tracks, request->index);
+    emit_transfer (request->session, track->uri, request->context_uri, NULL,
+                   request->position, request->paused, request->shuffle_mode);
+  }
+  connect_play_request_free (request);
+}
+
 static void
 dealer_handle_command (JsonObject *root)
 {
-  JsonObject *payload = json_object_get_object_member (root, "payload");
+  JsonObject *payload = connect_json_object (root, "payload");
   if (!payload)
     return;
 
-  JsonObject *cmd = json_object_has_member (payload, "command")
-                      ? json_object_get_object_member (payload, "command") : NULL;
-  const gchar *endpoint = cmd && json_object_has_member (cmd, "endpoint")
-                            ? json_object_get_string_member (cmd, "endpoint") : NULL;
+  g_autoptr(JsonParser) decoded_parser = NULL;
+  const gchar *compressed = connect_json_string (payload, "compressed");
+  if (compressed) {
+    g_autoptr(GBytes) decoded = connect_decode_payload (compressed, connect_envelope_is_gzip (root));
+    if (!decoded) return;
+    gsize decoded_len = 0;
+    const gchar *decoded_data = g_bytes_get_data (decoded, &decoded_len);
+    decoded_parser = json_parser_new ();
+    if (!json_parser_load_from_data (decoded_parser, decoded_data, decoded_len, NULL) ||
+        !JSON_NODE_HOLDS_OBJECT (json_parser_get_root (decoded_parser))) return;
+    payload = json_node_get_object (json_parser_get_root (decoded_parser));
+  }
+
+  JsonObject *cmd = connect_json_object (payload, "command");
+  const gchar *endpoint = connect_json_string (cmd, "endpoint");
+  if (!endpoint || !dealer_session) return;
 
   const gchar *from = json_object_has_member (payload, "sent_by_device_id")
                         ? json_object_get_string_member (payload, "sent_by_device_id") : NULL;
   guint64 msg_id = json_object_has_member (payload, "message_id")
                      ? (guint64) json_object_get_int_member (payload, "message_id") : 0;
 
-  g_message ("[command] %s from %s (message_id %" G_GUINT64_FORMAT ")",
-             endpoint ? endpoint : "(none)", from ? from : "(unknown)", msg_id);
+  g_message ("[command] received playback command");
 
   if (!dealer_bearer || !dealer_conn_id) {
     g_warning ("[command] arrived with no connection id to answer on");
@@ -1113,11 +1261,35 @@ dealer_handle_command (JsonObject *root)
   connect_ack_msg_id   = msg_id;
   connect_claim_active = TRUE;
 
+  if (g_strcmp0 (endpoint, "play") == 0) {
+    ConnectPlayRequest *request = connect_parse_play (dealer_session, cmd);
+    if (!request) return;
+    connect_put_state (dealer_bearer, dealer_conn_id);
+    if (request->track_uri) {
+      emit_transfer (dealer_session, request->track_uri, request->context_uri, NULL,
+                     request->position, request->paused, request->shuffle_mode);
+      connect_play_request_free (request);
+    } else {
+      spotifygtk_native_session_load_tracks (dealer_session, request->context_uri, 0,
+        dealer_session->cancellable, connect_play_resolved, request);
+    }
+    return;
+  }
+
   if (g_strcmp0 (endpoint, "transfer") != 0) {
     gint64 seek_to = 0;
-    if (g_strcmp0 (endpoint, "seek_to") == 0 && cmd &&
-        json_object_has_member (cmd, "value"))
-      seek_to = json_object_get_int_member (cmd, "value");
+    if (g_strcmp0 (endpoint, "seek_to") == 0)
+      seek_to = MAX (connect_json_number (cmd, "value",
+        connect_json_number (cmd, "position", 0)), 0);
+
+    if (g_strcmp0 (endpoint, "set_options") == 0 ||
+        g_strcmp0 (endpoint, "set_shuffling_context") == 0) {
+      seek_to = connect_now_shuffle_mode;
+      if (json_object_has_member (cmd, "shuffling_context"))
+        seek_to = connect_json_number (cmd, "shuffling_context", seek_to != 0) ? 1 : 0;
+      else if (g_strcmp0 (endpoint, "set_shuffling_context") == 0)
+        seek_to = connect_json_number (cmd, "value", seek_to != 0) ? 1 : 0;
+    }
 
     if ((g_strcmp0 (endpoint, "set_options") == 0 ||
          g_strcmp0 (endpoint, "set_shuffling_context") == 0) && cmd &&
@@ -1194,6 +1366,140 @@ cluster_active_device (const guint8 *cluster, gsize len)
 }
 
 static void
+connect_devices_changed_free (gpointer data)
+{
+  RemoteEvent *event = data;
+  g_object_unref (event->session);
+  g_free (event);
+}
+
+static gboolean
+dispatch_connect_devices_changed (gpointer data)
+{
+  RemoteEvent *event = data;
+  if (event->generation == g_atomic_int_get (&event->session->auth_generation) &&
+      !g_atomic_int_get (&event->session->signed_out))
+    g_signal_emit (event->session, signals[CONNECT_DEVICES_CHANGED], 0);
+  return G_SOURCE_REMOVE;
+}
+
+static gchar *
+connect_proto_string (const guint8 *data, gsize length, guint field)
+{
+  const guint8 *value = NULL;
+  gsize size = 0;
+  if (!pb_find_bytes_field (data, length, field, &value, &size) ||
+      size == 0 || size > 256 || memchr (value, 0, size) ||
+      !g_utf8_validate ((const gchar *) value, size, NULL))
+    return NULL;
+  return g_strndup ((const gchar *) value, size);
+}
+
+static gint
+connect_device_compare (gconstpointer a, gconstpointer b)
+{
+  const SpotifyNativeConnectDevice *left = *(SpotifyNativeConnectDevice * const *) a;
+  const SpotifyNativeConnectDevice *right = *(SpotifyNativeConnectDevice * const *) b;
+  if (left->local != right->local) return left->local ? -1 : 1;
+  return g_strcmp0 (left->id, right->id);
+}
+
+/* Cluster.device is a map<string, DeviceInfo>. Keep names/IDs only; this
+ * snapshot must not retain a player state, artwork, or an unbounded roster. */
+static void
+connect_update_devices (SpotifyNativeSession *self, const guint8 *cluster,
+                        gsize length, const gchar *active)
+{
+  if (!self) return;
+  g_autoptr(GPtrArray) devices = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_connect_device_free);
+  g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
+  gsize pos = 0, field_len;
+  guint32 fn;
+  PbWireType wt;
+  const guint8 *field;
+  guint64 value;
+  gboolean has_map = FALSE;
+  while (pb_read_field (cluster, length, &pos, &fn, &wt, &field, &field_len, &value)) {
+    if (fn != 4 || wt != PB_WIRE_LENGTH_DELIMITED) continue;
+    has_map = TRUE;
+    if (devices->len >= 100) break;
+    const guint8 *info = NULL, *caps = NULL;
+    gsize info_len = 0, caps_len = 0;
+    g_autofree gchar *id = connect_proto_string (field, field_len, 1);
+    if (!id || g_hash_table_contains (seen, id) ||
+        !pb_find_bytes_field (field, field_len, 2, &info, &info_len)) continue;
+    guint64 offline = 0, hidden = 0, can_play = 0, disabled = 0, type = 0;
+    pb_find_varint_field (info, info_len, 21, &offline);
+    pb_find_varint_field (info, info_len, 1, &can_play);
+    pb_find_varint_field (info, info_len, 7, &type);
+    if (pb_find_bytes_field (info, info_len, 4, &caps, &caps_len)) {
+      pb_find_varint_field (caps, caps_len, 12, &hidden);
+      pb_find_varint_field (caps, caps_len, 14, &disabled);
+    }
+    if (offline || hidden) continue;
+    SpotifyNativeConnectDevice *device = g_new0 (SpotifyNativeConnectDevice, 1);
+    device->id = g_steal_pointer (&id);
+    device->name = connect_proto_string (info, info_len, 3);
+    device->local = g_strcmp0 (device->id, self->device_id) == 0;
+    device->active = g_strcmp0 (device->id, active) == 0;
+    const guint8 *reasons = NULL; gsize reasons_len = 0;
+    device->restricted = !can_play || disabled ||
+      pb_find_bytes_field (info, info_len, 28, &reasons, &reasons_len);
+    device->type = g_strdup (type == 1 ? "computer" : type == 2 ? "tablet" :
+                            type == 3 ? "smartphone" : type == 5 ? "tv" : "speaker");
+    g_hash_table_add (seen, device->id);
+    g_ptr_array_add (devices, device);
+  }
+  g_mutex_lock (&self->lock);
+  gboolean changed = !self->connect_devices;
+  /* A partial player-state update need not include the roster. Preserve it
+   * while updating its active flag; a full map replaces it atomically. */
+  if (!has_map && self->connect_devices) {
+    g_clear_pointer (&devices, g_ptr_array_unref);
+    devices = g_steal_pointer (&self->connect_devices);
+    for (guint i = 0; i < devices->len; i++) {
+      SpotifyNativeConnectDevice *device = g_ptr_array_index (devices, i);
+      gboolean is_active = g_strcmp0 (device->id, active) == 0;
+      changed |= device->active != is_active;
+      device->active = is_active;
+    }
+  }
+  gboolean local_found = FALSE;
+  for (guint i = 0; i < devices->len; i++)
+    local_found |= ((SpotifyNativeConnectDevice *) g_ptr_array_index (devices, i))->local;
+  if (!local_found) {
+    SpotifyNativeConnectDevice *device = g_new0 (SpotifyNativeConnectDevice, 1);
+    device->id = g_strdup (self->device_id);
+    device->name = g_strdup ("SpotifyGTK");
+    device->type = g_strdup ("computer");
+    device->local = TRUE;
+    device->active = g_strcmp0 (device->id, active) == 0;
+    g_ptr_array_add (devices, device);
+  }
+  g_ptr_array_sort (devices, connect_device_compare);
+  if (has_map && self->connect_devices) {
+    changed |= devices->len != self->connect_devices->len;
+    for (guint i = 0; !changed && i < devices->len; i++) {
+      SpotifyNativeConnectDevice *a = g_ptr_array_index (devices, i);
+      SpotifyNativeConnectDevice *b = g_ptr_array_index (self->connect_devices, i);
+      changed = g_strcmp0 (a->id, b->id) || g_strcmp0 (a->name, b->name) ||
+        g_strcmp0 (a->type, b->type) || a->active != b->active ||
+        a->restricted != b->restricted || a->local != b->local;
+    }
+  }
+  g_clear_pointer (&self->connect_devices, g_ptr_array_unref);
+  self->connect_devices = g_steal_pointer (&devices);
+  g_mutex_unlock (&self->lock);
+  if (!changed) return;
+  RemoteEvent *event = g_new0 (RemoteEvent, 1);
+  event->session = g_object_ref (self);
+  event->generation = g_atomic_int_get (&self->auth_generation);
+  g_main_context_invoke_full (self->caller_context, G_PRIORITY_DEFAULT,
+    dispatch_connect_devices_changed, event, connect_devices_changed_free);
+}
+
+static void
 dealer_handle_cluster (const guint8 *cluster, gsize len)
 {
   g_autofree gchar *active = NULL;
@@ -1203,6 +1509,8 @@ dealer_handle_cluster (const guint8 *cluster, gsize len)
 
   if (pb_find_bytes_field (cluster, len, CS_CLUSTER_ACTIVE_DEVICE, &v, &vlen))
     active = g_strndup ((const gchar *) v, vlen);
+
+  connect_update_devices (dealer_session, cluster, len, active);
 
   g_autofree gchar *context = NULL;
   gboolean playing = FALSE;
@@ -1311,6 +1619,7 @@ dealer_handle_cluster (const guint8 *cluster, gsize len)
 static void
 dealer_handle_payloads (const gchar *body, gsize len)
 {
+  if (len > 8 * 1024 * 1024) return;
   g_autoptr(JsonParser) parser = json_parser_new ();
   if (!json_parser_load_from_data (parser, body, (gssize) len, NULL))
     return;
@@ -1332,6 +1641,8 @@ dealer_handle_payloads (const gchar *body, gsize len)
     dealer_handle_command (obj);
     return;
   }
+
+  gboolean gzip = connect_envelope_is_gzip (obj);
 
   /* The dealer multiplexes collection, playlist, social and Connect events
    * over one socket. Several of their protobufs also have a length-delimited
@@ -1360,10 +1671,18 @@ dealer_handle_payloads (const gchar *body, gsize len)
     if (!b64)
       continue;
 
+    g_autoptr(GBytes) decoded = connect_decode_payload (b64, gzip);
+    if (!decoded) continue;
     gsize raw_len = 0;
-    g_autofree guchar *raw = g_base64_decode (b64, &raw_len);
-    if (!raw || raw_len == 0)
+    const guint8 *raw = g_bytes_get_data (decoded, &raw_len);
+
+    if (route && strstr (route, "connect/volume")) {
+      guint64 volume = 0;
+      if (pb_find_varint_field (raw, raw_len, 1, &volume))
+        emit_remote (dealer_session, TRUE, "set_volume",
+                     MIN (volume, 65535) * 100 / 65535, FALSE);
       continue;
+    }
 
     /* ClusterUpdate.cluster, or nothing we understand yet. */
     const guint8 *cluster = NULL; gsize clen = 0;
@@ -1477,11 +1796,22 @@ dealer_reply_if_request (SoupWebsocketConnection *ws, const gchar *body,
   if (!key)
     return;
 
-  g_autofree gchar *reply =
-    g_strdup_printf ("{\"type\":\"reply\",\"key\":\"%s\","
-                     "\"payload\":{\"success\":true}}", key);
+  g_autoptr(JsonBuilder) builder = json_builder_new ();
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "type");
+  json_builder_add_string_value (builder, "reply");
+  json_builder_set_member_name (builder, "key");
+  json_builder_add_string_value (builder, key);
+  json_builder_set_member_name (builder, "payload");
+  json_builder_begin_object (builder);
+  json_builder_set_member_name (builder, "success");
+  json_builder_add_boolean_value (builder, TRUE);
+  json_builder_end_object (builder);
+  json_builder_end_object (builder);
+  g_autoptr(JsonNode) reply_node = json_builder_get_root (builder);
+  g_autofree gchar *reply = json_to_string (reply_node, FALSE);
   soup_websocket_connection_send_text (ws, reply);
-  g_message ("[dealer] replied success to request key %s", key);
+  g_message ("[dealer] replied to playback request");
 }
 
 static void
@@ -1702,6 +2032,9 @@ dealer_destroy_source (SpotifyNativeSession *self, guint *id)
 static void
 dealer_shutdown (SpotifyNativeSession *self)
 {
+  g_mutex_lock (&self->lock);
+  g_clear_pointer (&self->connect_devices, g_ptr_array_unref);
+  g_mutex_unlock (&self->lock);
   if (dealer_session != self)
     return;
 
@@ -2174,6 +2507,267 @@ acquire_login_token (SpotifyNativeSession *self)
   g_object_unref (auth);
 
   return self->login_token != NULL;
+}
+
+/* The picker uses the same authenticated Connect state transport as the
+ * receiver. Device discovery is Cluster.device (connect.proto field 4), and
+ * transfers use spclient's native /connect/transfer route. */
+typedef enum {
+  CONNECT_API_LIST_DEVICES,
+  CONNECT_API_TRANSFER_DEVICE,
+} ConnectApiKind;
+
+typedef struct {
+  GTask *task;
+  SoupSession *http_session;
+  SoupMessage *message;
+  gchar *device_id;
+  ConnectApiKind kind;
+  gint auth_generation;
+  guint refresh_waits;
+} ConnectApiOp;
+
+void
+spotifygtk_native_connect_device_free (SpotifyNativeConnectDevice *device)
+{
+  if (!device) return;
+  g_free (device->id);
+  g_free (device->name);
+  g_free (device->type);
+  g_free (device);
+}
+
+static SpotifyNativeConnectDevice *
+connect_device_copy (const SpotifyNativeConnectDevice *device)
+{
+  SpotifyNativeConnectDevice *copy = g_new0 (SpotifyNativeConnectDevice, 1);
+  *copy = *device;
+  copy->id = g_strdup (device->id);
+  copy->name = g_strdup (device->name);
+  copy->type = g_strdup (device->type);
+  return copy;
+}
+
+GPtrArray *
+spotifygtk_native_session_dup_connect_devices (SpotifyNativeSession *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self), NULL);
+  GPtrArray *copy = NULL;
+  g_mutex_lock (&self->lock);
+  if (self->connect_devices) {
+    copy = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_connect_device_free);
+    for (guint i = 0; i < self->connect_devices->len; i++)
+      g_ptr_array_add (copy, connect_device_copy (
+        g_ptr_array_index (self->connect_devices, i)));
+  }
+  g_mutex_unlock (&self->lock);
+  return copy;
+}
+
+static void
+connect_api_op_free (ConnectApiOp *op)
+{
+  g_clear_object (&op->message);
+  g_clear_object (&op->http_session);
+  g_clear_object (&op->task);
+  g_free (op->device_id);
+  g_free (op);
+}
+
+static gboolean
+connect_api_current (ConnectApiOp *op)
+{
+  SpotifyNativeSession *self = g_task_get_source_object (op->task);
+  if (op->auth_generation != g_atomic_int_get (&self->auth_generation) ||
+      g_atomic_int_get (&self->signed_out)) {
+    g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                             "Spotify sign-in changed");
+    return FALSE;
+  }
+  return !g_task_return_error_if_cancelled (op->task);
+}
+
+static void
+connect_api_complete (GObject *source, GAsyncResult *result, gpointer data)
+{
+  ConnectApiOp *op = data;
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) bytes = soup_session_send_and_read_finish (
+    SOUP_SESSION (source), result, &error);
+  if (!connect_api_current (op)) {
+    connect_api_op_free (op);
+    return;
+  }
+  if (!bytes) {
+    g_task_return_error (op->task, g_steal_pointer (&error));
+    connect_api_op_free (op);
+    return;
+  }
+  guint status = soup_message_get_status (op->message);
+  g_message ("connect-picker: %s HTTP %u",
+    op->kind == CONNECT_API_LIST_DEVICES ? "devices" : "transfer", status);
+  if (status < 200 || status >= 300) {
+    g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_FAILED,
+      "Spotify could not %s. Try Refresh and select the device again.",
+      op->kind == CONNECT_API_LIST_DEVICES ? "load available devices" : "transfer playback");
+  } else if (op->kind == CONNECT_API_TRANSFER_DEVICE) {
+    g_task_return_boolean (op->task, TRUE);
+  } else {
+    SpotifyNativeSession *self = g_task_get_source_object (op->task);
+    gsize length = 0, cluster_length = 0;
+    const guint8 *body = g_bytes_get_data (bytes, &length);
+    const guint8 *cluster = NULL;
+    if (body && length && length <= 4 * 1024 * 1024) {
+      if (!pb_find_bytes_field (body, length, CS_CLUSTERUPDATE_CLUSTER,
+                                &cluster, &cluster_length)) {
+        cluster = body;
+        cluster_length = length;
+      }
+      dealer_handle_cluster (cluster, cluster_length);
+    }
+    GPtrArray *devices = spotifygtk_native_session_dup_connect_devices (self);
+    if (devices)
+      g_task_return_pointer (op->task, devices, (GDestroyNotify) g_ptr_array_unref);
+    else
+      g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                               "Spotify did not return available Connect devices. Try Refresh.");
+  }
+  connect_api_op_free (op);
+}
+
+static gboolean
+start_connect_api (gpointer data)
+{
+  ConnectApiOp *op = data;
+  SpotifyNativeSession *self = g_task_get_source_object (op->task);
+  if (!connect_api_current (op)) {
+    connect_api_op_free (op);
+    return G_SOURCE_REMOVE;
+  }
+  g_mutex_lock (&self->lock);
+  gboolean ready = self->state == SPOTIFYGTK_SESSION_READY;
+  gint64 expiry = self->bearer_expires_at;
+  g_mutex_unlock (&self->lock);
+  if (!ready || dealer_session != self || !dealer_conn_id) {
+    g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
+                             "Spotify Connect is still connecting. Try Refresh shortly.");
+    connect_api_op_free (op);
+    return G_SOURCE_REMOVE;
+  }
+  if (self->refreshing || (expiry > 0 &&
+      g_get_monotonic_time () >= expiry - BEARER_REFRESH_MARGIN_US)) {
+    if (++op->refresh_waits > 80) {
+      g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
+                               "Spotify authorization is taking too long. Try Refresh.");
+      connect_api_op_free (op);
+      return G_SOURCE_REMOVE;
+    }
+    if (!self->refreshing) start_bearer_refresh (self);
+    GSource *retry = g_timeout_source_new (250);
+    g_source_set_callback (retry, start_connect_api, op, NULL);
+    g_source_attach (retry, self->context);
+    g_source_unref (retry);
+    return G_SOURCE_REMOVE;
+  }
+
+  g_autofree gchar *sender = g_uri_escape_string (self->device_id, NULL, FALSE);
+  g_autofree gchar *target = op->device_id
+    ? g_uri_escape_string (op->device_id, NULL, FALSE) : NULL;
+  g_autofree gchar *url = op->kind == CONNECT_API_LIST_DEVICES
+    ? g_strdup_printf ("https://gae2-spclient.spotify.com/connect-state/v1/devices/%s", sender)
+    : g_strdup_printf ("https://gae2-spclient.spotify.com/connect-state/v1/connect/transfer/from/%s/to/%s",
+                       sender, target);
+  op->message = soup_message_new (
+    op->kind == CONNECT_API_LIST_DEVICES ? SOUP_METHOD_PUT : SOUP_METHOD_POST, url);
+  SoupMessageHeaders *headers = soup_message_get_request_headers (op->message);
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", dealer_bearer);
+  soup_message_headers_replace (headers, "Authorization", authorization);
+  if (self->client_token)
+    soup_message_headers_replace (headers, "Client-Token", self->client_token);
+  if (op->kind == CONNECT_API_LIST_DEVICES) {
+    soup_message_headers_replace (headers, "X-Spotify-Connection-Id", dealer_conn_id);
+    g_autoptr(GBytes) state = connect_build_put_state (
+      self->device_id, "SpotifyGTK", NATIVE_AUTH_CLIENT_ID);
+    soup_message_set_request_body_from_bytes (op->message, "application/protobuf", state);
+  } else {
+    g_autoptr(GPtrArray) devices = spotifygtk_native_session_dup_connect_devices (self);
+    gboolean allowed = FALSE;
+    for (guint i = 0; devices && i < devices->len; i++) {
+      SpotifyNativeConnectDevice *device = g_ptr_array_index (devices, i);
+      if (g_strcmp0 (device->id, op->device_id) == 0 && !device->restricted)
+        allowed = TRUE;
+    }
+    if (!allowed) {
+      g_task_return_new_error (op->task, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                               "This device is no longer available. Refresh the list.");
+      connect_api_op_free (op);
+      return G_SOURCE_REMOVE;
+    }
+  }
+  op->http_session = soup_session_new_with_options ("timeout", 15u, NULL);
+  spotifygtk_soup_session_configure_tls (op->http_session);
+  soup_session_send_and_read_async (op->http_session, op->message,
+    G_PRIORITY_DEFAULT, g_task_get_cancellable (op->task), connect_api_complete, op);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+connect_api_start (SpotifyNativeSession *self, ConnectApiKind kind,
+                   const gchar *device_id, GCancellable *cancel,
+                   GAsyncReadyCallback callback, gpointer data, gpointer tag)
+{
+  GTask *task = g_task_new (self, cancel, callback, data);
+  g_task_set_source_tag (task, tag);
+  if (!self->context || g_atomic_int_get (&self->signed_out)) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED,
+                             "Sign in to Spotify to use Connect devices");
+    g_object_unref (task);
+    return;
+  }
+  ConnectApiOp *op = g_new0 (ConnectApiOp, 1);
+  op->task = task;
+  op->kind = kind;
+  op->device_id = g_strdup (device_id);
+  op->auth_generation = g_atomic_int_get (&self->auth_generation);
+  g_main_context_invoke (self->context, start_connect_api, op);
+}
+
+void
+spotifygtk_native_session_get_connect_devices (
+  SpotifyNativeSession *self, GCancellable *cancel,
+  GAsyncReadyCallback callback, gpointer data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+  connect_api_start (self, CONNECT_API_LIST_DEVICES, NULL, cancel, callback, data,
+                     spotifygtk_native_session_get_connect_devices);
+}
+
+GPtrArray *
+spotifygtk_native_session_get_connect_devices_finish (
+  SpotifyNativeSession *self, GAsyncResult *result, GError **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+  return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+void
+spotifygtk_native_session_transfer_to_device (
+  SpotifyNativeSession *self, const gchar *device_id, GCancellable *cancel,
+  GAsyncReadyCallback callback, gpointer data)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+  g_return_if_fail (device_id && *device_id && strlen (device_id) <= 256);
+  connect_api_start (self, CONNECT_API_TRANSFER_DEVICE, device_id, cancel, callback, data,
+                     spotifygtk_native_session_transfer_to_device);
+}
+
+gboolean
+spotifygtk_native_session_transfer_to_device_finish (
+  SpotifyNativeSession *self, GAsyncResult *result, GError **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
+  return g_task_propagate_boolean (G_TASK (result), error);
 }
 
 static gpointer
@@ -4325,6 +4919,7 @@ spotifygtk_native_session_finalize (GObject *object)
   SpotifyNativeSession *self = SPOTIFYGTK_NATIVE_SESSION (object);
   g_clear_pointer (&self->collection_cache, g_ptr_array_unref);
   g_clear_pointer (&self->collection_cache_uri, g_free);
+  g_clear_pointer (&self->connect_devices, g_ptr_array_unref);
   g_mutex_clear (&self->lock);
   G_OBJECT_CLASS (spotifygtk_native_session_parent_class)->finalize (object);
 }
@@ -4355,6 +4950,10 @@ spotifygtk_native_session_class_init (SpotifyNativeSessionClass *klass)
   signals[REMOTE_COMMAND] = g_signal_new ("remote-command",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
     G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_INT64);
+
+  signals[CONNECT_DEVICES_CHANGED] = g_signal_new ("connect-devices-changed",
+    G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+    G_TYPE_NONE, 0);
 
   signals[STATE_CHANGED] = g_signal_new ("state-changed",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,

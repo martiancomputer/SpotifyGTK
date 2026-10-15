@@ -12,6 +12,8 @@
 
 #include <adwaita.h>
 
+typedef struct _SpotifyNativeConnectDevice SpotifyNativeConnectDevice;
+
 G_BEGIN_DECLS
 
 /*
@@ -65,6 +67,16 @@ void spotifygtk_playback_bar_set_progress (SpotifyGtkPlaybackBar *self,
                                            gint64 duration_ms);
 void spotifygtk_playback_bar_set_queue_count (SpotifyGtkPlaybackBar *self,
                                               gint count);
+void spotifygtk_playback_bar_set_connect_enabled (SpotifyGtkPlaybackBar *self,
+                                                   gboolean enabled);
+void spotifygtk_playback_bar_set_connect_status (SpotifyGtkPlaybackBar *self,
+                                                  const gchar *status,
+                                                  gboolean loading);
+void spotifygtk_playback_bar_set_connect_devices (SpotifyGtkPlaybackBar *self,
+                                                   GPtrArray *devices);
+void spotifygtk_playback_bar_set_connect_error (SpotifyGtkPlaybackBar *self,
+                                                 const gchar *message);
+void spotifygtk_playback_bar_close_connect_dialog (SpotifyGtkPlaybackBar *self);
 void spotifygtk_playback_bar_set_volume       (SpotifyGtkPlaybackBar *self,
                                                gint percent);
 void spotifygtk_playback_bar_set_liked        (SpotifyGtkPlaybackBar *self,
@@ -90,6 +102,9 @@ void spotifygtk_playback_bar_set_skip_sensitive (SpotifyGtkPlaybackBar *self,
  * - shuffle-mode-changed (SpotifyGtkShuffleMode mode)
  * - repeat-changed  (SpotifyGtkRepeatMode mode)
  * - queue-clicked
+ * - connect-devices-requested
+ * - connect-device-selected (const gchar *device_id)
+ * - connect-picker-closed
  */
 
 G_END_DECLS

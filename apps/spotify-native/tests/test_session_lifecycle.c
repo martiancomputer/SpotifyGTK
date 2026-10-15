@@ -181,11 +181,111 @@ test_sign_in_before_logout_finishes (Fixture *f, gconstpointer data)
   (void) data;
 }
 
+static void
+test_connect_payload_decode (void)
+{
+  const gchar *json = "{\"command\":{\"endpoint\":\"pause\"}}";
+  g_autofree gchar *plain = g_base64_encode ((const guint8 *) json, strlen (json));
+  g_autoptr(GBytes) decoded = connect_decode_payload (plain, FALSE);
+  g_assert_cmpmem (g_bytes_get_data (decoded, NULL), g_bytes_get_size (decoded),
+                   json, strlen (json));
+  g_autoptr(GZlibCompressor) compressor = g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP, 6);
+  g_autoptr(GOutputStream) sink = g_memory_output_stream_new_resizable ();
+  g_autoptr(GOutputStream) encoded = g_converter_output_stream_new (sink, G_CONVERTER (compressor));
+  g_assert_true (g_output_stream_write_all (encoded, json, strlen (json), NULL, NULL, NULL));
+  g_assert_true (g_output_stream_close (encoded, NULL, NULL));
+  g_autofree gchar *gzip = g_base64_encode (g_memory_output_stream_get_data (G_MEMORY_OUTPUT_STREAM (sink)),
+    g_memory_output_stream_get_data_size (G_MEMORY_OUTPUT_STREAM (sink)));
+  g_clear_pointer (&decoded, g_bytes_unref);
+  decoded = connect_decode_payload (gzip, TRUE);
+  g_assert_nonnull (decoded);
+  g_assert_cmpmem (g_bytes_get_data (decoded, NULL), g_bytes_get_size (decoded), json, strlen (json));
+  g_assert_null (connect_decode_payload (plain, TRUE));
+  g_assert_null (connect_decode_payload ("", FALSE));
+
+  /* A small gzip packet must not expand without bound. */
+  g_autofree gchar *large = g_malloc0 (4 * 1024 * 1024 + 1);
+  g_autoptr(GOutputStream) large_sink = g_memory_output_stream_new_resizable ();
+  g_autoptr(GZlibCompressor) large_compressor = g_zlib_compressor_new (G_ZLIB_COMPRESSOR_FORMAT_GZIP, 6);
+  g_autoptr(GOutputStream) large_encoded = g_converter_output_stream_new (large_sink, G_CONVERTER (large_compressor));
+  g_assert_true (g_output_stream_write_all (large_encoded, large, 4 * 1024 * 1024 + 1, NULL, NULL, NULL));
+  g_assert_true (g_output_stream_close (large_encoded, NULL, NULL));
+  g_autofree gchar *bomb = g_base64_encode (g_memory_output_stream_get_data (G_MEMORY_OUTPUT_STREAM (large_sink)),
+    g_memory_output_stream_get_data_size (G_MEMORY_OUTPUT_STREAM (large_sink)));
+  g_assert_null (connect_decode_payload (bomb, TRUE));
+}
+
+static void
+test_connect_devices (void)
+{
+  g_autoptr(SpotifyNativeSession) session = spotifygtk_native_session_new ();
+  g_autoptr(GByteArray) cluster = g_byte_array_new ();
+  for (guint i = 0; i < 4; i++) {
+    const gchar *ids[] = { "fixture-computer", "fixture-phone", "fixture-offline", "fixture-hidden" };
+    g_autoptr(GByteArray) info = g_byte_array_new ();
+    g_autoptr(GByteArray) caps = g_byte_array_new ();
+    g_autoptr(GByteArray) entry = g_byte_array_new ();
+    pb_write_varint_field (info, 1, 1);
+    pb_write_bytes_field (info, 3, (const guint8 *) "Test device", 11);
+    pb_write_varint_field (info, 7, i == 1 ? 3 : 1);
+    pb_write_varint_field (info, 21, i == 2);
+    pb_write_varint_field (caps, 12, i == 3);
+    pb_write_message_field (info, 4, caps->data, caps->len);
+    pb_write_bytes_field (entry, 1, (const guint8 *) ids[i], strlen (ids[i]));
+    pb_write_message_field (entry, 2, info->data, info->len);
+    pb_write_message_field (cluster, 4, entry->data, entry->len);
+  }
+  connect_update_devices (session, cluster->data, cluster->len, "fixture-phone");
+  g_autoptr(GPtrArray) snapshot = spotifygtk_native_session_dup_connect_devices (session);
+  g_assert_cmpuint (snapshot->len, ==, 3); /* local + two available peers */
+  SpotifyNativeConnectDevice *local = g_ptr_array_index (snapshot, 0);
+  g_assert_true (local->local);
+  g_assert_cmpstr (local->name, ==, "SpotifyGTK");
+  SpotifyNativeConnectDevice *phone = g_ptr_array_index (snapshot, 2);
+  g_assert_cmpstr (phone->type, ==, "smartphone");
+  g_assert_true (phone->active);
+  /* A partial update preserves peers, and snapshots don't alias live state. */
+  connect_update_devices (session, NULL, 0, session->device_id);
+  g_autoptr(GPtrArray) next = spotifygtk_native_session_dup_connect_devices (session);
+  g_assert_cmpuint (next->len, ==, 3);
+  g_assert_true (((SpotifyNativeConnectDevice *) g_ptr_array_index (next, 0))->active);
+  g_assert_true (phone->active);
+  dealer_shutdown (session);
+  g_assert_null (spotifygtk_native_session_dup_connect_devices (session));
+}
+
+static void
+test_connect_play_command (void)
+{
+  g_autoptr(SpotifyNativeSession) session = spotifygtk_native_session_new ();
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  g_assert_true (json_parser_load_from_data (parser,
+    "{\"context\":{\"uri\":\"spotify:playlist:fixture\"},\"options\":{"
+    "\"skip_to\":{\"track_uri\":\"spotify:track:fixture\",\"track_index\":7},"
+    "\"seek_to\":42000,\"initially_paused\":true,"
+    "\"player_options_override\":{\"shuffling_context\":true}}}", -1, NULL));
+  ConnectPlayRequest *request = connect_parse_play (session,
+    json_node_get_object (json_parser_get_root (parser)));
+  g_assert_nonnull (request);
+  g_assert_cmpstr (request->track_uri, ==, "spotify:track:fixture");
+  g_assert_cmpstr (request->context_uri, ==, "spotify:playlist:fixture");
+  g_assert_cmpuint (request->index, ==, 7);
+  g_assert_cmpint (request->position, ==, 42000);
+  g_assert_true (request->paused);
+  g_assert_cmpuint (request->shuffle_mode, ==, 1);
+  connect_play_request_free (request);
+  g_assert_true (json_parser_load_from_data (parser, "{\"context\":{\"uri\":\"local:track:fixture\"}}", -1, NULL));
+  g_assert_null (connect_parse_play (session, json_node_get_object (json_parser_get_root (parser))));
+}
+
 int
 main (int argc, char **argv)
 {
   g_setenv ("SPOTIFY_DISABLE_CONNECT", "1", TRUE);
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/connect/payload-decode", test_connect_payload_decode);
+  g_test_add_func ("/connect/device-roster", test_connect_devices);
+  g_test_add_func ("/connect/play-command", test_connect_play_command);
   g_test_add ("/session/logout-login-reuses-worker", Fixture, NULL,
               setup, test_sign_out_then_start, teardown);
   g_test_add ("/session/ready-start-is-noop", Fixture, NULL,

@@ -219,6 +219,8 @@ struct _SpotifyGtkNativeWindow {
   /* Core services */
   SpotifyNativePlayerService *player;
   SpotifyNativeSession *session;
+  GCancellable *connect_request;
+  guint connect_request_generation;
 
   /* State */
   gchar *current_track_uri;
@@ -4218,6 +4220,126 @@ on_queue_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
   (void) bar;
 }
 
+typedef struct {
+  GWeakRef window;
+  guint generation;
+} ConnectPickerRequest;
+
+static ConnectPickerRequest *
+connect_picker_request_new (SpotifyGtkNativeWindow *self)
+{
+  ConnectPickerRequest *request = g_new0 (ConnectPickerRequest, 1);
+  g_weak_ref_init (&request->window, self);
+  request->generation = self->connect_request_generation;
+  return request;
+}
+
+static void
+connect_picker_request_free (ConnectPickerRequest *request)
+{
+  g_weak_ref_clear (&request->window);
+  g_free (request);
+}
+
+static void
+cancel_connect_request (SpotifyGtkNativeWindow *self)
+{
+  self->connect_request_generation++;
+  if (self->connect_request) {
+    g_cancellable_cancel (self->connect_request);
+    g_clear_object (&self->connect_request);
+  }
+}
+
+static void
+on_connect_devices_loaded (GObject *source, GAsyncResult *result,
+                           gpointer user_data)
+{
+  ConnectPickerRequest *request = user_data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&request->window);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GPtrArray) devices = spotifygtk_native_session_get_connect_devices_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  if (self && request->generation == self->connect_request_generation) {
+    g_clear_object (&self->connect_request);
+    if (error) {
+      spotifygtk_playback_bar_set_connect_error (self->playback_bar,
+                                                   error->message);
+    } else {
+      spotifygtk_playback_bar_set_connect_devices (self->playback_bar, devices);
+    }
+  }
+  connect_picker_request_free (request);
+}
+
+static void
+on_connect_devices_requested (SpotifyGtkPlaybackBar *bar, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  cancel_connect_request (self);
+  if (!self->session || spotifygtk_native_session_get_state (self->session) !=
+                         SPOTIFYGTK_SESSION_READY) {
+    spotifygtk_playback_bar_set_connect_error (bar,
+                                                "Sign in to load Connect devices.");
+    return;
+  }
+  self->connect_request = g_cancellable_new ();
+  spotifygtk_playback_bar_set_connect_status (bar, "Loading devices…", TRUE);
+  spotifygtk_native_session_get_connect_devices (
+    self->session, self->connect_request, on_connect_devices_loaded,
+    connect_picker_request_new (self));
+}
+
+static void
+on_connect_device_transferred (GObject *source, GAsyncResult *result,
+                               gpointer user_data)
+{
+  ConnectPickerRequest *request = user_data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&request->window);
+  g_autoptr(GError) error = NULL;
+  gboolean transferred = spotifygtk_native_session_transfer_to_device_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, &error);
+  if (self && request->generation == self->connect_request_generation) {
+    g_clear_object (&self->connect_request);
+    if (transferred)
+      spotifygtk_playback_bar_close_connect_dialog (self->playback_bar);
+    else
+      spotifygtk_playback_bar_set_connect_error (self->playback_bar,
+        error ? error->message : "Spotify could not transfer playback.");
+  }
+  connect_picker_request_free (request);
+}
+
+static void
+on_connect_device_selected (SpotifyGtkPlaybackBar *bar, const gchar *device_id,
+                           gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  if (!device_id || !*device_id || !self->session) return;
+  cancel_connect_request (self);
+  self->connect_request = g_cancellable_new ();
+  spotifygtk_native_session_transfer_to_device (
+    self->session, device_id, self->connect_request,
+    on_connect_device_transferred, connect_picker_request_new (self));
+  (void) bar;
+}
+
+static void
+on_connect_picker_closed (SpotifyGtkPlaybackBar *bar, gpointer user_data)
+{
+  cancel_connect_request (SPOTIFYGTK_NATIVE_WINDOW (user_data));
+  (void) bar;
+}
+
+static void
+on_connect_devices_changed (SpotifyNativeSession *session, gpointer user_data)
+{
+  SpotifyGtkNativeWindow *self = user_data;
+  if (!self->playback_bar || self->connect_request) return;
+  g_autoptr(GPtrArray) devices = spotifygtk_native_session_dup_connect_devices (session);
+  spotifygtk_playback_bar_set_connect_devices (self->playback_bar, devices);
+}
+
 /* Reachable from two places on purpose: the sidebar's own Collapse action,
  * and the header's menu button. The Collapse action disappears with the
  * sidebar, so without an entry point outside it a collapsed sidebar could
@@ -4984,6 +5106,7 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
    * because an ordinary report for the still-loaded track would immediately
    * try to reclaim ownership and recreate two simultaneous outputs. */
   if (g_strcmp0 (endpoint, "connect_ownership_lost") == 0) {
+    self->transfer_generation++;
     spotifygtk_player_service_pause (self->player);
     return;
   }
@@ -5000,6 +5123,12 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
     advance_next (self, FALSE);
   else if (g_strcmp0 (endpoint, "skip_prev") == 0)
     advance_prev (self);
+  else if (g_strcmp0 (endpoint, "set_volume") == 0) {
+    gint volume = CLAMP (value, 0, 100);
+    spotifygtk_player_service_set_volume (self->player, volume);
+    spotifygtk_playback_bar_set_volume (self->playback_bar, volume);
+    spotifygtk_settings_set_volume (spotifygtk_settings_get_default (), volume);
+  }
   else if (g_strcmp0 (endpoint, "set_options") == 0 ||
            g_strcmp0 (endpoint, "set_shuffling_context") == 0) {
     gboolean was_smart = self->smart_shuffle;
@@ -5143,27 +5272,9 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
     g_strcmp0 (self->current_track_uri, track->uri) == 0 &&
     spotifygtk_player_service_is_active (self->player);
 
-  /*
-   * A phone that is still playing does not get to drag this device around.
-   *
-   * The background app advances through its own queue and sends a transfer on
-   * every track change. Following those meant local playback was torn down
-   * and replaced at random by whatever the phone had moved on to -- music
-   * stopping for no reason the listener could see.
-   *
-   * The test is whether the server accepted the last claim. Until it has been
-   * refused once, transfers are honoured normally, so genuinely picking this
-   * device from the phone still works; it is only after being told another
-   * device is the active one that unsolicited orders are declined.
-   */
-  if (!already_current && self->session &&
-      !spotifygtk_native_session_connect_is_active (self->session) &&
-      self->current_track_uri && spotifygtk_player_service_is_active (self->player)) {
-    g_message ("window: declining a transfer to %s -- this device is not the "
-               "active one and something is already playing here", track->uri);
-    transfer_adopt_free (a);
-    return;
-  }
+  /* Only commands addressed to this receiver (and its active Smart Shuffle
+   * queue) reach this path. An explicit transfer back must work even while
+   * the previously active device is still yielding its ownership. */
 
   if (!already_current) {
     /*
@@ -5658,6 +5769,8 @@ on_logout_choice (GObject *source, GAsyncResult *result, gpointer user_data)
     spotifygtk_player_service_stop (self->player);
 
   native_auth_log_out (self->auth);
+  cancel_connect_request (self);
+  spotifygtk_playback_bar_close_connect_dialog (self->playback_bar);
   spotifygtk_home_page_set_session (self->home_page, NULL);
   spotifygtk_native_session_disconnect (self->session);
   spotifygtk_context_page_set_session (self->context_page, NULL);
@@ -5724,11 +5837,17 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
   SpotifyGtkNativeWindow *self = user_data;
 
   g_message ("session: %s", message ? message : "");
-
   /* A queued READY from before logout must not resurrect the account UI. */
   if (state == SPOTIFYGTK_SESSION_READY &&
       !native_auth_has_credentials (self->auth))
     return;
+
+  gboolean connect_ready = state == SPOTIFYGTK_SESSION_READY;
+  spotifygtk_playback_bar_set_connect_enabled (self->playback_bar, connect_ready);
+  if (!connect_ready) {
+    cancel_connect_request (self);
+    spotifygtk_playback_bar_close_connect_dialog (self->playback_bar);
+  }
 
   if (state == SPOTIFYGTK_SESSION_READY) {
     self->account_generation++;
@@ -6260,6 +6379,9 @@ static const gchar *theme_body =
   "  padding: 6px 16px 8px 16px;"
   "  border-bottom-left-radius: 12px;"
   "  border-bottom-right-radius: 12px; }"
+  ".connect-device-row { border-radius: 10px; padding: 12px; }"
+  ".connect-device-name { font-weight: 600; }"
+  ".connect-device-detail { color: @fg_dimmer; font-size: 12px; }"
 
   /* ── Sidebar navigation ────────────────────────────────────── */
   ".sidebar list { background-color: transparent; }"
@@ -6980,6 +7102,8 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_player_position_changed), self);
   g_signal_connect (self->session, "remote-command",
                     G_CALLBACK (on_session_remote_command), self);
+  g_signal_connect (self->session, "connect-devices-changed",
+                    G_CALLBACK (on_connect_devices_changed), self);
   g_signal_connect (self->session, "transfer-requested",
                     G_CALLBACK (on_session_transfer_requested), self);
   g_signal_connect (self->session, "state-changed",
@@ -7290,6 +7414,12 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_prev_clicked), self);
   g_signal_connect (self->playback_bar, "volume-changed",
                     G_CALLBACK (on_volume_changed), self);
+  g_signal_connect (self->playback_bar, "connect-devices-requested",
+                    G_CALLBACK (on_connect_devices_requested), self);
+  g_signal_connect (self->playback_bar, "connect-device-selected",
+                    G_CALLBACK (on_connect_device_selected), self);
+  g_signal_connect (self->playback_bar, "connect-picker-closed",
+                    G_CALLBACK (on_connect_picker_closed), self);
   spotifygtk_context_page_set_action_handler (self->context_page,
                                               on_context_action, self);
   spotifygtk_artist_page_set_follow_handler (self->artist_page,
@@ -7399,6 +7529,9 @@ static void
 spotifygtk_native_window_dispose (GObject *object)
 {
   SpotifyGtkNativeWindow *self = SPOTIFYGTK_NATIVE_WINDOW (object);
+  cancel_connect_request (self);
+  if (self->playback_bar)
+    spotifygtk_playback_bar_close_connect_dialog (self->playback_bar);
   g_clear_pointer (&self->playlist_card_requests, g_hash_table_unref);
   while (!g_queue_is_empty (&self->playlist_card_pending)) {
     PlaylistCard *c = g_queue_pop_head (&self->playlist_card_pending);
