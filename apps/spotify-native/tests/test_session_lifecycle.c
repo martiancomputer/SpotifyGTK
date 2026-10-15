@@ -278,6 +278,41 @@ test_connect_play_command (void)
   g_assert_null (connect_parse_play (session, json_node_get_object (json_parser_get_root (parser))));
 }
 
+static void
+test_remote_output_cannot_be_reclaimed_by_report (void)
+{
+  g_autoptr(SpotifyNativeSession) session = spotifygtk_native_session_new ();
+  g_autoptr(GByteArray) cluster = g_byte_array_new ();
+  g_autoptr(GByteArray) player = g_byte_array_new ();
+  g_autoptr(GByteArray) track = g_byte_array_new ();
+  pb_write_bytes_field (track, 1, (const guint8 *) "spotify:track:remote-fixture", 28);
+  pb_write_message_field (player, 7, track->data, track->len);
+  pb_write_varint_field (player, 10, 42000);
+  pb_write_varint_field (player, 11, 180000);
+  pb_write_varint_field (player, 12, 1);
+  pb_write_bytes_field (cluster, 2, (const guint8 *) "fixture-peer", 12);
+  pb_write_message_field (cluster, 3, player->data, player->len);
+  dealer_session = session;
+  dealer_handle_cluster (cluster->data, cluster->len);
+  g_assert_true (spotifygtk_native_session_is_remote_playback (session));
+  SpotifyNativeConnectPlayback *snapshot = spotifygtk_native_session_dup_connect_playback (session);
+  g_assert_true (snapshot->remote);
+  g_assert_true (snapshot->playing);
+  g_assert_cmpint (snapshot->position_ms, ==, 42000);
+  spotifygtk_native_connect_playback_free (snapshot);
+  /* Delayed pause/progress reports must not publish a loaded local track as
+   * active and steal the output back from the peer. */
+  ConnectPlaybackReport report = { .session = session,
+    .track_uri = "spotify:track:local-fixture", .playing = FALSE };
+  connect_claim_active = FALSE;
+  report_playback_on_worker (&report);
+  g_assert_false (connect_claim_active);
+  report.playing = TRUE;
+  report_playback_on_worker (&report);
+  g_assert_false (connect_claim_active);
+  dealer_session = NULL;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -286,6 +321,7 @@ main (int argc, char **argv)
   g_test_add_func ("/connect/payload-decode", test_connect_payload_decode);
   g_test_add_func ("/connect/device-roster", test_connect_devices);
   g_test_add_func ("/connect/play-command", test_connect_play_command);
+  g_test_add_func ("/connect/remote-report-ownership", test_remote_output_cannot_be_reclaimed_by_report);
   g_test_add ("/session/logout-login-reuses-worker", Fixture, NULL,
               setup, test_sign_out_then_start, teardown);
   g_test_add ("/session/ready-start-is-noop", Fixture, NULL,

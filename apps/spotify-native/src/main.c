@@ -851,6 +851,11 @@ on_seek_poll (gpointer user_data)
   if (!run_is_current (state))
     return G_SOURCE_REMOVE;
 
+  /* A seek may be queued before CDN startup has produced a fetcher. Keep
+   * the seek pending until then rather than cancelling through NULL. */
+  if (!state->cdn_fetcher)
+    return G_SOURCE_CONTINUE;
+
   if (spotifygtk_native_engine_control_seek_pending (state->control))
     if (!spotifygtk_cdn_fetcher_cancel_request (state->cdn_fetcher, state,
                                                 on_read_ahead_chunk, state))

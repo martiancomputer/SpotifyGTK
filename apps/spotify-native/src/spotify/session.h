@@ -119,6 +119,25 @@ typedef struct _SpotifyNativeConnectDevice {
 
 void spotifygtk_native_connect_device_free (SpotifyNativeConnectDevice *device);
 
+typedef struct {
+  gchar *device_id;
+  gchar *track_uri;
+  gchar *context_uri;
+  gint64 position_ms;
+  gint64 duration_ms;
+  gint64 observed_at_ms;
+  gboolean remote;
+  gboolean playing;
+} SpotifyNativeConnectPlayback;
+void spotifygtk_native_connect_playback_free (SpotifyNativeConnectPlayback *playback);
+SpotifyNativeConnectPlayback *spotifygtk_native_session_dup_connect_playback (SpotifyNativeSession *self);
+gboolean spotifygtk_native_session_is_remote_playback (SpotifyNativeSession *self);
+void spotifygtk_native_session_control_device (SpotifyNativeSession *self,
+  const gchar *endpoint, gint64 value, const gchar *track_uri,
+  GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);
+gboolean spotifygtk_native_session_control_device_finish (SpotifyNativeSession *self,
+  GAsyncResult *result, GError **error);
+
 /* These use the authenticated native Connect session, not the public Web API.
  * Network work is dispatched on the session worker, not the GTK thread.
  * Device-list finish returns a GPtrArray of SpotifyNativeConnectDevice* with

@@ -24,6 +24,7 @@
 #include "cover_loader.h"
 #include "sidebar.h"
 #include "playback_bar.h"
+#include "../spotify/connect_options.h"
 #include "page_stack.h"
 #include "now_playing_panel.h"
 #include "../audio/sink.h"
@@ -221,9 +222,15 @@ struct _SpotifyGtkNativeWindow {
   SpotifyNativeSession *session;
   GCancellable *connect_request;
   guint connect_request_generation;
+  gboolean remote_mode;
+  SpotifyNativeConnectPlayback *remote_state;
+  guint remote_progress_id;
+  GCancellable *remote_metadata;
+  guint remote_metadata_generation;
 
   /* State */
   gchar *current_track_uri;
+  gchar *local_player_uri; /* remote metadata must not masquerade as this engine's track */
   gint64 last_position_ms;   /* last reported position, for Connect */
   /* Play state a transfer asked for, applied once that track is sounding. */
   gchar   *pending_pause_uri;
@@ -1115,6 +1122,10 @@ smart_queue_fetch (SpotifyGtkNativeWindow *self)
 static void
 refresh_transport_and_queue (SpotifyGtkNativeWindow *self)
 {
+  if (self->remote_mode) {
+    spotifygtk_playback_bar_set_skip_sensitive (self->playback_bar, TRUE, TRUE);
+    return;
+  }
   gint opos = self->order_pos >= 0 ? self->order_pos
                                    : order_pos_of (self, self->context_index);
   gboolean can_prev = self->order && (opos > 0 ||
@@ -1216,6 +1227,9 @@ remember_display_track (SpotifyGtkNativeWindow *self,
                         spotifygtk_native_track_copy (track));
 }
 
+static gboolean control_remote (SpotifyGtkNativeWindow *self, const gchar *endpoint,
+                                gint64 value, const gchar *track_uri);
+
 static void
 play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track,
                    gboolean handover)
@@ -1224,6 +1238,10 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
     g_warning ("Track has no URI; nothing to play");
     return;
   }
+  if (g_str_has_prefix (track->uri, "spotify:") &&
+      control_remote (self, "play", -1, track->uri)) return;
+  g_free (self->local_player_uri);
+  self->local_player_uri = g_strdup (track->uri);
   if (g_str_has_prefix (track->uri, "spotify:") &&
       (!native_auth_has_credentials (self->auth) ||
        spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY)) {
@@ -2342,6 +2360,7 @@ on_shuffle_mode_changed (SpotifyGtkPlaybackBar *bar, guint mode,
                          gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (control_remote (self, "set_shuffling_context", mode != 0, NULL)) return;
   (void) bar;
 
   SpotifyGtkShuffleMode requested = MIN (mode, SPOTIFYGTK_SHUFFLE_SMART);
@@ -2377,6 +2396,11 @@ static void
 on_repeat_changed (SpotifyGtkPlaybackBar *bar, guint mode, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (self->remote_mode) {
+    control_remote (self, "set_repeating_track", mode == SPOTIFYGTK_REPEAT_ONE, NULL);
+    control_remote (self, "set_repeating_context", mode == SPOTIFYGTK_REPEAT_ALL, NULL);
+    return;
+  }
   (void) bar;
 
   self->repeat = (SpotifyGtkRepeatMode) mode;
@@ -4179,9 +4203,32 @@ on_sidebar_page_activated (SpotifyGtkSidebar *sidebar,
 
 /* === Playback bar callbacks === */
 static void
+on_remote_control_done (GObject *source, GAsyncResult *result, gpointer data)
+{
+  g_autoptr(GError) error = NULL;
+  if (!spotifygtk_native_session_control_device_finish (
+        SPOTIFYGTK_NATIVE_SESSION (source), result, &error) &&
+      !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+    g_warning ("connect: remote control failed; refresh the device picker and retry");
+  (void) data;
+}
+
+static gboolean
+control_remote (SpotifyGtkNativeWindow *self, const gchar *endpoint,
+                gint64 value, const gchar *track_uri)
+{
+  if (!self->remote_mode && !spotifygtk_native_session_is_remote_playback (self->session))
+    return FALSE;
+  spotifygtk_native_session_control_device (self->session, endpoint, value, track_uri,
+                                            NULL, on_remote_control_done, NULL);
+  return TRUE; /* Never fall back to a local stream if a remote command fails. */
+}
+
+static void
 on_play_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (control_remote (self, "resume", -1, NULL)) return;
   if (self->current_track_uri &&
       g_str_has_prefix (self->current_track_uri, "spotify:") &&
       (!native_auth_has_credentials (self->auth) ||
@@ -4340,6 +4387,119 @@ on_connect_devices_changed (SpotifyNativeSession *session, gpointer user_data)
   spotifygtk_playback_bar_set_connect_devices (self->playback_bar, devices);
 }
 
+static void
+clear_remote_playback_ui (SpotifyGtkNativeWindow *self)
+{
+  self->remote_mode = FALSE;
+  g_clear_handle_id (&self->remote_progress_id, g_source_remove);
+  g_clear_pointer (&self->remote_state, spotifygtk_native_connect_playback_free);
+  self->remote_metadata_generation++;
+  if (self->remote_metadata) g_cancellable_cancel (self->remote_metadata);
+  g_clear_object (&self->remote_metadata);
+}
+
+static gboolean
+update_remote_progress (gpointer data)
+{
+  SpotifyGtkNativeWindow *self = data;
+  if (!self->remote_mode || !self->remote_state) {
+    self->remote_progress_id = 0;
+    return G_SOURCE_REMOVE;
+  }
+  SpotifyNativeConnectPlayback *state = self->remote_state;
+  gint64 position = spotifygtk_connect_live_position (state->position_ms,
+    state->observed_at_ms, g_get_monotonic_time () / 1000, state->playing);
+  if (self->current_track_duration_ms > 0) position = MIN (position, self->current_track_duration_ms);
+  self->last_position_ms = position;
+  spotifygtk_native_window_set_progress (self, position, self->current_track_duration_ms);
+  return G_SOURCE_CONTINUE;
+}
+
+typedef struct {
+  GWeakRef window;
+  guint generation;
+  gchar *uri;
+} RemoteMetadataRequest;
+
+static void
+on_remote_metadata (GObject *source, GAsyncResult *result, gpointer data)
+{
+  RemoteMetadataRequest *request = data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&request->window);
+  g_autoptr(GPtrArray) tracks = spotifygtk_native_session_load_tracks_finish (
+    SPOTIFYGTK_NATIVE_SESSION (source), result, NULL);
+  if (self && self->remote_mode && request->generation == self->remote_metadata_generation &&
+      g_strcmp0 (self->current_track_uri, request->uri) == 0) {
+    g_clear_object (&self->remote_metadata);
+    for (guint i = 0; tracks && i < tracks->len; i++) {
+      SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
+      if (g_strcmp0 (track->uri, request->uri) != 0) continue;
+      remember_display_track (self, track);
+      self->current_track_duration_ms = track->duration_ms;
+      show_now_playing (self, track);
+      prune_display_tracks (self);
+      break;
+    }
+  }
+  g_weak_ref_clear (&request->window);
+  g_free (request->uri);
+  g_free (request);
+}
+
+static void
+on_connect_playback_changed (SpotifyNativeSession *session, gpointer data)
+{
+  SpotifyGtkNativeWindow *self = data;
+  SpotifyNativeConnectPlayback *state = spotifygtk_native_session_dup_connect_playback (session);
+  if (!state || !state->remote) {
+    spotifygtk_native_connect_playback_free (state);
+    if (self->remote_mode) clear_remote_playback_ui (self);
+    return;
+  }
+  if (!self->remote_mode) {
+    spotifygtk_now_playing_panel_set_native_queue (self->now_playing_panel, NULL);
+    spotifygtk_playback_bar_set_queue_count (self->playback_bar, 0);
+  }
+  self->remote_mode = TRUE;
+  spotifygtk_player_service_pause (self->player);
+  g_clear_pointer (&self->awaiting_uri, g_free);
+  g_clear_pointer (&self->pending_pause_uri, g_free);
+  g_clear_pointer (&self->remote_state, spotifygtk_native_connect_playback_free);
+  self->remote_state = state;
+  gboolean changed = g_strcmp0 (self->current_track_uri, state->track_uri) != 0;
+  g_free (self->current_track_uri);
+  self->current_track_uri = g_strdup (state->track_uri);
+  if (state->duration_ms > 0) self->current_track_duration_ms = state->duration_ms;
+  spotifygtk_playback_bar_set_playing (self->playback_bar, state->playing);
+  spotifygtk_playback_bar_set_skip_sensitive (self->playback_bar, TRUE, TRUE);
+  spotifygtk_search_page_set_playing_uri (self->search_page, state->track_uri, state->playing);
+  spotifygtk_liked_songs_page_set_playing_uri (self->liked_page, state->track_uri, state->playing);
+  spotifygtk_context_page_set_playing_uri (self->context_page, state->track_uri, state->playing);
+  spotifygtk_artist_page_set_playing_uri (self->artist_page, state->track_uri, state->playing);
+  mpris_emit_player_changed (self, "PlaybackStatus");
+  if (changed && state->track_uri) {
+    self->remote_metadata_generation++;
+    if (self->remote_metadata) g_cancellable_cancel (self->remote_metadata);
+    g_clear_object (&self->remote_metadata);
+    const SpotifyNativeTrack *known = self->display_tracks
+      ? g_hash_table_lookup (self->display_tracks, state->track_uri) : NULL;
+    if (known) show_now_playing (self, known);
+    else {
+      spotifygtk_playback_bar_set_track (self->playback_bar, "Loading track…", "Playing on another device");
+      self->remote_metadata = g_cancellable_new ();
+      RemoteMetadataRequest *request = g_new0 (RemoteMetadataRequest, 1);
+      g_weak_ref_init (&request->window, self);
+      request->generation = self->remote_metadata_generation;
+      request->uri = g_strdup (state->track_uri);
+      spotifygtk_native_session_load_tracks (session, state->track_uri, 1,
+        self->remote_metadata, on_remote_metadata, request);
+    }
+  }
+  update_remote_progress (self);
+  if (!self->remote_progress_id)
+    self->remote_progress_id = g_timeout_add (500, update_remote_progress, self);
+}
+
 /* Reachable from two places on purpose: the sidebar's own Collapse action,
  * and the header's menu button. The Collapse action disappears with the
  * sidebar, so without an entry point outside it a collapsed sidebar could
@@ -4357,6 +4517,7 @@ static void
 on_volume_changed (SpotifyGtkPlaybackBar *bar, gint percent, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (control_remote (self, "set_volume", percent, NULL)) return;
   spotifygtk_player_service_set_volume (self->player, percent);
   spotifygtk_settings_set_volume (spotifygtk_settings_get_default (), (guint) CLAMP (percent, 0, 100));
   mpris_emit_player_changed (self, "Volume");
@@ -4367,6 +4528,7 @@ static void
 on_pause_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (control_remote (self, "pause", -1, NULL)) return;
   spotifygtk_player_service_pause (self->player);
   broadcast_playing_uri (self);
   (void) bar;
@@ -4402,7 +4564,10 @@ on_shortcut_pressed (GtkEventControllerKey *controller, guint key, guint code,
       return GDK_EVENT_PROPAGATE;
     g_hash_table_add (self->held_shortcuts, identity);
     if (action == SPOTIFYGTK_SHORTCUT_PLAY_PAUSE) {
-      if (spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING &&
+      if (self->remote_mode) {
+        if (self->remote_state && self->remote_state->playing) on_pause_clicked (NULL, self);
+        else on_play_clicked (NULL, self);
+      } else if (spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING &&
           !spotifygtk_player_service_is_paused (self->player)) on_pause_clicked (NULL, self);
       else on_play_clicked (NULL, self);
     } else {
@@ -4458,6 +4623,7 @@ static void
 on_seek_requested (SpotifyGtkPlaybackBar *bar, gint64 position_ms, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (control_remote (self, "seek_to", MAX (position_ms, 0), NULL)) return;
   self->last_position_ms = MAX (position_ms, 0);
   spotifygtk_player_service_seek (self->player, position_ms);
   broadcast_playing_uri (self);
@@ -4469,6 +4635,7 @@ static void
 on_next_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (control_remote (self, "skip_next", -1, NULL)) return;
   advance_next (self, FALSE);
   (void) bar;
 }
@@ -4477,6 +4644,7 @@ static void
 on_prev_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (control_remote (self, "skip_prev", -1, NULL)) return;
   advance_prev (self);
   (void) bar;
 }
@@ -4577,6 +4745,7 @@ mpris_metadata (SpotifyGtkNativeWindow *self)
 static gboolean
 mpris_can_next (SpotifyGtkNativeWindow *self)
 {
+  if (self->remote_mode) return TRUE;
   gint pos = self->order_pos >= 0 ? self->order_pos
                                   : order_pos_of (self, self->context_index);
   return !g_queue_is_empty (self->user_queue) ||
@@ -4587,6 +4756,7 @@ mpris_can_next (SpotifyGtkNativeWindow *self)
 static gboolean
 mpris_can_previous (SpotifyGtkNativeWindow *self)
 {
+  if (self->remote_mode) return TRUE;
   gint pos = self->order_pos >= 0 ? self->order_pos
                                   : order_pos_of (self, self->context_index);
   return self->order && (pos > 0 ||
@@ -4596,6 +4766,7 @@ mpris_can_previous (SpotifyGtkNativeWindow *self)
 static const gchar *
 mpris_playback_status (SpotifyGtkNativeWindow *self)
 {
+  if (self->remote_mode) return self->remote_state && self->remote_state->playing ? "Playing" : "Paused";
   SpotifyNativePlayerState state = spotifygtk_player_service_get_state (self->player);
   if (state == SPOTIFYGTK_PLAYER_PLAYING)
     return "Playing";
@@ -4657,6 +4828,7 @@ mpris_set_property (GDBusConnection *connection, const gchar *sender,
     return FALSE;
   if (g_str_equal (property_name, "Volume")) {
     gint percent = (gint) CLAMP (g_variant_get_double (value) * 100.0, 0.0, 100.0);
+    if (control_remote (self, "set_volume", percent, NULL)) return TRUE;
     spotifygtk_player_service_set_volume (self->player, percent);
     spotifygtk_playback_bar_set_volume (self->playback_bar, percent);
     spotifygtk_settings_set_volume (spotifygtk_settings_get_default (), (guint) percent);
@@ -4665,6 +4837,7 @@ mpris_set_property (GDBusConnection *connection, const gchar *sender,
   }
   if (g_str_equal (property_name, "Shuffle")) {
     gboolean enabled = g_variant_get_boolean (value);
+    if (control_remote (self, "set_shuffling_context", enabled, NULL)) return TRUE;
     gboolean was_smart = self->smart_shuffle;
     self->shuffle = enabled;
     self->smart_shuffle = FALSE;
@@ -4681,6 +4854,11 @@ mpris_set_property (GDBusConnection *connection, const gchar *sender,
   }
   if (g_str_equal (property_name, "LoopStatus")) {
     const gchar *loop = g_variant_get_string (value, NULL);
+    if (self->remote_mode) {
+      on_repeat_changed (NULL, g_str_equal (loop, "Track") ? SPOTIFYGTK_REPEAT_ONE :
+        g_str_equal (loop, "Playlist") ? SPOTIFYGTK_REPEAT_ALL : SPOTIFYGTK_REPEAT_OFF, self);
+      return TRUE;
+    }
     if (g_str_equal (loop, "None")) self->repeat = SPOTIFYGTK_REPEAT_OFF;
     else if (g_str_equal (loop, "Playlist")) self->repeat = SPOTIFYGTK_REPEAT_ALL;
     else if (g_str_equal (loop, "Track")) self->repeat = SPOTIFYGTK_REPEAT_ONE;
@@ -4714,20 +4892,20 @@ mpris_method_call (GDBusConnection *connection, const gchar *sender,
     g_dbus_method_invocation_return_value (invocation, NULL);
     return;
   }
-  if (g_str_equal (method_name, "Next")) advance_next (self, FALSE);
-  else if (g_str_equal (method_name, "Previous")) advance_prev (self);
+  if (g_str_equal (method_name, "Next")) on_next_clicked (NULL, self);
+  else if (g_str_equal (method_name, "Previous")) on_prev_clicked (NULL, self);
   else if (g_str_equal (method_name, "Pause")) on_pause_clicked (NULL, self);
   else if (g_str_equal (method_name, "Play")) on_play_clicked (NULL, self);
   else if (g_str_equal (method_name, "PlayPause")) {
     if (g_str_equal (mpris_playback_status (self), "Playing")) on_pause_clicked (NULL, self);
     else on_play_clicked (NULL, self);
   } else if (g_str_equal (method_name, "Stop")) {
-    spotifygtk_player_service_stop (self->player);
+    if (!control_remote (self, "pause", -1, NULL)) spotifygtk_player_service_stop (self->player);
   } else if (g_str_equal (method_name, "Seek")) {
     gint64 offset_us; g_variant_get (parameters, "(x)", &offset_us);
     self->last_position_ms = CLAMP (self->last_position_ms + offset_us / 1000,
                                     (gint64) 0, self->current_track_duration_ms);
-    spotifygtk_player_service_seek (self->player, self->last_position_ms);
+    on_seek_requested (NULL, self->last_position_ms, self);
     mpris_emit_seeked (self);
   } else if (g_str_equal (method_name, "SetPosition")) {
     const gchar *track_path; gint64 position_us;
@@ -4736,7 +4914,7 @@ mpris_method_call (GDBusConnection *connection, const gchar *sender,
     if (g_str_equal (track_path, current_path)) {
       self->last_position_ms = CLAMP (position_us / 1000, (gint64) 0,
                                       self->current_track_duration_ms);
-      spotifygtk_player_service_seek (self->player, self->last_position_ms);
+      on_seek_requested (NULL, self->last_position_ms, self);
       mpris_emit_seeked (self);
     }
   } else if (g_str_equal (method_name, "OpenUri")) {
@@ -5107,6 +5285,7 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
    * try to reclaim ownership and recreate two simultaneous outputs. */
   if (g_strcmp0 (endpoint, "connect_ownership_lost") == 0) {
     self->transfer_generation++;
+    self->remote_mode = TRUE;
     spotifygtk_player_service_pause (self->player);
     return;
   }
@@ -5269,7 +5448,7 @@ on_transfer_track_resolved (GObject *source, GAsyncResult *res, gpointer user_da
    * position and play state being asked for.
    */
   gboolean already_current =
-    g_strcmp0 (self->current_track_uri, track->uri) == 0 &&
+    g_strcmp0 (self->local_player_uri, track->uri) == 0 &&
     spotifygtk_player_service_is_active (self->player);
 
   /* Only commands addressed to this receiver (and its active Smart Shuffle
@@ -5355,6 +5534,7 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
                                gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  clear_remote_playback_ui (self);
 
   if (!uri || !*uri)
     return;
@@ -5413,6 +5593,7 @@ on_session_transfer_requested (SpotifyNativeSession *session, const gchar *uri,
 static void
 broadcast_playing_uri (SpotifyGtkNativeWindow *self)
 {
+  if (self->remote_mode || spotifygtk_native_session_is_remote_playback (self->session)) return;
   gboolean is_playing =
     spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING;
   const gchar *uri = self->current_track_uri;
@@ -5445,6 +5626,7 @@ on_player_state_changed (SpotifyNativePlayerService *player,
                          gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (self->remote_mode) return;
 
   /* A track finishing on its own reaches the window as IDLE (a user switching
    * tracks never does — the service hands the pending URI straight to the
@@ -5513,6 +5695,7 @@ on_player_position_changed (SpotifyNativePlayerService *player,
                             gint64 position_ms, gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (self->remote_mode) return;
 
   /* Kept, not reported: put_state is an HTTPS round trip and this fires four
    * times a second. PlayerState pairs a position with the timestamp it was
@@ -5769,6 +5952,7 @@ on_logout_choice (GObject *source, GAsyncResult *result, gpointer user_data)
     spotifygtk_player_service_stop (self->player);
 
   native_auth_log_out (self->auth);
+  clear_remote_playback_ui (self);
   cancel_connect_request (self);
   spotifygtk_playback_bar_close_connect_dialog (self->playback_bar);
   spotifygtk_home_page_set_session (self->home_page, NULL);
@@ -6199,6 +6383,7 @@ on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
                         gpointer user_data)
 {
   SpotifyGtkNativeWindow *self = user_data;
+  if (self->remote_mode) return;
   (void) player;
 
   if (!uri || !self->display_tracks)
@@ -7104,6 +7289,8 @@ spotifygtk_native_window_constructed (GObject *object)
                     G_CALLBACK (on_session_remote_command), self);
   g_signal_connect (self->session, "connect-devices-changed",
                     G_CALLBACK (on_connect_devices_changed), self);
+  g_signal_connect (self->session, "connect-playback-changed",
+                    G_CALLBACK (on_connect_playback_changed), self);
   g_signal_connect (self->session, "transfer-requested",
                     G_CALLBACK (on_session_transfer_requested), self);
   g_signal_connect (self->session, "state-changed",
@@ -7529,6 +7716,7 @@ static void
 spotifygtk_native_window_dispose (GObject *object)
 {
   SpotifyGtkNativeWindow *self = SPOTIFYGTK_NATIVE_WINDOW (object);
+  clear_remote_playback_ui (self);
   cancel_connect_request (self);
   if (self->playback_bar)
     spotifygtk_playback_bar_close_connect_dialog (self->playback_bar);
@@ -7593,6 +7781,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_object (&self->player);
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_track_uri, g_free);
+  g_clear_pointer (&self->local_player_uri, g_free);
   g_clear_pointer (&self->play_context_uri, g_free);
   g_clear_pointer (&self->pending_pause_uri, g_free);
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
