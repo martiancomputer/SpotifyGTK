@@ -42,8 +42,16 @@ struct _SpotifySpclient {
 G_DEFINE_FINAL_TYPE (SpotifySpclient, spotifygtk_spclient, G_TYPE_OBJECT)
 
 static void
-use_gzip_response (SoupSession *session, SoupMessage *message, gpointer user_data)
+prepare_catalogue_request (SoupSession *session, SoupMessage *message, gpointer user_data)
 {
+  gint64 *last_request = user_data;
+  gint64 now = g_get_monotonic_time ();
+  if ((*last_request && now - *last_request >= 15 * G_USEC_PER_SEC) ||
+      g_object_get_data (G_OBJECT (session), "spotifygtk-fresh-connection")) {
+    soup_message_add_flags (message, SOUP_MESSAGE_NEW_CONNECTION);
+    g_object_set_data (G_OBJECT (session), "spotifygtk-fresh-connection", NULL);
+  }
+  *last_request = now;
   /* libsoup 3.8's zstd decoder treats the first frame boundary as EOF.
    * Spotify sends concatenated frames (often 64 KiB each), so otherwise a
    * successful large response silently reaches our parsers truncated.
@@ -59,8 +67,11 @@ use_gzip_response (SoupSession *session, SoupMessage *message, gpointer user_dat
 static void
 configure_catalogue_session (SoupSession *session)
 {
+  gint64 *last_request = g_new0 (gint64, 1);
+  g_object_set_data_full (G_OBJECT (session), "spotifygtk-last-request-us", last_request, g_free);
+  g_object_set (session, "idle-timeout", 15, NULL);
   g_signal_connect (session, "request-queued",
-                    G_CALLBACK (use_gzip_response), NULL);
+                    G_CALLBACK (prepare_catalogue_request), last_request);
   spotifygtk_soup_session_configure_tls (session);
 }
 
@@ -74,6 +85,7 @@ new_pathfinder_session (void)
 }
 
 typedef struct {
+  SoupMessage            *message;
   SpclientStorageCallback callback;
   gpointer                user_data;
 } RequestClosure;
@@ -210,8 +222,23 @@ on_response (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autoptr(GError)  err = NULL;
 
   GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source), result, &err);
+  g_autoptr(SoupMessage) message = g_steal_pointer (&cl->message);
   if (!bytes) {
+    if (!g_error_matches (err, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+      g_object_set_data (source, "spotifygtk-fresh-connection", GINT_TO_POINTER (TRUE));
     if (cl->callback) cl->callback (NULL, err, cl->user_data);
+    g_free (cl);
+    return;
+  }
+
+  guint status = soup_message_get_status (message);
+  if (status != SOUP_STATUS_OK) {
+    g_autoptr(GError) refused = g_error_new (G_IO_ERROR,
+      status == SOUP_STATUS_UNAUTHORIZED || status == SOUP_STATUS_FORBIDDEN
+        ? G_IO_ERROR_PERMISSION_DENIED : G_IO_ERROR_FAILED,
+      "audio storage returned HTTP %u", status);
+    if (cl->callback) cl->callback (NULL, refused, cl->user_data);
+    g_bytes_unref (bytes);
     g_free (cl);
     return;
   }
@@ -484,6 +511,7 @@ spotifygtk_spclient_get_audio_storage (SpotifySpclient *self,
     soup_message_headers_replace (headers, "Client-Token", client_token);
 
   RequestClosure *cl = g_new0 (RequestClosure, 1);
+  cl->message = g_object_ref (msg);
   cl->callback  = callback;
   cl->user_data = user_data;
 

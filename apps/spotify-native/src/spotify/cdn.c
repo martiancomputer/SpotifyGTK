@@ -33,6 +33,7 @@ struct _SpotifyCdnFetcher {
   SoupSession *session;
   GCancellable *cancellable;
   GSList       *active_requests; /* FetchClosure*, engine-context confined */
+  gint64        last_request_us;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, G_TYPE_OBJECT)
@@ -74,6 +75,7 @@ G_DEFINE_FINAL_TYPE (SpotifyCdnFetcher, spotifygtk_cdn_fetcher, G_TYPE_OBJECT)
  * starts.
  */
 #define CDN_REQUEST_DEADLINE_S 25
+#define CDN_CONNECTION_IDLE_US (15 * G_USEC_PER_SEC)
 
 typedef struct {
   SpotifyCdnFetcher *self;
@@ -368,6 +370,15 @@ spotifygtk_cdn_fetch_chunk (SpotifyCdnFetcher *self, const gchar *cdn_url,
   g_autofree gchar *range = g_strdup_printf ("bytes=%" G_GOFFSET_FORMAT "-%" G_GOFFSET_FORMAT,
                                              actual_offset, actual_offset + (goffset) length - 1);
   soup_message_headers_replace (soup_message_get_request_headers (msg), "Range", range);
+
+  /* Queue backpressure can park this context for an entire pause. The
+   * session's idle-reaper timer cannot run then; do not reuse an aged socket
+   * just because that timer has not dispatched yet. Other tracks' requests
+   * and their connections are left alone. */
+  gint64 now = g_get_monotonic_time ();
+  if (self->last_request_us && now - self->last_request_us >= CDN_CONNECTION_IDLE_US)
+    soup_message_add_flags (msg, SOUP_MESSAGE_NEW_CONNECTION);
+  self->last_request_us = now;
 
   FetchClosure *cl = g_new0 (FetchClosure, 1);
   cl->self      = self;

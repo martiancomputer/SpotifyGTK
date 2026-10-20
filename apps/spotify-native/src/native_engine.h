@@ -88,6 +88,14 @@ void   spotifygtk_native_engine_control_report_position (SpotifyNativeEngineCont
                                                          gint    sample_rate);
 gint64 spotifygtk_native_engine_control_get_position_ms (SpotifyNativeEngineControl *control);
 
+/* End of PCM already accepted by the sink, distinct from the audible cursor.
+ * A replacement stream must start here so retained queued audio is neither
+ * replayed nor skipped. A pending/in-flight user seek wins, including 0. */
+void   spotifygtk_native_engine_control_report_buffered_position (
+  SpotifyNativeEngineControl *control, guint64 frames, gint sample_rate);
+gint64 spotifygtk_native_engine_control_get_resume_position_ms (
+  SpotifyNativeEngineControl *control);
+
 /*
  * Seek. The UI calls request_seek() with a target in milliseconds; the engine
  * checks seek_pending() at its wait points and consumes the request with

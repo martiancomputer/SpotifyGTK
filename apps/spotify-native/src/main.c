@@ -92,8 +92,11 @@ struct _SpotifyNativeEngineControl {
   gboolean volume_dirty;   /* set by the UI, cleared once the output applies it */
   guint64  played_frames;  /* cumulative PCM frames written to the device */
   gint     sample_rate;    /* of the stream being played; 0 until known */
+  guint64  buffered_frames;
+  gint     buffered_rate;
   gboolean seek_requested; /* UI asked to reposition */
-  gint64   seek_target_ms; /* where to; valid while seek_requested */
+  gboolean seek_in_progress;
+  gint64   seek_target_ms; /* valid while requested or in progress */
 
   /* Equaliser. Gains (dB) and enable are pushed from the UI like volume;
    * the filter itself lives here so its state persists across buffers. */
@@ -362,6 +365,33 @@ spotifygtk_native_engine_control_request_seek (SpotifyNativeEngineControl *contr
   g_mutex_unlock (&control->lock);
 }
 
+void
+spotifygtk_native_engine_control_report_buffered_position (
+  SpotifyNativeEngineControl *control, guint64 frames, gint sample_rate)
+{
+  if (!control) return;
+  g_mutex_lock (&control->lock);
+  control->buffered_frames = frames;
+  control->buffered_rate = sample_rate;
+  control->seek_in_progress = FALSE;
+  g_mutex_unlock (&control->lock);
+}
+
+gint64
+spotifygtk_native_engine_control_get_resume_position_ms (SpotifyNativeEngineControl *control)
+{
+  if (!control) return 0;
+  g_mutex_lock (&control->lock);
+  gint64 audible = control->sample_rate > 0
+    ? (gint64) (control->played_frames * 1000u / control->sample_rate) : 0;
+  gint64 buffered = control->buffered_rate > 0
+    ? (gint64) (control->buffered_frames * 1000u / control->buffered_rate) : 0;
+  gint64 position = control->seek_requested || control->seek_in_progress
+    ? control->seek_target_ms : MAX (audible, buffered);
+  g_mutex_unlock (&control->lock);
+  return position;
+}
+
 gboolean
 spotifygtk_native_engine_control_seek_pending (SpotifyNativeEngineControl *control)
 {
@@ -385,6 +415,7 @@ spotifygtk_native_engine_control_take_seek (SpotifyNativeEngineControl *control,
     if (out_target_ms)
       *out_target_ms = control->seek_target_ms;
     control->seek_requested = FALSE;
+    control->seek_in_progress = TRUE;
   }
   g_mutex_unlock (&control->lock);
   return pending;
@@ -573,7 +604,7 @@ typedef struct {
   gchar             *device_id;         /* owned, freed in run_live_test */
   guint              connect_attempts;  /* AP connect retries used so far */
   SpotifyApSession  *pending_session;   /* borrowed; set before the first connect */
-  SpotifyApSession   *session;      /* borrowed, owned by run_live_test */
+  SpotifyApSession   *session;      /* referenced, including across AP disconnect */
   SpotifyClientToken *client_token_client;
   SpotifyLogin5      *login5_client;
   SpotifySpclient    *spclient;
@@ -589,6 +620,9 @@ typedef struct {
   /* Read-ahead retries spent on the current position. Reset on every chunk
    * that lands, so this bounds consecutive failures rather than the track. */
   guint               read_ahead_retries;
+  guint               storage_retries;
+  gboolean            recovery_auth_attempted;
+  gboolean            renewing_stream_credentials;
   gchar              *cdn_url;
   const gchar         *track_uri;
   GBytes             *initial_cdn_chunk;
@@ -612,6 +646,7 @@ typedef struct {
   gint                stream_sample_rate;
   SpotifyDecoder     *stream_decoder;
   guint64             stream_frames;
+  guint64             stream_position_frames;
   guint64             output_frames;
   /*
    * This track's slot in the sink. The device, the writer and the queued audio
@@ -910,7 +945,14 @@ stream_queue_frame (LiveTestState *state, PcmFrame *frame)
     return FALSE;
   }
 
+  gsize frames = frame->n_frames;
+  gint rate = frame->sample_rate;
   gboolean queued = spotifygtk_audio_sink_push (state->sink, state->sink_seq, frame);
+  if (queued) {
+    state->stream_position_frames += frames;
+    spotifygtk_native_engine_control_report_buffered_position (
+      state->control, state->stream_position_frames, rate);
+  }
 
   /*
    * The startup watchdog used to be disarmed by the output worker, on the
@@ -1257,6 +1299,8 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
   gint    sink_rate     = spotifygtk_audio_sink_device_rate (state->sink);
   gint    dev_rate      = sink_rate > 0 ? sink_rate : rate;
   guint64 stream_frames = landed_frames + (guint64) shortfall;
+  state->stream_position_frames = stream_frames;
+  spotifygtk_native_engine_control_report_buffered_position (state->control, stream_frames, rate);
   state->output_frames  = (guint64) ((gdouble) stream_frames
                                      * (gdouble) dev_rate / (gdouble) rate);
 
@@ -1400,6 +1444,36 @@ do_seek (LiveTestState *state)
 
 #define READ_AHEAD_MAX_RETRIES 2
 static void on_read_ahead_restorage (SpclientCdnUrls *urls, GError *error, gpointer user_data);
+static gboolean cred_cache_take (gchar **bearer, gchar **client_token);
+static void cred_cache_invalidate (void);
+static void on_client_token_result (const gchar *token, gpointer user_data);
+
+static void
+resolve_read_ahead_storage (LiveTestState *state)
+{
+  if (state->cancellable && g_cancellable_is_cancelled (state->cancellable)) {
+    g_main_loop_quit (state->loop);
+    return;
+  }
+  if (spotifygtk_native_engine_control_seek_pending (state->control)) {
+    do_seek (state);
+    return;
+  }
+  spotifygtk_spclient_get_audio_storage (state->spclient, state->file_id, 20,
+    state->bearer_token, state->client_token, on_read_ahead_restorage, state);
+}
+
+static void
+renew_read_ahead_credentials (LiveTestState *state)
+{
+  state->recovery_auth_attempted = TRUE;
+  state->renewing_stream_credentials = TRUE;
+  g_clear_object (&state->client_token_client);
+  state->client_token_client = spotifygtk_client_token_new ();
+  spotifygtk_client_token_set_cancellable (state->client_token_client, state->cancellable);
+  spotifygtk_client_token_request (state->client_token_client, NATIVE_AUTH_CLIENT_ID,
+    state->device_id, on_client_token_result, state);
+}
 
 static void
 on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpointer user_data)
@@ -1459,6 +1533,11 @@ on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpo
   }
 
   if (!decrypted_chunk) {
+    if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED) ||
+        (state->cancellable && g_cancellable_is_cancelled (state->cancellable))) {
+      g_main_loop_quit (state->loop);
+      return;
+    }
     /*
      * One refused range used to end the track outright. That is the wrong
      * response to the most common cause: a CDN URL that aged out while
@@ -1476,15 +1555,19 @@ on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpo
       g_warning ("[live-test] read-ahead fetch failed at logical offset %" G_GOFFSET_FORMAT
                  ": %s -- re-resolving the CDN URL and retrying.",
                  state->next_download_offset, error ? error->message : "unknown error");
-      spotifygtk_spclient_get_audio_storage (state->spclient, state->file_id, 20,
-                                             state->bearer_token, state->client_token,
-                                             on_read_ahead_restorage, state);
-      return;
-    }
-
-    if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-      g_message ("[live-test] read-ahead cancelled; the run was superseded");
-      g_main_loop_quit (state->loop);
+      g_autofree gchar *bearer = NULL;
+      g_autofree gchar *client = NULL;
+      if (cred_cache_take (&bearer, &client)) {
+        g_free (state->bearer_token);
+        g_free (state->client_token);
+        state->bearer_token = g_steal_pointer (&bearer);
+        state->client_token = g_steal_pointer (&client);
+        resolve_read_ahead_storage (state);
+      } else if (!state->recovery_auth_attempted) {
+        renew_read_ahead_credentials (state);
+      } else {
+        resolve_read_ahead_storage (state);
+      }
       return;
     }
 
@@ -1499,6 +1582,8 @@ on_read_ahead_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, gpo
 
   /* Progress made: forgive earlier failures at other offsets. */
   state->read_ahead_retries = 0;
+  state->storage_retries = 0;
+  state->recovery_auth_attempted = FALSE;
 
   gsize len = 0;
   g_bytes_get_data (decrypted_chunk, &len);
@@ -1550,10 +1635,38 @@ static void
 on_read_ahead_restorage (SpclientCdnUrls *urls, GError *error, gpointer user_data)
 {
   LiveTestState *state = user_data;
-  if (!run_is_current (state))
+  if (!run_is_current (state)) {
+    spclient_cdn_urls_free (urls);
     return;   /* the run that asked for this has already finished */
+  }
+
+  if ((state->cancellable && g_cancellable_is_cancelled (state->cancellable)) ||
+      g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+    spclient_cdn_urls_free (urls);
+    g_main_loop_quit (state->loop);
+    return;
+  }
+
+  if (spotifygtk_native_engine_control_seek_pending (state->control)) {
+    spclient_cdn_urls_free (urls);
+    do_seek (state);
+    return;
+  }
 
   if (!urls || urls->n_urls == 0) {
+    if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED) &&
+        !state->recovery_auth_attempted) {
+      spclient_cdn_urls_free (urls);
+      cred_cache_invalidate ();
+      renew_read_ahead_credentials (state);
+      return;
+    }
+    if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED) &&
+        state->storage_retries++ < READ_AHEAD_MAX_RETRIES) {
+      spclient_cdn_urls_free (urls);
+      resolve_read_ahead_storage (state);
+      return;
+    }
     g_warning ("[live-test] could not re-resolve CDN storage after a failed "
                "range (%s); ending the track.",
                error ? error->message : "no URLs returned");
@@ -1642,7 +1755,8 @@ on_cdn_seek_probe_result (GBytes *decrypted_chunk, goffset offset, GError *error
     g_message ("[live-test] SUCCESS: non-block-aligned CDN seek probe matches the initial decrypt.");
     state->stream_decoder = spotifygtk_decoder_new ();
     stream_playback_start (state);
-    if (!stream_decode_chunk (state, state->initial_cdn_chunk, FALSE)) {
+    if (!stream_decode_chunk (state, state->initial_cdn_chunk, FALSE) &&
+        !spotifygtk_native_engine_control_seek_pending (state->control)) {
       state->ok = FALSE;
       g_main_loop_quit (state->loop);
       return;
@@ -1668,7 +1782,10 @@ on_cdn_seek_probe_result (GBytes *decrypted_chunk, goffset offset, GError *error
     g_clear_pointer (&state->initial_cdn_chunk, g_bytes_unref);
     state->next_download_offset = (goffset) initial_len;
     g_message ("[live-test] seek validation passed; starting incremental read-ahead playback.");
-    start_read_ahead (state);
+    if (spotifygtk_native_engine_control_seek_pending (state->control))
+      do_seek (state);
+    else
+      start_read_ahead (state);
     return;
   }
 
@@ -2352,8 +2469,14 @@ on_login5_result (const gchar *access_token, gint32 expires_in_seconds,
     g_message ("[live-test] LOGIN5 SUCCEEDED -- obtained a spclient-usable bearer token "
               "(expires in %ds).", expires_in_seconds);
 
+    g_free (state->bearer_token);
     state->bearer_token = g_strdup (access_token);
     cred_cache_store (access_token, state->client_token, expires_in_seconds);
+    if (state->renewing_stream_credentials) {
+      state->renewing_stream_credentials = FALSE;
+      resolve_read_ahead_storage (state);
+      return;
+    }
     proceed_with_credentials (state);
     return;
   }
@@ -2419,10 +2542,12 @@ on_client_token_result (const gchar *token, gpointer user_data)
   if (!run_is_current (state))
     return;   /* the run that asked for this has already finished */
 
+  g_clear_pointer (&state->client_token, g_free);
   if (token) {
     g_message ("[live-test] client-token obtained, proceeding to login5...");
-    report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
-                     "Client token received; authorizing the streaming session.");
+    if (!state->renewing_stream_credentials)
+      report_progress (state, SPOTIFYGTK_ENGINE_BUFFERING,
+                       "Client token received; authorizing the streaming session.");
     state->client_token = g_strdup (token);
   } else {
     g_message ("[live-test] no client-token obtained -- proceeding to login5 without one "
@@ -2442,6 +2567,7 @@ on_client_token_result (const gchar *token, gpointer user_data)
     return;
   }
 
+  g_clear_object (&state->login5_client);
   state->login5_client = spotifygtk_login5_new ();
   spotifygtk_login5_set_cancellable (state->login5_client, state->cancellable);
   spotifygtk_login5_auth_token (state->login5_client,
@@ -2464,7 +2590,7 @@ on_client_token_result (const gchar *token, gpointer user_data)
 static void
 wire_session_to_state (LiveTestState *state, SpotifyApSession *session)
 {
-  state->session = session;
+  g_set_object (&state->session, session);
   state->audio_key_client = spotifygtk_audio_key_client_new (session);
 
   /* Reused across tracks so its connections stay warm. A fresh fetcher opened
@@ -3590,6 +3716,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
   g_clear_object (&state.login5_client);
   g_clear_object (&state.spclient);
   g_clear_object (&state.audio_key_client);
+  g_clear_object (&state.session);
   /* Borrowed from engine_cdn and shared across tracks -- unreffing it here is
    * what left the next run with a freed fetcher and a failed type assertion.
    * Just drop this run's pointer to it. */

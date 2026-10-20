@@ -45,12 +45,16 @@ struct _SpotifyNativePlayerService {
    * one track cannot land on whatever happens to start next. */
   gchar     *pending_seek_uri;
   gint64     pending_seek_ms;
+  gboolean   paused_requested;
+  gboolean   pending_keep_pause;
+  gboolean   pending_continuation;
 };
 
 typedef struct {
   gchar                      *uri;
   SpotifyNativeEngineControl *control;   /* referenced */
   GCancellable               *cancellable;  /* referenced; the sink watches it */
+  gboolean                    continuation;
 } InflightTrack;
 
 static void
@@ -75,6 +79,9 @@ enum { STATE_CHANGED, POSITION_CHANGED, NOW_PLAYING_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 #define POSITION_POLL_MS 250
+static gboolean start_uri_internal (SpotifyNativePlayerService *self,
+                                     const gchar *uri, gboolean keep_pause,
+                                     gboolean continuation, GError **error);
 
 /* Poll the engine control for the current position and announce it. Runs on
  * the service's main context while a track is active; stops when the control
@@ -185,7 +192,8 @@ sync_audible_track (SpotifyNativePlayerService *self)
     self->audible_seq = seq;
     g_message ("player-service: now sounding %s (sink slot %" G_GUINT64_FORMAT ")",
                audible->uri ? audible->uri : "(resume)", seq);
-    g_signal_emit (self, signals[NOW_PLAYING_CHANGED], 0, audible->uri);
+    if (!audible->continuation)
+      g_signal_emit (self, signals[NOW_PLAYING_CHANGED], 0, audible->uri);
   }
 
   return audible ? audible->control : NULL;
@@ -247,6 +255,15 @@ static void
 emit_state (SpotifyNativePlayerService *self, SpotifyNativePlayerState state,
             const gchar *message)
 {
+  if ((state == SPOTIFYGTK_PLAYER_CONNECTING || state == SPOTIFYGTK_PLAYER_BUFFERING) &&
+      spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ()) != 0) {
+    SpotifyNativeEngineControl *audible = active_control (self);
+    if (audible)
+      state = spotifygtk_native_engine_control_is_paused (audible)
+        ? SPOTIFYGTK_PLAYER_PAUSED : SPOTIFYGTK_PLAYER_PLAYING;
+  }
+  if (state == SPOTIFYGTK_PLAYER_PLAYING && self->paused_requested)
+    state = SPOTIFYGTK_PLAYER_PAUSED;
   self->state = state;
   g_message ("player-service: %s", message);
   g_signal_emit (self, signals[STATE_CHANGED], 0, state, message);
@@ -324,6 +341,20 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
   SpotifyNativePlayerService *self = user_data;
   g_autoptr(GError) error = NULL;
   gboolean ok = g_task_propagate_boolean (G_TASK (result), &error);
+  gboolean cancelled = g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  gint64 resume_ms = spotifygtk_native_engine_control_get_resume_position_ms (self->control);
+  gboolean had_seek = spotifygtk_native_engine_control_seek_pending (self->control);
+  guint64 finished_seq = spotifygtk_native_engine_control_get_sink_seq (self->control);
+  gboolean continuation = finished_seq != 0 && finished_seq == self->audible_seq;
+
+  for (guint i = self->inflight->len; i > 0; i--) {
+    InflightTrack *entry = g_ptr_array_index (self->inflight, i - 1);
+    if (entry->control == self->control)
+      continuation |= entry->continuation;
+    if (entry->control == self->control &&
+        spotifygtk_native_engine_control_get_sink_seq (entry->control) == 0)
+      g_ptr_array_remove_index (self->inflight, i - 1);
+  }
 
   g_clear_object (&self->task);
   g_clear_pointer (&self->control, spotifygtk_native_engine_control_free);
@@ -337,7 +368,8 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
     g_autofree gchar *next = g_steal_pointer (&self->pending_uri);
     g_autoptr(GError) start_err = NULL;
 
-    if (spotifygtk_player_service_start_uri (self, next, &start_err)) {
+    if (start_uri_internal (self, next, self->pending_keep_pause,
+                            self->pending_continuation, &start_err)) {
       g_object_unref (self);
       (void) source;
       return;
@@ -375,7 +407,7 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
     return;
   }
 
-  if (!ok && self->track_uri &&
+  if (!ok && !cancelled && self->track_uri &&
       !g_str_has_prefix (self->track_uri, "local:track:") &&
       g_strcmp0 (self->retry_uri, self->track_uri) != 0) {
     g_autofree gchar *again = g_strdup (self->track_uri);
@@ -384,10 +416,20 @@ on_engine_finished (GObject *source, GAsyncResult *result, gpointer user_data)
     g_free (self->retry_uri);
     self->retry_uri = g_strdup (again);
 
+    /* Keep the old slot's PCM. The replacement starts at its accepted end,
+     * not at the audible cursor (which would replay that entire buffer).
+     * Pass the seek before starting the worker so no audio from zero leaks. */
+    if ((resume_ms > 0 || had_seek) && !self->pending_seek_uri) {
+      self->pending_seek_uri = g_strdup (again);
+      self->pending_seek_ms = resume_ms;
+    }
+    if (had_seek)
+      abandon_queued_audio (self);
+
     g_message ("player-service: %s failed; retrying once (a dropped AP link "
                "fails the attempt that discovers it)", again);
 
-    if (spotifygtk_player_service_start_uri (self, again, &retry_err)) {
+    if (start_uri_internal (self, again, TRUE, continuation, &retry_err)) {
       g_object_unref (self);
       (void) source;
       return;
@@ -418,12 +460,13 @@ spotifygtk_player_service_start (SpotifyNativePlayerService *self, GError **erro
   return spotifygtk_player_service_start_uri (self, NULL, error);
 }
 
-gboolean
-spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
-                                     const gchar *track_uri, GError **error)
+static gboolean
+start_uri_internal (SpotifyNativePlayerService *self,
+                    const gchar *track_uri, gboolean keep_pause,
+                    gboolean continuation, GError **error)
 {
-  self->unavailable = FALSE;
   g_return_val_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self), FALSE);
+  self->unavailable = FALSE;
 
   /* Picking a different track while one is playing used to fail outright
    * with "playback is already active", so the first song kept playing and
@@ -434,6 +477,8 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   if (self->task) {
     g_free (self->pending_uri);
     self->pending_uri = g_strdup (track_uri);
+    self->pending_keep_pause = keep_pause;
+    self->pending_continuation = continuation;
 
     /* Everything already decoded belongs to a track the listener has moved
      * on from. Without this the new one waits behind it. */
@@ -463,11 +508,15 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   self->track_uri = g_strdup (track_uri);
   self->cancellable = g_cancellable_new ();
   self->control = spotifygtk_native_engine_control_new ();
+  if (!keep_pause) self->paused_requested = FALSE;
+  if (self->paused_requested)
+    spotifygtk_native_engine_control_pause (self->control);
 
   /* A seek that was waiting for this run. Requested before the engine starts,
    * so it is consumed at the first wait point rather than after a second of
    * the track has already been heard from the top. */
   if (self->pending_seek_uri && g_strcmp0 (self->pending_seek_uri, track_uri) == 0) {
+    spotifygtk_native_engine_control_report_position (self->control, self->pending_seek_ms, 1000);
     spotifygtk_native_engine_control_request_seek (self->control, self->pending_seek_ms);
     g_clear_pointer (&self->pending_seek_uri, g_free);
     self->pending_seek_ms = 0;
@@ -489,6 +538,7 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
     self->main_context = g_main_context_ref (g_main_context_default ());
   InflightTrack *entry = g_new0 (InflightTrack, 1);
   entry->uri     = g_strdup (track_uri);
+  entry->continuation = continuation;
   entry->control = spotifygtk_native_engine_control_ref (self->control);
   entry->cancellable = self->cancellable ? g_object_ref (self->cancellable) : NULL;
   g_ptr_array_add (self->inflight, entry);
@@ -503,6 +553,13 @@ spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
   start_position_timer (self);
   (void) error;
   return TRUE;
+}
+
+gboolean
+spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
+                                     const gchar *track_uri, GError **error)
+{
+  return start_uri_internal (self, track_uri, FALSE, FALSE, error);
 }
 
 void
@@ -537,6 +594,7 @@ void
 spotifygtk_player_service_pause (SpotifyNativePlayerService *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+  self->paused_requested = TRUE;
   SpotifyNativeEngineControl *c = active_control (self);
   if (!c)
     return;
@@ -545,6 +603,10 @@ spotifygtk_player_service_pause (SpotifyNativePlayerService *self)
    * click emitted "pause" again instead of "play" -- resume was
    * unreachable and the track appeared stuck. */
   spotifygtk_native_engine_control_pause (c);
+  for (guint i = 0; i < self->inflight->len; i++) {
+    InflightTrack *t = g_ptr_array_index (self->inflight, i);
+    if (t->control != c) spotifygtk_native_engine_control_pause (t->control);
+  }
   emit_state (self, SPOTIFYGTK_PLAYER_PAUSED, "Playback paused; buffered audio is retained.");
 }
 
@@ -552,10 +614,15 @@ void
 spotifygtk_player_service_resume (SpotifyNativePlayerService *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self));
+  self->paused_requested = FALSE;
   SpotifyNativeEngineControl *c = active_control (self);
   if (!c)
     return;
   spotifygtk_native_engine_control_resume (c);
+  for (guint i = 0; i < self->inflight->len; i++) {
+    InflightTrack *t = g_ptr_array_index (self->inflight, i);
+    if (t->control != c) spotifygtk_native_engine_control_resume (t->control);
+  }
   emit_state (self, SPOTIFYGTK_PLAYER_PLAYING, "Playback resumed.");
 }
 
@@ -648,7 +715,7 @@ spotifygtk_player_service_seek (SpotifyNativePlayerService *self, gint64 positio
        * on while the restarted track waits behind it, which is the drag
        * appearing to take effect several seconds late. */
       abandon_queued_audio (self);
-      if (!spotifygtk_player_service_start_uri (self, want, &err)) {
+      if (!start_uri_internal (self, want, TRUE, seq == self->audible_seq, &err)) {
         g_warning ("player-service: could not restart for the seek: %s",
                    err ? err->message : "unknown");
         g_clear_pointer (&self->pending_seek_uri, g_free);

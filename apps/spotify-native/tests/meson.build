@@ -34,7 +34,7 @@ if get_option('tests')
     '../src/spotify/protobuf_min.c', '../src/spotify/track_meta.c',
     '../src/log_file.c',
     include_directories: [config_inc, include_directories('../src')],
-    dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep],
+    dependencies: [glib_dep, gio_dep, soup_dep, json_glib_dep] + (openssl_dep.found() ? [openssl_dep] : []),
   )
   test('spclient-response-compression', test_spclient_compression, timeout: 30)
   test_catalog_cache = executable('test-catalog-cache',
@@ -285,13 +285,13 @@ if get_option('tests')
   )
   test('native-auth-constants', test_native_auth)
 
+  recovery_vorbisenc = dependency('vorbisenc', required: false)
   test_streaming_auth = executable('test-streaming-auth',
     'test_streaming_auth.c',
-    '../src/spotify/protobuf_min.c',
-    '../src/spotify/cdn.c',
-    '../src/log_file.c',
+    spotify_proto_sources, audio_engine_sources, runtime_sources,
     include_directories: [config_inc, include_directories('../src')],
-    dependencies: openssl_dep.found() ? [glib_dep, gio_dep, soup_dep, openssl_dep] : [glib_dep, gio_dep, soup_dep],
+    dependencies: all_deps + (recovery_vorbisenc.found() ? [recovery_vorbisenc] : []),
+    c_args: ['-DSPOTIFYGTK_TEST_VORBISENC=' + (recovery_vorbisenc.found() ? '1' : '0')],
   )
   test('streaming-auth-encoding', test_streaming_auth)
 

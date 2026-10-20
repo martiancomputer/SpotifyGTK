@@ -9,6 +9,7 @@ static gchar *server_url;
 static SoupMessage *loopback_message_new (const gchar *method, const gchar *url);
 #define soup_message_new loopback_message_new
 #include "../src/spotify/spclient.c"
+#include "../src/spotify/cdn.c"
 #undef soup_message_new
 
 #define TRACK_COUNT 2000
@@ -395,10 +396,154 @@ test_home_body (void)
   g_assert_cmpstr (json_object_get_string_member (variables, "homeEndUserIntegration"), ==, "INTEGRATION_DESKTOP");
 }
 
+typedef struct
+{
+  SoupMessage *message;
+  gboolean fresh;
+} ConnectionProbe;
+
+static void
+observe_connection (SoupSession *session, SoupMessage *message, gpointer data)
+{
+  ConnectionProbe *probe = data;
+  g_set_object (&probe->message, message);
+  probe->fresh = soup_message_query_flags (message, SOUP_MESSAGE_NEW_CONNECTION);
+  (void)session;
+}
+
+static void
+cdn_delivered (GBytes *bytes, goffset offset, GError *error, gpointer data)
+{
+  Fixture *f = data;
+  g_assert_no_error (error);
+  g_assert_nonnull (bytes);
+  g_assert_cmpuint (g_bytes_get_size (bytes), ==, 16);
+  g_assert_cmpint (offset, ==, 4096);
+  f->done = TRUE;
+  g_main_loop_quit (f->loop);
+}
+
+static void
+test_connection_after_idle (gconstpointer data)
+{
+#if HAVE_OPENSSL
+  gboolean cdn = GPOINTER_TO_UINT (data);
+  const guint8 payload[16] = { 0 };
+  Fixture f = { 0 };
+  fixture_init (&f, g_bytes_new_static (payload, sizeof payload), "application/octet-stream",
+                cdn ? 206 : 200);
+  g_autoptr (SpotifyCdnFetcher) fetcher = cdn ? spotifygtk_cdn_fetcher_new () : NULL;
+  g_autoptr (SoupSession) catalogue = cdn ? NULL : new_pathfinder_session ();
+  SoupSession *session = cdn ? fetcher->session : catalogue;
+  if (cdn)
+    configure_catalogue_session (session); /* fixture transport is gzip */
+  ConnectionProbe probe = { 0 };
+  g_signal_connect (session, "request-queued", G_CALLBACK (observe_connection), &probe);
+  guint64 original_id = 0;
+  guint64 previous_id = 0;
+  for (guint i = 0; i < 5; i++)
+    {
+      f.done = FALSE;
+      if (i == 2)
+        {
+          /* Model a parked context without sleeping or running its idle reaper. */
+          if (cdn)
+            fetcher->last_request_us = g_get_monotonic_time () - 13 * 60 * G_USEC_PER_SEC;
+          else
+            *(gint64 *)g_object_get_data (G_OBJECT (session), "spotifygtk-last-request-us")
+                = g_get_monotonic_time () - 13 * 60 * G_USEC_PER_SEC;
+        }
+      if (i == 3)
+        g_object_set_data (G_OBJECT (session), "spotifygtk-fresh-connection",
+                           GINT_TO_POINTER (TRUE));
+      if (cdn)
+        {
+          guint8 key[AUDIO_KEY_LEN] = { 0 }; /* synthetic encryption key */
+          spotifygtk_cdn_fetch_chunk (fetcher, server_url, key, 4096, 16, &f, cdn_delivered, &f);
+        }
+      else
+        {
+          g_autoptr (SoupMessage) message = soup_message_new (SOUP_METHOD_GET, server_url);
+          soup_session_send_and_read_async (session, message, G_PRIORITY_DEFAULT, NULL,
+                                            session_done, &f);
+        }
+      fixture_wait (&f);
+      guint64 id = soup_message_get_connection_id (probe.message);
+      g_assert_cmpuint (id, !=, 0);
+      g_assert_cmpint (probe.fresh, ==, i == 2 || i == 3);
+      if (i == 0)
+        original_id = id;
+      else if (i == 1)
+        g_assert_cmpuint (id, ==, original_id);
+      else if (i == 2 || i == 3)
+        g_assert_cmpuint (id, !=, previous_id);
+      previous_id = id;
+      g_assert_null (g_object_get_data (G_OBJECT (session), "spotifygtk-fresh-connection"));
+    }
+  g_clear_object (&probe.message);
+  fixture_clear (&f);
+#else
+  g_test_skip ("CDN connection regression requires OpenSSL");
+#endif
+}
+
+static void
+storage_done (SpclientCdnUrls *urls, GError *error, gpointer data)
+{
+  Fixture *f = data;
+  if (error)
+    f->error = g_error_copy (error);
+  if (urls)
+    {
+      f->tracks = urls->n_urls;
+      spclient_cdn_urls_free (urls);
+    }
+  f->done = TRUE;
+  g_main_loop_quit (f->loop);
+}
+
+static void
+test_storage_status (gconstpointer data)
+{
+  guint status = GPOINTER_TO_UINT (data);
+  g_autoptr (GByteArray) body = g_byte_array_new ();
+  const gchar *url = "https://example.invalid/audio";
+  pb_write_varint_field (body, 1, 0);
+  pb_write_bytes_field (body, 2, (const guint8 *)url, strlen (url));
+  Fixture f = { 0 };
+  fixture_init (&f, g_byte_array_free_to_bytes (g_steal_pointer (&body)), "application/x-protobuf",
+                status);
+  g_autoptr (SpotifySpclient) client = spotifygtk_spclient_new ();
+  const guint8 id[20] = { 0 };
+  spotifygtk_spclient_get_audio_storage (client, id, sizeof id, "fixture-bearer", "fixture-client",
+                                         storage_done, &f);
+  fixture_wait (&f);
+  if (status == 200)
+    {
+      g_assert_no_error (f.error);
+      g_assert_cmpuint (f.tracks, ==, 1);
+    }
+  else
+    {
+      gint expected
+          = status == 401 || status == 403 ? G_IO_ERROR_PERMISSION_DENIED : G_IO_ERROR_FAILED;
+      g_assert_error (f.error, G_IO_ERROR, expected);
+      g_assert_cmpuint (f.tracks, ==, 0);
+    }
+  fixture_clear (&f);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_data_func ("/playback/http/cdn-idle-connection", GUINT_TO_POINTER (1), test_connection_after_idle);
+  g_test_add_data_func ("/playback/http/storage-idle-connection", GUINT_TO_POINTER (0), test_connection_after_idle);
+  const guint storage_statuses[] = { 200, 401, 403, 503 };
+  for (guint i = 0; i < G_N_ELEMENTS (storage_statuses); i++) {
+    g_autofree gchar *path = g_strdup_printf ("/playback/http/storage-%u", storage_statuses[i]);
+    g_test_add_data_func (path, GUINT_TO_POINTER (storage_statuses[i]), test_storage_status);
+  }
   g_test_add_data_func ("/spclient/compression/large-metadata", GUINT_TO_POINTER (200), test_metadata);
   g_test_add_data_func ("/spclient/compression/metadata-http-error", GUINT_TO_POINTER (429), test_metadata);
   g_test_add_data_func ("/spclient/compression/large-context", GUINT_TO_POINTER (200), test_context);
