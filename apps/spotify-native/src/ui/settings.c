@@ -20,6 +20,7 @@ struct _SpotifyGtkSettings {
   SpotifyGtkResamplerMode resampler_mode;
   SpotifyGtkRenderer   renderer;
   guint frame_rate;
+  gboolean unsynchronized_rendering;
   guint ui_scale;
   gboolean ui_scale_custom;
   guint volume;
@@ -117,6 +118,8 @@ load (SpotifyGtkSettings *self)
   gint fps = g_key_file_get_integer (kf, SETTINGS_GROUP, "frame-rate", NULL);
   if (fps >= 0 && spotifygtk_presentation_valid_fps ((guint) fps))
     self->frame_rate = (guint) fps;
+  self->unsynchronized_rendering = g_key_file_get_boolean (
+    kf, SETTINGS_GROUP, "unsynchronized-rendering", NULL);
   gint scale = g_key_file_get_integer (kf, SETTINGS_GROUP, "ui-scale", NULL);
   gboolean custom = g_key_file_get_boolean (kf, SETTINGS_GROUP, "ui-scale-custom", NULL);
   if (scale >= 0 && spotifygtk_presentation_valid_scale ((guint) scale, custom)) {
@@ -273,6 +276,7 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_integer (kf, SETTINGS_GROUP, "scroll-smoothness",
                           (gint) self->scroll_smoothness);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "frame-rate", (gint) self->frame_rate);
+  g_key_file_set_boolean (kf, SETTINGS_GROUP, "unsynchronized-rendering", self->unsynchronized_rendering);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "ui-scale", (gint) self->ui_scale);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "ui-scale-custom", self->ui_scale_custom);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "volume", (gint) self->volume);
@@ -464,6 +468,25 @@ DEFINE_SETTING (sample_rate, SpotifyGtkSampleRate, sample_rate, SPOTIFYGTK_SAMPL
 DEFINE_SETTING (sample_format, SpotifyGtkSampleFormat, sample_format, SPOTIFYGTK_SAMPLE_FORMAT_32)
 DEFINE_SETTING (resampler_mode, SpotifyGtkResamplerMode, resampler_mode, SPOTIFYGTK_RESAMPLER_LINEAR)
 DEFINE_SETTING (renderer,    SpotifyGtkRenderer,   renderer,    SPOTIFYGTK_RENDERER_CAIRO)
+
+gboolean
+spotifygtk_settings_get_unsynchronized_rendering (SpotifyGtkSettings *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_SETTINGS (self), FALSE);
+  return self->unsynchronized_rendering;
+}
+
+void
+spotifygtk_settings_set_unsynchronized_rendering (SpotifyGtkSettings *self, gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  enabled = !!enabled;
+  if (self->unsynchronized_rendering == enabled) return;
+  self->unsynchronized_rendering = enabled;
+  save (self);
+  g_signal_emit (self, signals[CHANGED], 0);
+}
+
 
 guint
 spotifygtk_settings_get_frame_rate (SpotifyGtkSettings *self)

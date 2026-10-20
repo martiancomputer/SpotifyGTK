@@ -111,6 +111,9 @@ void               spotifygtk_settings_set_renderer (SpotifyGtkSettings *self,
  * regardless of this saved value; zero means Default. */
 guint spotifygtk_settings_get_frame_rate (SpotifyGtkSettings *self);
 void  spotifygtk_settings_set_frame_rate (SpotifyGtkSettings *self, guint fps);
+/* Default-off experimental Wayland/Vulkan throughput mode. */
+gboolean spotifygtk_settings_get_unsynchronized_rendering (SpotifyGtkSettings *self);
+void spotifygtk_settings_set_unsynchronized_rendering (SpotifyGtkSettings *self, gboolean enabled);
 guint spotifygtk_settings_get_ui_scale (SpotifyGtkSettings *self);
 gboolean spotifygtk_settings_get_ui_scale_custom (SpotifyGtkSettings *self);
 /* Percent relative to the desktop scale, 25..300, or 0 for Default.

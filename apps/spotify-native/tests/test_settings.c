@@ -38,6 +38,8 @@ test_online_lyrics_opt_in (void)
   g_assert_cmpint (spotifygtk_settings_get_resampler_mode (first), ==,
                    SPOTIFYGTK_RESAMPLER_POLYPHASE);
   g_assert_cmpuint (spotifygtk_settings_get_frame_rate (first), ==, 0);
+  g_assert_false (spotifygtk_settings_get_unsynchronized_rendering (first));
+  spotifygtk_settings_set_unsynchronized_rendering (first, TRUE);
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (first), ==, 0);
   g_assert_false (spotifygtk_settings_get_ui_scale_custom (first));
   g_assert_cmpuint (spotifygtk_settings_get_volume (first), ==, 100);
@@ -85,6 +87,8 @@ test_online_lyrics_opt_in (void)
   spotifygtk_settings_set_volume (second, 0);
   spotifygtk_settings_flush (second);
   g_assert_cmpuint (spotifygtk_settings_get_frame_rate (second), ==, 360);
+  g_assert_true (spotifygtk_settings_get_unsynchronized_rendering (second));
+  spotifygtk_settings_set_unsynchronized_rendering (second, FALSE);
   spotifygtk_settings_set_frame_rate (second, 0);
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (second), ==, 137);
   g_assert_true (spotifygtk_settings_get_ui_scale_custom (second));
@@ -115,6 +119,7 @@ test_online_lyrics_opt_in (void)
   g_assert_cmpuint (spotifygtk_settings_get_volume (third), ==, 0);
   g_assert_cmpstr (spotifygtk_settings_get_shortcut (third, SPOTIFYGTK_SHORTCUT_SCALE_UP), ==, "<Control>plus");
   g_assert_cmpuint (spotifygtk_settings_get_frame_rate (third), ==, 0);
+  g_assert_false (spotifygtk_settings_get_unsynchronized_rendering (third));
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (third), ==, 0);
   g_assert_false (spotifygtk_settings_get_ui_scale_custom (third));
   spotifygtk_settings_set_ui_scale (third, 100, TRUE);

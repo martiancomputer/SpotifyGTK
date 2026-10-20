@@ -433,6 +433,34 @@ on_frame_rate_map (GtkWidget *dropdown, gpointer data)
 }
 
 static void
+on_unsynchronized_map (GtkWidget *control, gpointer unused)
+{
+  (void) unused;
+  gboolean available = spotifygtk_frame_policy_unsync_available (control);
+  gboolean explicit_rate = spotifygtk_settings_get_frame_rate (spotifygtk_settings_get_default ()) != 0;
+  gtk_widget_set_sensitive (control, available && explicit_rate);
+  gtk_widget_set_tooltip_text (control,
+    !available ? "Unavailable: requires enhanced GTK, Wayland, Vulkan and MAILBOX/IMMEDIATE presentation. Your saved choice is retained."
+    : !explicit_rate ? "Choose an explicit frame-rate limit to enable unsynchronized rendering."
+    : "Experimental: focused windows only; compositor/driver limits may still apply. Higher power use. Extra rendered frames are not extra monitor refreshes.");
+}
+
+static void
+sync_unsynchronized_availability (SpotifyGtkSettings *settings, GtkWidget *control)
+{
+  (void) settings;
+  if (gtk_widget_get_mapped (control)) on_unsynchronized_map (control, NULL);
+}
+
+static void
+on_unsynchronized_changed (GtkSwitch *control, GParamSpec *pspec, SpotifyGtkSettingsPage *self)
+{
+  (void) pspec;
+  spotifygtk_settings_set_unsynchronized_rendering (self->settings,
+    gtk_switch_get_active (control));
+}
+
+static void
 build_frame_rate_settings (SpotifyGtkSettingsPage *self, GtkWidget *group)
 {
   static const gchar * const fps_options[] = {
@@ -445,8 +473,17 @@ build_frame_rate_settings (SpotifyGtkSettingsPage *self, GtkWidget *group)
   g_signal_connect (fps, "map", G_CALLBACK (on_frame_rate_map), NULL);
   g_signal_connect (fps, "notify::selected", G_CALLBACK (on_frame_rate_changed), self);
   gtk_box_append (GTK_BOX (group), build_row ("Frame rate",
-    "Experimental with GTK4-Enhanced. Default uses native pacing; other values "
-    "set a ceiling, bounded by your display and compositor. Stock GTK uses native pacing.", fps));
+    "Frame-rate limit. Default uses native pacing; requires GTK4-Enhanced.", fps));
+  GtkWidget *unsynchronized = gtk_switch_new ();
+  gtk_switch_set_active (GTK_SWITCH (unsynchronized),
+    spotifygtk_settings_get_unsynchronized_rendering (self->settings));
+  g_signal_connect (unsynchronized, "map", G_CALLBACK (on_unsynchronized_map), NULL);
+  g_signal_connect_object (self->settings, "changed",
+    G_CALLBACK (sync_unsynchronized_availability), unsynchronized, 0);
+  g_signal_connect (unsynchronized, "notify::active", G_CALLBACK (on_unsynchronized_changed), self);
+  gtk_box_append (GTK_BOX (group), build_row ("Unsynchronized rendering",
+    "Experimental rendering beyond display refresh. Higher power use; requires an explicit FPS limit.",
+    unsynchronized));
 }
 
 static const guint interface_scales[] = { 0, 0, 25, 50, 75, 90, 100, 150, 300 };
