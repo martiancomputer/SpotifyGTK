@@ -164,10 +164,11 @@ jobs:
           printf '%s' "$SIGNING_KEY_B64" | base64 -d > "$signing/private-key.pem"
           chmod 600 "$signing/certificate.pem" "$signing/private-key.pem"
           bash apps/spotify-native-windows/build-msix-tool.sh
-          SPOTIFYGTK_REQUIRE_ENHANCED_GTK=1 SPOTIFYGTK_MSIX_VERSION=1.1.1.0 \
+          version="$(sed -n "s/^ *version: *'\\([^']*\\)'.*/\\1/p" apps/spotify-native/meson.build | head -1)"
+          SPOTIFYGTK_REQUIRE_ENHANCED_GTK=1 SPOTIFYGTK_MSIX_VERSION="${version}.0" \
             bash apps/spotify-native-windows/package-msix.sh
-          test -f apps/spotify-native-windows/out/spotifygtk-1.1.1-release-windows-x86-64.msix
-          test -f apps/spotify-native-windows/out/spotifygtk-1.1.1-release-windows-x86-64.cer
+          test -f "apps/spotify-native-windows/out/spotifygtk-${version}-release-windows-x86-64.msix"
+          test -f "apps/spotify-native-windows/out/spotifygtk-${version}-release-windows-x86-64.cer"
       - uses: actions/upload-artifact@v4
         with:
           name: spotifygtk-windows-release
@@ -185,7 +186,7 @@ jobs:
             apps/spotify-native-windows/tools-build/gtk4-enhanced-build/meson-logs/
 
   publish:
-    name: Publish SpotifyGTK 1.1.1 release
+    name: Publish SpotifyGTK release
     needs: [linux, windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
@@ -204,10 +205,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          test "$version" = '1.1.1'
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
-            --title 'SpotifyGTK 1.1.1' \
+            --title "SpotifyGTK ${version}" \
             --notes-file packaging/release-notes.md \
             "dist/spotifygtk-${version}-release-linux-debian-x86-64.deb" \
             "dist/spotifygtk-${version}-release-linux-arch-x86-64.appimage" \

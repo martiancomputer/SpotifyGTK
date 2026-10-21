@@ -118,7 +118,8 @@ jobs:
           export SPOTIFYGTK_EXTRA_LINK_DIR="$prefix/lib"
           export SPOTIFYGTK_CROSS_FILE="$root/apps/spotify-native-windows/cross/llvm-mingw-ucrt64-linux.ini"
           bash apps/spotify-native-windows/build.sh
-          test "$(PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" PKG_CONFIG_SYSROOT_DIR="$PKG_CONFIG_SYSROOT_DIR" pkg-config --variable=libdir gtk4)" = /ucrt64/lib
+          gtk_libdir="$(PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" PKG_CONFIG_SYSROOT_DIR="$PKG_CONFIG_SYSROOT_DIR" pkg-config --variable=libdir gtk4)"
+          test "$gtk_libdir" = "$prefix/lib"
           objdump -p apps/spotify-native-windows/build/src/spotify-native.exe | grep -i 'DLL Name: libgtk-4-1.dll'
 
       - name: Upload diagnostics on failure
