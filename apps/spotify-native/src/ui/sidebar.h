@@ -19,6 +19,7 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkSidebar, spotifygtk_sidebar,
                       SPOTIFYGTK, SIDEBAR, GtkBox)
 
 SpotifyGtkSidebar *spotifygtk_sidebar_new (void);
+void spotifygtk_sidebar_select_page (SpotifyGtkSidebar *self, const gchar *page_id);
 void spotifygtk_sidebar_set_playlists_visible (SpotifyGtkSidebar *self,
                                                gboolean visible);
 

@@ -20,6 +20,7 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkSearchPage, spotifygtk_search_page,
                       SPOTIFYGTK, SEARCH_PAGE, GtkBox)
 
 SpotifyGtkSearchPage *spotifygtk_search_page_new (void);
+void spotifygtk_search_page_focus_input (SpotifyGtkSearchPage *self);
 
 void spotifygtk_search_page_set_session (SpotifyGtkSearchPage *self,
                                          SpotifyNativeSession *session);

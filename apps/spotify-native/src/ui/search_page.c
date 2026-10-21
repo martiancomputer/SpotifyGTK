@@ -139,6 +139,13 @@ sync_result_layout (SpotifyGtkSearchPage *self)
     self->compact ? self->contexts : NULL);
 }
 
+void
+spotifygtk_search_page_focus_input (SpotifyGtkSearchPage *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SEARCH_PAGE (self));
+  gtk_widget_grab_focus (GTK_WIDGET (self->entry));
+}
+
 static void
 show_message (SpotifyGtkSearchPage *self, const gchar *text)
 {

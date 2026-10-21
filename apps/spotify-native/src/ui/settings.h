@@ -125,8 +125,44 @@ typedef enum {
   SPOTIFYGTK_SHORTCUT_SCALE_UP,
   SPOTIFYGTK_SHORTCUT_SCALE_DOWN,
   SPOTIFYGTK_SHORTCUT_PLAY_PAUSE,
+  SPOTIFYGTK_SHORTCUT_NEXT,
+  SPOTIFYGTK_SHORTCUT_PREVIOUS,
+  SPOTIFYGTK_SHORTCUT_SEEK_FORWARD,
+  SPOTIFYGTK_SHORTCUT_SEEK_BACKWARD,
+  SPOTIFYGTK_SHORTCUT_VOLUME_UP,
+  SPOTIFYGTK_SHORTCUT_VOLUME_DOWN,
+  SPOTIFYGTK_SHORTCUT_MUTE,
+  SPOTIFYGTK_SHORTCUT_LIKE,
+  SPOTIFYGTK_SHORTCUT_HOME,
+  SPOTIFYGTK_SHORTCUT_SEARCH,
+  SPOTIFYGTK_SHORTCUT_LIKED,
+  SPOTIFYGTK_SHORTCUT_LIBRARY,
+  SPOTIFYGTK_SHORTCUT_SETTINGS,
+  SPOTIFYGTK_SHORTCUT_BACK,
+  SPOTIFYGTK_SHORTCUT_FORWARD,
+  SPOTIFYGTK_SHORTCUT_FOCUS_SEARCH,
+  SPOTIFYGTK_SHORTCUT_QUEUE,
+  SPOTIFYGTK_SHORTCUT_LYRICS,
+  SPOTIFYGTK_SHORTCUT_DEVICES,
+  SPOTIFYGTK_SHORTCUT_CREATE_PLAYLIST,
   SPOTIFYGTK_SHORTCUT_COUNT
 } SpotifyGtkShortcut;
+typedef enum {
+  SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK,
+  SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION,
+  SPOTIFYGTK_SHORTCUT_GROUP_PANELS,
+  SPOTIFYGTK_SHORTCUT_GROUP_INTERFACE,
+  SPOTIFYGTK_SHORTCUT_GROUP_COUNT
+} SpotifyGtkShortcutGroup;
+typedef struct {
+  const gchar *key; /* Stable INI key, including for the original three actions. */
+  const gchar *accelerator;
+  const gchar *label;
+  const gchar *description;
+  SpotifyGtkShortcutGroup group;
+  gboolean allow_typing;
+} SpotifyGtkShortcutInfo;
+const SpotifyGtkShortcutInfo *spotifygtk_shortcut_info (SpotifyGtkShortcut action);
 const gchar *spotifygtk_settings_get_shortcut (SpotifyGtkSettings *self, SpotifyGtkShortcut action);
 /* NULL restores the action's default. Callers validate GTK accelerators. */
 void spotifygtk_settings_set_shortcut (SpotifyGtkSettings *self, SpotifyGtkShortcut action,

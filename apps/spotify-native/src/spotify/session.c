@@ -96,6 +96,7 @@ struct _SpotifyNativeSession {
   GPtrArray *connect_devices;  /* bounded, owned Connect roster; protected by lock */
   SpotifyNativeConnectPlayback *connect_playback;
   gint remote_playback; /* atomic: local reports cannot reclaim a remote output */
+  gint volume_percent; /* atomic local gain, independent of remote output gain */
   gint64   bearer_expires_at;   /* monotonic; 0 = unknown */
   gboolean stopping;            /* dispose has begun; worker must not start its loop */
   gint     auth_generation;     /* atomic; invalidates delayed sign-in callbacks */
@@ -491,7 +492,8 @@ connect_build_put_state (const gchar *device_id, const gchar *device_name,
 
   g_autoptr(GByteArray) info = g_byte_array_new ();
   pb_write_varint_field (info, CS_DEVINFO_CAN_PLAY, 1);
-  pb_write_varint_field (info, CS_DEVINFO_VOLUME, 65535);
+  pb_write_varint_field (info, CS_DEVINFO_VOLUME,
+    (dealer_session ? g_atomic_int_get (&dealer_session->volume_percent) : 100) * 65535 / 100);
   pb_write_bytes_field (info, CS_DEVINFO_NAME,
                         (const guint8 *) device_name, strlen (device_name));
   pb_write_message_field (info, CS_DEVINFO_CAPABILITIES, caps->data, caps->len);
@@ -1462,6 +1464,9 @@ connect_update_devices (SpotifyNativeSession *self, const guint8 *cluster,
     device->name = connect_proto_string (info, info_len, 3);
     device->local = g_strcmp0 (device->id, self->device_id) == 0;
     device->active = g_strcmp0 (device->id, active) == 0;
+    guint64 volume = 0;
+    device->volume_percent = pb_find_varint_field (info, info_len, 2, &volume)
+      ? (gint) ((MIN (volume, 65535) * 100 + 32767) / 65535) : -1;
     const guint8 *reasons = NULL; gsize reasons_len = 0;
     device->restricted = !can_play || disabled ||
       pb_find_bytes_field (info, info_len, 28, &reasons, &reasons_len);
@@ -1493,6 +1498,7 @@ connect_update_devices (SpotifyNativeSession *self, const guint8 *cluster,
     device->name = g_strdup ("SpotifyGTK");
     device->type = g_strdup ("computer");
     device->local = TRUE;
+    device->volume_percent = -1;
     device->active = g_strcmp0 (device->id, active) == 0;
     g_ptr_array_add (devices, device);
   }
@@ -1504,7 +1510,7 @@ connect_update_devices (SpotifyNativeSession *self, const guint8 *cluster,
       SpotifyNativeConnectDevice *b = g_ptr_array_index (self->connect_devices, i);
       changed = g_strcmp0 (a->id, b->id) || g_strcmp0 (a->name, b->name) ||
         g_strcmp0 (a->type, b->type) || a->active != b->active ||
-        a->restricted != b->restricted || a->local != b->local;
+        a->restricted != b->restricted || a->local != b->local || a->volume_percent != b->volume_percent;
     }
   }
   g_clear_pointer (&self->connect_devices, g_ptr_array_unref);
@@ -1557,6 +1563,13 @@ dealer_handle_cluster (const guint8 *cluster, gsize len)
     SpotifyNativeConnectPlayback *state = g_new0 (SpotifyNativeConnectPlayback, 1);
     state->device_id = g_strdup (active);
     state->remote = active && *active && !ours;
+    state->volume_percent = -1;
+    g_mutex_lock (&dealer_session->lock);
+    for (guint i = 0; dealer_session->connect_devices && i < dealer_session->connect_devices->len; i++) {
+      SpotifyNativeConnectDevice *device = g_ptr_array_index (dealer_session->connect_devices, i);
+      if (device->active) { state->volume_percent = device->volume_percent; break; }
+    }
+    g_mutex_unlock (&dealer_session->lock);
     state->context_uri = g_strdup (context);
     state->observed_at_ms = g_get_monotonic_time () / 1000;
     if (player_state) {
@@ -5145,6 +5158,7 @@ spotifygtk_native_session_init (SpotifyNativeSession *self)
 {
   g_mutex_init (&self->lock);
   self->state       = SPOTIFYGTK_SESSION_IDLE;
+  self->volume_percent = 100;
   self->cancellable = g_cancellable_new ();
   self->device_id   = generate_device_id ();
 
@@ -5155,6 +5169,13 @@ SpotifyNativeSession *
 spotifygtk_native_session_new (void)
 {
   return g_object_new (SPOTIFYGTK_TYPE_NATIVE_SESSION, NULL);
+}
+
+void
+spotifygtk_native_session_set_connect_volume (SpotifyNativeSession *self, guint percent)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NATIVE_SESSION (self));
+  g_atomic_int_set (&self->volume_percent, MIN (percent, 100));
 }
 
 gboolean

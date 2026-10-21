@@ -65,8 +65,39 @@ enum { CHANGED, LOCAL_FILES_CHANGED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 static void save (SpotifyGtkSettings *self);
 
-static const gchar *shortcut_keys[] = { "shortcut-scale-up", "shortcut-scale-down", "shortcut-play-pause" };
-static const gchar *shortcut_defaults[] = { "<Control>plus", "<Control>minus", "space" };
+/* One metadata/default registry shared by persistence, the editor and the
+ * window dispatcher. Existing INI keys and enum positions stay compatible. */
+static const SpotifyGtkShortcutInfo shortcut_registry[SPOTIFYGTK_SHORTCUT_COUNT] = {
+  [SPOTIFYGTK_SHORTCUT_SCALE_UP] = { "shortcut-scale-up", "<Control>plus", "Increase scale", "Increase interface scale by one step", SPOTIFYGTK_SHORTCUT_GROUP_INTERFACE, TRUE },
+  [SPOTIFYGTK_SHORTCUT_SCALE_DOWN] = { "shortcut-scale-down", "<Control>minus", "Decrease scale", "Decrease interface scale by one step", SPOTIFYGTK_SHORTCUT_GROUP_INTERFACE, TRUE },
+  [SPOTIFYGTK_SHORTCUT_PLAY_PAUSE] = { "shortcut-play-pause", "space", "Play / Pause", "Toggle playback on the active output", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_NEXT] = { "shortcut-next", "<Control>Right", "Next track", "Skip to the next available track", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_PREVIOUS] = { "shortcut-previous", "<Control>Left", "Previous track", "Return to the previous track", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_SEEK_FORWARD] = { "shortcut-seek-forward", "<Shift>Right", "Seek forward", "Move forward 10 seconds", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_SEEK_BACKWARD] = { "shortcut-seek-backward", "<Shift>Left", "Seek backward", "Move backward 10 seconds", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_VOLUME_UP] = { "shortcut-volume-up", "<Control>Up", "Increase volume", "Raise the active output volume by 5%", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_VOLUME_DOWN] = { "shortcut-volume-down", "<Control>Down", "Decrease volume", "Lower the active output volume by 5%", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_MUTE] = { "shortcut-mute", "<Control>m", "Mute / Unmute", "Restore the previous volume when unmuting", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_LIKE] = { "shortcut-like", "<Control><Shift>s", "Like / Unlike", "Save or unsave the current track", SPOTIFYGTK_SHORTCUT_GROUP_PLAYBACK },
+  [SPOTIFYGTK_SHORTCUT_HOME] = { "shortcut-home", "<Control>1", "Home", "Open Home", SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION, TRUE },
+  [SPOTIFYGTK_SHORTCUT_SEARCH] = { "shortcut-search", "<Control>2", "Search", "Open Search and start typing", SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION, TRUE },
+  [SPOTIFYGTK_SHORTCUT_LIKED] = { "shortcut-liked", "<Control>3", "Liked Songs", "Open Liked Songs", SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION, TRUE },
+  [SPOTIFYGTK_SHORTCUT_LIBRARY] = { "shortcut-library", "<Control>4", "Library", "Open Library", SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION, TRUE },
+  [SPOTIFYGTK_SHORTCUT_SETTINGS] = { "shortcut-settings", "<Control>5", "Settings", "Open Settings", SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION, TRUE },
+  [SPOTIFYGTK_SHORTCUT_BACK] = { "shortcut-back", "<Alt>Left", "Back", "Go back in navigation history", SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION },
+  [SPOTIFYGTK_SHORTCUT_FORWARD] = { "shortcut-forward", "<Alt>Right", "Forward", "Go forward in navigation history", SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION },
+  [SPOTIFYGTK_SHORTCUT_FOCUS_SEARCH] = { "shortcut-focus-search", "<Control>f", "Focus search / filter", "Focus this page's filter, or open Search", SPOTIFYGTK_SHORTCUT_GROUP_NAVIGATION, TRUE },
+  [SPOTIFYGTK_SHORTCUT_QUEUE] = { "shortcut-queue", "<Control><Shift>q", "Toggle queue", "Show or hide the Queue panel", SPOTIFYGTK_SHORTCUT_GROUP_PANELS },
+  [SPOTIFYGTK_SHORTCUT_LYRICS] = { "shortcut-lyrics", "<Control><Shift>l", "Toggle lyrics", "Show or hide Lyrics; load only when requested", SPOTIFYGTK_SHORTCUT_GROUP_PANELS },
+  [SPOTIFYGTK_SHORTCUT_DEVICES] = { "shortcut-devices", "<Control><Shift>d", "Spotify Connect devices", "Open the device picker", SPOTIFYGTK_SHORTCUT_GROUP_PANELS },
+  [SPOTIFYGTK_SHORTCUT_CREATE_PLAYLIST] = { "shortcut-create-playlist", "<Control>n", "Create playlist", "Open playlist creation", SPOTIFYGTK_SHORTCUT_GROUP_PANELS },
+};
+
+const SpotifyGtkShortcutInfo *
+spotifygtk_shortcut_info (SpotifyGtkShortcut action)
+{
+  return (guint) action < SPOTIFYGTK_SHORTCUT_COUNT ? &shortcut_registry[action] : NULL;
+}
 
 static void
 spotifygtk_settings_finalize (GObject *object)
@@ -132,7 +163,7 @@ load (SpotifyGtkSettings *self)
     if (!error && volume >= 0 && volume <= 100) self->volume = (guint) volume;
   }
   for (guint i = 0; i < SPOTIFYGTK_SHORTCUT_COUNT; i++) {
-    g_autofree gchar *shortcut = g_key_file_get_string (kf, SETTINGS_GROUP, shortcut_keys[i], NULL);
+    g_autofree gchar *shortcut = g_key_file_get_string (kf, SETTINGS_GROUP, shortcut_registry[i].key, NULL);
     if (shortcut && *shortcut && strlen (shortcut) < 128 && !strpbrk (shortcut, "\r\n")) {
       g_free (self->shortcuts[i]);
       self->shortcuts[i] = g_steal_pointer (&shortcut);
@@ -281,7 +312,7 @@ save (SpotifyGtkSettings *self)
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "ui-scale-custom", self->ui_scale_custom);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "volume", (gint) self->volume);
   for (guint i = 0; i < SPOTIFYGTK_SHORTCUT_COUNT; i++)
-    g_key_file_set_string (kf, SETTINGS_GROUP, shortcut_keys[i], self->shortcuts[i]);
+    g_key_file_set_string (kf, SETTINGS_GROUP, shortcut_registry[i].key, self->shortcuts[i]);
   g_key_file_set_boolean (kf, SETTINGS_GROUP, "shuffle", self->shuffle);
   g_key_file_set_integer (kf, SETTINGS_GROUP, "repeat", (gint) self->repeat);
   g_key_file_set_double_list (kf, SETTINGS_GROUP, "eq-gains", self->eq_gains,
@@ -351,7 +382,7 @@ spotifygtk_settings_init (SpotifyGtkSettings *self)
   self->scroll_smoothness = 50;
   self->volume = 100;
   for (guint i = 0; i < SPOTIFYGTK_SHORTCUT_COUNT; i++)
-    self->shortcuts[i] = g_strdup (shortcut_defaults[i]);
+    self->shortcuts[i] = g_strdup (shortcut_registry[i].accelerator);
   self->pins        = g_ptr_array_new_with_free_func (pin_free);
   self->local_directories = g_ptr_array_new_with_free_func (g_free);
   self->unavailable = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
@@ -487,7 +518,6 @@ spotifygtk_settings_set_unsynchronized_rendering (SpotifyGtkSettings *self, gboo
   g_signal_emit (self, signals[CHANGED], 0);
 }
 
-
 guint
 spotifygtk_settings_get_frame_rate (SpotifyGtkSettings *self)
 {
@@ -581,7 +611,7 @@ spotifygtk_settings_set_shortcut (SpotifyGtkSettings *self, SpotifyGtkShortcut a
 {
   g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
   if ((guint) action >= SPOTIFYGTK_SHORTCUT_COUNT) return;
-  if (!accelerator) accelerator = shortcut_defaults[action];
+  if (!accelerator) accelerator = shortcut_registry[action].accelerator;
   if (!*accelerator || strlen (accelerator) >= 128 || strpbrk (accelerator, "\r\n") ||
       g_strcmp0 (self->shortcuts[action], accelerator) == 0) return;
   g_free (self->shortcuts[action]);

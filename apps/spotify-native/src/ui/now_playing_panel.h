@@ -22,6 +22,8 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkNowPlayingPanel, spotifygtk_now_playing_panel,
                       SPOTIFYGTK, NOW_PLAYING_PANEL, GtkBox)
 
 SpotifyGtkNowPlayingPanel *spotifygtk_now_playing_panel_new (void);
+void spotifygtk_now_playing_panel_show_view (SpotifyGtkNowPlayingPanel *self, gboolean lyrics);
+gboolean spotifygtk_now_playing_panel_is_lyrics (SpotifyGtkNowPlayingPanel *self);
 
 /* Update displayed information */
 void spotifygtk_now_playing_panel_set_track (SpotifyGtkNowPlayingPanel *self,

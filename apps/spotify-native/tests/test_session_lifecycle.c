@@ -226,6 +226,7 @@ test_connect_devices (void)
     g_autoptr(GByteArray) caps = g_byte_array_new ();
     g_autoptr(GByteArray) entry = g_byte_array_new ();
     pb_write_varint_field (info, 1, 1);
+    pb_write_varint_field (info, 2, 32768);
     pb_write_bytes_field (info, 3, (const guint8 *) "Test device", 11);
     pb_write_varint_field (info, 7, i == 1 ? 3 : 1);
     pb_write_varint_field (info, 21, i == 2);
@@ -244,6 +245,7 @@ test_connect_devices (void)
   SpotifyNativeConnectDevice *phone = g_ptr_array_index (snapshot, 2);
   g_assert_cmpstr (phone->type, ==, "smartphone");
   g_assert_true (phone->active);
+  g_assert_cmpint (phone->volume_percent, ==, 50);
   /* A partial update preserves peers, and snapshots don't alias live state. */
   connect_update_devices (session, NULL, 0, session->device_id);
   g_autoptr(GPtrArray) next = spotifygtk_native_session_dup_connect_devices (session);
@@ -313,6 +315,23 @@ test_remote_output_cannot_be_reclaimed_by_report (void)
   dealer_session = NULL;
 }
 
+static void
+test_connect_volume_report (void)
+{
+  g_autoptr(SpotifyNativeSession) session = spotifygtk_native_session_new ();
+  dealer_session = session;
+  spotifygtk_native_session_set_connect_volume (session, 37);
+  g_autoptr(GBytes) put = connect_build_put_state ("fixture-device", "Fixture", "fixture-client");
+  gsize length, device_len, info_len;
+  const guint8 *data = g_bytes_get_data (put, &length), *device, *info;
+  guint64 volume;
+  g_assert_true (pb_find_bytes_field (data, length, CS_PUT_DEVICE, &device, &device_len));
+  g_assert_true (pb_find_bytes_field (device, device_len, CS_DEVICE_DEVICE_INFO, &info, &info_len));
+  g_assert_true (pb_find_varint_field (info, info_len, CS_DEVINFO_VOLUME, &volume));
+  g_assert_cmpuint (volume, ==, 37 * 65535 / 100);
+  dealer_session = NULL;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -322,6 +341,7 @@ main (int argc, char **argv)
   g_test_add_func ("/connect/device-roster", test_connect_devices);
   g_test_add_func ("/connect/play-command", test_connect_play_command);
   g_test_add_func ("/connect/remote-report-ownership", test_remote_output_cannot_be_reclaimed_by_report);
+  g_test_add_func ("/connect/volume-report", test_connect_volume_report);
   g_test_add ("/session/logout-login-reuses-worker", Fixture, NULL,
               setup, test_sign_out_then_start, teardown);
   g_test_add ("/session/ready-start-is-noop", Fixture, NULL,

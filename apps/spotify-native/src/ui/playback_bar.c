@@ -637,6 +637,21 @@ on_connect_button_clicked (GtkButton *button, SpotifyGtkPlaybackBar *self)
   (void) button;
 }
 
+void
+spotifygtk_playback_bar_open_connect_dialog (SpotifyGtkPlaybackBar *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self));
+  if (gtk_widget_get_sensitive (GTK_WIDGET (self->connect_btn)))
+    on_connect_button_clicked (self->connect_btn, self);
+}
+
+gint
+spotifygtk_playback_bar_get_volume (SpotifyGtkPlaybackBar *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_PLAYBACK_BAR (self), 0);
+  return (gint) gtk_range_get_value (GTK_RANGE (self->volume_scale));
+}
+
 static void
 spotifygtk_playback_bar_dispose (GObject *object)
 {

@@ -77,6 +77,8 @@ void spotifygtk_playback_bar_set_connect_devices (SpotifyGtkPlaybackBar *self,
 void spotifygtk_playback_bar_set_connect_error (SpotifyGtkPlaybackBar *self,
                                                  const gchar *message);
 void spotifygtk_playback_bar_close_connect_dialog (SpotifyGtkPlaybackBar *self);
+void spotifygtk_playback_bar_open_connect_dialog (SpotifyGtkPlaybackBar *self);
+gint spotifygtk_playback_bar_get_volume (SpotifyGtkPlaybackBar *self);
 void spotifygtk_playback_bar_set_volume       (SpotifyGtkPlaybackBar *self,
                                                gint percent);
 void spotifygtk_playback_bar_set_liked        (SpotifyGtkPlaybackBar *self,

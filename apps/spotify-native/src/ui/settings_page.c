@@ -19,6 +19,57 @@
 #include "frame_policy.h"
 #include "shortcuts.h"
 
+static GdkTexture *
+load_theme_preview_texture (const gchar *resource)
+{
+  /* These static thumbnails occupy roughly 280 logical pixels per pane.
+   * Decode the trusted bundled SVG directly at that size on the CPU, once.
+   * GdkMemoryTexture shares the pixbuf's pixels; four RGBA buffers total
+   * 739 KiB. No full-size intermediate, SVG scene, or render node is retained.
+   * Do not export a texture through the window renderer: on Vulkan that can
+   * initialize an additional display-lifetime EGL/GL renderer. */
+  g_autoptr(GdkPixbuf) pixels = gdk_pixbuf_new_from_resource_at_scale (
+    resource, 280, 169, TRUE, NULL);
+  if (!pixels) return NULL;
+  g_autoptr(GBytes) bytes = gdk_pixbuf_read_pixel_bytes (pixels);
+  return gdk_memory_texture_new (
+    gdk_pixbuf_get_width (pixels), gdk_pixbuf_get_height (pixels),
+    gdk_pixbuf_get_has_alpha (pixels) ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8,
+    bytes, gdk_pixbuf_get_rowstride (pixels));
+}
+
+static void
+freeze_theme_preview (GtkWidget *picture, gpointer unused)
+{
+  (void) unused;
+  if (g_object_get_data (G_OBJECT (picture), "preview-frozen")) return;
+  const gchar *resource = g_object_get_data (G_OBJECT (picture), "preview-resource");
+  g_autoptr(GdkTexture) texture = load_theme_preview_texture (resource);
+  if (!texture) {
+    g_warning ("Could not decode a bundled theme preview; check the SVG image loader");
+    g_object_set_data (G_OBJECT (picture), "preview-frozen", GINT_TO_POINTER (1));
+    return;
+  }
+  gtk_picture_set_paintable (GTK_PICTURE (picture), GDK_PAINTABLE (texture));
+  g_object_set_data (G_OBJECT (picture), "preview-frozen", GINT_TO_POINTER (1));
+}
+
+static GtkWidget *
+build_theme_preview (const gchar *resource)
+{
+  GtkWidget *picture = gtk_picture_new ();
+  g_object_set_data_full (G_OBJECT (picture), "preview-resource", g_strdup (resource), g_free);
+  gtk_picture_set_can_shrink (GTK_PICTURE (picture), TRUE);
+  gtk_picture_set_content_fit (GTK_PICTURE (picture), GTK_CONTENT_FIT_CONTAIN);
+  gtk_widget_set_size_request (picture, 1, 1);
+  gtk_widget_set_overflow (picture, GTK_OVERFLOW_HIDDEN);
+  gtk_widget_add_css_class (picture, "theme-preview");
+  g_signal_connect (picture, "map", G_CALLBACK (freeze_theme_preview), NULL);
+  GtkWidget *aspect = gtk_aspect_frame_new (0.5f, 0.5f, 560.0f / 338.0f, FALSE);
+  gtk_aspect_frame_set_child (GTK_ASPECT_FRAME (aspect), picture);
+  return aspect;
+}
+
 struct _SpotifyGtkSettingsPage {
   GtkBox parent_instance;
   SpotifyGtkSettings *settings;
@@ -37,6 +88,8 @@ struct _SpotifyGtkSettingsPage {
   GtkWidget          *custom_scale_row;
   GtkSpinButton      *custom_scale;
   GtkDropDown        *scale_dropdown;
+  GtkWidget          *theme_panes[4];
+  guint               theme_selection; /* enum + 1; zero before initial sync */
 };
 
 /* The stored array and the filter must agree on how many bands there are. */
@@ -381,12 +434,77 @@ on_resampler_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_da
 }
 
 static void
-on_theme_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+sync_theme_panes (SpotifyGtkSettings *settings, SpotifyGtkSettingsPage *self)
 {
-  SpotifyGtkSettingsPage *self = user_data;
-  spotifygtk_settings_set_theme (self->settings,
-                                 (SpotifyGtkTheme) gtk_drop_down_get_selected (dropdown));
-  (void) pspec;
+  SpotifyGtkTheme selected = spotifygtk_settings_get_theme (settings);
+  if (self->theme_selection == (guint) selected + 1) return;
+  self->theme_selection = (guint) selected + 1;
+  for (guint i = 0; i < G_N_ELEMENTS (self->theme_panes); i++) {
+    GtkWidget *pane = self->theme_panes[i];
+    if (!pane) continue;
+    gboolean active = i == (guint) selected;
+    if (active) gtk_widget_add_css_class (pane, "selected");
+    else gtk_widget_remove_css_class (pane, "selected");
+    gtk_accessible_update_state (GTK_ACCESSIBLE (pane), GTK_ACCESSIBLE_STATE_PRESSED, active, -1);
+  }
+}
+
+static void
+on_theme_pane_clicked (GtkButton *button, SpotifyGtkSettingsPage *self)
+{
+  SpotifyGtkTheme theme = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (button), "theme-choice"));
+  spotifygtk_settings_set_theme (self->settings, theme);
+}
+
+static GtkWidget *
+build_theme_selector (SpotifyGtkSettingsPage *self)
+{
+  static const struct { const gchar *name, *file; SpotifyGtkTheme theme; } choices[] = {
+    { "White", "white", SPOTIFYGTK_THEME_LIGHT },
+    { "Milk", "milk", SPOTIFYGTK_THEME_MILK },
+    { "Dark", "dark", SPOTIFYGTK_THEME_DARK },
+    { "Dark+", "dark-plus", SPOTIFYGTK_THEME_DARK_PLUS },
+  };
+  GtkWidget *island = gtk_box_new (GTK_ORIENTATION_VERTICAL, 16);
+  gtk_widget_add_css_class (island, "settings-island");
+  gtk_widget_add_css_class (island, "theme-selector");
+  GtkWidget *heading = gtk_label_new ("Theme");
+  gtk_label_set_xalign (GTK_LABEL (heading), 0);
+  gtk_widget_add_css_class (heading, "settings-island-title");
+  gtk_box_append (GTK_BOX (island), heading);
+  GtkWidget *description = gtk_label_new ("Choose your appearance.");
+  gtk_label_set_xalign (GTK_LABEL (description), 0);
+  gtk_label_set_wrap (GTK_LABEL (description), TRUE);
+  gtk_widget_add_css_class (description, "dim-text");
+  gtk_box_append (GTK_BOX (island), description);
+  GtkWidget *grid = gtk_grid_new ();
+  gtk_grid_set_column_homogeneous (GTK_GRID (grid), TRUE);
+  gtk_grid_set_row_homogeneous (GTK_GRID (grid), TRUE);
+  gtk_grid_set_column_spacing (GTK_GRID (grid), 16);
+  gtk_grid_set_row_spacing (GTK_GRID (grid), 16);
+  for (guint i = 0; i < G_N_ELEMENTS (choices); i++) {
+    GtkWidget *pane = gtk_button_new ();
+    gtk_widget_add_css_class (pane, "theme-pane");
+    gtk_widget_set_hexpand (pane, TRUE);
+    GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
+    g_autofree gchar *resource = g_strdup_printf (
+      "/com/github/spotifygtk/SpotifyNative/theme-previews/%s.svg", choices[i].file);
+    gtk_box_append (GTK_BOX (content), build_theme_preview (resource));
+    GtkWidget *label = gtk_label_new (choices[i].name);
+    gtk_widget_add_css_class (label, "theme-pane-label");
+    gtk_box_append (GTK_BOX (content), label);
+    gtk_button_set_child (GTK_BUTTON (pane), content);
+    g_autofree gchar *accessible = g_strdup_printf ("%s theme", choices[i].name);
+    gtk_accessible_update_property (GTK_ACCESSIBLE (pane), GTK_ACCESSIBLE_PROPERTY_LABEL, accessible, -1);
+    g_object_set_data (G_OBJECT (pane), "theme-choice", GUINT_TO_POINTER (choices[i].theme));
+    g_signal_connect_object (pane, "clicked", G_CALLBACK (on_theme_pane_clicked), self, 0);
+    self->theme_panes[choices[i].theme] = pane;
+    gtk_grid_attach (GTK_GRID (grid), pane, i, 0, 1, 1);
+  }
+  gtk_box_append (GTK_BOX (island), grid);
+  sync_theme_panes (self->settings, self);
+  g_signal_connect_object (self->settings, "changed", G_CALLBACK (sync_theme_panes), self, 0);
+  return island;
 }
 
 static void
@@ -529,8 +647,9 @@ build_presentation_settings (SpotifyGtkSettingsPage *self, GtkWidget *group)
   GtkWidget *scale = build_dropdown (scale_options, selected, TRUE);
   self->scale_dropdown = GTK_DROP_DOWN (scale);
   gtk_box_append (GTK_BOX (group), build_row ("Interface scale",
-    "Resizes text, artwork, spacing and controls together, relative to your "
-    "desktop scale. Changes apply immediately. Default adds no extra scaling.", scale));
+    "Resize text, artwork and controls together.", scale));
+  gtk_widget_set_tooltip_text (scale,
+    "Applies immediately, relative to your desktop scale. Default adds no extra scaling.");
 
   GtkWidget *controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   self->custom_scale = GTK_SPIN_BUTTON (gtk_spin_button_new_with_range (25, 300, 1));
@@ -805,23 +924,11 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
 
   /* ── Interface ─────────────────────────────────────────────── */
   GtkWidget *interface_group = build_group ("Interface");
+  /* Canonical order on every platform and theme: appearance first, other
+   * interface controls next, and the compact keybind manager last. */
+  gtk_box_append (GTK_BOX (interface_group), build_theme_selector (self));
   build_presentation_settings (self, interface_group);
   g_signal_connect_object (self->settings, "changed", G_CALLBACK (sync_interface_scale), self, 0);
-  gtk_box_append (GTK_BOX (interface_group), build_row ("Keybind manager",
-    "Click a shortcut to change it. Scaling changes by 10 percentage points. "
-    "Play/pause takes priority over focused buttons except while typing. F11 toggles fullscreen.", NULL));
-  gtk_box_append (GTK_BOX (interface_group), spotifygtk_shortcuts_editor_new ());
-
-  static const gchar * const themes[] = { "Dark", "White", "Milk", "Dark+", NULL };
-  GtkWidget *theme_dd = build_dropdown (themes,
-                                        spotifygtk_settings_get_theme (self->settings),
-                                        TRUE);
-  g_signal_connect (theme_dd, "notify::selected", G_CALLBACK (on_theme_changed), self);
-  gtk_box_append (GTK_BOX (interface_group),
-                  build_row ("Theme",
-                             "Dark (default), White, the warmer Milk, or near-black Dark+. "
-                             "Applies immediately and is remembered.",
-                             theme_dd));
 
   /* Preview policy is applied immediately by every artwork surface. */
   static const gchar * const media_modes[] = {
@@ -836,10 +943,10 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   g_signal_connect (media_dd, "notify::selected", G_CALLBACK (on_media_mode_changed), self);
   gtk_box_append (GTK_BOX (interface_group),
                   build_row ("Previews",
-                             "Media shows artwork everywhere. Now playing only "
-                             "loads it for the Now Playing panel and control "
-                             "bar. None disables media loading completely.",
+                             "Choose where artwork loads.",
                              media_dd));
+  gtk_widget_set_tooltip_text (media_dd,
+    "Media: everywhere. Now playing only: player panel and bar. None: no artwork loading.");
 
   GtkWidget *detail_view = gtk_switch_new ();
   gtk_switch_set_active (GTK_SWITCH (detail_view),
@@ -848,9 +955,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_detail_view_toggled), self);
   gtk_box_append (GTK_BOX (interface_group),
                   build_row ("Compact mode",
-                             "On keeps compact headers and artwork in track rows. "
-                             "Off shows large covers and release details for albums, "
-                             "playlists, and artist releases. Search follows the same choice.",
+                             "Smaller headers and covers across browsing pages.",
                              detail_view));
 
   GtkWidget *separate_playlists = gtk_switch_new ();
@@ -860,8 +965,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_separate_playlists_toggled), self);
   gtk_box_append (GTK_BOX (interface_group),
                   build_row ("Show playlists separately",
-                             "On keeps Playlists in the sidebar. Off includes them "
-                             "in Library's All and Playlists filters.",
+                             "Keep playlists in the sidebar instead of Library.",
                              separate_playlists));
 
   GtkWidget *page_crossfade = gtk_switch_new ();
@@ -871,7 +975,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_page_crossfade_toggled), self);
   gtk_box_append (GTK_BOX (interface_group),
                   build_row ("Page crossfade",
-                             "Fade between pages when navigating. Turn off for an instant switch.",
+                             "Fade between pages.",
                              page_crossfade));
 
   GtkWidget *scroll_scale = gtk_scale_new_with_range (
@@ -887,12 +991,11 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_scroll_smoothness_changed), self);
   gtk_box_append (GTK_BOX (interface_group),
                   build_row ("Scroll smoothness",
-                             "Adjusts mouse-wheel easing and gravity together. "
-                             "Responsive stops sooner; Glide carries farther "
-                             "and settles more gradually. Touchpad motion is "
-                             "left unchanged.",
+                             "Mouse-wheel glide. Touchpad scrolling is unchanged.",
                              scroll_scale));
 
+  gtk_box_append (GTK_BOX (interface_group), build_row (
+    "Keybind manager", NULL, spotifygtk_shortcuts_manager_new ()));
   gtk_box_append (GTK_BOX (content), interface_group);
 
   /* Local lyric sidecars need no network permission. LRCLIB receives title,
@@ -905,9 +1008,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_online_lyrics_toggled), self);
   gtk_box_append (GTK_BOX (lyrics_group),
     build_row ("Online lyrics",
-               "Look up the current song on LRCLIB when no local .lrc file "
-               "exists. Sends its title, artist, album and duration to "
-               "LRCLIB. Off by default; local files always work.",
+               "Sends title, artist, album and duration to LRCLIB when no local lyrics exist.",
                online_lyrics));
   static const gchar * const lyric_font_options[] = {
     "19 px", "20 px", "22 px", "24 px", "26 px", "28 px", NULL
@@ -920,9 +1021,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_lyrics_font_size_changed), self);
   gtk_box_append (GTK_BOX (lyrics_group),
     build_row ("Font size",
-               "Sets the highlighted lyric size from the current 19 px "
-               "through 28 px. Surrounding lines and plain lyrics scale "
-               "with it. Applies immediately without reloading lyrics.",
+               "Resize lyrics, including surrounding lines.",
                lyrics_font));
   gtk_box_append (GTK_BOX (content), lyrics_group);
 
@@ -936,9 +1035,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_aggressive_filtering_toggled), self);
   gtk_box_append (GTK_BOX (search_group),
                   build_row ("Aggressive Filtering",
-                             "Matches and ranks results aggressively. Exact "
-                             "artist matches appear first; weaker matches are "
-                             "kept at the bottom.",
+                             "Prioritize exact artist matches.",
                              aggressive));
   gtk_box_append (GTK_BOX (content), search_group);
 
@@ -948,7 +1045,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
   gtk_widget_set_sensitive (customize_home, FALSE);
   gtk_widget_set_tooltip_text (customize_home, "Home customization is planned, but not available yet.");
   gtk_box_append (GTK_BOX (home_group), build_row (
-    "Home layout", "Customization is coming later. The new dashboard uses your personalised feed.",
+    "Home layout", "Customization coming later.",
     customize_home));
   gtk_box_append (GTK_BOX (content), home_group);
 
@@ -968,8 +1065,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_local_files_toggled), self);
   gtk_box_append (GTK_BOX (local_group),
     build_row ("Show local files",
-               "Include music from the selected folders in Library. Scanning "
-               "runs in the background.", local_enabled));
+               "Add music from your folders to Library.", local_enabled));
   GtkWidget *add_folder = gtk_button_new_with_label ("Add folder");
   g_signal_connect (add_folder, "clicked",
                     G_CALLBACK (on_local_directory_add), self);
@@ -994,10 +1090,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_sample_rate_changed), self);
   gtk_box_append (GTK_BOX (audio_group),
                   build_row ("Sample rate",
-                             "Chooses the output rate. Default follows the source "
-                             "without app-side conversion. Higher rates do not "
-                             "add detail to a lower-rate recording; a local file "
-                             "can retain its own rate.",
+                             "Default follows the source. Higher rates do not add detail.",
                              rate_dd));
 
   static const gchar * const formats[] = { "16-bit", "24-bit", "32-bit", NULL };
@@ -1007,9 +1100,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_sample_format_changed), self);
   gtk_box_append (GTK_BOX (audio_group),
                   build_row ("Sample format",
-                             "Signed PCM sent to the output device. The current "
-                             "Spotify decoder is 16-bit; selecting a wider "
-                             "container does not restore lost precision.",
+                             "Output bit depth. Spotify decoding remains 16-bit.",
                              format_dd));
 
   static const gchar * const resamplers[] = { "Polyphase (quality)",
@@ -1020,9 +1111,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_resampler_changed), self);
   gtk_box_append (GTK_BOX (audio_group),
                   build_row ("Resampler",
-                             "Used only when the source and output rates differ. "
-                             "Polyphase rejects aliasing; linear is faster but "
-                             "less accurate. Matching rates bypass conversion.",
+                             "Quality or speed when converting sample rates.",
                              resampler_dd));
 
   GtkWidget *eq_heading = gtk_label_new ("Equalizer");
@@ -1046,10 +1135,10 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_renderer_changed), self);
   gtk_box_append (GTK_BOX (perf_group),
                   build_row ("Renderer",
-                             "Automatic lets GTK choose. A forced backend "
-                             "takes effect after restarting; GSK_RENDERER "
-                             "from the environment always takes precedence.",
+                             "Graphics backend. Changes require a restart.",
                              renderer_dd));
+  gtk_widget_set_tooltip_text (renderer_dd,
+    "Automatic lets GTK choose. GSK_RENDERER from the environment takes precedence.");
 
   build_frame_rate_settings (self, perf_group);
 
@@ -1061,9 +1150,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_caching_toggled), self);
   gtk_box_append (GTK_BOX (perf_group),
                   build_row ("Caching",
-                             "Caches artwork and resolved media information on "
-                             "disk for faster loading. Changes take effect "
-                             "immediately.",
+                             "Save artwork and media information on disk.",
                              cache_switch));
 
   GtkWidget *clear_cache = gtk_button_new_with_label ("Clear cache");
@@ -1072,8 +1159,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
                     G_CALLBACK (on_clear_cache_clicked), self);
   gtk_box_append (GTK_BOX (perf_group),
                   build_row ("Cached data",
-                             "Removes cached names and media, and releases "
-                             "decoded artwork held by the app.",
+                             "Clear saved metadata and artwork.",
                              clear_cache));
 
   gtk_box_append (GTK_BOX (content), perf_group);
@@ -1174,7 +1260,12 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
 
   gtk_box_append (GTK_BOX (content), about_group);
 
-  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
+  /* Settings contain aspect-ratio previews. Use their natural height when
+   * scrolling, rather than compressing every image to its tiny minimum. */
+  GtkWidget *viewport = gtk_viewport_new (NULL, NULL);
+  gtk_scrollable_set_vscroll_policy (GTK_SCROLLABLE (viewport), GTK_SCROLL_NATURAL);
+  gtk_viewport_set_child (GTK_VIEWPORT (viewport), content);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), viewport);
   gtk_box_append (GTK_BOX (self), scroller);
 }
 

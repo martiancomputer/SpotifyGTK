@@ -39,6 +39,22 @@ static guint signals[N_SIGNALS];
  * so the thing under the pointer is pinned by definition and the only sensible
  * verb is the one that undoes it.
  */
+void
+spotifygtk_sidebar_select_page (SpotifyGtkSidebar *self, const gchar *page_id)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SIDEBAR (self));
+  for (GtkWidget *child = gtk_widget_get_first_child (GTK_WIDGET (self->nav_list));
+       child; child = gtk_widget_get_next_sibling (child)) {
+    const gchar *id = g_object_get_data (G_OBJECT (child), "page-id");
+    if (g_strcmp0 (id, page_id) == 0) {
+      gtk_list_box_select_row (self->nav_list, GTK_LIST_BOX_ROW (child));
+      g_free (self->selected_page);
+      self->selected_page = g_strdup (page_id);
+      return;
+    }
+  }
+}
+
 static void
 on_pinned_menu_unpin (GtkButton *entry, gpointer user_data)
 {
@@ -223,9 +239,11 @@ spotifygtk_sidebar_init (SpotifyGtkSidebar *self)
   gtk_list_box_set_selection_mode (self->nav_list, GTK_SELECTION_SINGLE);
   gtk_widget_set_margin_top (GTK_WIDGET (self->nav_list), 10);
 
-  for (guint i = 0; i < G_N_ELEMENTS (NAV_ITEMS); i++)
-    gtk_list_box_append (self->nav_list,
-                         build_nav_row (NAV_ITEMS[i].label, NAV_ITEMS[i].icon));
+  for (guint i = 0; i < G_N_ELEMENTS (NAV_ITEMS); i++) {
+    GtkWidget *row = build_nav_row (NAV_ITEMS[i].label, NAV_ITEMS[i].icon);
+    g_object_set_data (G_OBJECT (row), "page-id", (gpointer) NAV_ITEMS[i].id);
+    gtk_list_box_append (self->nav_list, row);
+  }
 
   g_signal_connect (self->nav_list, "row-activated",
                     G_CALLBACK (on_nav_row_activated), self);

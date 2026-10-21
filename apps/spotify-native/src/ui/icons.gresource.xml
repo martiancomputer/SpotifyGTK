@@ -7,4 +7,20 @@
   <gresource prefix="/com/github/spotifygtk/SpotifyNative/icons/scalable/status">
     <file preprocess="xml-stripblanks" alias="spotifygtk-vinyl-record.svg">icons/vinyl-record.svg</file>
   </gresource>
+  <gresource prefix="/com/github/spotifygtk/SpotifyNative/theme-previews">
+    <file alias="white.svg">theme-previews/white.svg</file>
+    <file alias="milk.svg">theme-previews/milk.svg</file>
+    <file alias="dark.svg">theme-previews/dark.svg</file>
+    <file alias="dark-plus.svg">theme-previews/dark-plus.svg</file>
+  </gresource>
+  <gresource prefix="/com/github/spotifygtk/SpotifyNative/keycaps">
+    <file alias="white.svg">keycaps/white.svg</file>
+    <file alias="white-active.svg">keycaps/white-active.svg</file>
+    <file alias="milk.svg">keycaps/milk.svg</file>
+    <file alias="milk-active.svg">keycaps/milk-active.svg</file>
+    <file alias="dark.svg">keycaps/dark.svg</file>
+    <file alias="dark-active.svg">keycaps/dark-active.svg</file>
+    <file alias="dark-plus.svg">keycaps/dark-plus.svg</file>
+    <file alias="dark-plus-active.svg">keycaps/dark-plus-active.svg</file>
+  </gresource>
 </gresources>

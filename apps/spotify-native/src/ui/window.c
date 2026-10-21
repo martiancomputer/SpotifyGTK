@@ -136,6 +136,7 @@ struct _SpotifyGtkNativeWindow {
   GtkWidget *presentation_base;  /* owned across live wrapper replacement */
   GtkWidget *header_handle;
   GHashTable *held_shortcuts;
+  guint last_nonzero_volume;
   /* Every track list wired through wire_track_list(), so a liked mark can be
    * fanned out to all of them: one track can be on screen in more than one
    * list at a time. Borrowed -- the lists belong to their pages. */
@@ -4391,6 +4392,9 @@ static void
 clear_remote_playback_ui (SpotifyGtkNativeWindow *self)
 {
   self->remote_mode = FALSE;
+  if (self->player && self->playback_bar)
+    spotifygtk_playback_bar_set_volume (self->playback_bar,
+      spotifygtk_player_service_get_volume (self->player));
   g_clear_handle_id (&self->remote_progress_id, g_source_remove);
   g_clear_pointer (&self->remote_state, spotifygtk_native_connect_playback_free);
   self->remote_metadata_generation++;
@@ -4466,6 +4470,8 @@ on_connect_playback_changed (SpotifyNativeSession *session, gpointer data)
   g_clear_pointer (&self->pending_pause_uri, g_free);
   g_clear_pointer (&self->remote_state, spotifygtk_native_connect_playback_free);
   self->remote_state = state;
+  if (state->volume_percent >= 0)
+    spotifygtk_playback_bar_set_volume (self->playback_bar, state->volume_percent);
   gboolean changed = g_strcmp0 (self->current_track_uri, state->track_uri) != 0;
   g_free (self->current_track_uri);
   self->current_track_uri = g_strdup (state->track_uri);
@@ -4519,7 +4525,10 @@ on_volume_changed (SpotifyGtkPlaybackBar *bar, gint percent, gpointer user_data)
   SpotifyGtkNativeWindow *self = user_data;
   if (control_remote (self, "set_volume", percent, NULL)) return;
   spotifygtk_player_service_set_volume (self->player, percent);
+  if (percent > 0) self->last_nonzero_volume = percent;
+  spotifygtk_native_session_set_connect_volume (self->session, CLAMP (percent, 0, 100));
   spotifygtk_settings_set_volume (spotifygtk_settings_get_default (), (guint) CLAMP (percent, 0, 100));
+  broadcast_playing_uri (self);
   mpris_emit_player_changed (self, "Volume");
   (void) bar;
 }
@@ -4535,47 +4544,30 @@ on_pause_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
 }
 
 static gboolean
+dispatch_shortcut (SpotifyGtkNativeWindow *self, SpotifyGtkShortcut action);
+
+static gboolean
 on_shortcut_pressed (GtkEventControllerKey *controller, guint key, guint code,
                      GdkModifierType mods, SpotifyGtkNativeWindow *self)
 {
   (void) controller;
   if (g_object_get_data (G_OBJECT (self), "shortcut-recording")) return GDK_EVENT_PROPAGATE;
+  if (adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (self)))
+    return GDK_EVENT_PROPAGATE;
   /* Consume repeats too, so a held Space cannot toggle on every repeat or
    * fall through to a focused button after the first press. */
   gpointer identity = GUINT_TO_POINTER (code ? code : key);
   if (g_hash_table_contains (self->held_shortcuts, identity)) return GDK_EVENT_STOP;
-  if (key == GDK_KEY_F11 && !(mods & gtk_accelerator_get_default_mod_mask ())) {
-    g_hash_table_add (self->held_shortcuts, identity);
-    if (gtk_window_is_fullscreen (GTK_WINDOW (self))) gtk_window_unfullscreen (GTK_WINDOW (self));
-    else gtk_window_fullscreen (GTK_WINDOW (self));
-    return GDK_EVENT_STOP;
-  }
-  if (key == GDK_KEY_Escape && gtk_window_is_fullscreen (GTK_WINDOW (self)) &&
-      !adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (self))) {
-    gtk_window_unfullscreen (GTK_WINDOW (self));
-    return GDK_EVENT_STOP;
-  }
   GtkWidget *focus = gtk_window_get_focus (GTK_WINDOW (self));
+  if (focus && gtk_widget_get_ancestor (focus, GTK_TYPE_POPOVER)) return GDK_EVENT_PROPAGATE;
   gboolean typing = spotifygtk_shortcut_is_typing (focus);
   SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
   for (guint action = 0; action < SPOTIFYGTK_SHORTCUT_COUNT; action++) {
     if (!spotifygtk_shortcut_matches (spotifygtk_settings_get_shortcut (settings, action), key, mods)) continue;
-    if (typing && (action == SPOTIFYGTK_SHORTCUT_PLAY_PAUSE || key == GDK_KEY_space))
+    if (typing && !spotifygtk_shortcut_allowed_while_typing (action, key, mods))
       return GDK_EVENT_PROPAGATE;
     g_hash_table_add (self->held_shortcuts, identity);
-    if (action == SPOTIFYGTK_SHORTCUT_PLAY_PAUSE) {
-      if (self->remote_mode) {
-        if (self->remote_state && self->remote_state->playing) on_pause_clicked (NULL, self);
-        else on_play_clicked (NULL, self);
-      } else if (spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING &&
-          !spotifygtk_player_service_is_paused (self->player)) on_pause_clicked (NULL, self);
-      else on_play_clicked (NULL, self);
-    } else {
-      guint percent = spotifygtk_presentation_step_scale (
-        spotifygtk_settings_get_ui_scale (settings), action == SPOTIFYGTK_SHORTCUT_SCALE_UP);
-      spotifygtk_settings_set_ui_scale (settings, percent,
-        !spotifygtk_presentation_valid_scale (percent, FALSE));
-    }
+    dispatch_shortcut (self, action);
     return GDK_EVENT_STOP;
   }
   return GDK_EVENT_PROPAGATE;
@@ -4647,6 +4639,120 @@ on_prev_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
   if (control_remote (self, "skip_prev", -1, NULL)) return;
   advance_prev (self);
   (void) bar;
+}
+
+static void show_playlist_create_dialog (SpotifyGtkNativeWindow *self);
+
+static GtkWidget *
+page_search_input (GtkWidget *widget)
+{
+  if (!widget || !gtk_widget_get_visible (widget)) return NULL;
+  if (GTK_IS_SEARCH_ENTRY (widget)) return widget;
+  for (GtkWidget *child = gtk_widget_get_first_child (widget); child;
+       child = gtk_widget_get_next_sibling (child)) {
+    GtkWidget *entry = page_search_input (child);
+    if (entry) return entry;
+  }
+  return NULL;
+}
+
+static void
+shortcut_volume (SpotifyGtkNativeWindow *self, gint volume)
+{
+  volume = CLAMP (volume, 0, 100);
+  if (volume > 0) self->last_nonzero_volume = volume;
+  spotifygtk_playback_bar_set_volume (self->playback_bar, volume);
+  on_volume_changed (NULL, volume, self);
+}
+
+/* The only action/availability dispatcher. Keys and labels come from the
+ * shared registry; these callbacks reuse mouse/MPRIS/Connect action paths. */
+static gboolean
+dispatch_shortcut (SpotifyGtkNativeWindow *self, SpotifyGtkShortcut action)
+{
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  switch (action) {
+    case SPOTIFYGTK_SHORTCUT_PLAY_PAUSE:
+      if (!self->current_track_uri) return FALSE;
+      if (self->remote_mode ? (self->remote_state && self->remote_state->playing) :
+          spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_PLAYING)
+        on_pause_clicked (NULL, self);
+      else on_play_clicked (NULL, self);
+      break;
+    case SPOTIFYGTK_SHORTCUT_NEXT: on_next_clicked (NULL, self); break;
+    case SPOTIFYGTK_SHORTCUT_PREVIOUS: on_prev_clicked (NULL, self); break;
+    case SPOTIFYGTK_SHORTCUT_SEEK_FORWARD:
+    case SPOTIFYGTK_SHORTCUT_SEEK_BACKWARD: {
+      if (!self->current_track_uri || self->current_track_duration_ms <= 0 ||
+          (!self->remote_mode && !spotifygtk_player_service_is_active (self->player))) return FALSE;
+      gint64 position = CLAMP (self->last_position_ms, (gint64) 0, self->current_track_duration_ms);
+      gint64 target = action == SPOTIFYGTK_SHORTCUT_SEEK_FORWARD
+        ? position + MIN ((gint64) 10000, self->current_track_duration_ms - position)
+        : MAX ((gint64) 0, position - 10000);
+      on_seek_requested (NULL, target, self);
+      break;
+    }
+    case SPOTIFYGTK_SHORTCUT_VOLUME_UP:
+    case SPOTIFYGTK_SHORTCUT_VOLUME_DOWN:
+      shortcut_volume (self, spotifygtk_playback_bar_get_volume (self->playback_bar) +
+        (action == SPOTIFYGTK_SHORTCUT_VOLUME_UP ? 5 : -5));
+      break;
+    case SPOTIFYGTK_SHORTCUT_MUTE: {
+      gint current = spotifygtk_playback_bar_get_volume (self->playback_bar);
+      if (current > 0) self->last_nonzero_volume = current;
+      shortcut_volume (self, current ? 0 : (self->last_nonzero_volume ? self->last_nonzero_volume : 100));
+      break;
+    }
+    case SPOTIFYGTK_SHORTCUT_LIKE:
+      if (!self->current_track_uri || !self->liked_uris) return FALSE;
+      on_playback_like_toggled (NULL,
+        !g_hash_table_contains (self->liked_uris, self->current_track_uri), self);
+      break;
+    case SPOTIFYGTK_SHORTCUT_HOME: navigate_to_page (self, "home"); break;
+    case SPOTIFYGTK_SHORTCUT_SEARCH:
+      navigate_to_page (self, "search");
+      spotifygtk_search_page_focus_input (self->search_page);
+      break;
+    case SPOTIFYGTK_SHORTCUT_LIKED: navigate_to_page (self, "liked"); break;
+    case SPOTIFYGTK_SHORTCUT_LIBRARY: navigate_to_page (self, "library"); break;
+    case SPOTIFYGTK_SHORTCUT_SETTINGS: navigate_to_page (self, "settings"); break;
+    case SPOTIFYGTK_SHORTCUT_BACK: nav_go (self, -1); break;
+    case SPOTIFYGTK_SHORTCUT_FORWARD: nav_go (self, 1); break;
+    case SPOTIFYGTK_SHORTCUT_FOCUS_SEARCH: {
+      GtkWidget *entry = page_search_input (gtk_stack_get_visible_child (self->page_stack));
+      if (entry) gtk_widget_grab_focus (entry);
+      else {
+        navigate_to_page (self, "search");
+        spotifygtk_search_page_focus_input (self->search_page);
+      }
+      break;
+    }
+    case SPOTIFYGTK_SHORTCUT_QUEUE:
+    case SPOTIFYGTK_SHORTCUT_LYRICS: {
+      gboolean lyrics = action == SPOTIFYGTK_SHORTCUT_LYRICS;
+      gboolean hide = self->queue_expanded &&
+        spotifygtk_now_playing_panel_is_lyrics (self->now_playing_panel) == lyrics;
+      spotifygtk_native_window_set_queue_expanded (self, !hide);
+      if (!hide) spotifygtk_now_playing_panel_show_view (self->now_playing_panel, lyrics);
+      break;
+    }
+    case SPOTIFYGTK_SHORTCUT_DEVICES:
+      if (!self->session || spotifygtk_native_session_get_state (self->session) != SPOTIFYGTK_SESSION_READY)
+        return FALSE;
+      spotifygtk_playback_bar_open_connect_dialog (self->playback_bar);
+      break;
+    case SPOTIFYGTK_SHORTCUT_CREATE_PLAYLIST: show_playlist_create_dialog (self); break;
+    case SPOTIFYGTK_SHORTCUT_SCALE_UP:
+    case SPOTIFYGTK_SHORTCUT_SCALE_DOWN: {
+      guint percent = spotifygtk_presentation_step_scale (
+        spotifygtk_settings_get_ui_scale (settings), action == SPOTIFYGTK_SHORTCUT_SCALE_UP);
+      spotifygtk_settings_set_ui_scale (settings, percent,
+        !spotifygtk_presentation_valid_scale (percent, FALSE));
+      break;
+    }
+    default: return FALSE;
+  }
+  return TRUE;
 }
 
 /* ── MPRIS2 ───────────────────────────────────────────────────────────────
@@ -4803,7 +4909,9 @@ mpris_get_property (GDBusConnection *connection, const gchar *sender,
     if (g_str_equal (property_name, "Rate")) return g_variant_new_double (1.0);
     if (g_str_equal (property_name, "Shuffle")) return g_variant_new_boolean (self->shuffle);
     if (g_str_equal (property_name, "Metadata")) return mpris_metadata (self);
-    if (g_str_equal (property_name, "Volume")) return g_variant_new_double (spotifygtk_player_service_get_volume (self->player) / 100.0);
+    if (g_str_equal (property_name, "Volume")) return g_variant_new_double (
+      (self->remote_mode ? spotifygtk_playback_bar_get_volume (self->playback_bar) :
+       spotifygtk_player_service_get_volume (self->player)) / 100.0);
     if (g_str_equal (property_name, "Position")) return g_variant_new_int64 (MAX (self->last_position_ms, 0) * 1000);
     if (g_str_equal (property_name, "MinimumRate") || g_str_equal (property_name, "MaximumRate")) return g_variant_new_double (1.0);
     if (g_str_equal (property_name, "CanGoNext")) return g_variant_new_boolean (mpris_can_next (self));
@@ -4828,10 +4936,8 @@ mpris_set_property (GDBusConnection *connection, const gchar *sender,
     return FALSE;
   if (g_str_equal (property_name, "Volume")) {
     gint percent = (gint) CLAMP (g_variant_get_double (value) * 100.0, 0.0, 100.0);
-    if (control_remote (self, "set_volume", percent, NULL)) return TRUE;
-    spotifygtk_player_service_set_volume (self->player, percent);
     spotifygtk_playback_bar_set_volume (self->playback_bar, percent);
-    spotifygtk_settings_set_volume (spotifygtk_settings_get_default (), (guint) percent);
+    on_volume_changed (NULL, percent, self);
     mpris_emit_player_changed (self, "Volume");
     return TRUE;
   }
@@ -5305,6 +5411,7 @@ on_session_remote_command (SpotifyNativeSession *session, const gchar *endpoint,
   else if (g_strcmp0 (endpoint, "set_volume") == 0) {
     gint volume = CLAMP (value, 0, 100);
     spotifygtk_player_service_set_volume (self->player, volume);
+    spotifygtk_native_session_set_connect_volume (self->session, volume);
     spotifygtk_playback_bar_set_volume (self->playback_bar, volume);
     spotifygtk_settings_set_volume (spotifygtk_settings_get_default (), volume);
   }
@@ -6299,6 +6406,7 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
       g_strcmp0 (page_name, "search") == 0)
     gtk_root_set_focus (GTK_ROOT (self), NULL);
   spotifygtk_page_stack_show (self->page_stack, page_name);
+  spotifygtk_sidebar_select_page (self->sidebar, page_name);
   if (old_page)
     release_page_covers_after_paint (self, old_page);
 
@@ -6653,6 +6761,38 @@ static const gchar *theme_body =
   ".settings-action { background-color: @bg_selected; border-radius: 8px;"
   "  color: @fg; font-size: 12px; font-weight: 600; padding: 8px 16px; }"
   ".settings-action:hover { background-color: @pill_hover; }"
+  /* Settings kit: supplied SVG keycaps (nine-sliced to preserve the corners)
+   * with native labels, and the supplied skeletal theme panes. */
+  ".settings-island { background-color: @bg_card; border: 1px solid alpha(@fg, 0.10);"
+  "  border-radius: 16px; padding: 20px; }"
+  ".settings-island-title { color: @fg_strong; font-size: 19px; font-weight: 700; }"
+  ".settings-island separator { background-color: alpha(@fg, 0.10); min-height: 1px; }"
+  ".shortcuts-editor .dim-text { font-size: 12px; }"
+  "list.shortcuts-editor, list.shortcuts-editor > row { background: transparent; }"
+  "list.shortcuts-editor > row { padding: 0; }"
+  ".shortcut-row { padding: 4px 0; }"
+  ".shortcut-name { color: @fg_strong; font-size: 14px; font-weight: 600; }"
+  ".shortcut-record-status { color: @accent; font-size: 12px; }"
+  "button.shortcut-binding, button.shortcut-binding:hover, button.shortcut-binding:active"
+  "  { background: transparent; border: none; box-shadow: none; padding: 2px;"
+  "    min-width: 0; min-height: 0; border-radius: 11px; }"
+  "button.shortcut-binding:focus-visible { outline: 2px solid alpha(@fg, 0.45); outline-offset: 3px; }"
+  ".keycap { background-color: @keycap_bg; background-clip: padding-box; color: @fg_strong;"
+  "  border-width: 9px 6px; border-style: solid; border-color: transparent; border-radius: 15px / 18px;"
+  "  border-image-slice: 20 fill; border-image-width: 16px; border-image-repeat: stretch;"
+  "  min-width: 32px; min-height: 34px; padding: 0; font-size: 13px; font-weight: 600; }"
+  ".keycap-modifier { min-width: 56px; }"
+  ".keycap-wide { min-width: 128px; }"
+  ".keycap-glyph { font-size: 16px; }"
+  ".keycap-join { color: @fg_dim; font-size: 17px; }"
+  "button.theme-pane { background: alpha(@fg, 0.035); color: @fg;"
+  "  border: 2px solid alpha(@fg, 0.13); border-radius: 13px; box-shadow: none;"
+  "  padding: 10px; min-width: 0; min-height: 0; }"
+  "button.theme-pane:hover { background: alpha(@fg, 0.06); border-color: alpha(@fg, 0.30); }"
+  "button.theme-pane.selected { border-color: alpha(@fg, 0.65); }"
+  "button.theme-pane:focus-visible { outline: 2px solid alpha(@fg, 0.65); outline-offset: 3px; }"
+  ".theme-preview { border-radius: 7px; }"
+  ".theme-pane-label { font-size: 15px; font-weight: 600; margin: 2px 0 6px; }"
   ".now-playing-metadata link { color: @fg_dim; text-decoration: none; }"
   ".now-playing-metadata link:hover { color: @fg; text-decoration: underline; }"
 
@@ -6836,6 +6976,10 @@ static const gchar *theme_body =
 
 /* One @define-color block per theme. Dark is the shipped design, verbatim. */
 static const gchar *palette_dark =
+  "@define-color shortcut_panel #111111;"
+  ".keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/dark.svg'); }"
+  ".recording .keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/dark-active.svg'); }"
+  "@define-color keycap_bg #1d1d1d; @define-color keycap_border #595959;"
   "@define-color bg_chrome #0a0a0a;  @define-color bg_panel #0f0f0f;"
   "@define-color bg_content #121212; @define-color bg_card #1a1a1a;"
   "@define-color bg_hover #242424;   @define-color bg_hover_row #1c1c1c;"
@@ -6857,6 +7001,10 @@ static const gchar *palette_dark =
 /* Crisp white: dark ink on white, same green accent, a deeper blue selection
  * that stays legible on light. Play button / knob invert to near-black. */
 static const gchar *palette_white =
+  "@define-color shortcut_panel #ffffff;"
+  ".keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/white.svg'); }"
+  ".recording .keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/white-active.svg'); }"
+  "@define-color keycap_bg #f7f7f7; @define-color keycap_border #cacaca;"
   "@define-color bg_chrome #ffffff;  @define-color bg_panel #f6f6f6;"
   "@define-color bg_content #ffffff; @define-color bg_card #eeeeee;"
   "@define-color bg_hover #e6e6e6;   @define-color bg_hover_row #f0f0f0;"
@@ -6879,6 +7027,10 @@ static const gchar *palette_white =
  * near-black canvas and AMOLED-black side panels and chrome. Cards, hover
  * states and popovers remain distinct from both surfaces. */
 static const gchar *palette_dark_plus =
+  "@define-color shortcut_panel #0d0d0d;"
+  ".keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/dark-plus.svg'); }"
+  ".recording .keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/dark-plus-active.svg'); }"
+  "@define-color keycap_bg #151515; @define-color keycap_border #484848;"
   "@define-color bg_chrome #000000;  @define-color bg_panel #000000;"
   "@define-color bg_content #080808; @define-color bg_card #121212;"
   "@define-color bg_hover #1a1a1a;   @define-color bg_hover_row #161616;"
@@ -6900,6 +7052,10 @@ static const gchar *palette_dark_plus =
 /* Milk: a warm off-white. Same structure as White, cream-shifted, with warm
  * near-black ink so it reads softer than the crisp White theme. */
 static const gchar *palette_milk =
+  "@define-color shortcut_panel #f8f3ea;"
+  ".keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/milk.svg'); }"
+  ".recording .keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/milk-active.svg'); }"
+  "@define-color keycap_bg #f2eee6; @define-color keycap_border #c8beae;"
   "@define-color bg_chrome #f5f0e6;  @define-color bg_panel #efe9db;"
   "@define-color bg_content #faf6ee; @define-color bg_card #ece5d5;"
   "@define-color bg_hover #e6ddcc;   @define-color bg_hover_row #efe9db;"
@@ -7273,6 +7429,7 @@ spotifygtk_native_window_constructed (GObject *object)
   spotifygtk_player_service_set_local_path_resolver (
     self->player, spotifygtk_local_catalog_dup_track_path);
   self->session = spotifygtk_native_session_new ();
+  spotifygtk_native_session_set_connect_volume (self->session, spotifygtk_settings_get_volume (settings));
   self->loading_sources = g_hash_table_new (g_direct_hash, g_direct_equal);
 
   /* Seed the equaliser from the persisted settings now that the player

@@ -154,8 +154,9 @@ if get_option('tests')
   if enable_gui
     test_shortcuts = executable('test-shortcuts',
       'test_shortcuts.c', '../src/ui/shortcuts.c', '../src/ui/settings.c',
+      '../src/ui/dialog_host.c', '../src/ui/presentation_view.c',
       include_directories: [config_inc, include_directories('../src')],
-      dependencies: [gtk4_dep, adw_check, gio_dep],
+      dependencies: [gtk4_dep, adw_check, gio_dep, m_dep],
     )
     test('shortcuts', test_shortcuts)
   endif

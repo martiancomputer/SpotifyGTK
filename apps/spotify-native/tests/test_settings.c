@@ -47,6 +47,8 @@ test_online_lyrics_opt_in (void)
   spotifygtk_settings_set_volume (first, 101);
   spotifygtk_settings_flush (first);
   spotifygtk_settings_set_shortcut (first, SPOTIFYGTK_SHORTCUT_SCALE_UP, "<Control>F2");
+  spotifygtk_settings_set_shortcut (first, SPOTIFYGTK_SHORTCUT_SEARCH, "<Control>F3");
+  g_assert_cmpstr (spotifygtk_settings_get_shortcut (first, SPOTIFYGTK_SHORTCUT_SEEK_FORWARD), ==, "<Shift>Right");
   g_assert_cmpstr (spotifygtk_settings_get_shortcut (first, SPOTIFYGTK_SHORTCUT_PLAY_PAUSE), ==, "space");
   spotifygtk_settings_set_ui_scale (first, 90, FALSE);
   g_assert_cmpuint (spotifygtk_settings_get_ui_scale (first), ==, 90);
@@ -83,6 +85,9 @@ test_online_lyrics_opt_in (void)
     g_object_new (SPOTIFYGTK_TYPE_SETTINGS, NULL);
   g_assert_cmpuint (spotifygtk_settings_get_volume (second), ==, 37);
   g_assert_cmpstr (spotifygtk_settings_get_shortcut (second, SPOTIFYGTK_SHORTCUT_SCALE_UP), ==, "<Control>F2");
+  g_assert_cmpstr (spotifygtk_settings_get_shortcut (second, SPOTIFYGTK_SHORTCUT_SEARCH), ==, "<Control>F3");
+  spotifygtk_settings_set_shortcut (second, SPOTIFYGTK_SHORTCUT_SEARCH, NULL);
+  g_assert_cmpstr (spotifygtk_settings_get_shortcut (second, SPOTIFYGTK_SHORTCUT_SEARCH), ==, "<Control>2");
   spotifygtk_settings_set_shortcut (second, SPOTIFYGTK_SHORTCUT_SCALE_UP, NULL);
   spotifygtk_settings_set_volume (second, 0);
   spotifygtk_settings_flush (second);

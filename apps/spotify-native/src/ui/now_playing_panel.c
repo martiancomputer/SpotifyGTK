@@ -381,6 +381,20 @@ on_lower_view_changed (GtkStack *stack, GParamSpec *pspec,
   (void) pspec;
 }
 
+void
+spotifygtk_now_playing_panel_show_view (SpotifyGtkNowPlayingPanel *self, gboolean lyrics)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_NOW_PLAYING_PANEL (self));
+  gtk_stack_set_visible_child_name (self->content_stack, lyrics ? "lyrics" : "queue");
+}
+
+gboolean
+spotifygtk_now_playing_panel_is_lyrics (SpotifyGtkNowPlayingPanel *self)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_NOW_PLAYING_PANEL (self), FALSE);
+  return g_strcmp0 (gtk_stack_get_visible_child_name (self->content_stack), "lyrics") == 0;
+}
+
 static void
 on_lyrics_retry_clicked (GtkButton *button, gpointer user_data)
 {

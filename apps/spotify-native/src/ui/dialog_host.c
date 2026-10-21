@@ -92,6 +92,10 @@ on_dialog_escape (GtkEventControllerKey *controller, guint keyval, guint keycode
   (void) controller; (void) keycode; (void) state;
   AdwDialog *dialog = adw_application_window_get_visible_dialog (window);
   if (keyval != GDK_KEY_Escape || !dialog) return GDK_EVENT_PROPAGATE;
+  /* Let the active keybind cancel recording first, without dismissing its
+   * editor. All other modal Escape handling remains unchanged. */
+  if (g_object_get_data (G_OBJECT (window), "shortcut-recording"))
+    return GDK_EVENT_PROPAGATE;
   adw_dialog_close (dialog);
   return GDK_EVENT_STOP;
 }

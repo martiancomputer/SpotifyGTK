@@ -1,327 +1,118 @@
 # SpotifyGTK
 
-A native Spotify client for Linux and Windows, written entirely in **C** — no
-Rust, no Electron. It speaks Spotify's own protocol directly: sign-in, catalog,
-audio keys, CDN decrypt, Ogg/Vorbis playback and Spotify Connect, with a GTK4
-and libadwaita interface.
+A native Spotify player for **Linux and Windows**, written in C with GTK4 and
+libadwaita. It signs in to Spotify, browses your music and plays streams
+directly—without running Spotify's desktop app.
 
 ![License](https://img.shields.io/github/license/martiancomputer/SpotifyGTK)
 ![CI](https://github.com/martiancomputer/SpotifyGTK/actions/workflows/build.yml/badge.svg)
+[![Latest release](https://img.shields.io/github/v/release/martiancomputer/SpotifyGTK)](https://github.com/martiancomputer/SpotifyGTK/releases/latest)
 
-> **A Spotify Premium account is required.** Free accounts cannot play through
-> this client and never will — see [Requirements](#requirements).
+**Latest release: [1.1.1](https://github.com/martiancomputer/SpotifyGTK/releases/tag/v1.1.1).**
+Linux packages and a signed Windows MSIX are available.
 
----
+> Spotify streaming requires a **Premium account**. The client does not bypass
+> Spotify's account or service checks. Unofficial clients may not comply with
+> Spotify's terms; use at your own risk. SpotifyGTK is independent and is not
+> affiliated with or endorsed by Spotify AB. See [the legal notes](research/legal.md).
+
+## What works today
+
+| Area | Available features |
+|---|---|
+| **Play music** | Stream tracks from search, playlists, albums and artist radio; gapless playback, seeking, shuffle, Smart Shuffle recommendations, repeat, lyrics and a 15-band equalizer. |
+| **Browse** | Personalized Home, Search, Library, Liked Songs, album and artist pages, queue and Now Playing panel. |
+| **Manage your music** | Like tracks, save albums, follow artists, filter your library and create playlists. Official Spotify clients can transfer playback to SpotifyGTK and control it remotely via Spotify Connect. |
+| **Play local files** | Optional FFmpeg support for FLAC, Opus, WAV, M4A and AAC. Add folders in Settings; tags and embedded artwork are read by the background scanner. |
+| **Personalize** | Four themes, 25–300% interface scaling, configurable shortcuts, saved volume, audio output settings, renderer selection and artwork caching. |
+
+Local favorites and device-only playlists are stored separately from Spotify.
+Local tracks are not uploaded as Spotify tracks. Artwork and metadata caching is
+bounded; downloaded artwork is available offline.
+
+### Experimental
+
+- **High-refresh rendering:** frame-rate limits are available with the optional
+  GTK4-Enhanced runtime: Default, 30, 60, 90, 120, 144, 240 and 360 FPS. The
+  display, compositor and renderer can limit the actual presented rate.
+### Not implemented or unsupported
+
+- **Home customization:** a Settings entry is reserved for it; controls are not
+  implemented yet.
+- **Podcasts, video and promotional feed sections:** not displayed.
+- **Free-account streaming:** Spotify's service requires Premium for playback.
 
 ## Screenshots
 
 | | |
 |:---:|:---:|
-| ![Artist page, dark theme](media/01-artist-dark.png) | ![Artist page, light theme](media/02-artist-light.png) |
-| **Artist** — banner, top tracks and the full discography | **Artist, light theme** — one of four palettes |
-| ![Album page, dark theme](media/03-album-dark.png) | ![Album page, light theme](media/04-album-light.png) |
-| **Album** — save it to your library from the header | **Album, light theme** |
+| ![Artist page, dark theme](media/01-artist-dark.png) | ![Album page, dark theme](media/03-album-dark.png) |
+| **Artist** — top tracks, follow and discography | **Album** — artwork, track list and save controls |
 | ![Search results](media/05-search.png) | ![Liked Songs](media/08-liked-dark.png) |
-| **Search** — albums and tracks together | **Liked Songs** — filter as you type, sort by date, length or title |
-| ![Now Playing panel](media/06-now-playing.png) | ![Following an artist](media/07-artist-following.png) |
-| **Now Playing** — artwork and the queue | **Following** — follow and unfollow from the artist page |
+| **Search** — tracks and albums together | **Liked Songs** — filter and sort your tracks |
+| ![Now Playing panel](media/06-now-playing.png) | ![Artist page, light theme](media/02-artist-light.png) |
+| **Now Playing** — artwork, queue and lyrics | **Light theme** — artist page |
 
----
+## Download
 
-## Requirements
+Get the `.deb`, `.appimage`, Windows `.msix` and public signing certificate
+from the [1.1.1 release page](https://github.com/martiancomputer/SpotifyGTK/releases/tag/v1.1.1).
+For Windows, install the included `.cer` into **Trusted People** before the
+MSIX; follow the [Windows installation guide](apps/spotify-native-windows/INSTALL-MSIX.md).
 
-**Spotify Premium.** This is not a limitation of the client and not a missing
-feature: the audio-key exchange is gated server-side. Verified against a live
-server, a free account is refused a key for *every* file a track offers —
-OGG_VORBIS 320, 160 and 96 and AAC_24 alike — so no client-side change reaches
-playback. `librespot` has required Premium for the same reason since 2015.
+On first launch, sign in through the browser. The login credential is stored
+locally and reused on later starts.
 
-**Support for free accounts will not be added.** There is nothing to add.
+## Build from source
 
-**Use at your own risk, with your own account.** This is a client for music you
-already hold a licence to stream. Connecting to Spotify's service with
-unofficial software is likely outside their Terms of Service; account
-suspension is the realistic consequence and is accepted knowingly by whoever
-runs it. Nothing here bypasses a Premium or licensing check, and this is not a
-downloader. See [research/legal.md](research/legal.md) for the full position.
+Source builds target GTK 4.22.4 and libadwaita 1.9.0 or newer. Ubuntu 24.04's
+defaults are older; older libraries can be allowed with `-Dallow_old_gtk=true`
+and `-Dallow_old_libadwaita=true`, but the layout may differ. Release packages
+include the pinned GTK runtime.
 
----
-
-## Building
-
-```bash
-cd apps/spotify-native
-meson setup build --native-file build-profiles/stable.ini
-ninja -C build
-./build/src/spotify-native
-```
-
-`--native-file build-profiles/nightly.ini` swaps in the newer audio backend
-(PipeWire). `-Denable_gui=false` builds the engine and CLI harness without GTK.
-For performance investigations, `-Dverbose_logging=true` compiles in catalog
-timings, cover-cache ownership snapshots, page diagnostics, and a five-second
-process-memory sample tagged with the visible page; normal builds omit that
-timer and logging overhead.
-
-Local-file playback uses FFmpeg's `libavformat`, `libavcodec`, `libavutil`,
-and `libswresample` development libraries. Developer builds detect these
-automatically; use `-Dlocal_playback=enabled` to require them or `disabled` to
-omit local decoding. Release packaging requires them so a missing build
-dependency cannot silently produce an app without local playback.
-
-Linux release packages use the staged `dependencies/gtk4-enhanced` runtime.
-AppImage packaging explicitly deploys those libraries and verifies GTK's ELF
-build ID against the staged fork, including after the final deployment step.
-It does not force X11 or a GTK theme over the application's normal choices.
-
-**Dependencies**
-
-```bash
-# Debian / Ubuntu 24.04+
-sudo apt install meson ninja-build pkg-config libglib2.0-dev libsoup-3.0-dev \
-                 libjson-glib-dev libgtk-4-dev libadwaita-1-dev libogg-dev \
-                 libvorbis-dev libssl-dev libpulse-dev libasound2-dev
-
-# Fedora
-sudo dnf install meson ninja-build pkg-config glib2-devel libsoup3-devel \
-                 json-glib-devel gtk4-devel libadwaita-devel libogg-devel \
-                 libvorbis-devel openssl-devel pulseaudio-libs-devel \
-                 alsa-lib-devel
-
-# Arch
-sudo pacman -S meson glib2 libsoup3 json-glib gtk4 libadwaita libogg \
-               libvorbis openssl libpulse alsa-lib
-```
-
-Add `libpipewire-0.3-dev` / `pipewire-devel` / `pipewire` for the nightly track.
-The interface is laid out against GTK 4.22.4 and libadwaita 1.9.0. Older
-distribution packages, including Ubuntu 24.04's defaults, can still build with
-`-Dallow_old_gtk=true`, but widget sizing and spacing may differ.
-
-First run opens a browser to authorise your account; the token is stored
-locally and reused.
-
-Building on **Windows** is a different set of steps —
-see [apps/spotify-native-windows/README.md](apps/spotify-native-windows/README.md#building-and-running-it-on-windows).
-
----
-
-## What works
-
-Playback is gapless, seekable, and survives a dropped connection. Search, Liked
-Songs, playlists, albums and artist pages all load over the native protocol.
-You can like tracks, save albums, follow artists, and create and delete
-playlists. There is a 15-band equaliser, an optional resampler, shuffle and
-repeat.
-
-The Library separates saved Albums, EPs and Singles from followed Artists, with
-local filtering across every view. Release artwork and artist portraits use the
-shared bounded disk cache, while artist names and portrait mappings persist as
-small metadata indexes. The card grids are virtualised so off-screen artwork is
-not retained merely because it exists in the library.
-
-Spotify Connect is integrated into the native player. SpotifyGTK appears as an
-available device in official Spotify clients, accepts playback transfer and
-remote play, pause, seek, previous and next commands, and yields audio when a
-different device takes ownership. Track, play state and elapsed-position
-updates stay synchronized with other Spotify clients and with Spotify-linked
-Discord activity.
-
-Search returns up to 150 ranked tracks. Starting a search result builds a song
-radio queue instead of walking down the result list; radio expands and
-deduplicates recommendations up to a 200-track target. Playlist, album, Liked
-Songs and artist contexts retain their natural order and ordinary shuffle
-behavior.
-
-Home displays Spotify's personalised music feed in a responsive dashboard:
-compact "Jump back in" tiles with separate play actions, a new-release or
-recommendation shelf, and shortcuts to your rotation, local collection and
-recently liked songs. Remaining music shelves retain Spotify's supplied order.
-Albums, artists, playlists and tracks open through the existing navigation and
-playback controls. Home customization is reserved in Settings but is not yet
-available. Bounded, account-scoped snapshots provide
-cached names and artwork while refreshing; a failed refresh leaves the last
-loaded feed visible with a Retry action. Only music sections are displayed;
-podcast, video, promotion and other unsupported sections are omitted.
-
-Smart Shuffle is Connect-aware: official clients can enable it, SpotifyGTK
-fetches and interleaves song-radio recommendations, and disabling it restores
-the original sequential queue rather than leaving recommendations behind.
-
-Local files can be added from Settings when the app is built with FFmpeg
-development libraries. The background scanner reads FLAC, Opus, WAV, M4A and
-AAC files from the selected folders, uses their tags and embedded artwork, and
-shows local albums alongside saved Spotify releases in Library. Local track
-identities survive renames and moves on the same filesystem. Files that go
-missing are omitted from playback until they return.
-
-Liked Songs combines Spotify likes with a separate, persistent set of local
-favorites. Device-only playlists can contain local and Spotify tracks, and
-local tracks can also be added to a Spotify playlist as a device-only overlay.
-Their order is retained on this device; local entries are never uploaded to
-Spotify. Local and Spotify tracks can share the client queue. Explicit queue
-additions remain in place when Smart Shuffle changes the Spotify context, and
-Smart Shuffle is unavailable for contexts containing local tracks. A Spotify
-sequence interrupted by local playback resumes afterward.
-
-Previously loaded Spotify album and playlist tracks can remain browsable from
-the in-memory session cache after sign-out. Trying to play a Spotify track
-while signed out displays a dismissible sign-in banner and leaves local
-playback and the queue alone. You can sign in again without restarting or
-stopping local playback. Sign-out offers the choice to clear Spotify's cached
-media and metadata or keep them; local artwork, indexes, favorites and
-device-only playlists are kept either way.
-
-Settings include compact or expanded album and playlist pages, a page
-crossfade switch, and adjustable mouse-wheel smoothness. Audio output can be
-set to Default, 44.1, 48, 96, 192 or 384 kHz, with 16, 24 or 32-bit PCM
-containers and either a polyphase or linear resampler. Spotify's current
-decoder produces 16-bit audio, so a wider output container does not restore
-precision already lost in decoding. Local `.lrc` lyrics work without a
-network lookup; optional LRCLIB lookup is off by default.
-
-The interface includes a slim app-wide loading indicator and selectable GTK
-renderers—Automatic, Vulkan, OpenGL and Cairo—from Settings. Renderer changes
-take effect after restarting the app; an explicit `GSK_RENDERER` environment
-value still takes precedence for debugging. Four palettes are included: Dark,
-White, Milk and the near-black Dark+. Media controls can show artwork
-everywhere, restrict it to Now Playing, or disable it; persistent caching and
-aggressive bounded loading can be switched or cleared live. Settings also shows
-the signed-in display name, account id, product tier and avatar.
-
-On Linux and Windows, Settings → Interface offers live interface scaling: Default,
-Custom, 25%, 50%, 75%, 90%, 100%, 150% or 300%. Custom scale accepts whole percentages
-from 25% through 300%, applied with the Apply button. Scaling changes text,
-artwork, spacing and controls together, relative to the desktop's existing
-scale. Overflow uses overlay scrollbars without wrapping the whole application
-in a scrolling viewport. Default and 100% use the original native widget
-hierarchy, with no scaling wrapper. The artwork viewer still fits its image to
-the window. Interface also contains a keybind manager for increasing scale,
-decreasing scale, and play/pause. Click an action's shortcut, then press its new
-combination; Escape cancels, and conflicts are rejected. Defaults are Ctrl++
-(Ctrl+= and keypad + also work), Ctrl+-, and Space. Scaling steps by ten
-percentage points within 25–300%. Play/pause does not steal input from text boxes;
-otherwise it takes priority over focused buttons and sliders. F11
-toggles fullscreen; Escape leaves fullscreen when no dialog is open.
-
-Volume uses the existing perceptual curve, native slider dragging, one-percent
-arrow steps and ten-percent page steps. It is saved to the same settings INI
-after a brief debounce and flushed when the window closes, including mute.
-Narrow windows automatically hide side panes to fit snapped/tiled layouts.
-Windows packages load the bundled Adwaita Sans interface faces explicitly into
-Pango, with Noto Sans for the platform's default font and bundled fallbacks.
-
-Frame-rate choices (Default, 30, 60, 120, 144, 240 and 360 FPS) remain stored,
-but the control is disabled on stock GTK. With the optional GTK4-Enhanced
-runtime it enables an experimental per-window GDK rendering ceiling. Default
-uses upstream pacing; explicit values never force redraws or bypass vsync.
-The compositor and display can impose a lower presented rate. There is no
-app-side snapshot cache, frame-skipping workaround, or redraw timer. Both
-preferences survive restart. Enhanced Windows tester packages also enable the
-frame-rate control. See the
-[Windows enhanced-GTK packaging guide](apps/spotify-native-windows/ENHANCED-GTK.md).
-
-### Optional enhanced GTK experiment (Linux)
-
-The pinned `dependencies/gtk4-enhanced` submodule follows GTK 4.24.1. This updates
-GTK rather than downgrading libadwaita; host libadwaita remains in use. Install
-the fork's documented build dependencies (including GLib 2.89.3+, Pango 1.58+,
-GLib development tools and SassC) before building:
+Building from source also needs GLib, libsoup, JSON-GLib, Ogg/Vorbis, OpenSSL
+and an audio output development package. FFmpeg development libraries enable
+local-file playback. This package list is for Ubuntu 26.04 or newer:
 
 ```sh
-git submodule update --init dependencies/gtk4-enhanced
-./packaging/build-enhanced-gtk.sh
-./packaging/run-enhanced-gtk.sh
+sudo apt install build-essential meson ninja-build pkg-config \
+  libglib2.0-dev libsoup-3.0-dev libjson-glib-dev libgtk-4-dev \
+  libadwaita-1-dev libogg-dev libvorbis-dev libssl-dev \
+  libpulse-dev libasound2-dev libavformat-dev libavcodec-dev \
+  libavutil-dev libswresample-dev
 ```
 
-The script builds GTK first into `_stage/gtk4-enhanced/usr`, then reconfigures
-and builds the normal client in `apps/spotify-native/build`. It clears cached
-dependency resolution so an existing stock-GTK build switches to the fork,
-uses release optimization with verbose diagnostics disabled, and embeds the
-staged library's runtime search path. Existing desktop launchers therefore use
-the enhanced runtime without pointing to a separate application build directory.
-System libraries remain unchanged. The release workflow uses this fork for
-Linux packages and the separate UCRT64 cross-build for Windows packages.
-Close the running client before switching runtimes.
-
-To switch the same build directory back to stock GTK, clear its dependency
-cache and remove the staged runtime search path, then rebuild:
+Then, from the repository root:
 
 ```sh
-env -u PKG_CONFIG_PATH -u LD_LIBRARY_PATH meson setup --reconfigure --clearcache \
-  apps/spotify-native/build apps/spotify-native -Dc_link_args=[]
+meson setup apps/spotify-native/build apps/spotify-native \
+  --native-file apps/spotify-native/build-profiles/stable.ini
 meson compile -C apps/spotify-native/build
+meson test -C apps/spotify-native/build --print-errorlogs
+apps/spotify-native/build/src/spotify-native
 ```
 
-Advanced local builds can override `GTK_ENHANCED_SOURCE`,
-`GTK_ENHANCED_BUILD`, `GTK_ENHANCED_PREFIX`, `GTK_CONSUMER_BUILD` and
-`GTK_BUILD_JOBS`. `GTK_ENHANCED_NATIVE_FILE` selects local Meson tooling;
-never commit that machine-specific file. Reuse the same prefix/build overrides
-with the launch script. Generated build paths are local artifacts, not public
-project configuration. Introspection generation is disabled for this C-only
-experiment; this is not a general-purpose GTK distribution package.
+`-Dlocal_playback=enabled` requires FFmpeg; `-Dlocal_playback=disabled` omits
+local decoding. Release builds require FFmpeg so local playback is not silently
+left out. For PipeWire, use `build-profiles/nightly.ini`. Interface shortcuts
+include Ctrl++/Ctrl+- for scaling and Space for play/pause (Space is ignored
+while typing in a text field).
 
-Inspect `ldd apps/spotify-native/build/src/spotify-native` and the live
-process's loaded-library map to confirm the fork is actually loaded. A submodule
-or a selected FPS number alone is not evidence of runtime use or physical
-120/144/240/360 Hz presentation. No transparency implementation is included.
+For the optional Linux frame-rate experiment, see
+[`packaging/build-enhanced-gtk.sh`](packaging/build-enhanced-gtk.sh) and the
+[performance notes](research/internals.md).
 
-Windows is supported and plays through WASAPI — sign-in, streaming and
-playback are all verified on real hardware. Build it with
-[the Windows instructions](apps/spotify-native-windows/README.md#building-and-running-it-on-windows),
-which are step-by-step from installing MSYS2 onwards.
+Windows uses the same native source with its own toolchain and packaging steps;
+see the [Windows build guide](apps/spotify-native-windows/README.md). The Linux
+release packages and Windows MSIX include the pinned GTK4-Enhanced runtime.
 
-Per-subsystem status, architecture and measured performance live in
-[research/internals.md](research/internals.md).
+## Project details
 
----
+SpotifyGTK is licensed under [GPL-3.0](LICENSE), with an attribution requirement
+described in the license. See [third-party notices](THIRD_PARTY_LICENSES) for
+upstream code and protocol references. Architecture and protocol research are
+in [project internals](research/internals.md).
 
-## Repository layout
-
-```
-apps/spotify-connect/   Web API control client (HTTP + JSON only) -- own README
-apps/spotify-native/    The player: protocol, audio engine, GTK4 interface
-apps/spotify-native-windows/   Windows toolchain and packaging
-dependencies/gtk4-enhanced/    Optional pinned GTK source fork (Linux experiment)
-research/               Protocol findings, internals, legal position
-```
-
-The two apps are separate because their dependencies are: the control client is
-HTTP and JSON and will run on a microcontroller, while the player needs a decode
-pipeline and a sound server. Splitting them keeps each one's dependency list to
-what it actually uses.
-
----
-
-## Contributing
-
-Findings ported into `apps/spotify-native/src/spotify/` should note the upstream
-file they came from — see `THIRD_PARTY_LICENSES`.
-
-Run the tests with `meson test -C build --print-errorlogs`. Development
-switches, the roadmap and the design principles are in
-[research/internals.md](research/internals.md).
-
-If you run into a bug, lag, or other unexpected behavior, please [open an
-issue](https://github.com/martiancomputer/SpotifyGTK/issues). Include steps to
-reproduce it, your operating system and build profile, and any relevant logs
-after checking them for account details or other private information.
-
----
-
-## License
-
-**GNU General Public License v3.0** — see [LICENSE](LICENSE).
-
-One additional term, under GPLv3 Section 7(b): redistributions and works based
-on this one must keep the attribution and link back to
-<https://github.com/martiancomputer/SpotifyGTK> in their documentation and
-credits. That is an attribution requirement, not a restriction — every freedom
-the GPL grants still applies.
-
-Portions of `apps/spotify-native` are ported from or reference
-[`librespot`](https://github.com/librespot-org/librespot) and the `shannon`
-crate it depends on (both MIT) — see `THIRD_PARTY_LICENSES` for attribution.
-
-SpotifyGTK is an independent open-source project, not affiliated with or
-endorsed by Spotify AB. "Spotify" is a trademark of Spotify AB.
+Found a bug? [Open an issue](https://github.com/martiancomputer/SpotifyGTK/issues)
+with reproduction steps, your operating system and build type. Check logs for
+account information before sharing them.

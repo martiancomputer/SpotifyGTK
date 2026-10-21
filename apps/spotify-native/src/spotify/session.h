@@ -106,6 +106,8 @@ void spotifygtk_native_session_start (SpotifyNativeSession *self);
 /* Whether the server's last answer named this device the active one. A device
  * that has been refused should not be taking orders about what to play. */
 gboolean spotifygtk_native_session_connect_is_active (SpotifyNativeSession *self);
+/* Local output gain to advertise to controllers; does not change ownership. */
+void spotifygtk_native_session_set_connect_volume (SpotifyNativeSession *self, guint percent);
 
 /* A Spotify Connect output available to the signed-in account. */
 typedef struct _SpotifyNativeConnectDevice {
@@ -115,6 +117,7 @@ typedef struct _SpotifyNativeConnectDevice {
   gboolean active;
   gboolean restricted;
   gboolean local;
+  gint volume_percent; /* -1 when absent from the device snapshot */
 } SpotifyNativeConnectDevice;
 
 void spotifygtk_native_connect_device_free (SpotifyNativeConnectDevice *device);
@@ -128,6 +131,7 @@ typedef struct {
   gint64 observed_at_ms;
   gboolean remote;
   gboolean playing;
+  gint volume_percent;
 } SpotifyNativeConnectPlayback;
 void spotifygtk_native_connect_playback_free (SpotifyNativeConnectPlayback *playback);
 SpotifyNativeConnectPlayback *spotifygtk_native_session_dup_connect_playback (SpotifyNativeSession *self);
