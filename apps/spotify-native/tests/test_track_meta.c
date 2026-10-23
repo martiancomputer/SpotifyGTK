@@ -276,12 +276,28 @@ test_album_and_artist_uris (void)
   pb_write_message_field (track, 4, artist2->data, artist2->len);
   g_byte_array_free (artist2, TRUE);
 
+  GByteArray *artist3 = build_named_submessage ("Guest, Ensemble & Co.");
+  pb_write_bytes_field (artist3, 1, album_gid, sizeof album_gid);
+  pb_write_message_field (track, 4, artist3->data, artist3->len);
+  g_byte_array_free (artist3, TRUE);
+
   SpotifyTrackMeta meta;
   g_assert_true (spotifygtk_track_meta_parse (track->data, track->len, &meta));
 
   g_assert_cmpstr (meta.album_uri,  ==, "spotify:album:000syw7rIjXKeGogUSqgWP");
   g_assert_cmpstr (meta.artist_uri, ==, "spotify:artist:6rSlp8ANBNnZysgkI3JVSL");
-  g_assert_cmpstr (meta.artist_names, ==, "Primary, Featuring");
+  g_assert_cmpstr (meta.artist_names, ==, "Primary, Featuring, Guest, Ensemble & Co.");
+  g_assert_cmpuint (g_variant_n_children (meta.artist_credits), ==, 3);
+  const gchar *name, *uri;
+  g_variant_get_child (meta.artist_credits, 0, "(&s&s)", &name, &uri);
+  g_assert_cmpstr (name, ==, "Primary");
+  g_assert_cmpstr (uri, ==, meta.artist_uri);
+  g_variant_get_child (meta.artist_credits, 1, "(&s&s)", &name, &uri);
+  g_assert_cmpstr (name, ==, "Featuring");
+  g_assert_cmpstr (uri, ==, "");
+  g_variant_get_child (meta.artist_credits, 2, "(&s&s)", &name, &uri);
+  g_assert_cmpstr (name, ==, "Guest, Ensemble & Co.");
+  g_assert_cmpstr (uri, ==, "spotify:artist:000syw7rIjXKeGogUSqgWP");
 
   spotifygtk_track_meta_clear (&meta);
   g_byte_array_free (track, TRUE);

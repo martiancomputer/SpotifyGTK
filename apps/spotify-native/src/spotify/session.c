@@ -130,6 +130,7 @@ spotifygtk_native_track_free (SpotifyNativeTrack *track)
   g_free (track->cover_id_small);
   g_free (track->album_uri);
   g_free (track->artist_uri);
+  g_clear_pointer (&track->artist_credits, g_variant_unref);
   g_free (track->section_title);
   g_free (track->section_detail);
   g_free (track);
@@ -155,6 +156,7 @@ spotifygtk_native_track_copy (const SpotifyNativeTrack *track)
   copy->release_year = track->release_year;
   copy->album_uri   = g_strdup (track->album_uri);
   copy->artist_uri  = g_strdup (track->artist_uri);
+  copy->artist_credits = track->artist_credits ? g_variant_ref (track->artist_credits) : NULL;
   copy->section_title = g_strdup (track->section_title);
   copy->section_detail = g_strdup (track->section_detail);
   return copy;
@@ -3472,6 +3474,7 @@ on_batch_metadata (const SpclientTrackInfo *tracks, guint n_tracks,
     track->cover_id_small = g_strdup (info->meta.cover_id_small);
     track->album_uri   = g_strdup (info->meta.album_uri);
     track->artist_uri  = g_strdup (info->meta.artist_uri);
+    track->artist_credits = info->meta.artist_credits ? g_variant_ref (info->meta.artist_credits) : NULL;
     track->release_year = info->meta.release_year;
 
     g_ptr_array_add (out, track);
@@ -3940,6 +3943,7 @@ on_disco_tracks (const SpclientTrackInfo *tracks, guint n_tracks,
     t->cover_id_small = g_strdup (info->meta.cover_id_small);
     t->album_uri      = g_strdup (info->meta.album_uri ? info->meta.album_uri : owner->uri);
     t->artist_uri     = g_strdup (info->meta.artist_uri);
+    t->artist_credits = info->meta.artist_credits ? g_variant_ref (info->meta.artist_credits) : NULL;
     t->release_year   = info->meta.release_year ? info->meta.release_year : owner->year;
 
     g_ptr_array_add (owner->tracks, t);

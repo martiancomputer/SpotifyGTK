@@ -30,6 +30,7 @@ spotifygtk_track_item_finalize (GObject *object)
   g_clear_pointer (&self->track.cover_id_small, g_ref_string_release);
   g_clear_pointer (&self->track.album_uri, g_ref_string_release);
   g_clear_pointer (&self->track.artist_uri, g_ref_string_release);
+  g_clear_pointer (&self->track.artist_credits, g_variant_unref);
   g_clear_pointer (&self->track.section_title, g_ref_string_release);
   g_clear_pointer (&self->track.section_detail, g_ref_string_release);
   G_OBJECT_CLASS (spotifygtk_track_item_parent_class)->finalize (object);
@@ -70,6 +71,7 @@ spotifygtk_track_item_new (const SpotifyNativeTrack *track, guint number)
   self->track.cover_id_small = track->cover_id_small ? g_ref_string_new_intern (track->cover_id_small) : NULL;
   self->track.album_uri   = track->album_uri ? g_ref_string_new_intern (track->album_uri) : NULL;
   self->track.artist_uri  = track->artist_uri ? g_ref_string_new_intern (track->artist_uri) : NULL;
+  self->track.artist_credits = track->artist_credits ? g_variant_ref (track->artist_credits) : NULL;
   self->track.release_year = track->release_year;
   self->track.section_title = track->section_title ? g_ref_string_new_intern (track->section_title) : NULL;
   self->track.section_detail = track->section_detail ? g_ref_string_new_intern (track->section_detail) : NULL;

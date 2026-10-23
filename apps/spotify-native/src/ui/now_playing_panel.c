@@ -191,7 +191,20 @@ on_metadata_link (GtkLabel *label, const gchar *link, gpointer data)
 {
   SpotifyGtkNowPlayingPanel *self = data;
   const SpotifyNativeTrack *track = self->navigation_track;
-  if (!track || (!g_str_equal (link, "artist") && !g_str_equal (link, "album")))
+  if (!track)
+    return TRUE;
+  if (g_str_has_prefix (link, "artist:")) {
+    guint64 index;
+    gsize count = track->artist_credits ? g_variant_n_children (track->artist_credits) : 0;
+    if (!count || !g_ascii_string_to_unsigned (link + 7, 10, 0, count - 1, &index, NULL))
+      return TRUE;
+    const gchar *name, *uri;
+    g_variant_get_child (track->artist_credits, index, "(&s&s)", &name, &uri);
+    if (g_str_has_prefix (uri, "spotify:artist:") && spotifygtk_home_uri_supported (uri))
+      g_signal_emit (self, signals[CONTEXT_REQUESTED], 0, uri, name, "Artist");
+    return TRUE;
+  }
+  if (!g_str_equal (link, "artist") && !g_str_equal (link, "album"))
     return TRUE;
   gboolean artist = g_str_equal (link, "artist");
   const gchar *uri = artist ? track->artist_uri : track->album_uri;
@@ -735,11 +748,33 @@ spotifygtk_now_playing_panel_set_navigation_track (SpotifyGtkNowPlayingPanel *se
      g_str_has_prefix (track->album_uri, "local:album:"));
   if (!artist) g_clear_pointer (&self->navigation_track->artist_uri, g_free);
   if (!album) g_clear_pointer (&self->navigation_track->album_uri, g_free);
-  g_autofree gchar *a = g_markup_escape_text (track->artists ?: "", -1);
   g_autofree gchar *b = g_markup_escape_text (track->album ?: "", -1);
-  g_autofree gchar *artist_text = artist ? g_strdup_printf ("<a href=\"artist\">%s</a>", a) : g_strdup (a);
+  g_autoptr(GString) artist_text = g_string_new (NULL);
+  gsize count = track->artist_credits ? g_variant_n_children (track->artist_credits) : 0;
+  for (gsize i = 0; i < count; i++) {
+    const gchar *name, *uri;
+    g_variant_get_child (track->artist_credits, i, "(&s&s)", &name, &uri);
+    g_autofree gchar *escaped = g_markup_escape_text (name, -1);
+    if (i) g_string_append (artist_text, ", ");
+    if (g_str_has_prefix (uri, "spotify:artist:") && spotifygtk_home_uri_supported (uri))
+      g_string_append_printf (artist_text, "<a href=\"artist:%" G_GSIZE_FORMAT "\">%s</a>", i, escaped);
+    else
+      g_string_append (artist_text, escaped);
+  }
+  if (!count) {
+    /* Older snapshots know only the primary URI. Do not make other names
+     * clickable with that same target while waiting for fresh metadata. */
+    const gchar *names = track->artists ?: "";
+    const gchar *sep = strstr (names, ", ");
+    g_autofree gchar *primary = g_markup_escape_text (names, sep ? sep - names : -1);
+    g_autofree gchar *rest = g_markup_escape_text (sep ?: "", -1);
+    if (artist)
+      g_string_append_printf (artist_text, "<a href=\"artist\">%s</a>%s", primary, rest);
+    else
+      g_string_append_printf (artist_text, "%s%s", primary, rest);
+  }
   g_autofree gchar *album_text = album ? g_strdup_printf ("<a href=\"album\">%s</a>", b) : g_strdup (b);
-  g_autofree gchar *markup = g_strdup_printf ("%s • %s", artist_text, album_text);
+  g_autofree gchar *markup = g_strdup_printf ("%s • %s", artist_text->str, album_text);
   gtk_label_set_markup (self->artist_label, markup);
 }
 

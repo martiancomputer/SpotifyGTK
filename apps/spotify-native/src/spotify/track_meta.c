@@ -412,6 +412,8 @@ spotifygtk_track_meta_parse (const guint8     *track_data,
     return FALSE;
 
   GPtrArray *artists = g_ptr_array_new_with_free_func (g_free);
+  g_auto(GVariantBuilder) credits;
+  g_variant_builder_init (&credits, G_VARIANT_TYPE ("a(ss)"));
 
   gsize        pos = 0;
   guint32      field_num;
@@ -450,11 +452,19 @@ spotifygtk_track_meta_parse (const guint8     *track_data,
       /* Repeated: every occurrence is one artist, in order. */
       if (wire_type == PB_WIRE_LENGTH_DELIMITED) {
         gchar *artist = dup_name_from_submessage (field_data, field_len);
-        if (artist)
+        if (artist && !g_utf8_validate (artist, -1, NULL)) {
+          gchar *valid = g_utf8_make_valid (artist, -1);
+          g_free (artist);
+          artist = valid;
+        }
+        g_autofree gchar *uri = dup_uri_from_submessage (field_data, field_len, "artist");
+        if (artist) {
+          g_variant_builder_add (&credits, "(ss)", artist, uri ? uri : "");
           g_ptr_array_add (artists, artist);
+        }
         /* "Go to Artist" navigates to the primary (first) artist only. */
         if (!out->artist_uri)
-          out->artist_uri = dup_uri_from_submessage (field_data, field_len, "artist");
+          out->artist_uri = g_strdup (uri);
       }
       break;
 
@@ -488,6 +498,7 @@ spotifygtk_track_meta_parse (const guint8     *track_data,
   }
 
   if (artists->len > 0) {
+    out->artist_credits = g_variant_ref_sink (g_variant_builder_end (&credits));
     g_ptr_array_add (artists, NULL);   /* NULL-terminate for g_strjoinv */
     out->artist_names = g_strjoinv (", ", (gchar **) artists->pdata);
   }
@@ -509,6 +520,7 @@ spotifygtk_track_meta_clear (SpotifyTrackMeta *meta)
   g_clear_pointer (&meta->cover_id_small, g_free);
   g_clear_pointer (&meta->album_uri, g_free);
   g_clear_pointer (&meta->artist_uri, g_free);
+  g_clear_pointer (&meta->artist_credits, g_variant_unref);
   meta->release_year = 0;
   meta->duration_ms = 0;
   meta->is_explicit = FALSE;

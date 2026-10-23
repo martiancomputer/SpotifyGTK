@@ -9,6 +9,7 @@ void spotifygtk_native_track_free (SpotifyNativeTrack *t)
   g_free (t->uri); g_free (t->name); g_free (t->artists); g_free (t->album);
   g_free (t->cover_id); g_free (t->cover_id_small); g_free (t->album_uri);
   g_free (t->artist_uri); g_free (t->section_title); g_free (t->section_detail);
+  g_clear_pointer (&t->artist_credits, g_variant_unref);
   g_free (t);
 }
 void spotifygtk_native_release_free (SpotifyNativeRelease *r)
@@ -100,11 +101,13 @@ static void test_revision (void)
 }
 static void test_snapshots (void)
 {
+  g_autoptr(GVariant) credits = g_variant_ref_sink (g_variant_new_parsed (
+    "[('Artist', 'spotify:artist:fixture'), ('Guest, Ensemble', 'spotify:artist:guest')]"));
   SpotifyNativeTrack t = { .uri = "spotify:track:fixture", .name = "Fixture",
     .artists = "Artist", .album = "Album", .duration_ms = 123456,
     .is_explicit = TRUE, .cover_id = "large", .cover_id_small = "small",
     .artist_uri = "spotify:artist:fixture", .album_uri = "spotify:album:fixture",
-    .release_year = 2026 };
+    .release_year = 2026, .artist_credits = credits };
   g_autoptr(GPtrArray) tracks = g_ptr_array_new ();
   g_ptr_array_add (tracks, &t);
   g_ptr_array_add (tracks, &t); /* preserve duplicate recordings/order */
@@ -117,6 +120,7 @@ static void test_snapshots (void)
   g_assert_cmpint (out->duration_ms, ==, t.duration_ms);
   g_assert_true (out->is_explicit);
   g_assert_cmpstr (out->cover_id_small, ==, "small");
+  g_assert_true (g_variant_equal (out->artist_credits, credits));
   SpotifyNativeRelease r = { .uri = "spotify:album:fixture", .name = "Album",
     .cover_id = "art", .year = 2026, .type = SPOTIFY_ALBUM_TYPE_ALBUM,
     .tracks = tracks };
@@ -129,6 +133,31 @@ static void test_snapshots (void)
   g_assert_cmpstr (release->name, ==, "Album");
   g_assert_cmpuint (release->tracks->len, ==, 2);
   g_assert_cmpint (release->year, ==, 2026);
+  g_assert_true (g_variant_equal (
+    ((SpotifyNativeTrack *) release->tracks->pdata[0])->artist_credits, credits));
+
+  /* Existing offline snapshots retain their metadata across the upgrade. */
+  GVariantBuilder legacy;
+  g_variant_builder_init (&legacy, G_VARIANT_TYPE ("a(ssssxbssssi)"));
+  g_variant_builder_add (&legacy, "(ssssxbssssi)", t.uri, t.name,
+    t.artists, t.album, t.duration_ms, t.is_explicit, t.cover_id,
+    t.cover_id_small, t.album_uri, t.artist_uri, t.release_year);
+  g_autoptr(GVariant) legacy_value = g_variant_ref_sink (g_variant_builder_end (&legacy));
+  g_autoptr(GBytes) legacy_bytes = g_variant_get_data_as_bytes (legacy_value);
+  g_autoptr(GPtrArray) legacy_tracks = spotifygtk_catalog_tracks_unpack (legacy_bytes);
+  g_assert_nonnull (legacy_tracks);
+  g_assert_cmpstr (((SpotifyNativeTrack *) legacy_tracks->pdata[0])->artist_uri, ==, t.artist_uri);
+
+  GVariantBuilder legacy_releases;
+  g_variant_builder_init (&legacy_releases, G_VARIANT_TYPE ("a(sssiia(ssssxbssssi))"));
+  g_variant_builder_add (&legacy_releases, "(sssii@a(ssssxbssssi))",
+    r.uri, r.name, r.cover_id, r.year, (gint) r.type, legacy_value);
+  g_autoptr(GVariant) legacy_releases_value = g_variant_ref_sink (
+    g_variant_builder_end (&legacy_releases));
+  g_autoptr(GBytes) legacy_release_bytes = g_variant_get_data_as_bytes (legacy_releases_value);
+  g_autoptr(GPtrArray) legacy_release_copy = spotifygtk_catalog_releases_unpack (legacy_release_bytes);
+  g_assert_nonnull (legacy_release_copy);
+  g_assert_cmpuint (((SpotifyNativeRelease *) legacy_release_copy->pdata[0])->tracks->len, ==, 1);
 }
 static void test_corrupt (void)
 {

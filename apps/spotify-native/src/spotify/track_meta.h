@@ -60,6 +60,7 @@ typedef struct {
    * "Go to Album" / "Go to Artist". */
   gchar   *album_uri;    /* spotify:album:<id>  — NULL if absent */
   gchar   *artist_uri;   /* spotify:artist:<id> — NULL if absent (first artist) */
+  GVariant *artist_credits; /* immutable a(ss): ordered (name, URI) pairs */
 
   /* Album cover, as lowercase hex of the largest advertised Image.file_id
    * in Track.album.cover_group. NULL when the album carries no artwork.

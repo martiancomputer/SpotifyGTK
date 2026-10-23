@@ -13,6 +13,8 @@ static SpotifyNativeTrack *source_track (void)
   track->cover_id_small = g_strdup ("small-cover");
   track->album_uri = g_strdup ("spotify:album:fixture");
   track->artist_uri = g_strdup ("spotify:artist:fixture");
+  track->artist_credits = g_variant_ref_sink (g_variant_new_parsed (
+    "[('Artist fixture', 'spotify:artist:fixture'), ('Guest', 'spotify:artist:guest')]"));
   track->section_title = g_strdup ("Release fixture");
   track->section_detail = g_strdup ("2026");
   track->duration_ms = 225000;
@@ -29,6 +31,7 @@ static void source_free (SpotifyNativeTrack *track)
   g_free (track->artists); g_free (track->album);
   g_free (track->cover_id); g_free (track->cover_id_small);
   g_free (track->album_uri); g_free (track->artist_uri);
+  g_variant_unref (track->artist_credits);
   g_free (track->section_title); g_free (track->section_detail);
   memset (track, 0xa5, sizeof *track);
   g_free (track);
@@ -37,6 +40,7 @@ static void source_free (SpotifyNativeTrack *track)
 static void assert_metadata (SpotifyGtkTrackItem *item)
 {
   const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (item);
+  g_assert_cmpuint (g_variant_n_children (track->artist_credits), ==, 2);
   g_assert_cmpstr (track->uri, ==, "spotify:track:fixture");
   g_assert_cmpstr (track->name, ==, "Track fixture");
   g_assert_cmpstr (track->artists, ==, "Artist fixture");
