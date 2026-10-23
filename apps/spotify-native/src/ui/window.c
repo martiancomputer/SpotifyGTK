@@ -6863,6 +6863,8 @@ static const gchar *theme_body =
   "scale slider { background-color: @knob; min-width: 12px;"
   "  min-height: 12px; border-radius: 6px; margin: 0; }"
   "scale:disabled slider { background-color: @knob_muted; }"
+  /* Hide only the seek thumb's paint; retain its geometry and drag target. */
+  ".seek-scale slider { opacity: 0; }"
   ".volume-scale { padding: 8px 4px; }"
   ".volume-scale slider { min-width: 14px; min-height: 14px; border-radius: 7px;"
   " margin: -5px 0; padding: 0; border: 0; box-shadow: none; }"

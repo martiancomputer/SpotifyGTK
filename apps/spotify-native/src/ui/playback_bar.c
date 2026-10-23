@@ -890,6 +890,7 @@ build_centre_column (SpotifyGtkPlaybackBar *self)
   self->progress_scale = GTK_SCALE (gtk_scale_new_with_range (GTK_ORIENTATION_HORIZONTAL,
                                                               0.0, 1.0, 0.001));
   gtk_scale_set_draw_value (self->progress_scale, FALSE);
+  gtk_widget_add_css_class (GTK_WIDGET (self->progress_scale), "seek-scale");
   gtk_widget_set_size_request (GTK_WIDGET (self->progress_scale), 160, -1);
   gtk_widget_set_hexpand (GTK_WIDGET (self->progress_scale), TRUE);
   gtk_widget_set_valign (GTK_WIDGET (self->progress_scale), GTK_ALIGN_CENTER);
