@@ -22,6 +22,7 @@
 #include "cover_loader.h"
 #include "track_item.h"
 #include "smooth_scroll.h"
+#include "layout_policy.h"
 #include "spotify/track_meta.h"
 #include <math.h>
 
@@ -359,13 +360,10 @@ update_velocity_overscan (gpointer user_data)
   guint ahead = OVERSCAN_BASE_AHEAD + velocity_rows;
   gboolean upwards = self->scroll_velocity < 0;
   guint destination_first = visible_first;
-  guint destination_last = visible_last;
 
   /* Wheel scrolling is deliberately eased, so adjustment deltas describe the
    * animation's current slow frame rather than where the gesture is going.
-   * Use the smooth scroller's destination to warm the complete path to its
-   * landing viewport.  The current visible range remains the anchor below;
-   * this only grows the leading edge and can never discard an on-screen row.
+   * Use its destination to extend bounded read-ahead from the current viewport.
    * Touchpads, scrollbar drags and keyboard scrolling have no smooth target
    * and continue through the velocity estimator above. */
   gdouble smooth_target = value;
@@ -381,27 +379,16 @@ update_velocity_overscan (gpointer user_data)
   if (smooth_active) {
     gdouble target_delta = smooth_target - value;
     destination_first = MIN ((guint) (smooth_target / row_extent), n - 1);
-    destination_last = MIN (
-      destination_first + (visible_last - visible_first), n - 1);
-    /* The destination, not every row between here and there, is what must be
-     * warm when the eased wheel animation lands. Growing one contiguous range
-     * from the current viewport to the target decoded hundreds of transient
-     * covers during a long gesture and permanently raised allocator/renderer
-     * high-water memory. */
     ahead = OVERSCAN_BASE_AHEAD;
     if (fabs (target_delta) > 0.5)
       upwards = target_delta < 0.0;
   }
 
-  guint first = smooth_active ? destination_first : visible_first;
-  guint last = smooth_active ? destination_last : visible_last;
-  if (upwards) {
-    first = first > ahead ? first - ahead : 0;
-    last = MIN (last + OVERSCAN_TRAILING, n - 1);
-  } else {
-    first = first > OVERSCAN_TRAILING ? first - OVERSCAN_TRAILING : 0;
-    last = MIN (last + ahead, n - 1);
-  }
+  SpotifyGtkArtworkWindow window = spotifygtk_layout_artwork_window (
+    n, visible_first, visible_last, destination_first, ahead,
+    OVERSCAN_MAX_AHEAD, OVERSCAN_TRAILING, upwards);
+  guint first = window.first;
+  guint last = window.last;
 
   if (started_us) {
     self->trace_visible_first = visible_first + prefix;
@@ -423,24 +410,19 @@ update_velocity_overscan (gpointer user_data)
   self->overscan_first = first + prefix;
   self->overscan_last = last + prefix;
 
-  /* Every request has a row owner and therefore a cancellable. GtkListView
-   * binds around 200 rows here, comfortably covering the maximum window; do
-   * not manufacture ownerless prefetch requests for positions outside it. */
+  /* Requests belong to bound rows and are cancelled when those rows leave
+   * the bounded window. The window never assumes a particular GTK pool size. */
   for (guint i = 0; i < self->bound_rows->len; i++) {
     SpotifyGtkTrackRow *row = g_ptr_array_index (self->bound_rows, i);
     guint position = GPOINTER_TO_UINT (
       g_object_get_data (G_OBJECT (row), "row-position"));
     gboolean destination = position_in_overscan (self, position);
-    /* During eased wheel motion, keep artwork that is already on the current
-     * viewport until it leaves, but never start a decode merely because a
-     * transient row passed under the viewport. New work belongs exclusively
-     * to the landing window computed above. */
+    /* Allocated visible rows remain eligible during smooth motion too, even
+     * if GTK's measured geometry differs slightly from the model estimate. */
     gboolean allocated = geometry_trusted && !destination &&
       row_in_allocated_viewport (self, GTK_WIDGET (row));
-    gboolean load_visible = allocated && !smooth_active;
-    gboolean current_and_shown = allocated &&
-      spotifygtk_track_row_has_cover (row);
-    gboolean retain = destination || load_visible || current_and_shown;
+    gboolean load_visible = allocated;
+    gboolean retain = destination || load_visible;
     guint previous = GPOINTER_TO_UINT (
       g_object_get_data (G_OBJECT (row), "overscan-retained"));
     if (previous == (retain ? 2u : 1u)) {
@@ -1040,9 +1022,13 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     g_object_set_data (G_OBJECT (row), "play-connected", GINT_TO_POINTER (1));
   }
 
-  /* The adjustment update owns the range pass. New rows inside that range
-   * have already been allowed through set_native_track above; forcing another
-   * pass per bind caused heavy upward-scroll churn. */
+  /* GTK can bind after the adjustment pass. Reconcile once after the binding
+   * batch, even if the numeric window is unchanged. The idle is coalesced,
+   * rather than running a range scan synchronously for every recycled row. */
+  if (self->velocity_overscan) {
+    self->overscan_reconcile = TRUE;
+    schedule_velocity_overscan (self);
+  }
 
   (void) factory;
 }
