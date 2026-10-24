@@ -20,6 +20,7 @@
 #include <libsoup/soup.h>
 
 #include "settings.h"
+#include "layout_policy.h"
 #include "local_catalog.h"
 #include "../log_file.h"
 #include "../log_verbose.h"
@@ -466,6 +467,10 @@ static struct {
   guint  metered;       /* fetches with usable metrics */
   guint  dropped;       /* queued, then every waiter went away before its turn */
   guint  peak_queue;
+  guint  decode_profiled;
+  gint64 worker_us;
+  gint64 dispatch_us;
+  gint64 worst_dispatch_us;
 } cover_stats;
 
 /*
@@ -703,6 +708,13 @@ spotifygtk_cover_log_stats (const gchar *context)
                cover_stats.transfer_us / 1000.0 / cover_stats.metered,
                cover_stats.metered);
   }
+  if (cover_stats.decode_profiled > 0)
+    g_message ("cover decode profile: %u completed; worker avg %.2fms; "
+               "delivery wait avg %.2fms, max %.2fms",
+               cover_stats.decode_profiled,
+               cover_stats.worker_us / 1000.0 / cover_stats.decode_profiled,
+               cover_stats.dispatch_us / 1000.0 / cover_stats.decode_profiled,
+               cover_stats.worst_dispatch_us / 1000.0);
 }
 
 static gboolean cover_deferred = FALSE;
@@ -895,6 +907,22 @@ read_local_cover_bounded (const gchar *path)
   return g_byte_array_free_to_bytes (bytes);
 }
 
+typedef struct {
+  gint64 started_us;
+  gint64 finished_us;
+} DecodeProfile;
+
+static void
+attach_decode_profile (GTask *task)
+{
+  static gsize mode;
+  if (g_once_init_enter (&mode))
+    g_once_init_leave (&mode, g_getenv ("SPOTIFY_COVER_STATS") ? 2 : 1);
+  if (mode == 2)
+    g_object_set_data_full (G_OBJECT (task), "decode-profile",
+                            g_new0 (DecodeProfile, 1), g_free);
+}
+
 /* Runs on a worker thread: decode the JPEG at the target size and build a
  * texture. Doing this here rather than in the soup callback is what keeps a
  * scroll smooth -- decoding on the main thread blocked a frame per cover, so
@@ -903,6 +931,8 @@ read_local_cover_bounded (const gchar *path)
 static void
 decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable *cancellable)
 {
+  DecodeProfile *profile = g_object_get_data (G_OBJECT (task), "decode-profile");
+  if (profile) profile->started_us = g_get_monotonic_time ();
   GBytes *bytes = task_data;
   const gchar *write_id = g_object_get_data (G_OBJECT (task), "cache-write-id");
   if (bytes && write_id)
@@ -1034,6 +1064,7 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
   GdkTexture *texture = gdk_memory_texture_new (
     w, h, GDK_MEMORY_R8G8B8A8, pixels, rowstride);
 
+  if (profile) profile->finished_us = g_get_monotonic_time ();
   g_task_return_pointer (task, texture, g_object_unref);
   (void) source; (void) cancellable;
 }
@@ -1045,6 +1076,14 @@ on_cover_decoded (GObject *source, GAsyncResult *result, gpointer user_data)
   g_autofree gchar *cache_key = user_data;
   g_autoptr(GError) error = NULL;
   g_autoptr(GdkTexture) texture = g_task_propagate_pointer (G_TASK (result), &error);
+  DecodeProfile *profile = g_object_get_data (G_OBJECT (result), "decode-profile");
+  if (profile && profile->finished_us) {
+    gint64 wait_us = g_get_monotonic_time () - profile->finished_us;
+    cover_stats.decode_profiled++;
+    cover_stats.worker_us += profile->finished_us - profile->started_us;
+    cover_stats.dispatch_us += wait_us;
+    cover_stats.worst_dispatch_us = MAX (cover_stats.worst_dispatch_us, wait_us);
+  }
   gboolean disk = g_object_get_data (G_OBJECT (result), "disk-source") != NULL;
   if (disk) cover_disk_active--; else cover_active--;
   if (g_object_get_data (G_OBJECT (result), "cache-only")) {
@@ -1111,7 +1150,8 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback,
   if (disk_path) {
     cover_stats.disk_hits++;
     GTask *task = g_task_new (NULL, NULL, on_cover_decoded, g_strdup (cache_key));
-    g_task_set_priority (task, playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW);
+    attach_decode_profile (task);
+    g_task_set_priority (task, playback ? G_PRIORITY_HIGH : SPOTIFYGTK_ARTWORK_PRIORITY);
     gint64 *decode_start = g_new (gint64, 1);
     *decode_start = g_get_monotonic_time ();
     g_object_set_data_full (G_OBJECT (task), "decode-start-us",
@@ -1150,7 +1190,7 @@ issue_fetch (const gchar *cache_key, gint target_px, gboolean playback,
   soup_message_add_flags (msg, SOUP_MESSAGE_COLLECT_METRICS);
   fetch->message = g_object_ref (msg);
   soup_session_send_async (cover_session, msg,
-                                    playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW,
+                                    playback ? G_PRIORITY_HIGH : SPOTIFYGTK_ARTWORK_PRIORITY,
                                     NULL,
                                     on_cover_fetched, fetch);
   g_object_unref (msg);
@@ -1218,11 +1258,12 @@ finish_cover_fetch (FetchClosure *fetch, GBytes *bytes, GError *error)
   /* Decode off the main thread. The bytes and target size ride along; the
    * key is the callback's user_data. */
   GTask *task = g_task_new (NULL, NULL, on_cover_decoded, cache_key);
+  attach_decode_profile (task);
   /* Keep successfully downloaded bytes even if the row left the viewport,
    * but avoid decoding pixels nobody will display. */
   if (waiters_all_cancelled (cache_key))
     g_object_set_data (G_OBJECT (task), "cache-only", GINT_TO_POINTER (1));
-  g_task_set_priority (task, fetch->playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW);
+  g_task_set_priority (task, fetch->playback ? G_PRIORITY_HIGH : SPOTIFYGTK_ARTWORK_PRIORITY);
   /* Carried on the task rather than accumulated in decode_in_thread: that runs
    * on a worker and every other counter here is written from the main thread,
    * so timing it from both ends of the hop keeps the whole struct single
@@ -1280,7 +1321,7 @@ static void
 cover_read_next (FetchClosure *fetch)
 {
   g_input_stream_read_bytes_async (fetch->stream, 65536,
-    fetch->playback ? G_PRIORITY_HIGH : G_PRIORITY_LOW, NULL, on_cover_chunk, fetch);
+    fetch->playback ? G_PRIORITY_HIGH : SPOTIFYGTK_ARTWORK_PRIORITY, NULL, on_cover_chunk, fetch);
 }
 
 static void

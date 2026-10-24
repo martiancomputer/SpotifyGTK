@@ -86,6 +86,8 @@ struct _SpotifyGtkTrackList {
   gint64         trace_max_adjustment_gap_us;
   gint64         trace_overscan_us;
   gint64         trace_max_overscan_us;
+  gint64         trace_scan_scheduled_us;
+  gint64         trace_max_scan_wait_us;
   guint          trace_adjustments;
   guint          trace_binds;
   guint          trace_unbinds;
@@ -165,6 +167,7 @@ trace_scroll_begin (SpotifyGtkTrackList *self, gint64 now)
   self->trace_max_adjustment_gap_us = 0;
   self->trace_overscan_us = 0;
   self->trace_max_overscan_us = 0;
+  self->trace_max_scan_wait_us = 0;
   self->trace_adjustments = 0;
   self->trace_binds = 0;
   self->trace_unbinds = 0;
@@ -218,7 +221,7 @@ trace_scroll_end (SpotifyGtkTrackList *self)
   g_message ("track-list-profile: duration=%.1fms model=%u bound=%u"
              " bound-peak=%u binds=%u unbinds=%u adjustments=%u"
              " max-adjustment-gap=%.1fms overscan-runs=%u"
-             " overscan-total=%.1fms overscan-max=%.1fms"
+             " overscan-total=%.1fms overscan-max=%.1fms scan-wait-max=%.1fms"
              " visible=%u..%u window=%u..%u smooth-target=%s"
              " cover-retry-calls=%u cover-release-calls=%u"
              " covers-shown=%u hover-in=%u hover-out=%u",
@@ -228,6 +231,7 @@ trace_scroll_end (SpotifyGtkTrackList *self)
              self->trace_max_adjustment_gap_us / 1000.0,
              self->trace_overscan_runs, self->trace_overscan_us / 1000.0,
              self->trace_max_overscan_us / 1000.0,
+             self->trace_max_scan_wait_us / 1000.0,
              self->trace_visible_first, self->trace_visible_last,
              self->trace_window_first, self->trace_window_last,
              self->trace_smooth_target ? "yes" : "no",
@@ -267,8 +271,12 @@ header_prefix_len (SpotifyGtkTrackList *self)
 static void
 schedule_velocity_overscan (SpotifyGtkTrackList *self)
 {
-  if (self->velocity_overscan && self->overscan_idle_id == 0)
-    self->overscan_idle_id = g_idle_add (update_velocity_overscan, self);
+  if (self->velocity_overscan && self->overscan_idle_id == 0) {
+    if (self->trace_scroll)
+      self->trace_scan_scheduled_us = g_get_monotonic_time ();
+    self->overscan_idle_id = g_idle_add_full (SPOTIFYGTK_ARTWORK_PRIORITY,
+                                             update_velocity_overscan, self, NULL);
+  }
 }
 
 static gboolean
@@ -288,6 +296,11 @@ update_velocity_overscan (gpointer user_data)
 {
   SpotifyGtkTrackList *self = user_data;
   self->overscan_idle_id = 0;
+  if (self->trace_scroll && self->trace_scan_scheduled_us) {
+    self->trace_max_scan_wait_us = MAX (self->trace_max_scan_wait_us,
+      g_get_monotonic_time () - self->trace_scan_scheduled_us);
+    self->trace_scan_scheduled_us = 0;
+  }
   gint64 started_us = self->trace_scroll && self->trace_started_us
     ? g_get_monotonic_time () : 0;
   if (started_us)

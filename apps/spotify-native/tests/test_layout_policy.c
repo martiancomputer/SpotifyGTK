@@ -86,6 +86,49 @@ static void test_artwork_window_bounds (void)
   g_assert_cmpuint (single.last, ==, 0);
 }
 
+static gboolean count_redraw (gpointer data)
+{
+  (*(guint *) data)++;
+  return G_SOURCE_CONTINUE;
+}
+
+static gboolean count_artwork (gpointer data)
+{
+  (*(guint *) data)++;
+  return G_SOURCE_REMOVE;
+}
+
+static guint dispatch_artwork_under_redraw (gint priority)
+{
+  g_autoptr(GMainContext) context = g_main_context_new ();
+  g_autoptr(GSource) redraw = g_idle_source_new ();
+  guint redraws = 0, deliveries = 0;
+  /* Model a renderer which remains ready throughout a busy scroll. No GTK
+   * display, automated input or real rendering is involved. */
+  g_source_set_priority (redraw, G_PRIORITY_HIGH_IDLE + 20);
+  g_source_set_callback (redraw, count_redraw, &redraws, NULL);
+  g_source_attach (redraw, context);
+  for (guint i = 0; i < 2; i++) {
+    g_autoptr(GSource) artwork = g_idle_source_new ();
+    g_source_set_priority (artwork, priority);
+    g_source_set_callback (artwork, count_artwork, &deliveries, NULL);
+    g_source_attach (artwork, context);
+  }
+  for (guint i = 0; i < 64; i++)
+    g_main_context_iteration (context, FALSE);
+  g_source_destroy (redraw);
+  g_assert_cmpuint (redraws, >, 0);
+  return deliveries;
+}
+
+static void test_artwork_dispatch_under_redraw (void)
+{
+  /* Both former priorities can leave work ready but undispatched forever. */
+  g_assert_cmpuint (dispatch_artwork_under_redraw (G_PRIORITY_DEFAULT_IDLE), ==, 0);
+  g_assert_cmpuint (dispatch_artwork_under_redraw (G_PRIORITY_LOW), ==, 0);
+  g_assert_cmpuint (dispatch_artwork_under_redraw (SPOTIFYGTK_ARTWORK_PRIORITY), ==, 2);
+}
+
 int main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
@@ -94,5 +137,6 @@ int main (int argc, char **argv)
   g_test_add_func ("/layout/chrome-accounting", test_chrome_accounting);
   g_test_add_func ("/layout/artwork-read-ahead", test_artwork_read_ahead);
   g_test_add_func ("/layout/artwork-window-bounds", test_artwork_window_bounds);
+  g_test_add_func ("/layout/artwork-dispatch-under-redraw", test_artwork_dispatch_under_redraw);
   return g_test_run ();
 }

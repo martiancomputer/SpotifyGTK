@@ -2,6 +2,10 @@
 
 #include <glib.h>
 
+/* Viewport scans and cover delivery must run before idle redraw sources.
+ * Sustained rendering can otherwise starve even an already-decoded image. */
+#define SPOTIFYGTK_ARTWORK_PRIORITY G_PRIORITY_DEFAULT
+
 typedef struct {
   guint first;
   guint last; /* inclusive */
