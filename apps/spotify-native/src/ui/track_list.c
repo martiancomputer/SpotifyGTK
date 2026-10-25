@@ -32,6 +32,7 @@ struct _SpotifyGtkTrackList {
   GtkLabel    *status;
   SpotifyGtkTrackSectionFunc section_factory;
   gpointer section_data;
+  gboolean sectioned;
   GtkListView *list;
   GListStore  *store;
   GtkWidget   *page_header; /* owned; first virtual item scrolls with rows */
@@ -127,6 +128,7 @@ struct _SpotifyGtkTrackList {
 #define OVERSCAN_TRAILING   16
 #define OVERSCAN_HORIZON_S  0.12
 #define PAGE_HEADER_PLACEHOLDER_URI "spotifygtk:page-header"
+#define SECTION_HEADER_PLACEHOLDER_URI "spotifygtk:section-header"
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list, GTK_TYPE_BOX)
 
@@ -246,6 +248,44 @@ static gboolean
 is_page_header_placeholder (const SpotifyNativeTrack *track)
 {
   return track && g_strcmp0 (track->uri, PAGE_HEADER_PLACEHOLDER_URI) == 0;
+}
+
+static gboolean
+is_section_header_placeholder (const SpotifyNativeTrack *track)
+{
+  return track && g_strcmp0 (track->uri, SECTION_HEADER_PLACEHOLDER_URI) == 0;
+}
+
+/* Grouping belongs to this view, never to a playable track passed to another
+ * page, the queue or Liked Songs. Preserve the separate device-only marker. */
+static SpotifyGtkTrackItem *
+playable_item_new (const SpotifyNativeTrack *track, guint number)
+{
+  SpotifyNativeTrack playable = *track;
+  playable.section_title = NULL;
+  if (track->section_title)
+    playable.section_detail = NULL;
+  return spotifygtk_track_item_new (&playable, number);
+}
+
+static GtkWidget *
+section_heading_new (const SpotifyNativeTrack *track)
+{
+  GtkWidget *header = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_margin_top (header, 18);
+  GtkWidget *title = gtk_label_new (track->section_title);
+  gtk_widget_set_margin_start (title, 8);
+  gtk_widget_add_css_class (title, "section-heading");
+  gtk_label_set_xalign (GTK_LABEL (title), 0);
+  gtk_label_set_ellipsize (GTK_LABEL (title), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand (title, TRUE);
+  gtk_box_append (GTK_BOX (header), title);
+  GtkWidget *detail = gtk_label_new (track->section_detail);
+  gtk_widget_set_margin_end (detail, 8);
+  gtk_widget_add_css_class (detail, "dim-text");
+  gtk_widget_set_valign (detail, GTK_ALIGN_END);
+  gtk_box_append (GTK_BOX (header), detail);
+  return header;
 }
 
 static void
@@ -582,6 +622,7 @@ on_scroll_settled (gpointer user_data)
          * instead both downloaded the 640px original for a 96px thumbnail and
          * cached it under a key no row would ever look up, so the read-ahead
          * cost the most and bought nothing. */
+        if (!t || is_section_header_placeholder (t)) continue;
         const gchar *pre = t->cover_id_small ? t->cover_id_small : t->cover_id;
         if (t && pre)
           spotifygtk_cover_prefetch (pre, 96);
@@ -668,7 +709,7 @@ is_context_result (const SpotifyNativeTrack *track)
 static void
 activate_result (SpotifyGtkTrackList *self, const SpotifyNativeTrack *track)
 {
-  if (!track || is_page_header_placeholder (track))
+  if (!track || is_page_header_placeholder (track) || is_section_header_placeholder (track))
     return;
   g_signal_emit (self,
     signals[is_context_result (track) ? CONTEXT_ACTIVATED : TRACK_ACTIVATED],
@@ -840,7 +881,7 @@ on_list_item_position (GObject *object, GParamSpec *pspec, gpointer user_data)
 
   if (self->numbered && SPOTIFYGTK_IS_TRACK_ROW (child))
     spotifygtk_track_row_set_number (SPOTIFYGTK_TRACK_ROW (child),
-      self->section_factory && gtk_list_item_get_item (list_item)
+      self->sectioned && gtk_list_item_get_item (list_item)
       ? (gint) spotifygtk_track_item_get_number (gtk_list_item_get_item (list_item))
       : (gint) gtk_list_item_get_position (list_item) + 1 -
       (gint) header_prefix_len (self));
@@ -947,6 +988,21 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
       gtk_widget_add_css_class (header_row, "page-header-row");
     return;
   }
+  const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (item);
+  if (is_section_header_placeholder (track)) {
+    GtkWidget *header = self->section_factory
+      ? self->section_factory (track, self->section_data) : NULL;
+    if (!header) header = section_heading_new (track);
+    gtk_widget_set_margin_start (header, self->row_margin_start);
+    gtk_widget_set_margin_end (header, self->row_margin_end);
+    gtk_list_item_set_focusable (list_item, FALSE);
+    gtk_list_item_set_activatable (list_item, FALSE);
+    gtk_list_item_set_selectable (list_item, FALSE);
+    gtk_list_item_set_child (list_item, header);
+    GtkWidget *container = gtk_widget_get_parent (header);
+    if (container) gtk_widget_add_css_class (container, "section-header-row");
+    return;
+  }
   gtk_list_item_set_focusable (list_item, TRUE);
   gtk_list_item_set_activatable (list_item, TRUE);
   /* This view uses GtkNoSelection. In single-click mode GTK otherwise
@@ -986,20 +1042,10 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
 
   spotifygtk_track_row_set_native_track (row,
     spotifygtk_track_item_get_track (item), 0);
-  spotifygtk_track_row_set_section_widget (row, self->section_factory
-    ? self->section_factory (spotifygtk_track_item_get_track (item), self->section_data)
-    : NULL);
-  GtkWidget *container = gtk_widget_get_parent (GTK_WIDGET (row));
-  if (container) {
-    if (gtk_widget_has_css_class (GTK_WIDGET (row), "release-track-row"))
-      gtk_widget_add_css_class (container, "compound-track-item");
-    else
-      gtk_widget_remove_css_class (container, "compound-track-item");
-  }
   spotifygtk_track_row_set_show_album (row, self->show_album);
   spotifygtk_track_row_set_show_type (row, self->show_type);
   spotifygtk_track_row_set_number (row,
-    self->numbered ? (self->section_factory
+    self->numbered ? (self->sectioned
       ? (gint) spotifygtk_track_item_get_number (item)
       : (gint) position + 1 - (gint) header_prefix_len (self)) : 0);
 
@@ -1053,6 +1099,16 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
   SpotifyGtkTrackRow  *row  = g_object_get_data (G_OBJECT (list_item), "track-row");
   SpotifyGtkTrackItem *item = gtk_list_item_get_item (list_item);
 
+  if (item && is_section_header_placeholder (spotifygtk_track_item_get_track (item))) {
+    GtkWidget *header = gtk_list_item_get_child (list_item);
+    GtkWidget *container = header ? gtk_widget_get_parent (header) : NULL;
+    if (container) gtk_widget_remove_css_class (container, "section-header-row");
+    /* This also releases artwork and adjustment handlers owned by a release
+     * header, independently of whichever track row is recycled next. */
+    gtk_list_item_set_child (list_item, NULL);
+    return;
+  }
+
   if (item && is_page_header_placeholder (spotifygtk_track_item_get_track (item))) {
     GtkWidget *header_row = gtk_widget_get_parent (self->page_header);
     if (header_row)
@@ -1067,9 +1123,6 @@ factory_unbind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer us
   g_object_set_data (G_OBJECT (row), "changed-handler", NULL);
   g_object_set_data (G_OBJECT (row), "bound-item", NULL);
   g_object_set_data (G_OBJECT (row), "overscan-retained", NULL);
-  spotifygtk_track_row_set_section_widget (row, NULL);
-  GtkWidget *container = gtk_widget_get_parent (GTK_WIDGET (row));
-  if (container) gtk_widget_remove_css_class (container, "compound-track-item");
   if (self->velocity_overscan)
     spotifygtk_track_row_release_cover (row);
   g_ptr_array_remove_fast (self->bound_rows, row);
@@ -1089,6 +1142,7 @@ spotifygtk_track_list_set_section_factory (SpotifyGtkTrackList *self,
 {
   self->section_factory = fn;
   self->section_data = user_data;
+  self->sectioned = TRUE;
 }
 
 /* === Activation === */
@@ -1449,7 +1503,7 @@ spotifygtk_track_list_insert_native_track (SpotifyGtkTrackList      *self,
 
   /* The number is set from the position on bind, so the value passed here is
    * only a placeholder. */
-  g_autoptr(SpotifyGtkTrackItem) item = spotifygtk_track_item_new (track, position + 1);
+  g_autoptr(SpotifyGtkTrackItem) item = playable_item_new (track, position + 1);
   g_list_store_insert (self->store, position, item);
 
   spotifygtk_track_list_set_status (self, NULL);
@@ -1789,10 +1843,19 @@ spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *t
     const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
     if (!track || !track->uri)
       continue;
-    if (self->section_factory && track->section_title) section_number = 0;
+    if (self->sectioned && track->section_title && *track->section_title) {
+      SpotifyNativeTrack header = {
+        .uri = SECTION_HEADER_PLACEHOLDER_URI,
+        .album_uri = track->album_uri,
+        .section_title = track->section_title,
+        .section_detail = track->section_detail,
+      };
+      g_ptr_array_add (items, spotifygtk_track_item_new (&header, 0));
+      section_number = 0;
+    }
     section_number++;
-    guint number = self->section_factory ? section_number : items->len + 1;
-    g_ptr_array_add (items, spotifygtk_track_item_new (track, number));
+    guint number = self->sectioned ? section_number : items->len + 1;
+    g_ptr_array_add (items, playable_item_new (track, number));
   }
 
   gint64 splice_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;
@@ -1931,7 +1994,8 @@ spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self)
     g_autoptr(SpotifyGtkTrackItem) item =
       g_list_model_get_item (G_LIST_MODEL (self->store), i);
     const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (item);
-    if (!is_page_header_placeholder (track) && !is_context_result (track))
+    if (!is_page_header_placeholder (track) && !is_section_header_placeholder (track) &&
+        !is_context_result (track))
       g_ptr_array_add (out, spotifygtk_native_track_copy (track));
   }
 

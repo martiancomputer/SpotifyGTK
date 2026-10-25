@@ -6729,18 +6729,14 @@ static const gchar *theme_body =
   "  transition: background-color 120ms ease; }"
   ".list-row:hover { background-color: @bg_hover_row; }"
   ".list-row:selected { background-color: @bg_selected_row; }"
-  /* A virtualized release header shares an item with its first track.
-   * Never paint the GtkListView item's full (header + track) hover rectangle. */
-  ".track-listview > row.compound-track-item,"
-  " .track-listview > row.compound-track-item:hover,"
-  " .track-listview > row.compound-track-item:active,"
-  " .track-listview > row.compound-track-item:selected"
-  " { background: transparent; box-shadow: none; padding: 0; }"
-  /* Match Adwaita's ordinary row padding and hover exactly, but apply them
-   * only to the track surface, not to its preceding release header. */
-  ".release-track-row > .track-body { border-radius: 0; padding: 2px; }"
-  ".release-track-row > .track-body:hover"
-  " { background-color: color-mix(in srgb, currentColor 4%, transparent); }"
+  /* Release headings are independent non-playable items. Real tracks use
+   * the ordinary list-row interaction surface, including the first track. */
+  ".track-listview > row.section-header-row,"
+  " .track-listview > row.section-header-row:hover,"
+  " .track-listview > row.section-header-row:active,"
+  " .track-listview > row.section-header-row:selected"
+  " { background: transparent; border: none; box-shadow: none;"
+  "   padding: 0; outline: none; }"
   ".art-thumb { background-color: @art_bg; border-radius: 6px;"
   "  color: @art_glyph; }"
   ".art-large { background-color: @art_bg; border-radius: 12px;"

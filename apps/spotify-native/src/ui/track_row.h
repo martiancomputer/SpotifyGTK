@@ -94,8 +94,4 @@ const gchar *spotifygtk_track_row_get_id (SpotifyGtkTrackRow *self);
  * - album-activated (const gchar *album_id)
  */
 
-/* Optional virtualized release header; owned by the row until replaced. */
-void spotifygtk_track_row_set_section_widget (SpotifyGtkTrackRow *self,
-                                               GtkWidget *header);
-
 G_END_DECLS

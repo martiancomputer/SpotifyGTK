@@ -23,7 +23,9 @@ G_DECLARE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list,
 /* Borrow the shared set of liked URIs. Not copied -- consulted on bind. */
 typedef GtkWidget *(*SpotifyGtkTrackSectionFunc) (const SpotifyNativeTrack *track,
                                                    gpointer user_data);
-/* Configure before replacing the model. Headers live only with pooled rows. */
+/* Enable section headings before replacing the model. Each heading is its own
+ * non-playable virtual item; NULL uses a compact text heading. Custom widgets
+ * exist only while their header item is bound, never inside a track row. */
 void spotifygtk_track_list_set_section_factory (SpotifyGtkTrackList *self,
                                                 SpotifyGtkTrackSectionFunc fn,
                                                 gpointer user_data);

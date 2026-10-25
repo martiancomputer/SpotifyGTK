@@ -2,6 +2,7 @@
  * authentication, or a window session. All persistent state is temporary. */
 #include "../src/ui/window.c"
 #include "../src/ui/artwork_viewer.h"
+#include "../src/ui/track_row.h"
 
 static void
 settle (void)
@@ -866,6 +867,24 @@ test_artist_release_layout (void)
   settle ();
   GtkWidget *header = find_class (GTK_WIDGET (page), "artist-release-header");
   g_assert_nonnull (header);
+  g_assert_null (gtk_widget_get_ancestor (header, SPOTIFYGTK_TYPE_TRACK_ROW));
+  GtkListView *release_view = GTK_LIST_VIEW (gtk_widget_get_ancestor (header, GTK_TYPE_LIST_VIEW));
+  GtkSelectionModel *model = gtk_list_view_get_model (release_view);
+  g_assert_cmpuint (g_list_model_get_n_items (G_LIST_MODEL (model)), ==, 6);
+  SpotifyGtkTrackList *release_list = SPOTIFYGTK_TRACK_LIST (
+    gtk_widget_get_ancestor (header, SPOTIFYGTK_TYPE_TRACK_LIST));
+  g_autoptr(GPtrArray) playable = spotifygtk_track_list_snapshot (release_list);
+  g_assert_cmpuint (playable->len, ==, 4);
+  for (guint i = 0; i < playable->len; i++) {
+    const SpotifyNativeTrack *track = g_ptr_array_index (playable, i);
+    g_assert_true (g_str_has_prefix (track->uri, "spotify:track:"));
+    g_assert_null (track->section_title);
+    g_assert_null (track->section_detail);
+  }
+  g_signal_emit_by_name (release_view, "activate", 0); /* Heading cannot play. */
+  g_assert_null (played_uri);
+  g_signal_emit_by_name (release_view, "activate", 1);
+  g_assert_cmpstr (played_uri, ==, "spotify:track:0000000000000000000000");
   g_assert_true (gtk_widget_get_visible (find_class (GTK_WIDGET (page), "artist-hero")));
   g_assert_true (gtk_widget_get_visible (GTK_WIDGET (spotifygtk_artist_page_get_list (page))));
   g_assert_nonnull (find_label (GTK_WIDGET (page), "Top tracks"));
@@ -885,35 +904,38 @@ test_artist_release_layout (void)
     apply_theme (themes[i]); settle ();
     save_preview (window, i ? "artist-releases-dark-plus.png" : "artist-releases-light.png");
   }
-  /* GTK's item hover must not paint the large release header above track 1. */
+  /* Header and track 1 have separate GTK items and interaction surfaces. */
   GtkWidget *scroller = find_type (GTK_WIDGET (page), GTK_TYPE_SCROLLED_WINDOW);
   GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller));
   gtk_adjustment_set_value (vadj, gtk_adjustment_get_value (vadj) +
     bounds (header, scroller).origin.y - 20);
   settle ();
   header = find_class (GTK_WIDGET (page), "artist-release-header");
-  GtkWidget *row = gtk_widget_get_parent (header);
-  GtkWidget *item = gtk_widget_get_parent (row);
-  GtkWidget *body = find_class (row, "track-body");
+  GtkWidget *header_item = gtk_widget_get_parent (header);
+  g_assert_true (gtk_widget_has_css_class (header_item, "section-header-row"));
+  g_assert_null (find_type (header_item, SPOTIFYGTK_TYPE_TRACK_ROW));
+  GtkWidget *item = gtk_widget_get_next_sibling (header_item);
+  g_assert_nonnull (item);
+  GtkWidget *first_row = find_type (item, SPOTIFYGTK_TYPE_TRACK_ROW);
+  g_assert_nonnull (first_row);
   GtkWidget *second_item = gtk_widget_get_next_sibling (item);
   g_assert_nonnull (second_item);
-  g_assert_true (gtk_widget_has_css_class (item, "compound-track-item"));
   for (guint i = 0; i < G_N_ELEMENTS (themes); i++) {
     apply_theme (themes[i]);
+    gtk_widget_set_state_flags (header_item, GTK_STATE_FLAG_PRELIGHT, FALSE);
     gtk_widget_set_state_flags (item, GTK_STATE_FLAG_PRELIGHT, FALSE);
-    gtk_widget_set_state_flags (body, GTK_STATE_FLAG_PRELIGHT, FALSE);
     gtk_widget_set_state_flags (second_item, GTK_STATE_FLAG_PRELIGHT, FALSE);
     settle ();
     g_autoptr(GdkTexture) hovered = render (window);
-    graphene_rect_t h = bounds (header, window), b = bounds (body, window);
+    graphene_rect_t h = bounds (header, window), b = bounds (item, window);
     assert_pixel (hovered, h.origin.x + h.size.width - 30, h.origin.y + 25,
                   i ? 0 : 255);
     graphene_rect_t second = bounds (second_item, window);
     g_assert_cmpfloat (fabs (b.origin.x - second.origin.x), <=, 1);
     g_assert_cmpfloat (fabs (b.size.width - second.size.width), <=, 1);
     g_assert_cmpfloat (fabs (b.size.height - second.size.height), <=, 1);
-    /* Compare the real standard row, including both far corners: no inset,
-     * no shorter band, no extra rounding, and no custom darker hover color. */
+    g_assert_cmpfloat (b.origin.y, >=, h.origin.y + h.size.height);
+    /* First and subsequent tracks use the same ordinary row rendering. */
     gint stride = gdk_texture_get_width (hovered) * 4;
     g_autofree guint8 *pixels = g_malloc (stride * gdk_texture_get_height (hovered));
     gdk_texture_download (hovered, pixels, stride);
@@ -932,7 +954,7 @@ test_artist_release_layout (void)
           g_assert_cmpint (ABS (first_pixel - second_pixel), <=, 1);
         }
     gtk_widget_unset_state_flags (item, GTK_STATE_FLAG_PRELIGHT);
-    gtk_widget_unset_state_flags (body, GTK_STATE_FLAG_PRELIGHT);
+    gtk_widget_unset_state_flags (header_item, GTK_STATE_FLAG_PRELIGHT);
     gtk_widget_unset_state_flags (second_item, GTK_STATE_FLAG_PRELIGHT);
   }
   GWeakRef old_header;
@@ -947,6 +969,7 @@ test_artist_release_layout (void)
   spotifygtk_settings_set_compact_mode (settings, TRUE);
   settle ();
   g_assert_null (find_class (GTK_WIDGET (page), "artist-release-header"));
+  g_assert_nonnull (find_class (GTK_WIDGET (page), "section-header-row"));
   g_assert_true (gtk_widget_get_visible (find_class (GTK_WIDGET (page), "artist-hero")));
   g_autoptr(GObject) previous = g_weak_ref_get (&old_header);
   g_assert_null (previous);
@@ -970,7 +993,8 @@ test_liked_mixed_dates (void)
   g_autoptr(SpotifyGtkLikedSongsPage) page = g_object_ref_sink (spotifygtk_liked_songs_page_new ());
   SpotifyNativeTrack local = { .uri = "local:track:fixture", .name = "Old local", .liked_at = 200 };
   SpotifyNativeTrack legacy = { .uri = "local:track:legacy", .name = "Undated local" };
-  SpotifyNativeTrack newer = { .uri = "spotify:track:new", .name = "New Spotify" };
+  SpotifyNativeTrack newer = { .uri = "spotify:track:new", .name = "New Spotify",
+    .section_title = "Artist release heading", .section_detail = "Album · 2026" };
   SpotifyNativeTrack older = { .uri = "spotify:track:old", .name = "Old Spotify" };
   spotifygtk_liked_songs_page_add_track (page, &local);
   spotifygtk_liked_songs_page_add_track (page, &legacy);
@@ -984,6 +1008,11 @@ test_liked_mixed_dates (void)
   g_autoptr(GPtrArray) tracks = spotifygtk_track_list_snapshot (
     spotifygtk_liked_songs_page_get_list (page));
   g_assert_cmpuint (tracks->len, ==, 4);
+  for (guint i = 0; i < tracks->len; i++) {
+    const SpotifyNativeTrack *track = g_ptr_array_index (tracks, i);
+    g_assert_null (track->section_title);
+    g_assert_null (track->section_detail);
+  }
   g_assert_cmpstr (((SpotifyNativeTrack *) tracks->pdata[0])->uri, ==, newer.uri);
   g_assert_cmpstr (((SpotifyNativeTrack *) tracks->pdata[1])->uri, ==, local.uri);
   g_assert_cmpstr (((SpotifyNativeTrack *) tracks->pdata[2])->uri, ==, older.uri);

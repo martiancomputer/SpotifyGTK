@@ -71,9 +71,9 @@ typedef struct {
   gchar   *artist_uri;   /* spotify:artist:<id> (primary); NULL if unknown */
   GVariant *artist_credits; /* shared immutable a(ss): ordered (name, URI) pairs */
   gint     release_year; /* from the album; 0 when unknown */
-  /* Optional UI grouping carried by flattened compound pages. The artist
-   * discography uses this on the first track of each release so one
-   * virtualised list can retain its release headings. */
+  /* Optional section-boundary annotation in a flattened page input. The
+   * track list extracts a separate non-playable heading and strips this
+   * grouping from playable row metadata before activation or snapshots. */
   gchar   *section_title;
   gchar   *section_detail;
 } SpotifyNativeTrack;
