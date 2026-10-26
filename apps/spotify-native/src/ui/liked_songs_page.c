@@ -594,6 +594,8 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   gtk_widget_set_hexpand (GTK_WIDGET (self->filter_entry), TRUE);
   adw_wrap_box_append (ADW_WRAP_BOX (controls), GTK_WIDGET (self->filter_entry));
   GtkWidget *sort_controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  gtk_widget_set_hexpand (sort_controls, TRUE);
+  gtk_widget_set_halign (sort_controls, GTK_ALIGN_END);
 
   GtkWidget *sort_caption = gtk_label_new ("Sort by");
   gtk_widget_add_css_class (sort_caption, "dim-text");

@@ -202,6 +202,76 @@ static void test_finished_download_survives_cancel (void)
   g_assert_cmpuint (g_hash_table_size (in_flight), ==, 0);
 }
 
+/* Keep the previous scalar resize as a pixel reference, not production work.
+ * RGB, alpha and edge sampling must remain identical. */
+static void reference_resize (const guchar *source, gint sw, gint sh, gint channels,
+                              guchar *dest, gint w, gint h)
+{
+  for (gint y = 0; y < h; y++) {
+    gdouble sy = ((y + 0.5) * sh / h) - 0.5;
+    gint y0 = CLAMP ((gint) floor (sy), 0, sh - 1);
+    gint y1 = MIN (y0 + 1, sh - 1);
+    gdouble fy = CLAMP (sy - y0, 0.0, 1.0);
+    for (gint x = 0; x < w; x++) {
+      gdouble sx = ((x + 0.5) * sw / w) - 0.5;
+      gint x0 = CLAMP ((gint) floor (sx), 0, sw - 1);
+      gint x1 = MIN (x0 + 1, sw - 1);
+      gdouble fx = CLAMP (sx - x0, 0.0, 1.0);
+      const guchar *p00 = source + ((gsize) y0 * sw + x0) * channels;
+      const guchar *p10 = source + ((gsize) y0 * sw + x1) * channels;
+      const guchar *p01 = source + ((gsize) y1 * sw + x0) * channels;
+      const guchar *p11 = source + ((gsize) y1 * sw + x1) * channels;
+      for (gint c = 0; c < 4; c++) {
+        gdouble top = c < channels ? p00[c] + (p10[c] - p00[c]) * fx : 255;
+        gdouble bottom = c < channels ? p01[c] + (p11[c] - p01[c]) * fx : 255;
+        dest[((gsize) y * w + x) * 4 + c] =
+          (guchar) CLAMP (top + (bottom - top) * fy + 0.5, 0.0, 255.0);
+      }
+    }
+  }
+}
+
+static void test_resize_pixels (void)
+{
+  const gint targets[][2] = {{9,7}, {1,1}, {4,3}, {8,1}, {1,5}, {13,11}};
+  guchar source[9 * 7 * 4];
+  for (guint i = 0; i < sizeof source; i++) source[i] = (i * 31 + i / 5) % 256;
+  for (gint channels = 3; channels <= 4; channels++)
+    for (guint t = 0; t < G_N_ELEMENTS (targets); t++) {
+      gint w = targets[t][0], h = targets[t][1];
+      gsize size = (gsize) w * h * 4;
+      g_autofree guchar *expected = g_malloc0 (size);
+      g_autofree guchar *actual = g_malloc0 (size);
+      reference_resize (source, 9, 7, channels, expected, w, h);
+      resize_cover_rgba (source, 9, 7, channels, actual, w, h);
+      g_assert_cmpmem (actual, size, expected, size);
+    }
+  guchar single[] = {19, 37, 83, 113}, scaled[16];
+  resize_cover_rgba (single, 1, 1, 4, scaled, 2, 2);
+  for (guint i = 0; i < 4; i++) g_assert_cmpmem (scaled + i * 4, 4, single, 4);
+}
+
+static gpointer accounting_worker (gpointer data)
+{
+  for (guint i = 0; i < 10000; i++)
+    account_mapped_pixels (64, GPOINTER_TO_INT (data) != 0);
+  return NULL;
+}
+
+static void test_mapping_accounting (void)
+{
+  gsize before = get_mapped_pixel_bytes ();
+  GThread *workers[4];
+  for (guint i = 0; i < G_N_ELEMENTS (workers); i++)
+    workers[i] = g_thread_new ("mapping-add", accounting_worker, GINT_TO_POINTER (1));
+  for (guint i = 0; i < G_N_ELEMENTS (workers); i++) g_thread_join (workers[i]);
+  g_assert_cmpuint (get_mapped_pixel_bytes (), ==, before + 4 * 10000 * 64);
+  for (guint i = 0; i < G_N_ELEMENTS (workers); i++)
+    workers[i] = g_thread_new ("mapping-remove", accounting_worker, NULL);
+  for (guint i = 0; i < G_N_ELEMENTS (workers); i++) g_thread_join (workers[i]);
+  g_assert_cmpuint (get_mapped_pixel_bytes (), ==, before);
+}
+
 int main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
@@ -222,6 +292,8 @@ int main (int argc, char **argv)
   g_test_add_func ("/art-cache/cancelled-subscriber", test_cancelled_subscriber);
   g_test_add_func ("/art-cache/corrupt-entry-retries", test_corrupt_entry_retries);
   g_test_add_func ("/art-cache/finished-download-survives-cancel", test_finished_download_survives_cancel);
+  g_test_add_func ("/art-cache/resize-pixels", test_resize_pixels);
+  g_test_add_func ("/art-cache/concurrent-mapping-accounting", test_mapping_accounting);
   gint result = g_test_run ();
   if (root) {
     g_autoptr(GFile) directory = g_file_new_for_path (root);

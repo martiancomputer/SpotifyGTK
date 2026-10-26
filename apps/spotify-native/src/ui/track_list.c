@@ -1303,11 +1303,14 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
    * on a row play it, matching the old GtkListBox behaviour. */
   GtkNoSelection *model = gtk_no_selection_new (G_LIST_MODEL (g_object_ref (self->store)));
   self->list = GTK_LIST_VIEW (gtk_list_view_new (GTK_SELECTION_MODEL (model), factory));
-  /* Optional fork capability. Stock GTK keeps its normal retained pool. */
+  /* Optional fork capability. Keep a modest offscreen widget pool instead of
+   * restyling almost a hundred rows for a dozen visible tracks. The fork
+   * raises this floor to at least three viewports at dense/fractional scales;
+   * stock GTK keeps its ordinary pool. Artwork overscan is independent. */
   if (GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (self->list),
         "gtk4-enhanced-list-pool-version")) == 1)
     g_object_set_data (G_OBJECT (self->list),
-      "gtk4-enhanced-list-pool-budget-v1", GUINT_TO_POINTER (96));
+      "gtk4-enhanced-list-pool-budget-v1", GUINT_TO_POINTER (48));
   gtk_list_view_set_single_click_activate (self->list, TRUE);
 
   gtk_widget_add_css_class (GTK_WIDGET (self->list), "track-listview");

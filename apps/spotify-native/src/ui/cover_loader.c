@@ -206,6 +206,28 @@ typedef struct {
 } MappedPixels;
 
 static gsize mapped_live_bytes = 0;   /* pixel memory actually still mapped */
+static GMutex mapped_bytes_lock;
+
+/* Decodes create textures on several workers; widgets can release their
+ * textures on a different thread. Keep diagnostics from losing updates or
+ * reporting phantom retained pixels during rapid scrolling. */
+static void
+account_mapped_pixels (gsize bytes, gboolean add)
+{
+  g_mutex_lock (&mapped_bytes_lock);
+  if (add) mapped_live_bytes += bytes;
+  else mapped_live_bytes -= MIN (bytes, mapped_live_bytes);
+  g_mutex_unlock (&mapped_bytes_lock);
+}
+
+static gsize
+get_mapped_pixel_bytes (void)
+{
+  g_mutex_lock (&mapped_bytes_lock);
+  gsize bytes = mapped_live_bytes;
+  g_mutex_unlock (&mapped_bytes_lock);
+  return bytes;
+}
 /*
  * Pages for one decoded cover, taken from and returned to the OS.
  *
@@ -245,7 +267,7 @@ static void
 mapped_pixels_free (gpointer data)
 {
   MappedPixels *m = data;
-  mapped_live_bytes -= MIN (m->len, mapped_live_bytes);
+  account_mapped_pixels (m->len, FALSE);
   pixel_pages_free (m->addr, m->len);
   g_free (m);
 }
@@ -686,7 +708,7 @@ spotifygtk_cover_log_stats (const gchar *context)
              context ? context : "",
              cover_cache ? g_hash_table_size (cover_cache) : 0,
              cover_cache_bytes / 1048576.0,
-             mapped_live_bytes / 1048576.0);
+             get_mapped_pixel_bytes () / 1048576.0);
 
   if (cover_stats.fetched > 0) {
     g_message ("cover stats (%s): fetch avg %.0f ms, worst %.0f ms; "
@@ -923,6 +945,64 @@ attach_decode_profile (GTask *task)
                             g_new0 (DecodeProfile, 1), g_free);
 }
 
+typedef struct {
+  gint left, right;
+  gdouble fraction;
+} CoverScaleColumn;
+
+static void
+resize_cover_rgba (const guchar *source, gint source_w, gint source_h,
+                   gint channels, guchar *dest, gint w, gint h)
+{
+  /* JPEG's scaled DCT often already produced precisely the requested size.
+   * Do not run an identity resize through floating-point interpolation. */
+  if (w == source_w && h == source_h) {
+    if (channels == 4) {
+      memcpy (dest, source, (gsize) w * h * 4);
+    } else {
+      for (gsize i = 0; i < (gsize) w * h; i++) {
+        dest[4 * i] = source[3 * i];
+        dest[4 * i + 1] = source[3 * i + 1];
+        dest[4 * i + 2] = source[3 * i + 2];
+        dest[4 * i + 3] = 255;
+      }
+    }
+    return;
+  }
+
+  /* The horizontal sampling coordinates are identical on every scanline. */
+  g_autofree CoverScaleColumn *columns = g_new (CoverScaleColumn, w);
+  for (gint x = 0; x < w; x++) {
+    gdouble sx = ((x + 0.5) * source_w / w) - 0.5;
+    columns[x].left = CLAMP ((gint) floor (sx), 0, source_w - 1);
+    columns[x].right = MIN (columns[x].left + 1, source_w - 1);
+    columns[x].fraction = CLAMP (sx - columns[x].left, 0.0, 1.0);
+  }
+  for (gint y = 0; y < h; y++) {
+    gdouble sy = ((y + 0.5) * source_h / h) - 0.5;
+    gint y0 = CLAMP ((gint) floor (sy), 0, source_h - 1);
+    gint y1 = MIN (y0 + 1, source_h - 1);
+    gdouble fy = CLAMP (sy - y0, 0.0, 1.0);
+    const guchar *top_row = source + (gsize) y0 * source_w * channels;
+    const guchar *bottom_row = source + (gsize) y1 * source_w * channels;
+    for (gint x = 0; x < w; x++) {
+      const CoverScaleColumn *column = &columns[x];
+      gdouble fx = column->fraction;
+      const guchar *p00 = top_row + (gsize) column->left * channels;
+      const guchar *p10 = top_row + (gsize) column->right * channels;
+      const guchar *p01 = bottom_row + (gsize) column->left * channels;
+      const guchar *p11 = bottom_row + (gsize) column->right * channels;
+      guchar *out = dest + ((gsize) y * w + x) * 4;
+      for (gint c = 0; c < channels; c++) {
+        gdouble top = p00[c] + (p10[c] - p00[c]) * fx;
+        gdouble bottom = p01[c] + (p11[c] - p01[c]) * fx;
+        out[c] = (guchar) CLAMP (top + (bottom - top) * fy + 0.5, 0.0, 255.0);
+      }
+      if (channels == 3) out[3] = 255;
+    }
+  }
+}
+
 /* Runs on a worker thread: decode the JPEG at the target size and build a
  * texture. Doing this here rather than in the soup callback is what keeps a
  * scroll smooth -- decoding on the main thread blocked a frame per cover, so
@@ -1025,39 +1105,13 @@ decode_in_thread (GTask *task, gpointer source, gpointer task_data, GCancellable
     return;
   }
 
-  /* Bilinear resize directly into the final texture mapping. */
-  for (gint y = 0; y < h; y++) {
-    gdouble sy = ((y + 0.5) * source_h / h) - 0.5;
-    gint y0 = CLAMP ((gint) floor (sy), 0, source_h - 1);
-    gint y1 = MIN (y0 + 1, source_h - 1);
-    gdouble fy = CLAMP (sy - y0, 0.0, 1.0);
-    for (gint x = 0; x < w; x++) {
-      gdouble sx = ((x + 0.5) * source_w / w) - 0.5;
-      gint x0 = CLAMP ((gint) floor (sx), 0, source_w - 1);
-      gint x1 = MIN (x0 + 1, source_w - 1);
-      gdouble fx = CLAMP (sx - x0, 0.0, 1.0);
-      guchar *out = mapped + (gsize) y * rowstride + (gsize) x * 4;
-      const guchar *p00 = decoded + ((gsize) y0 * source_w + x0) * source_channels;
-      const guchar *p10 = decoded + ((gsize) y0 * source_w + x1) * source_channels;
-      const guchar *p01 = decoded + ((gsize) y1 * source_w + x0) * source_channels;
-      const guchar *p11 = decoded + ((gsize) y1 * source_w + x1) * source_channels;
-      for (gint c = 0; c < 4; c++) {
-        if (c == 3 && source_channels == 3) {
-          out[c] = 255;
-          continue;
-        }
-        gdouble top = p00[c] + (p10[c] - p00[c]) * fx;
-        gdouble bottom = p01[c] + (p11[c] - p01[c]) * fx;
-        out[c] = (guchar) CLAMP (top + (bottom - top) * fy + 0.5, 0.0, 255.0);
-      }
-    }
-  }
+  resize_cover_rgba (decoded, source_w, source_h, source_channels, mapped, w, h);
   pixel_pages_free (decoded, decoded_len);
 
   MappedPixels *owner = g_new0 (MappedPixels, 1);
   owner->addr = mapped;
   owner->len  = pix_len;
-  mapped_live_bytes += pix_len;
+  account_mapped_pixels (pix_len, TRUE);
 
   g_autoptr(GBytes) pixels =
     g_bytes_new_with_free_func (mapped, pix_len, mapped_pixels_free, owner);

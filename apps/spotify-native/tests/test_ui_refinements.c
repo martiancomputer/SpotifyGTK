@@ -75,12 +75,20 @@ render (GtkWidget *window)
 {
   g_autoptr(GdkPaintable) paintable = gtk_widget_paintable_new (window);
   GtkSnapshot *snapshot = gtk_snapshot_new ();
+  graphene_rect_t outer;
+  g_assert_true (gtk_widget_compute_bounds (window, window, &outer));
+  /* WidgetPaintable includes CSS padding/borders. Keep a 1:1 snapshot and
+   * crop to the content coordinates used by bounds(), rather than shrinking
+   * the whole paintable and sampling several pixels outside the artwork. */
+  gtk_snapshot_translate (snapshot, &outer.origin);
   gdk_paintable_snapshot (paintable, GDK_SNAPSHOT (snapshot),
-    gtk_widget_get_width (window), gtk_widget_get_height (window));
+    outer.size.width, outer.size.height);
   g_autoptr(GskRenderNode) node = gtk_snapshot_free_to_node (snapshot);
   g_assert_nonnull (node);
+  graphene_rect_t viewport = GRAPHENE_RECT_INIT (0, 0,
+    gtk_widget_get_width (window), gtk_widget_get_height (window));
   return gsk_renderer_render_texture (
-    gtk_native_get_renderer (GTK_NATIVE (window)), node, NULL);
+    gtk_native_get_renderer (GTK_NATIVE (window)), node, &viewport);
 }
 
 static void
@@ -148,6 +156,7 @@ static void
 test_liked_sort_alignment (void)
 {
   GtkWidget *window = gtk_window_new ();
+  gtk_widget_set_size_request (window, 1200, 600);
   gtk_window_set_default_size (GTK_WINDOW (window), 1200, 600);
   SpotifyGtkLikedSongsPage *page = spotifygtk_liked_songs_page_new ();
   SpotifyGtkTrackList *list = spotifygtk_liked_songs_page_get_list (page);
@@ -165,8 +174,12 @@ test_liked_sort_alignment (void)
     g_assert_true (spotifygtk_track_list_duration_inset (list, &inset));
     graphene_rect_t s = bounds (sort, GTK_WIDGET (page));
     graphene_rect_t l = bounds (GTK_WIDGET (list), GTK_WIDGET (page));
+    g_test_message ("sort right=%.1f duration edge=%.1f page-width=%d",
+      s.origin.x + s.size.width, l.origin.x + l.size.width - inset,
+      gtk_widget_get_width (GTK_WIDGET (page)));
     g_assert_cmpfloat (fabs (s.origin.x + s.size.width -
                             (l.origin.x + l.size.width - inset)), <=, 1);
+    gtk_widget_set_size_request (window, 900, 600);
     gtk_window_set_default_size (GTK_WINDOW (window), 900, 600);
     settle ();
   }
@@ -988,6 +1001,49 @@ test_artist_release_layout (void)
 }
 
 static void
+test_track_list_retained_budget (void)
+{
+  g_autoptr(GPtrArray) tracks = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_track_free);
+  for (guint i = 0; i < 1000; i++) {
+    g_autofree gchar *uri = g_strdup_printf ("spotify:track:fixture%u", i);
+    SpotifyNativeTrack track = { .uri = uri, .name = "Fixture track",
+      .artists = "Fixture artist", .duration_ms = 180000 };
+    g_ptr_array_add (tracks, spotifygtk_native_track_copy (&track));
+  }
+  guint normal = 0;
+  const gint heights[] = {700, 1800};
+  for (guint i = 0; i < G_N_ELEMENTS (heights); i++) {
+    GtkWidget *window = gtk_window_new ();
+    gtk_widget_set_size_request (window, 900, heights[i]);
+    gtk_window_set_default_size (GTK_WINDOW (window), 900, heights[i]);
+    SpotifyGtkTrackList *list = spotifygtk_track_list_new ();
+    spotifygtk_track_list_set_show_cover (list, FALSE);
+    spotifygtk_track_list_set_numbered (list, TRUE);
+    spotifygtk_track_list_set_native_tracks (list, tracks);
+    gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (list));
+    gtk_window_present (GTK_WINDOW (window));
+    settle ();
+    GtkWidget *view = find_type (GTK_WIDGET (list), GTK_TYPE_LIST_VIEW);
+    if (GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (view),
+          "gtk4-enhanced-list-pool-version")) == 1) {
+      guint applied = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (view),
+        "gtk4-enhanced-list-pool-applied-v1"));
+      g_test_message ("retained row budget at viewport height %d: %u",
+        gtk_widget_get_height (view), applied);
+      if (i == 0) {
+        normal = applied;
+        g_assert_cmpuint (applied, ==, 48);
+      } else {
+        g_assert_cmpuint (applied, >, normal);
+      }
+    }
+    gtk_window_destroy (GTK_WINDOW (window));
+    settle ();
+  }
+}
+
+static void
 test_liked_mixed_dates (void)
 {
   g_autoptr(SpotifyGtkLikedSongsPage) page = g_object_ref_sink (spotifygtk_liked_songs_page_new ());
@@ -1109,6 +1165,7 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/settings/account-actions", test_account_and_actions);
   g_test_add_func ("/ui/artist/follow-alignment", test_artist_follow_alignment);
   g_test_add_func ("/ui/artist/release-layout", test_artist_release_layout);
+  g_test_add_func ("/ui/tracks/retained-budget", test_track_list_retained_budget);
   g_test_add_func ("/ui/liked/mixed-dates", test_liked_mixed_dates);
   g_test_add_func ("/ui/playlist/overlay-delete-mapping", test_overlay_delete_mapping);
   g_test_add_func ("/ui/now-playing/navigation", test_panel_navigation);
