@@ -8,7 +8,33 @@ typedef struct {
   gint64 total_paint_us, max_paint_us, max_gap_us;
   guint frames, late_frames;
   gint width, height;
+  struct { gint64 total_us, max_us; guint count; } work[SPOTIFYGTK_FRAME_WORK_COUNT];
 } FrameStats;
+
+gint64
+spotifygtk_frame_stats_work_begin (void)
+{
+  static gsize enabled;
+  if (g_once_init_enter (&enabled))
+    g_once_init_leave (&enabled, g_getenv ("SPOTIFY_SCROLL_STATS") ? 2 : 1);
+  return enabled == 2 ? g_get_monotonic_time () : 0;
+}
+
+void
+spotifygtk_frame_stats_work_end (GtkWidget *widget,
+                                 SpotifyGtkFrameWork work, gint64 started)
+{
+  if (!started || work >= SPOTIFYGTK_FRAME_WORK_COUNT)
+    return;
+  gint64 elapsed = g_get_monotonic_time () - started;
+  GtkRoot *root = gtk_widget_get_root (widget);
+  FrameStats *stats = root ? g_object_get_data (G_OBJECT (root), "frame-stats") : NULL;
+  if (!stats)
+    return;
+  stats->work[work].total_us += elapsed;
+  stats->work[work].max_us = MAX (stats->work[work].max_us, elapsed);
+  stats->work[work].count++;
+}
 
 static void
 frame_stats_free (gpointer data)
@@ -80,6 +106,15 @@ after_paint (GdkFrameClock *clock, gpointer data)
                GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (clock), "gtk4-enhanced-max-fps-v1")),
                GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (clock), "gtk4-enhanced-unsynchronized-v1")),
                GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (clock), "gtk4-enhanced-unsynchronized-available-v1")));
+    static const gchar *names[] = { "row-bind", "header-bind", "glass-snapshot" };
+    for (guint i = 0; i < SPOTIFYGTK_FRAME_WORK_COUNT; i++) {
+      if (stats->work[i].count)
+        g_message ("frame-work-profile: stage=%s calls=%u total=%.2fms max=%.2fms",
+          names[i], stats->work[i].count, stats->work[i].total_us / 1000.0,
+          stats->work[i].max_us / 1000.0);
+      stats->work[i].total_us = stats->work[i].max_us = 0;
+      stats->work[i].count = 0;
+    }
     stats->started_us = now;
     stats->frames = stats->late_frames = 0;
     stats->total_paint_us = stats->max_paint_us = stats->max_gap_us = 0;

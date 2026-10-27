@@ -1258,6 +1258,23 @@ spotifygtk_album_grid_add_pending_card (SpotifyGtkAlbumGrid *self, const gchar *
  * A card scrolled out of view has nothing to repaint, and does not need one --
  * the item holds the data, so it is correct on the next bind.
  */
+static void
+update_card_metadata (SpotifyGtkAlbumGrid *self, SpotifyGtkAlbumItem *item,
+                      const gchar *title, const gchar *subtitle,
+                      const gchar *cover_id, gboolean pending)
+{
+  g_free (item->name); item->name = g_strdup (title);
+  g_free (item->artist); item->artist = g_strdup (subtitle);
+  g_free (item->cover_id); item->cover_id = g_strdup (cover_id);
+  item->pending = pending;
+  if (!pending) item->resolving = FALSE;
+  for (guint c = 0; c < self->bound_cards->len; c++) {
+    GtkWidget *card = g_ptr_array_index (self->bound_cards, c);
+    if (g_strcmp0 (g_object_get_data (G_OBJECT (card), "album-uri"), item->uri) == 0)
+      card_apply_item (self, card, item);
+  }
+}
+
 void
 spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
                                     const gchar *title, const gchar *subtitle,
@@ -1273,23 +1290,13 @@ spotifygtk_album_grid_resolve_card (SpotifyGtkAlbumGrid *self, const gchar *uri,
     if (!item || g_strcmp0 (item->uri, uri) != 0)
       continue;
 
-    g_free (item->name);     item->name     = g_strdup (title);
-    g_free (item->artist);   item->artist   = g_strdup (subtitle);
-    g_free (item->cover_id); item->cover_id = g_strdup (cover_id);
-    item->pending   = FALSE;
-    item->resolving = FALSE;
+    update_card_metadata (self, item, title, subtitle, cover_id, FALSE);
 
     /* A pending artist is deliberately visible so its metadata can resolve.
      * Re-evaluate now that its real searchable name is available. */
     if (self->filter && self->filter_text && *self->filter_text)
       gtk_filter_changed (GTK_FILTER (self->filter), GTK_FILTER_CHANGE_DIFFERENT);
 
-    for (guint c = 0; c < self->bound_cards->len; c++) {
-      GtkWidget *card = g_ptr_array_index (self->bound_cards, c);
-      const gchar *shown = g_object_get_data (G_OBJECT (card), "album-uri");
-      if (g_strcmp0 (shown, uri) == 0)
-        card_apply_item (self, card, item);
-    }
     return;
   }
 }
@@ -1468,6 +1475,31 @@ set_card_specs (SpotifyGtkAlbumGrid       *self,
                 gboolean                   pending)
 {
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  guint existing = g_list_model_get_n_items (G_LIST_MODEL (self->store));
+  gboolean same_order = existing == n_cards;
+  for (guint i = 0; same_order && i < n_cards; i++) {
+    g_autoptr(SpotifyGtkAlbumItem) item = g_list_model_get_item (G_LIST_MODEL (self->store), i);
+    same_order = cards[i].uri && g_strcmp0 (cards[i].uri, item->uri) == 0;
+  }
+  if (same_order) {
+    gboolean changed = FALSE;
+    for (guint i = 0; i < n_cards; i++) {
+      g_autoptr(SpotifyGtkAlbumItem) item = g_list_model_get_item (G_LIST_MODEL (self->store), i);
+      const gchar *title = cards[i].title ? cards[i].title : cards[i].uri;
+      const gchar *subtitle = cards[i].subtitle ? cards[i].subtitle : "";
+      gboolean needs_metadata = pending &&
+        (g_str_has_prefix (cards[i].uri, "spotify:playlist:") ||
+         g_str_has_prefix (cards[i].uri, "spotify:artist:"));
+      if (g_strcmp0 (item->name, title) || g_strcmp0 (item->artist, subtitle) ||
+          g_strcmp0 (item->cover_id, cards[i].cover_id) || item->pending != needs_metadata) {
+        update_card_metadata (self, item, title, subtitle, cards[i].cover_id, needs_metadata);
+        changed = TRUE;
+      }
+    }
+    if (changed && self->filter_text && *self->filter_text)
+      gtk_filter_changed (GTK_FILTER (self->filter), GTK_FILTER_CHANGE_DIFFERENT);
+    return;
+  }
 
   spotifygtk_album_grid_release_covers (self);
 
@@ -1832,6 +1864,9 @@ album_grid_new (gboolean wrap)
   }
 
   gtk_widget_set_hexpand (scroller, TRUE);
+  if (GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (view),
+      "gtk4-enhanced-replacement-anchor-version")) == 1)
+    g_object_set_data (G_OBJECT (view), "gtk4-enhanced-replacement-anchor-v1", GUINT_TO_POINTER (1));
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), view);
   gtk_box_append (GTK_BOX (self), scroller);
 

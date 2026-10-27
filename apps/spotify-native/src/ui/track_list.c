@@ -23,6 +23,7 @@
 #include "track_item.h"
 #include "smooth_scroll.h"
 #include "layout_policy.h"
+#include "frame_stats.h"
 #include "spotify/track_meta.h"
 #include <math.h>
 
@@ -103,6 +104,7 @@ spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *co
   G_GNUC_END_IGNORE_DEPRECATIONS
   if (!have_tint)
     return;
+  gint64 work_started = spotifygtk_frame_stats_work_begin ();
   GskColorStop stops[] = { { 0.0f, tint }, { 1.0f, tint } };
   stops[0].color.alpha = 0.92f;
   stops[1].color.alpha = 0;
@@ -159,6 +161,7 @@ spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *co
   }
   gtk_snapshot_append_linear_gradient (snapshot, &band, &start, &end,
                                         stops, G_N_ELEMENTS (stops));
+  spotifygtk_frame_stats_work_end (page, SPOTIFYGTK_FRAME_WORK_GLASS, work_started);
 }
 
 void
@@ -1111,6 +1114,7 @@ on_row_play_clicked (SpotifyGtkTrackRow *row, gpointer user_data)
 static void
 factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
+  gint64 work_started = spotifygtk_frame_stats_work_begin ();
   SpotifyGtkTrackList *self = user_data;
   SpotifyGtkTrackRow  *row  = g_object_get_data (G_OBJECT (list_item), "track-row");
   SpotifyGtkTrackItem *item = gtk_list_item_get_item (list_item);
@@ -1130,6 +1134,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     GtkWidget *header_row = gtk_widget_get_parent (self->page_header);
     if (header_row)
       gtk_widget_add_css_class (header_row, "page-header-row");
+    spotifygtk_frame_stats_work_end (GTK_WIDGET (self), SPOTIFYGTK_FRAME_WORK_HEADER_BIND, work_started);
     return;
   }
   const SpotifyNativeTrack *track = spotifygtk_track_item_get_track (item);
@@ -1145,6 +1150,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
     gtk_list_item_set_child (list_item, header);
     GtkWidget *container = gtk_widget_get_parent (header);
     if (container) gtk_widget_add_css_class (container, "section-header-row");
+    spotifygtk_frame_stats_work_end (GTK_WIDGET (self), SPOTIFYGTK_FRAME_WORK_HEADER_BIND, work_started);
     return;
   }
   gtk_list_item_set_focusable (list_item, TRUE);
@@ -1234,6 +1240,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   }
 
   (void) factory;
+  spotifygtk_frame_stats_work_end (GTK_WIDGET (self), SPOTIFYGTK_FRAME_WORK_BIND, work_started);
 }
 
 static void
@@ -1447,6 +1454,9 @@ spotifygtk_track_list_init (SpotifyGtkTrackList *self)
    * on a row play it, matching the old GtkListBox behaviour. */
   GtkNoSelection *model = gtk_no_selection_new (G_LIST_MODEL (g_object_ref (self->store)));
   self->list = GTK_LIST_VIEW (gtk_list_view_new (GTK_SELECTION_MODEL (model), factory));
+  if (GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (self->list),
+      "gtk4-enhanced-replacement-anchor-version")) == 1)
+    g_object_set_data (G_OBJECT (self->list), "gtk4-enhanced-replacement-anchor-v1", GUINT_TO_POINTER (1));
   /* Optional fork capability. Keep a modest offscreen widget pool instead of
    * restyling almost a hundred rows for a dozen visible tracks. The fork
    * raises this floor to at least three viewports at dense/fractional scales;
@@ -1965,6 +1975,7 @@ spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *t
   guint existing = g_list_model_get_n_items (G_LIST_MODEL (self->store)) - prefix;
 
   if (!tracks || tracks->len == 0) {
+    g_object_set_data (G_OBJECT (self->list), "gtk4-enhanced-item-extents-groups-v1", NULL);
     if (existing > 0)
       g_list_store_splice (self->store, prefix, existing, NULL, 0);
     spotifygtk_track_list_set_status (self, "Nothing here yet.");
@@ -2004,6 +2015,29 @@ spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *t
     guint number = self->sectioned ? section_number : items->len + 1;
     g_ptr_array_add (items, playable_item_new (track, number));
   }
+
+  /* Only declare equal-height groups to runtimes that advertise this optional
+   * protocol. The page header is variable; tracks and release headings have
+   * separate layouts. GTK learns each group's extent from actual widgets at
+   * the current width, without constructing the whole discography. */
+  if (self->sectioned && prefix <= 16384 && items->len <= 16384 - prefix &&
+      GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (self->list),
+        "gtk4-enhanced-item-extents-groups-version")) == 1 &&
+      GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (self->list),
+        "gtk4-enhanced-item-extents-default-v1")) > 0) {
+    guint8 *groups = g_new0 (guint8, prefix + items->len);
+    for (guint i = 0; i < items->len; i++) {
+      const SpotifyNativeTrack *item_track = spotifygtk_track_item_get_track (
+        g_ptr_array_index (items, i));
+      groups[prefix + i] = is_section_header_placeholder (item_track) ? 2 : 1;
+    }
+    g_object_set_data_full (G_OBJECT (self->list), "gtk4-enhanced-item-extents-groups-v1",
+      g_bytes_new_take (groups, prefix + items->len), (GDestroyNotify) g_bytes_unref);
+    if (self->trace_scroll)
+      g_message ("track-list-profile: grouped height estimates enabled items=%u",
+                 prefix + items->len);
+  } else
+    g_object_set_data (G_OBJECT (self->list), "gtk4-enhanced-item-extents-groups-v1", NULL);
 
   gint64 splice_started_us = self->trace_scroll ? g_get_monotonic_time () : 0;
   g_list_store_splice (self->store, prefix, existing, items->pdata, items->len);

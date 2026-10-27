@@ -1004,6 +1004,13 @@ test_artist_large_discography (gconstpointer data)
   g_assert_cmpuint (realized, <, 300);
   GtkAdjustment *adjustment = gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller));
   gdouble previous_upper = gtk_adjustment_get_upper (adjustment);
+  gdouble initial_upper = previous_upper;
+  gboolean grouped_extents = g_object_get_data (G_OBJECT (view),
+    "gtk4-enhanced-item-extents-groups-v1") != NULL;
+  if (GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (view),
+      "gtk4-enhanced-item-extents-groups-version")) == 1)
+    g_assert_true (grouped_extents);
+  g_test_message ("grouped extents=%d initial scroll range=%.0f", grouped_extents, initial_upper);
   guint steps = tracks_per_release == 1 ? 40 : 8;
   for (guint step = 0; step < steps; step++) {
     guint position = step < steps / 2 ? step : steps - step;
@@ -1014,7 +1021,9 @@ test_artist_large_discography (gconstpointer data)
       g_usleep (1000);
     }
     gdouble upper = gtk_adjustment_get_upper (adjustment);
-    if (extent_cache)
+    if (grouped_extents)
+      g_assert_cmpfloat (fabs (upper - initial_upper), <=, 1);
+    else if (extent_cache)
       g_assert_cmpfloat (upper + 1, >=, previous_upper);
     previous_upper = upper;
   }
@@ -1082,6 +1091,11 @@ test_artist_release_layout (void)
   g_assert_true (gtk_widget_get_visible (GTK_WIDGET (spotifygtk_artist_page_get_list (page))));
   g_assert_nonnull (find_label (GTK_WIDGET (page), "Top tracks"));
   g_assert_true (gtk_widget_get_visible (button_for (GTK_WIDGET (page), "Follow")));
+  /* The page header can fill the viewport. Realize the first release before
+   * inspecting artwork geometry instead of relying on offscreen allocation. */
+  gtk_list_view_scroll_to (release_view, 1, GTK_LIST_SCROLL_NONE, NULL);
+  settle ();
+  header = find_class (GTK_WIDGET (page), "artist-release-header");
   GtkWidget *cover = find_class (header, "artist-release-cover");
   graphene_rect_t rect = bounds (cover, window);
   g_assert_cmpfloat (rect.size.width, ==, 226);
@@ -1314,6 +1328,86 @@ test_panel_navigation (void)
   g_assert_null (last);
 }
 
+static void
+test_collection_replacement_anchor (gconstpointer data)
+{
+  guint kind = GPOINTER_TO_UINT (data);
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1000, 700);
+  gtk_widget_set_size_request (window, 800, 700);
+  GtkWidget *root = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *entry = gtk_entry_new ();
+  gtk_box_append (GTK_BOX (root), entry);
+  GtkWidget *body = kind == 0 ? GTK_WIDGET (spotifygtk_album_grid_new_grid ())
+                              : GTK_WIDGET (spotifygtk_track_list_new ());
+  if (kind == 2) {
+    GtkWidget *header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request (header, -1, 100);
+    spotifygtk_track_list_set_page_header (SPOTIFYGTK_TRACK_LIST (body), header);
+  }
+  gtk_box_append (GTK_BOX (root), body);
+  gtk_window_set_child (GTK_WINDOW (window), root);
+  g_autoptr(GPtrArray) tracks = g_ptr_array_new_with_free_func ((GDestroyNotify) spotifygtk_native_track_free);
+  SpotifyNativeTrack old = { .uri = "local:track:provisional", .name = "Provisional", .duration_ms = 1000 };
+  g_ptr_array_add (tracks, spotifygtk_native_track_copy (&old));
+  g_ptr_array_add (tracks, spotifygtk_native_track_copy (&old));
+  SpotifyGtkCardSpec provisional[] = {
+    { .uri = "spotify:album:provisional-a", .title = "Provisional A" },
+    { .uri = "spotify:album:provisional-b", .title = "Provisional B" },
+  };
+  if (kind == 0) spotifygtk_album_grid_set_cards (SPOTIFYGTK_ALBUM_GRID (body), provisional, 2);
+  else spotifygtk_track_list_set_native_tracks (SPOTIFYGTK_TRACK_LIST (body), tracks);
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkWidget *view = find_type (body, kind == 0 ? GTK_TYPE_GRID_VIEW : GTK_TYPE_LIST_VIEW);
+  if (kind == 0)
+    gtk_grid_view_set_max_columns (GTK_GRID_VIEW (view), 1);
+  GtkScrolledWindow *scroller = GTK_SCROLLED_WINDOW (find_type (body, GTK_TYPE_SCROLLED_WINDOW));
+  GtkAdjustment *adjustment = gtk_scrolled_window_get_vadjustment (scroller);
+  gtk_widget_grab_focus (view);
+  if (kind == 0) gtk_grid_view_scroll_to (GTK_GRID_VIEW (view), 1, GTK_LIST_SCROLL_FOCUS, NULL);
+  else gtk_list_view_scroll_to (GTK_LIST_VIEW (view), kind == 2 ? 2 : 1, GTK_LIST_SCROLL_FOCUS, NULL);
+  settle ();
+  /* A viewport resize with a short provisional model re-evaluates its anchor
+   * against the padded, non-scrolling page. Reproduce that native adjustment
+   * notification before the asynchronous collection replaces those rows. */
+  g_signal_emit_by_name (adjustment, "value-changed");
+  settle ();
+  g_autofree SpotifyGtkCardSpec *cards = g_new0 (SpotifyGtkCardSpec, 449);
+  g_autoptr(GPtrArray) uris = g_ptr_array_new_with_free_func (g_free);
+  g_ptr_array_set_size (tracks, 0);
+  for (guint i = 0; i < 449; i++) {
+    gchar *uri = g_strdup_printf (kind == 0 ? "spotify:album:fixture-%u" : "local:track:fixture-%u", i);
+    g_ptr_array_add (uris, uri);
+    cards[i] = (SpotifyGtkCardSpec) { .uri = uri, .title = "Loaded album" };
+    SpotifyNativeTrack track = { .uri = uri, .name = "Loaded track", .duration_ms = 180000 };
+    g_ptr_array_add (tracks, spotifygtk_native_track_copy (&track));
+  }
+  if (kind == 0) spotifygtk_album_grid_set_cards (SPOTIFYGTK_ALBUM_GRID (body), cards, 449);
+  else spotifygtk_track_list_set_native_tracks (SPOTIFYGTK_TRACK_LIST (body), tracks);
+  settle ();
+  g_test_message ("initial collection position=%.0f", gtk_adjustment_get_value (adjustment));
+  g_assert_cmpfloat (gtk_adjustment_get_value (adjustment), <=, 1);
+  if (kind == 0) {
+    gtk_grid_view_scroll_to (GTK_GRID_VIEW (view), 200, GTK_LIST_SCROLL_FOCUS, NULL);
+    settle ();
+    double before = gtk_adjustment_get_value (adjustment);
+    g_assert_cmpfloat (before, >, 1);
+    GtkSelectionModel *model = gtk_grid_view_get_model (GTK_GRID_VIEW (view));
+    g_autoptr(GObject) item = g_list_model_get_item (G_LIST_MODEL (model), 200);
+    cards[200].title = "Updated metadata";
+    gtk_widget_grab_focus (entry);
+    spotifygtk_album_grid_set_cards (SPOTIFYGTK_ALBUM_GRID (body), cards, 449);
+    settle ();
+    g_autoptr(GObject) same = g_list_model_get_item (G_LIST_MODEL (model), 200);
+    g_assert_true (same == item);
+    g_assert_cmpfloat (fabs (gtk_adjustment_get_value (adjustment) - before), <=, 1);
+    GtkWidget *focus = gtk_root_get_focus (GTK_ROOT (window));
+    g_assert_true (focus == entry || gtk_widget_is_ancestor (focus, entry));
+  }
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1333,6 +1427,9 @@ main (int argc, char **argv)
   adw_init ();
   g_object_set (gtk_settings_get_default (), "gtk-enable-animations", FALSE, NULL);
   apply_theme (SPOTIFYGTK_THEME_DARK_PLUS);
+  g_test_add_data_func ("/ui/load-position/library", GUINT_TO_POINTER (0), test_collection_replacement_anchor);
+  g_test_add_data_func ("/ui/load-position/liked", GUINT_TO_POINTER (1), test_collection_replacement_anchor);
+  g_test_add_data_func ("/ui/load-position/search-header", GUINT_TO_POINTER (2), test_collection_replacement_anchor);
   g_test_add_func ("/ui/library/local-empty-and-create", test_library_local_empty_and_create_position);
   g_test_add_func ("/ui/liked/sort-alignment-resize", test_liked_sort_alignment);
   g_test_add_func ("/ui/liked/header-transparency-preserves-geometry", test_header_transparency_preserves_geometry);
