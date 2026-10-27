@@ -1,10 +1,9 @@
 /*
  * library_page.c — Library page implementation.
  *
- * What is real here: the albums grid is the distinct albums present in the
- * signed-in user's Liked Songs, resolved through the same /context-resolve
- * path everything else uses. Those are genuinely albums the user has saved
- * tracks from, so the grid is real library data, not filler.
+ * Saved releases come from the account's collection and batched album
+ * metadata. An account-scoped disk snapshot restores cards while startup
+ * refreshes their membership; artwork uses the shared encoded-image cache.
  *
  * The optional unified view reuses the same virtualized card grid for saved
  * releases, local albums, and playlist cards. No nested scroller is added.
@@ -17,6 +16,7 @@
 #include "../log_file.h"
 #include "../spotify/collection.h"
 #include "../spotify/catalog_cache.h"
+#include "../spotify/catalog_snapshot.h"
 
 /* Artist identities share the bounded catalogue cache with the session.
  * Do not rewrite a whole name map synchronously on GTK's thread per card. */
@@ -70,6 +70,12 @@ struct _SpotifyGtkLibraryPage {
   guint                 load_retry_count;
   gboolean              loading;
   gboolean              loaded;
+  gchar                *cache_key;
+  guint                 cache_generation, load_cache_epoch;
+  GHashTable           *cached_album_dates;
+  GBytes               *pending_cache;
+  guint                 pending_cache_epoch;
+  gboolean              cache_write_running;
 };
 
 G_DEFINE_FINAL_TYPE (SpotifyGtkLibraryPage, spotifygtk_library_page, GTK_TYPE_BOX)
@@ -99,6 +105,9 @@ spotifygtk_library_page_dispose (GObject *object)
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
+  g_clear_pointer (&self->cache_key, g_free);
+  g_clear_pointer (&self->cached_album_dates, g_hash_table_unref);
+  g_clear_pointer (&self->pending_cache, g_bytes_unref);
   g_clear_pointer (&self->playlists, g_ptr_array_unref);
   spotifygtk_local_snapshot_unref (self->local_snapshot);
   self->local_snapshot = NULL;
@@ -214,11 +223,12 @@ release_date_compare (gconstpointer a, gconstpointer b, gpointer user_data)
 static void
 sort_releases_by_date_added (SpotifyGtkLibraryPage *self)
 {
-  if (!self->saved_releases || !self->saved_album_dates)
+  GHashTable *dates = self->cached_album_dates ? self->cached_album_dates : self->saved_album_dates;
+  if (!self->saved_releases || !dates)
     return;
 
   g_ptr_array_sort_with_data (self->saved_releases, release_date_compare,
-                              self->saved_album_dates);
+                              dates);
 }
 
 typedef struct {
@@ -266,9 +276,9 @@ show_release_view (SpotifyGtkLibraryPage *self)
       g_ptr_array_index (self->saved_releases, i);
     if (!release_in_view (release, self->active_view))
       continue;
+    GHashTable *dates = self->cached_album_dates ? self->cached_album_dates : self->saved_album_dates;
     LibraryCardEntry entry = { .release = release,
-      .date = self->saved_album_dates ? GPOINTER_TO_INT (
-        g_hash_table_lookup (self->saved_album_dates, release->uri)) : 0 };
+      .date = dates ? GPOINTER_TO_INT (g_hash_table_lookup (dates, release->uri)) : 0 };
     g_array_append_val (entries, entry);
   }
   if (self->active_view == LIBRARY_ALL ||
@@ -396,6 +406,123 @@ on_library_settings_changed (SpotifyGtkSettings *settings,
     show_release_view (self);
 }
 
+typedef struct {
+  GWeakRef page;
+  gchar *key;
+  guint generation, epoch;
+  GBytes *bytes;
+} LibraryCacheJob;
+
+typedef struct { GPtrArray *releases; GHashTable *dates; } LibrarySnapshot;
+
+static void library_snapshot_free (gpointer data)
+{
+  if (!data) return;
+  LibrarySnapshot *snapshot = data;
+  g_clear_pointer (&snapshot->releases, g_ptr_array_unref);
+  g_clear_pointer (&snapshot->dates, g_hash_table_unref);
+  g_free (snapshot);
+}
+
+static void library_cache_job_free (gpointer data)
+{
+  LibraryCacheJob *job = data;
+  g_weak_ref_clear (&job->page);
+  g_free (job->key);
+  g_clear_pointer (&job->bytes, g_bytes_unref);
+  g_free (job);
+}
+
+static GTask *library_cache_task (SpotifyGtkLibraryPage *self,
+                                  GAsyncReadyCallback callback)
+{
+  LibraryCacheJob *job = g_new0 (LibraryCacheJob, 1);
+  g_weak_ref_init (&job->page, self);
+  job->key = g_strdup (self->cache_key);
+  job->generation = self->cache_generation;
+  job->epoch = spotifygtk_catalog_cache_epoch ();
+  GTask *task = g_task_new (NULL, NULL, callback, NULL);
+  g_task_set_task_data (task, job, library_cache_job_free);
+  g_task_set_priority (task, G_PRIORITY_LOW);
+  return task;
+}
+
+static void read_library_cache (GTask *task, gpointer source,
+                                gpointer data, GCancellable *cancel)
+{
+  LibraryCacheJob *job = data;
+  g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (job->key, 0);
+  LibrarySnapshot *snapshot = g_new0 (LibrarySnapshot, 1);
+  snapshot->releases = spotifygtk_catalog_library_unpack (bytes, &snapshot->dates);
+  g_task_return_pointer (task, snapshot, library_snapshot_free);
+  (void) source; (void) cancel;
+}
+
+static void on_library_cache_read (GObject *source, GAsyncResult *result, gpointer data)
+{
+  LibraryCacheJob *job = g_task_get_task_data (G_TASK (result));
+  g_autoptr(SpotifyGtkLibraryPage) self = g_weak_ref_get (&job->page);
+  LibrarySnapshot *snapshot = g_task_propagate_pointer (G_TASK (result), NULL);
+  if (self && job->generation == self->cache_generation &&
+      job->epoch == spotifygtk_catalog_cache_epoch () &&
+      spotifygtk_settings_get_caching_enabled (spotifygtk_settings_get_default ()) &&
+      !self->loaded && !self->saved_releases && snapshot->releases) {
+    self->saved_releases = g_steal_pointer (&snapshot->releases);
+    self->cached_album_dates = g_steal_pointer (&snapshot->dates);
+    sort_releases_by_date_added (self);
+    show_release_view (self);
+    g_message ("library: restored %u saved album(s) from disk", self->saved_releases->len);
+  }
+  library_snapshot_free (snapshot);
+  (void) source; (void) data;
+}
+
+static void start_library_cache_write (SpotifyGtkLibraryPage *self);
+
+static void write_library_cache (GTask *task, gpointer source,
+                                 gpointer data, GCancellable *cancel)
+{
+  LibraryCacheJob *job = data;
+  spotifygtk_catalog_cache_put (job->key, job->bytes, job->epoch);
+  g_task_return_boolean (task, TRUE);
+  (void) source; (void) cancel;
+}
+
+static void on_library_cache_written (GObject *source, GAsyncResult *result, gpointer data)
+{
+  LibraryCacheJob *job = g_task_get_task_data (G_TASK (result));
+  g_autoptr(SpotifyGtkLibraryPage) self = g_weak_ref_get (&job->page);
+  g_task_propagate_boolean (G_TASK (result), NULL);
+  if (self) {
+    self->cache_write_running = FALSE;
+    start_library_cache_write (self);
+  }
+  (void) source; (void) data;
+}
+
+static void start_library_cache_write (SpotifyGtkLibraryPage *self)
+{
+  if (self->cache_write_running || !self->pending_cache || !self->cache_key) return;
+  g_autoptr(GTask) task = library_cache_task (self, on_library_cache_written);
+  LibraryCacheJob *job = g_task_get_task_data (task);
+  job->bytes = g_steal_pointer (&self->pending_cache);
+  job->epoch = self->pending_cache_epoch;
+  self->cache_write_running = TRUE;
+  g_task_run_in_thread (task, write_library_cache);
+}
+
+static void save_library_cache (SpotifyGtkLibraryPage *self, guint epoch)
+{
+  if (!self->cache_key || !self->loaded ||
+      !spotifygtk_settings_get_caching_enabled (spotifygtk_settings_get_default ())) return;
+  g_clear_pointer (&self->pending_cache, g_bytes_unref);
+  self->pending_cache = spotifygtk_catalog_library_pack (self->saved_releases, self->saved_album_dates);
+  self->pending_cache_epoch = epoch;
+  /* One writer plus one newest pending snapshot: updates cannot write an old
+   * collection after a newer one, or build an unbounded disk-work queue. */
+  start_library_cache_write (self);
+}
+
 static void
 on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
 {
@@ -427,9 +554,12 @@ on_album_meta_loaded (GObject *source, GAsyncResult *result, gpointer user_data)
   }
   self->loaded = TRUE;
   self->load_retry_count = 0;
+  g_clear_pointer (&self->cached_album_dates, g_hash_table_unref);
 
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
   self->saved_releases = g_steal_pointer (&albums);
+  g_message ("library: loaded %u saved album(s)", self->saved_releases->len);
+  save_library_cache (self, self->load_cache_epoch);
   sort_releases_by_date_added (self);
   show_release_view (self);
 }
@@ -527,15 +657,23 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
                                      SpotifyNativeSession  *session)
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
+  g_autofree gchar *user = session ? spotifygtk_native_session_dup_username (session) : NULL;
+  g_autofree gchar *account = user ? g_compute_checksum_for_string (G_CHECKSUM_SHA256, user, -1) : NULL;
+  g_autofree gchar *key = account ? g_strconcat ("saved-albums-v1:", account, NULL) : NULL;
 
   /* READY is emitted again after an access-point reconnect.  It is still the
    * same session and the already resolved album model remains valid; clearing
    * it here discarded every cached name/cover association and started the
    * expensive collection load again in the middle of normal UI activity. */
-  if (self->session == session)
+  if (self->session == session && g_strcmp0 (self->cache_key, key) == 0)
     return;
 
   self->session = session;
+  self->cache_generation++;
+  g_free (self->cache_key);
+  self->cache_key = g_steal_pointer (&key);
+  g_clear_pointer (&self->cached_album_dates, g_hash_table_unref);
+  g_clear_pointer (&self->pending_cache, g_bytes_unref);
   self->generation++;
   g_clear_handle_id (&self->load_timeout_id, g_source_remove);
   self->load_retry_count = 0;
@@ -549,6 +687,11 @@ spotifygtk_library_page_set_session (SpotifyGtkLibraryPage *self,
   g_clear_pointer (&self->saved_releases, g_ptr_array_unref);
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
+  show_release_view (self);
+  if (self->cache_key && spotifygtk_settings_get_caching_enabled (spotifygtk_settings_get_default ())) {
+    g_autoptr(GTask) task = library_cache_task (self, on_library_cache_read);
+    g_task_run_in_thread (task, read_library_cache);
+  }
 }
 
 static void
@@ -563,6 +706,7 @@ start_library_load (SpotifyGtkLibraryPage *self)
   set_loading (self, TRUE);
 
   self->load_cancel = g_cancellable_new ();
+  self->load_cache_epoch = spotifygtk_catalog_cache_epoch ();
   self->generation++;
   g_clear_pointer (&self->saved_album_uris, g_ptr_array_unref);
   g_clear_pointer (&self->saved_album_dates, g_hash_table_unref);
@@ -576,7 +720,7 @@ void
 spotifygtk_library_page_refresh (SpotifyGtkLibraryPage *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
-  /* Lazy first visit, with a clear retry path after a failed request. */
+  /* Shared by startup and navigation, with a retry after a failed request. */
   if (self->loaded || self->load_cancel)
     return;
   self->load_retry_count = 0;
@@ -664,6 +808,7 @@ on_saved_album_added_loaded (GObject *source, GAsyncResult *result,
   sort_releases_by_date_added (self);
   show_release_view (self);
   spotifygtk_runtime_schedule_heap_trim ();
+  save_library_cache (self, spotifygtk_catalog_cache_epoch ());
   saved_album_update_free (update);
 }
 
@@ -693,6 +838,7 @@ spotifygtk_library_page_set_album_saved (SpotifyGtkLibraryPage *self,
     spotifygtk_album_grid_remove_uri (self->albums, uri);
     if (self->loaded)
       show_release_view (self);
+    save_library_cache (self, spotifygtk_catalog_cache_epoch ());
     spotifygtk_runtime_schedule_heap_trim ();
     return;
   }

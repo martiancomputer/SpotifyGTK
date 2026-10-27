@@ -6063,6 +6063,7 @@ on_logout_choice (GObject *source, GAsyncResult *result, gpointer user_data)
   cancel_connect_request (self);
   spotifygtk_playback_bar_close_connect_dialog (self->playback_bar);
   spotifygtk_home_page_set_session (self->home_page, NULL);
+  spotifygtk_library_page_set_session (self->library_page, NULL);
   spotifygtk_native_session_disconnect (self->session);
   spotifygtk_context_page_set_session (self->context_page, NULL);
   spotifygtk_context_page_set_action (self->context_page, "", FALSE, FALSE);
@@ -6205,6 +6206,10 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
     else if (start && *start)
       navigate_raw (self, start);
     spotifygtk_library_page_set_session (self->library_page, session);
+    /* Warm both collections at sign-in, independently of the visible page.
+     * Refresh guards share an in-flight load with an early sidebar click. */
+    spotifygtk_liked_songs_page_refresh (self->liked_page);
+    spotifygtk_library_page_refresh (self->library_page);
 
     const gchar *visible = gtk_stack_get_visible_child_name (self->page_stack);
     if (visible)
@@ -6413,8 +6418,8 @@ navigate_raw (SpotifyGtkNativeWindow *self, const gchar *page_name)
   /* And ask the arriving page for its artwork back. */
   set_page_covers_loaded (self, page_name, TRUE);
 
-  /* Load substantial collections on first visit rather than behind Home at
-   * startup; each page no-ops refresh once it holds data. */
+  /* Startup already warms these collections. Navigation also provides a retry
+   * after failure; refresh no-ops for loaded or already-running requests. */
   if (g_strcmp0 (page_name, "liked") == 0)
     spotifygtk_liked_songs_page_refresh (self->liked_page);
   if (g_strcmp0 (page_name, "library") == 0) {

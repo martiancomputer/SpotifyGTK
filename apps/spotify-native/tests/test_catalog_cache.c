@@ -228,6 +228,62 @@ static void test_membership_empty (void)
   g_assert_cmpuint (tracks->len, ==, 0);
 }
 
+static void test_saved_library (void)
+{
+  const gchar *key = "saved-albums-v1:fixture-account";
+  if (g_test_subprocess ()) {
+    g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (key, 0);
+    g_autoptr(GHashTable) dates = NULL;
+    g_autoptr(GPtrArray) releases = spotifygtk_catalog_library_unpack (bytes, &dates);
+    g_assert_nonnull (releases);
+    g_assert_cmpuint (releases->len, ==, 1);
+    SpotifyNativeRelease *r = releases->pdata[0];
+    g_assert_cmpstr (r->name, ==, "Cached EP");
+    g_assert_cmpstr (r->cover_id, ==, "abcdef");
+    g_assert_cmpint (r->type, ==, SPOTIFY_ALBUM_TYPE_EP);
+    g_assert_cmpuint (r->tracks->len, ==, 0);
+    g_assert_cmpint (GPOINTER_TO_INT (g_hash_table_lookup (dates, r->uri)), ==, 1234567890);
+    g_assert_null (spotifygtk_catalog_cache_get ("saved-albums-v1:other-fixture-account", 0));
+    return;
+  }
+  g_autoptr(GPtrArray) tracks = g_ptr_array_new ();
+  SpotifyNativeTrack track = { .uri = "spotify:track:fixture" };
+  g_ptr_array_add (tracks, &track);
+  SpotifyNativeRelease release = { .uri = "spotify:album:fixture", .name = "Cached EP",
+    .cover_id = "abcdef", .year = 2026, .type = SPOTIFY_ALBUM_TYPE_EP, .tracks = tracks };
+  g_autoptr(GPtrArray) releases = g_ptr_array_new ();
+  g_ptr_array_add (releases, &release);
+  g_autoptr(GHashTable) dates = g_hash_table_new (g_str_hash, g_str_equal);
+  g_hash_table_insert (dates, release.uri, GINT_TO_POINTER (1234567890));
+  g_autoptr(GBytes) bytes = spotifygtk_catalog_library_pack (releases, dates);
+  spotifygtk_catalog_cache_put (key, bytes, spotifygtk_catalog_cache_epoch ());
+  g_test_trap_subprocess (NULL, 5 * G_USEC_PER_SEC, 0);
+  g_test_trap_assert_passed ();
+
+  /* Saving an empty collection must replace an older nonempty snapshot. */
+  g_ptr_array_set_size (releases, 0);
+  g_autoptr(GBytes) empty = spotifygtk_catalog_library_pack (releases, dates);
+  spotifygtk_catalog_cache_put (key, empty, spotifygtk_catalog_cache_epoch ());
+  g_autoptr(GBytes) saved = spotifygtk_catalog_cache_get (key, 0);
+  g_autoptr(GHashTable) empty_dates = NULL;
+  g_autoptr(GPtrArray) restored = spotifygtk_catalog_library_unpack (saved, &empty_dates);
+  g_assert_nonnull (restored);
+  g_assert_cmpuint (restored->len, ==, 0);
+
+  g_autoptr(GBytes) broken = g_bytes_new_static ("SGL1broken", 10);
+  g_autoptr(GHashTable) broken_dates = NULL;
+  g_assert_null (spotifygtk_catalog_library_unpack (broken, &broken_dates));
+  g_assert_null (broken_dates);
+  release.uri = "spotify:playlist:fixture";
+  g_ptr_array_add (releases, &release);
+  g_autoptr(GBytes) wrong_kind = spotifygtk_catalog_library_pack (releases, dates);
+  g_assert_null (spotifygtk_catalog_library_unpack (wrong_kind, &broken_dates));
+  release.uri = "spotify:album:fixture";
+  g_ptr_array_add (releases, &release);
+  g_autoptr(GBytes) duplicated = spotifygtk_catalog_library_pack (releases, dates);
+  g_assert_null (spotifygtk_catalog_library_unpack (duplicated, &broken_dates));
+}
+
 int main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
@@ -243,6 +299,7 @@ int main (int argc, char **argv)
   g_test_add_func ("/catalog/limits", test_limits);
   g_test_add_func ("/catalog/revision", test_revision);
   g_test_add_func ("/catalog/snapshots", test_snapshots);
+  g_test_add_func ("/catalog/saved-library", test_saved_library);
   g_test_add_func ("/catalog/corrupt", test_corrupt);
   g_test_add_func ("/catalog/membership/metadata-first", test_membership_metadata_first);
   g_test_add_func ("/catalog/membership/membership-first", test_membership_first);

@@ -9,6 +9,7 @@
 #define RELEASE_TYPE "(sssii" TRACKS_TYPE ")"
 #define RELEASES_TYPE "a" RELEASE_TYPE
 #define TEXT(s) ((s) ? (s) : "")
+#define LIBRARY_TYPE "a(sssiii)"
 
 /* Keep old offline snapshots readable while storing structured credits in new
  * snapshots. A prefix disambiguates the two serialized GVariant schemas. */
@@ -169,4 +170,60 @@ GPtrArray *spotifygtk_catalog_releases_unpack (GBytes *bytes)
     g_ptr_array_add (releases, r);
   }
   return releases;
+}
+
+GBytes *
+spotifygtk_catalog_library_pack (GPtrArray *releases, GHashTable *dates)
+{
+  if (!releases || releases->len > 20000) return NULL;
+  GVariantBuilder builder;
+  g_variant_builder_init (&builder, G_VARIANT_TYPE (LIBRARY_TYPE));
+  for (guint i = 0; i < releases->len; i++) {
+    const SpotifyNativeRelease *r = releases->pdata[i];
+    g_variant_builder_add (&builder, "(sssiii)", TEXT (r->uri), TEXT (r->name),
+      TEXT (r->cover_id), r->year, (gint) r->type,
+      dates ? GPOINTER_TO_INT (g_hash_table_lookup (dates, r->uri)) : 0);
+  }
+  g_autoptr(GVariant) value = g_variant_ref_sink (g_variant_builder_end (&builder));
+  if (g_variant_get_size (value) > 4 * 1024 * 1024 - 4) return NULL;
+  GByteArray *out = g_byte_array_new ();
+  g_byte_array_append (out, (const guint8 *) "SGL1", 4);
+  g_byte_array_append (out, g_variant_get_data (value), g_variant_get_size (value));
+  return g_byte_array_free_to_bytes (out);
+}
+
+GPtrArray *
+spotifygtk_catalog_library_unpack (GBytes *bytes, GHashTable **dates)
+{
+  *dates = NULL;
+  if (!bytes || g_bytes_get_size (bytes) < 4 ||
+      g_bytes_get_size (bytes) > 4 * 1024 * 1024 ||
+      memcmp (g_bytes_get_data (bytes, NULL), "SGL1", 4) != 0) return NULL;
+  g_autoptr(GBytes) payload = g_bytes_new_from_bytes (bytes, 4, g_bytes_get_size (bytes) - 4);
+  g_autoptr(GVariant) value = g_variant_ref_sink (g_variant_new_from_bytes (
+    G_VARIANT_TYPE (LIBRARY_TYPE), payload, FALSE));
+  if (!g_variant_is_normal_form (value) || g_variant_n_children (value) > 20000)
+    return NULL;
+  g_autoptr(GPtrArray) releases = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_release_free);
+  g_autoptr(GHashTable) added = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  GVariantIter iter;
+  const gchar *uri, *name, *cover;
+  gint year, type, date;
+  g_variant_iter_init (&iter, value);
+  while (g_variant_iter_loop (&iter, "(&s&s&siii)", &uri, &name, &cover, &year, &type, &date)) {
+    if (!g_str_has_prefix (uri, "spotify:album:") || strlen (uri) > 128 ||
+        g_hash_table_contains (added, uri) || date < 0 ||
+        type < SPOTIFY_ALBUM_TYPE_UNKNOWN || type > SPOTIFY_ALBUM_TYPE_EP)
+      return NULL;
+    SpotifyNativeRelease *r = g_new0 (SpotifyNativeRelease, 1);
+    r->uri = g_strdup (uri); r->name = g_strdup (name);
+    r->cover_id = *cover ? g_strdup (cover) : NULL;
+    r->year = year; r->type = type;
+    r->tracks = g_ptr_array_new_with_free_func ((GDestroyNotify) spotifygtk_native_track_free);
+    g_ptr_array_add (releases, r);
+    g_hash_table_insert (added, g_strdup (uri), GINT_TO_POINTER (date));
+  }
+  *dates = g_steal_pointer (&added);
+  return g_steal_pointer (&releases);
 }
