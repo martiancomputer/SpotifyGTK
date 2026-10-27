@@ -532,10 +532,19 @@ spotifygtk_liked_songs_page_dispose (GObject *object)
 }
 
 static void
+spotifygtk_liked_songs_page_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
+{
+  SpotifyGtkLikedSongsPage *self = SPOTIFYGTK_LIKED_SONGS_PAGE (widget);
+  spotifygtk_snapshot_header_transparency (widget, GTK_WIDGET (self->list), self->list, snapshot);
+  GTK_WIDGET_CLASS (spotifygtk_liked_songs_page_parent_class)->snapshot (widget, snapshot);
+}
+
+static void
 spotifygtk_liked_songs_page_class_init (SpotifyGtkLikedSongsPageClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   object_class->dispose = spotifygtk_liked_songs_page_dispose;
+  GTK_WIDGET_CLASS (klass)->snapshot = spotifygtk_liked_songs_page_snapshot;
 
   signals[TRACK_ACTIVATED] = g_signal_new ("track-activated",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,

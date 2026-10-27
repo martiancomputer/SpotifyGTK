@@ -131,7 +131,6 @@ struct _SpotifyGtkArtistPage {
 
   SpotifyGtkTrackList *list;
   SpotifyGtkTrackList *releases_list; /* one virtualised discography model */
-  GtkWidget           *releases_box;   /* one section per release */
   GtkLabel            *releases_status;
   GtkWidget           *kind_buttons[N_RELEASE_KINDS];
   ReleaseKind          sort_kind;
@@ -470,16 +469,12 @@ align_title_to_hero (GtkWidget *widget, GParamSpec *pspec, gpointer data)
   /* A hidden or not-yet-allocated scrollbar occupies no gutter. Waiting for
    * a positive width in a frame callback kept the frame clock running forever
    * on pages without overflow; a resize happened to give it an allocation. */
-  gint gutter = vsb && gtk_widget_get_visible (vsb)
+  gint gutter = vsb && gtk_widget_get_mapped (vsb)
     ? gtk_widget_get_width (vsb) : 0;
 
   gint want = gutter + CONTENT_MARGIN_END;
-  graphene_rect_t bounds;
-  if (self->hero_art && gtk_widget_compute_bounds (GTK_WIDGET (self->hero_art),
-                                                  GTK_WIDGET (self), &bounds) &&
-      bounds.size.width > 0)
-    want = MAX (0, (gint) ceil (gtk_widget_get_width (GTK_WIDGET (self)) -
-                               bounds.origin.x - bounds.size.width));
+  /* The virtual header may be unbound or still have its previous window's
+   * allocation. Its image bounds must not become a stale fixed right inset. */
   if (gtk_widget_get_margin_end (self->title_row) != want)
     gtk_widget_set_margin_end (self->title_row, want);
 }
@@ -594,6 +589,7 @@ compare_releases (gconstpointer a, gconstpointer b, gpointer user_data)
 static void
 apply_release_sort (SpotifyGtkArtistPage *self)
 {
+  spotifygtk_smooth_scroll_cancel (GTK_SCROLLED_WINDOW (self->scroller));
   if (!self->all_releases) {
     spotifygtk_track_list_clear (self->releases_list);
     return;
@@ -626,6 +622,8 @@ apply_release_sort (SpotifyGtkArtistPage *self)
   }
 
   spotifygtk_track_list_set_native_tracks (self->releases_list, flattened);
+  /* The artist's own message lives in the scrollable section heading. */
+  spotifygtk_track_list_set_status (self->releases_list, NULL);
 
   gboolean empty = (ordered->len == 0);
   gtk_label_set_text (self->releases_status, empty ? "No releases here." : "");
@@ -969,9 +967,19 @@ spotifygtk_artist_page_dispose (GObject *object)
 }
 
 static void
+spotifygtk_artist_page_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
+{
+  SpotifyGtkArtistPage *self = SPOTIFYGTK_ARTIST_PAGE (widget);
+  spotifygtk_snapshot_scrolled_header_transparency (widget, self->scroller,
+    GTK_SCROLLED_WINDOW (self->scroller), snapshot);
+  GTK_WIDGET_CLASS (spotifygtk_artist_page_parent_class)->snapshot (widget, snapshot);
+}
+
+static void
 spotifygtk_artist_page_class_init (SpotifyGtkArtistPageClass *klass)
 {
   G_OBJECT_CLASS (klass)->dispose = spotifygtk_artist_page_dispose;
+  GTK_WIDGET_CLASS (klass)->snapshot = spotifygtk_artist_page_snapshot;
 
   signals[TRACK_ACTIVATED] = g_signal_new (
     "track-activated", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
@@ -1041,25 +1049,28 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   self->title_row = title_row;
   gtk_box_append (GTK_BOX (self), title_row);
 
-  /*
-   * Everything below the title scrolls as one. The sections inside are the
-   * shared list and grid in inline mode, so neither scrolls on its own -- see
-   * the note on set_inline().
-   */
-  GtkWidget *scroller = gtk_scrolled_window_new ();
+  /* The discography owns the only scrolling viewport. Its first virtual
+   * item holds the hero, the bounded top-ten list and the release controls.
+   * Propagating an inline discography's full natural height to an outer
+   * scroller makes GTK treat the entire catalogue as visible. */
+  self->releases_list = spotifygtk_track_list_new ();
+  spotifygtk_track_list_set_content_margins (self->releases_list, 0, 0);
+  spotifygtk_track_list_set_row_margins (self->releases_list, 0, CONTENT_MARGIN_END + 2);
+  spotifygtk_track_list_set_numbered (self->releases_list, TRUE);
+  g_signal_connect (self->releases_list, "track-activated",
+                    G_CALLBACK (on_track_activated), self);
+  GtkWidget *scroller = GTK_WIDGET (spotifygtk_track_list_get_scroller (self->releases_list));
   self->scroller = scroller;
   gtk_widget_set_vexpand (scroller, TRUE);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-  /*
-   * The wheel animation every other page has. Its absence here is why
-   * scrolling seemed to lose smoothness at random: it was not intermittent,
-   * it was this page. Every release's track list is inline and therefore does
-   * not scroll itself, so without this the page fell through to
-   * GtkScrolledWindow's stepped wheel handling -- one notch, one jump.
-   */
-  spotifygtk_smooth_scroll_attach (GTK_SCROLLED_WINDOW (scroller),
-                                   GTK_ORIENTATION_VERTICAL);
+  /* TrackList already owns this scroller's wheel controller. */
+  spotifygtk_smooth_scroll_set_variable_rows (GTK_SCROLLED_WINDOW (scroller));
+  GtkWidget *view = gtk_scrolled_window_get_child (GTK_SCROLLED_WINDOW (scroller));
+  if (GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (view), "gtk4-enhanced-item-extents-version")) == 1)
+    /* Normal rows are estimated at 56 logical pixels. Measured section
+     * headings keep their actual heights when GTK recycles their widgets. */
+    g_object_set_data (G_OBJECT (view), "gtk4-enhanced-item-extents-default-v1", GUINT_TO_POINTER (56));
   gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (scroller), FALSE);
 
   GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 12);
@@ -1165,30 +1176,14 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
   gtk_box_append (GTK_BOX (releases_row), kind_group);
   gtk_box_append (GTK_BOX (content), releases_row);
 
-  self->releases_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
-  gtk_box_append (GTK_BOX (content), self->releases_box);
-
-  /* A single model is essential here. A GtkListView per release combined
-   * with propagate-natural-height realised the entire discography and kept
-   * all those rows and textures alive after leaving the page. */
-  self->releases_list = spotifygtk_track_list_new ();
-  spotifygtk_track_list_set_inline (self->releases_list, TRUE);
-  spotifygtk_track_list_set_external_viewport (
-    self->releases_list, GTK_SCROLLED_WINDOW (scroller));
-  spotifygtk_track_list_set_numbered (self->releases_list, TRUE);
-  g_signal_connect (self->releases_list, "track-activated",
-                    G_CALLBACK (on_track_activated), self);
-  gtk_box_append (GTK_BOX (self->releases_box),
-                  GTK_WIDGET (self->releases_list));
-
   self->releases_status = GTK_LABEL (gtk_label_new (""));
   gtk_widget_add_css_class (GTK_WIDGET (self->releases_status), "dim-text");
   gtk_label_set_xalign (self->releases_status, 0.0);
   gtk_widget_set_visible (GTK_WIDGET (self->releases_status), FALSE);
   gtk_box_append (GTK_BOX (content), GTK_WIDGET (self->releases_status));
 
-  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), content);
-  gtk_box_append (GTK_BOX (self), scroller);
+  spotifygtk_track_list_set_page_header (self->releases_list, content);
+  gtk_box_append (GTK_BOX (self), GTK_WIDGET (self->releases_list));
 
   SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
   self->compact = !spotifygtk_settings_get_compact_mode (settings);

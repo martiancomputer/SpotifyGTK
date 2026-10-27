@@ -26,6 +26,150 @@
 #include "spotify/track_meta.h"
 #include <math.h>
 
+typedef struct {
+  GtkCssProvider *provider;
+  guint update;
+  gint extent;
+} HeaderBackdropExtent;
+
+static void
+header_backdrop_extent_free (gpointer data)
+{
+  HeaderBackdropExtent *state = data;
+  g_clear_handle_id (&state->update, g_source_remove);
+  g_clear_object (&state->provider);
+  g_free (state);
+}
+
+static gboolean
+apply_header_backdrop_extent (gpointer data)
+{
+  HeaderBackdropExtent *state = data;
+  state->update = 0;
+  /* Equal padding and negative margin leave content coordinates, viewport
+   * size and scroll range unchanged, while expanding the list's paint area
+   * so GTK allocates the preceding rows needed by the whole glass band. */
+  g_autofree gchar *css = g_strdup_printf (
+    "listview.track-listview { padding-top: %dpx; margin-top: -%dpx; }",
+    state->extent, state->extent);
+  gtk_css_provider_load_from_string (state->provider, css);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+ensure_header_backdrop_extent (GtkWidget *view, gint extent)
+{
+  HeaderBackdropExtent *state = g_object_get_data (G_OBJECT (view), "header-backdrop-extent");
+  if (!state) {
+    state = g_new0 (HeaderBackdropExtent, 1);
+    state->provider = gtk_css_provider_new ();
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    gtk_style_context_add_provider (gtk_widget_get_style_context (view),
+      GTK_STYLE_PROVIDER (state->provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    g_object_set_data_full (G_OBJECT (view), "header-backdrop-extent",
+                            state, header_backdrop_extent_free);
+  }
+  if (state->extent == extent)
+    return;
+  state->extent = extent;
+  /* Apply after snapshot; changing CSS during drawing invalidates allocation. */
+  if (!state->update)
+    state->update = g_idle_add (apply_header_backdrop_extent, state);
+}
+
+void
+spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *content,
+                                                   GtkScrolledWindow *scroller,
+                                                   GtkSnapshot *snapshot)
+{
+  graphene_rect_t content_bounds;
+  if (!gtk_widget_compute_bounds (content, page, &content_bounds))
+    return;
+  float left = gtk_widget_get_margin_start (page);
+  float right = gtk_widget_get_margin_end (page);
+  float top = gtk_widget_get_margin_top (page);
+  float height = content_bounds.origin.y + top;
+  float width = gtk_widget_get_width (page) + left + right;
+  if (width <= 0 || height <= 0)
+    return;
+
+  /* Named palette colours are still exposed through GtkStyleContext in GTK4.
+   * Keep that lookup here; it neither changes CSS nor requests layout. */
+  GdkRGBA tint;
+  G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+  gboolean have_tint = gtk_style_context_lookup_color (
+    gtk_widget_get_style_context (page), "bg_content", &tint);
+  G_GNUC_END_IGNORE_DEPRECATIONS
+  if (!have_tint)
+    return;
+  GskColorStop stops[] = { { 0.0f, tint }, { 1.0f, tint } };
+  stops[0].color.alpha = 0.92f;
+  stops[1].color.alpha = 0;
+  graphene_rect_t band = GRAPHENE_RECT_INIT (-left, -top, width, height);
+  graphene_point_t start = GRAPHENE_POINT_INIT (0, -top);
+  graphene_point_t end = GRAPHENE_POINT_INIT (0, content_bounds.origin.y);
+
+  /* Replay the preceding list items from the extended paint area. The visible
+   * content coordinates, scroll range and scrollbar allocation stay intact. */
+  GtkWidget *view = gtk_scrolled_window_get_child (scroller);
+  if (GTK_IS_LIST_VIEW (view)) {
+    /* Keep normal row drawing inside the original list viewport. Only the
+     * separately frosted backdrop may use its expanded paint allocation. */
+    gtk_widget_set_overflow (gtk_widget_get_parent (GTK_WIDGET (scroller)), GTK_OVERFLOW_HIDDEN);
+    ensure_header_backdrop_extent (view, (gint) ceilf (height + 54));
+  }
+  graphene_point_t zero = GRAPHENE_POINT_INIT (0, 0), origin;
+  if (view && gtk_widget_compute_point (view, page, &zero, &origin)) {
+    GtkSnapshot *backdrop = gtk_snapshot_new ();
+    graphene_rect_t sample;
+    /* The strongest blur needs source pixels up to three radii away. */
+    graphene_rect_inset_r (&band, -54, -54, &sample);
+    gtk_snapshot_push_clip (backdrop, &sample);
+    gtk_snapshot_append_color (backdrop, &tint, &sample);
+    gtk_snapshot_translate (backdrop, &origin);
+    for (GtkWidget *item = gtk_widget_get_first_child (view); item;
+         item = gtk_widget_get_next_sibling (item)) {
+      graphene_rect_t item_bounds;
+      if (gtk_widget_get_mapped (item) &&
+          gtk_widget_compute_bounds (item, page, &item_bounds) &&
+          graphene_rect_intersection (&item_bounds, &sample, NULL))
+        gtk_widget_snapshot_child (view, item, backdrop);
+    }
+    gtk_snapshot_pop (backdrop);
+    g_autoptr(GskRenderNode) node = gtk_snapshot_free_to_node (backdrop);
+    if (node) {
+      const GskColorStop mask[] = {
+        { 0.0f, { 1, 1, 1, 1 } }, { 1.0f, { 1, 1, 1, 0 } },
+      };
+      gtk_snapshot_push_clip (snapshot, &band);
+      /* Both frosting and tint fade continuously to clear at the lower edge.
+       * Controls are drawn afterwards and remain sharp. */
+      gtk_snapshot_append_node (snapshot, node);
+      gtk_snapshot_push_mask (snapshot, GSK_MASK_MODE_ALPHA);
+      gtk_snapshot_append_linear_gradient (snapshot, &band, &start, &end,
+                                            mask, G_N_ELEMENTS (mask));
+      gtk_snapshot_pop (snapshot);
+      gtk_snapshot_push_blur (snapshot, 18);
+      gtk_snapshot_append_node (snapshot, node);
+      gtk_snapshot_pop (snapshot);
+      gtk_snapshot_pop (snapshot);
+      gtk_snapshot_pop (snapshot);
+    }
+  }
+  gtk_snapshot_append_linear_gradient (snapshot, &band, &start, &end,
+                                        stops, G_N_ELEMENTS (stops));
+}
+
+void
+spotifygtk_snapshot_header_transparency (GtkWidget *page, GtkWidget *content,
+                                          SpotifyGtkTrackList *tracks,
+                                          GtkSnapshot *snapshot)
+{
+  spotifygtk_snapshot_scrolled_header_transparency (page, content,
+    spotifygtk_track_list_get_scroller (tracks), snapshot);
+}
+
 struct _SpotifyGtkTrackList {
   GtkBox parent_instance;
 

@@ -28,10 +28,13 @@ G_BEGIN_DECLS
  *
  * The event is consumed only while that axis can still move, so a scroller
  * nested in another one hands the wheel back at its ends instead of trapping
- * it. Safe to call once per scroller; state lives and dies with the widget.
+ * it. Repeated calls reuse the existing setup; state dies with the widget.
  */
 void spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
                                       GtkOrientation     orientation);
+/* A virtual list with tall section headings can make large anchor
+ * corrections. Direct mouse/keyboard input and unmap explicitly take over. */
+void spotifygtk_smooth_scroll_set_variable_rows (GtkScrolledWindow *scroller);
 
 /* Give an embedded horizontal shelf first refusal of wheel events inside its
  * bounds. The child is weakly held; the parent keeps scrolling elsewhere. */

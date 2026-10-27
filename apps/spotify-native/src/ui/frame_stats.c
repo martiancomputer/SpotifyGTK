@@ -63,14 +63,23 @@ after_paint (GdkFrameClock *clock, gpointer data)
   stats->frames++;
   if (now - stats->started_us >= 5000000) {
     GskRenderer *renderer = gtk_native_get_renderer (GTK_NATIVE (stats->window));
+    GdkSurface *surface = gtk_native_get_surface (GTK_NATIVE (stats->window));
     g_message ("frame-profile: renderer=%s size=%dx%d frames=%u"
                " paint-avg=%.2fms paint-max=%.2fms gap-max=%.2fms"
-               " late=%u refresh=%.2fms",
+               " late=%u refresh=%.2fms surface=%dx%d scale=%.3f focused=%d"
+               " limit=%u unsync-request=%u unsync-available=%u",
                renderer ? G_OBJECT_TYPE_NAME (renderer) : "unavailable",
                width, height, stats->frames,
                stats->total_paint_us / (1000.0 * stats->frames),
                stats->max_paint_us / 1000.0, stats->max_gap_us / 1000.0,
-               stats->late_frames, refresh / 1000.0);
+               stats->late_frames, refresh / 1000.0,
+               surface ? gdk_surface_get_width (surface) : 0,
+               surface ? gdk_surface_get_height (surface) : 0,
+               surface ? gdk_surface_get_scale (surface) : 0,
+               gtk_window_is_active (GTK_WINDOW (stats->window)),
+               GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (clock), "gtk4-enhanced-max-fps-v1")),
+               GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (clock), "gtk4-enhanced-unsynchronized-v1")),
+               GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (clock), "gtk4-enhanced-unsynchronized-available-v1")));
     stats->started_us = now;
     stats->frames = stats->late_frames = 0;
     stats->total_paint_us = stats->max_paint_us = stats->max_gap_us = 0;

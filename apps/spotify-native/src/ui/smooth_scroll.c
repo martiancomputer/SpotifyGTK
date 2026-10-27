@@ -29,6 +29,8 @@ typedef struct {
   guint              tick;
   gdouble            target;
   gdouble            last_set;      /* what we last wrote, to spot outside changes */
+  gboolean           variable_rows;
+  gdouble            known_page_size;
   gint64             last_frame_us; /* to ease by elapsed time, not by frame count */
   gboolean           writing_adjustment;
   gboolean           trace;
@@ -134,10 +136,35 @@ static void
 on_adjustment_geometry (GtkAdjustment *adj, GParamSpec *pspec, gpointer user_data)
 {
   SmoothScroll *ss = user_data;
+  gdouble page = gtk_adjustment_get_page_size (adj);
+  if (ss->variable_rows && ss->tick && ss->known_page_size > 0 && page != ss->known_page_size)
+    spotifygtk_smooth_scroll_cancel (ss->scroller);
+  ss->known_page_size = page;
   if (ss->trace)
     ss->geometry_changes++;
   (void) adj;
   (void) pspec;
+}
+
+static gboolean
+reconcile_scroll_anchor (SmoothScroll *ss, GtkAdjustment *adj)
+{
+  gdouble value = gtk_adjustment_get_value (adj);
+  gdouble delta = value - ss->last_set;
+  gdouble tolerance = SMOOTH_SCROLL_ANCHOR_TOLERANCE;
+  if (ss->variable_rows && GTK_IS_LIST_VIEW (gtk_scrolled_window_get_child (ss->scroller)))
+    /* Several large section headings may be remeasured together. Their
+     * anchor correction can exceed a viewport; direct input and navigation
+     * already cancel this mode explicitly, rather than guessing from size. */
+    tolerance = G_MAXDOUBLE;
+  if (fabs (delta) > tolerance)
+    return FALSE;
+  if (fabs (delta) > 1.0) {
+    ss->target += delta;
+    ss->last_set = value;
+    if (ss->trace) ss->anchor_corrections++;
+  }
+  return TRUE;
 }
 
 static const gchar *
@@ -317,16 +344,13 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
    * rows are remeasured. Preserve the remaining animation distance across
    * those corrections; otherwise every correction looks like outside input,
    * kills the easing after a few frames, and the next correction can visibly
-   * pull the viewport back. A large displacement is a real scrollbar,
-   * keyboard or programmatic takeover and still wins immediately. */
-  gdouble outside_delta = value - ss->last_set;
-  if (ABS (outside_delta) > 1.0 &&
-      ABS (outside_delta) <= SMOOTH_SCROLL_ANCHOR_TOLERANCE) {
-    ss->target += outside_delta;
-    ss->last_set = value;
+   * pull the viewport back. Variable-height lists permit larger corrections;
+   * their pointer/keyboard input and model navigation cancel motion explicitly.
+   * Other views retain the small correction tolerance. */
+  if (!reconcile_scroll_anchor (ss, adj)) {
     if (ss->trace)
-      ss->anchor_corrections++;
-  } else if (ABS (outside_delta) > SMOOTH_SCROLL_ANCHOR_TOLERANCE) {
+      g_message ("scroll-profile-stop: outside-delta=%.1f upper=%.1f page=%.1f",
+        value - ss->last_set, gtk_adjustment_get_upper (adj), gtk_adjustment_get_page_size (adj));
     log_scroll_end (ss, "external-change", value);
     ss->tick = 0;
     return G_SOURCE_REMOVE;
@@ -515,6 +539,10 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
    * there; dx is preferred when present (tilt wheels, horizontal gestures). */
   /* Accumulate onto an in-flight target so a flick of several notches travels
    * the whole distance instead of each notch cancelling the last. */
+  if (ss->variable_rows && ss->tick)
+    /* Allocation can correct the anchor between the last frame and this new
+     * input event. Reconcile before last_set is replaced below. */
+    reconcile_scroll_anchor (ss, adj);
   gdouble base = (ss->tick != 0) ? ss->target : value;
 
   if (ss->trace && ss->tick == 0) {
@@ -556,6 +584,10 @@ spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
                                  GtkOrientation     orientation)
 {
   g_return_if_fail (GTK_IS_SCROLLED_WINDOW (scroller));
+  /* Replacing this state leaves the old event controller's callback pointing
+   * at freed memory. Composite pages may reuse an already wired TrackList. */
+  if (g_object_get_data (G_OBJECT (scroller), "spotifygtk-smooth-scroll"))
+    return;
 
   SmoothScroll *ss = g_new0 (SmoothScroll, 1);
   ss->scroller    = scroller;
@@ -602,6 +634,53 @@ spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
   gtk_event_controller_set_propagation_phase (wheel, GTK_PHASE_CAPTURE);
   g_signal_connect (wheel, "scroll", G_CALLBACK (on_scroll), ss);
   gtk_widget_add_controller (GTK_WIDGET (scroller), wheel);
+}
+
+static gboolean
+variable_rows_direct_input (GtkEventControllerLegacy *controller, GdkEvent *event,
+                             gpointer user_data)
+{
+  SmoothScroll *ss = user_data;
+  (void) controller;
+  GdkEventType type = gdk_event_get_event_type (event);
+  gboolean takeover = type == GDK_BUTTON_PRESS || type == GDK_TOUCH_BEGIN;
+  if (type == GDK_KEY_PRESS) {
+    guint key = gdk_key_event_get_keyval (event);
+    takeover = key == GDK_KEY_Up || key == GDK_KEY_Down ||
+      key == GDK_KEY_Left || key == GDK_KEY_Right ||
+      key == GDK_KEY_Page_Up || key == GDK_KEY_Page_Down ||
+      key == GDK_KEY_Home || key == GDK_KEY_End ||
+      key == GDK_KEY_KP_Up || key == GDK_KEY_KP_Down ||
+      key == GDK_KEY_KP_Page_Up || key == GDK_KEY_KP_Page_Down ||
+      key == GDK_KEY_KP_Home || key == GDK_KEY_KP_End;
+  }
+  if (takeover)
+    spotifygtk_smooth_scroll_cancel (ss->scroller);
+  return GDK_EVENT_PROPAGATE;
+}
+
+static void
+variable_rows_unmap (GtkWidget *widget, gpointer unused)
+{
+  spotifygtk_smooth_scroll_cancel (GTK_SCROLLED_WINDOW (widget));
+  (void) unused;
+}
+
+void
+spotifygtk_smooth_scroll_set_variable_rows (GtkScrolledWindow *scroller)
+{
+  g_return_if_fail (GTK_IS_SCROLLED_WINDOW (scroller));
+  SmoothScroll *ss = g_object_get_data (G_OBJECT (scroller), "spotifygtk-smooth-scroll");
+  g_return_if_fail (ss != NULL);
+  if (ss->variable_rows) return;
+  ss->variable_rows = TRUE;
+  GtkAdjustment *adj = adjustment_for (ss);
+  ss->known_page_size = adj ? gtk_adjustment_get_page_size (adj) : 0;
+  GtkEventController *input = gtk_event_controller_legacy_new ();
+  gtk_event_controller_set_propagation_phase (input, GTK_PHASE_CAPTURE);
+  g_signal_connect (input, "event", G_CALLBACK (variable_rows_direct_input), ss);
+  gtk_widget_add_controller (GTK_WIDGET (scroller), input);
+  g_signal_connect (scroller, "unmap", G_CALLBACK (variable_rows_unmap), NULL);
 }
 
 void

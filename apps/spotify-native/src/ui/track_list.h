@@ -20,6 +20,16 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (SpotifyGtkTrackList, spotifygtk_track_list,
                       SPOTIFYGTK, TRACK_LIST, GtkBox)
 
+/* Paint only: retain the page's existing header allocation and scroll area. */
+void spotifygtk_snapshot_header_transparency (GtkWidget *page,
+                                               GtkWidget *content,
+                                               SpotifyGtkTrackList *tracks,
+                                               GtkSnapshot *snapshot);
+void spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page,
+                                                        GtkWidget *content,
+                                                        GtkScrolledWindow *scroller,
+                                                        GtkSnapshot *snapshot);
+
 /* Borrow the shared set of liked URIs. Not copied -- consulted on bind. */
 typedef GtkWidget *(*SpotifyGtkTrackSectionFunc) (const SpotifyNativeTrack *track,
                                                    gpointer user_data);
