@@ -8,7 +8,7 @@ directly—without running Spotify's desktop app.
 ![CI](https://github.com/martiancomputer/SpotifyGTK/actions/workflows/build.yml/badge.svg)
 [![Latest release](https://img.shields.io/github/v/release/martiancomputer/SpotifyGTK)](https://github.com/martiancomputer/SpotifyGTK/releases/latest)
 
-**Latest release: [1.1.3](https://github.com/martiancomputer/SpotifyGTK/releases/tag/v1.1.3).**
+**Latest release: [1.1.4](https://github.com/martiancomputer/SpotifyGTK/releases/tag/v1.1.4).**
 Linux packages and a signed Windows MSIX are available.
 
 > Spotify streaming requires a **Premium account**. The client does not bypass
@@ -56,7 +56,7 @@ bounded; downloaded artwork is available offline.
 ## Download
 
 Get the `.deb`, `.appimage`, Windows `.msix` and public signing certificate
-from the [1.1.3 release page](https://github.com/martiancomputer/SpotifyGTK/releases/tag/v1.1.3).
+from the [1.1.4 release page](https://github.com/martiancomputer/SpotifyGTK/releases/tag/v1.1.4).
 For Windows, install the included `.cer` into **Trusted People** before the
 MSIX; follow the [Windows installation guide](apps/spotify-native-windows/INSTALL-MSIX.md).
 
