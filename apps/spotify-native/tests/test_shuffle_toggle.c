@@ -3,10 +3,17 @@
 #include "ui/playback_bar.h"
 #include "ui/context_menu.h"
 #include "ui/cover_loader.h"
+#include "ui/dialog_host.h"
 #include "spotify/track_meta.h"
 
 /* The shuffle control does not request artwork, metadata or a context menu.
  * Keep this test focused on the real playback bar and its click signal. */
+void
+spotifygtk_dialog_prepare (AdwDialog *dialog)
+{
+  (void) dialog;
+}
+
 void
 spotifygtk_cover_load_playback (const gchar *cover_id, gint target_px,
                                 GCancellable *cancellable,

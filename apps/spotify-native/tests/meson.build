@@ -86,7 +86,7 @@ if get_option('tests')
     test_shuffle_toggle = executable('test-shuffle-toggle',
       'test_shuffle_toggle.c', '../src/ui/playback_bar.c',
       include_directories: [config_inc, include_directories('../src')],
-      dependencies: [gtk4_dep, adw_check, gio_dep, m_dep],
+      dependencies: [gtk4_dep, adw_check, gio_dep, json_glib_dep, soup_dep, m_dep],
     )
     test('shuffle-toggle', test_shuffle_toggle, timeout: 10)
     test_track_row_pointer = executable('test-track-row-pointer',
