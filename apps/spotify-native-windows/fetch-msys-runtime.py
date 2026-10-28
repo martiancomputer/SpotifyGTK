@@ -73,6 +73,10 @@ def main():
                  "glib-networking", "ca-certificates", "adwaita-icon-theme",
                  "adwaita-icon-theme-legacy"):
         select(PREFIX + name)
+    # Cairo and several image/codec dependencies use C++ even though the app
+    # and our GTK fork are C. The split GCC runtime metadata is not enough to
+    # guarantee libstdc++ is selected through every transitive dependency.
+    select(PREFIX + ("libstdc++" if PREFIX + "libstdc++" in packages else "gcc-libs"))
     for name in args.extra_package:
         select(PREFIX + name)
 

@@ -180,7 +180,15 @@ while :; do
       [[ -n "$name" ]] || continue
       have_in_dist "$name" && continue
       src="$(resolve_dll "$name" || true)"
-      [[ -n "$src" ]] || continue
+      if [[ -z "$src" ]]; then
+        case "${name,,}" in
+          lib*.dll|icu*.dll|zlib*.dll|avcodec-*.dll|avformat-*.dll|avutil-*.dll|swresample-*.dll|swscale-*.dll)
+            echo "error: unresolved bundled dependency '$name' imported by '$(basename "$bin")'" >&2
+            exit 1
+            ;;
+        esac
+        continue
+      fi
       cp -n "$src" "$DIST/" 2>/dev/null || true
       dist_dlls["${name,,}"]="$DIST/$name"
       added=$((added + 1))

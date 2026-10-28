@@ -325,6 +325,11 @@ Concrete catches from the port, each of which broke something real:
 - **`g_app_info_launch_default_for_uri()` asserts on Windows** when handed a NULL
   launch context, so OAuth sign-in could not open a browser. `ShellExecuteW` is
   used instead (`native_auth.c`).
+- **C dependencies can require the C++ runtime.** Cairo and several image and
+  codec libraries import `libstdc++-6.dll`. The cross-build SDK explicitly
+  selects MSYS2's split `libstdc++` package (or the legacy `gcc-libs` package),
+  and bundling fails on unresolved third-party DLL imports instead of silently
+  relying on another application's runtime or the developer's `PATH`.
 - **A GTK bundle needs `lib/gio/modules/`.** Without glib-networking there, every
   HTTPS request fails with "TLS support is not available" — which looks like a
   network problem and is not. Loadable modules also carry their own dependency
