@@ -276,6 +276,44 @@ test_header_transparency_preserves_geometry (void)
 }
 
 static void
+test_liked_sort_stale_allocation (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1600, 600);
+  SpotifyGtkLikedSongsPage *page = spotifygtk_liked_songs_page_new ();
+  SpotifyGtkTrackList *list = spotifygtk_liked_songs_page_get_list (page);
+  SpotifyNativeTrack track = { .uri = "local:track:layout-fixture", .name = "Track",
+    .artists = "Artist", .album = "Album", .duration_ms = 180000 };
+  g_autoptr(GPtrArray) tracks = g_ptr_array_new ();
+  g_ptr_array_add (tracks, &track);
+  spotifygtk_track_list_set_native_tracks (list, tracks);
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkWidget *controls = gtk_widget_get_parent (find_type (GTK_WIDGET (page), GTK_TYPE_SEARCH_ENTRY));
+  gint stable_inset = gtk_widget_get_margin_end (controls);
+  g_assert_cmpint (stable_inset, <, 128);
+  GtkWidget *row = find_type (GTK_WIDGET (list), SPOTIFYGTK_TYPE_TRACK_ROW);
+  g_assert_nonnull (row);
+  g_autoptr(GtkWidget) retained_row = g_object_ref (row);
+  gint row_height = gtk_widget_get_height (row), minimum;
+  gtk_widget_measure (row, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, NULL, NULL, NULL);
+  /* A remapped/recycled row remains mapped with its previous width until
+   * LAYOUT. UPDATE callbacks must not turn that width into a header margin. */
+  gtk_widget_set_visible (GTK_WIDGET (page), FALSE);
+  gtk_widget_set_visible (GTK_WIDGET (page), TRUE);
+  g_assert_true (gtk_widget_get_mapped (row));
+  gtk_widget_allocate (row, MAX (minimum, 300), row_height, -1, NULL);
+  g_signal_emit_by_name (gtk_widget_get_frame_clock (window), "update");
+  g_test_message ("stable inset=%d, before-layout inset=%d", stable_inset,
+                   gtk_widget_get_margin_end (controls));
+  g_assert_cmpint (gtk_widget_get_margin_end (controls), ==, stable_inset);
+  settle ();
+  g_assert_cmpint (gtk_widget_get_margin_end (controls), <, 128);
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
+static void
 test_right_collapse_style (void)
 {
   g_autoptr(SpotifyGtkNowPlayingPanel) panel =
@@ -1517,6 +1555,7 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/library/local-empty-and-create", test_library_local_empty_and_create_position);
   g_test_add_func ("/ui/liked/sort-alignment-resize", test_liked_sort_alignment);
   g_test_add_func ("/ui/liked/header-transparency-preserves-geometry", test_header_transparency_preserves_geometry);
+  g_test_add_func ("/ui/liked/sort-recycled-allocation", test_liked_sort_stale_allocation);
   g_test_add_func ("/ui/now-playing/collapse-style", test_right_collapse_style);
   g_test_add_func ("/ui/dialog/theme-palettes", test_dialog_palette);
   g_test_add_func ("/ui/artwork/borderless-centered", test_artwork_overlay);
