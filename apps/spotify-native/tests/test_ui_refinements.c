@@ -1528,6 +1528,45 @@ test_zoom_breakpoints (void)
   spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), 0, FALSE);
 }
 
+static void
+test_zoom_focus_restoration (void)
+{
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  spotifygtk_settings_set_ui_scale (settings, 130, TRUE);
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 601, 403);
+  GtkWidget *target = gtk_button_new_with_label ("Large focus target");
+  gtk_widget_set_size_request (target, 1200, 800);
+  GtkWidget *wrapper = spotifygtk_presentation_wrap (target);
+  gtk_window_set_child (GTK_WINDOW (window), wrapper);
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkAdjustment *horizontal = NULL, *vertical = NULL;
+  for (GtkWidget *child = gtk_widget_get_first_child (wrapper); child;
+       child = gtk_widget_get_next_sibling (child)) {
+    if (!GTK_IS_SCROLLBAR (child)) continue;
+    GtkAdjustment *adjustment = gtk_scrollbar_get_adjustment (GTK_SCROLLBAR (child));
+    if (gtk_orientable_get_orientation (GTK_ORIENTABLE (child)) == GTK_ORIENTATION_HORIZONTAL)
+      horizontal = adjustment;
+    else
+      vertical = adjustment;
+  }
+  g_assert_nonnull (horizontal);
+  g_assert_nonnull (vertical);
+  gtk_adjustment_set_value (horizontal, 100);
+  gtk_adjustment_set_value (vertical, 100);
+  settle ();
+  for (guint i = 0; i < 4; i++) {
+    gtk_root_set_focus (GTK_ROOT (window), NULL);
+    gtk_root_set_focus (GTK_ROOT (window), target);
+    settle ();
+    g_assert_cmpfloat (gtk_adjustment_get_value (horizontal), ==, 100);
+    g_assert_cmpfloat (gtk_adjustment_get_value (vertical), ==, 100);
+  }
+  gtk_window_destroy (GTK_WINDOW (window));
+  spotifygtk_settings_set_ui_scale (settings, 0, FALSE);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1549,6 +1588,7 @@ main (int argc, char **argv)
   apply_theme (SPOTIFYGTK_THEME_DARK_PLUS);
   g_test_add_func ("/ui/presentation/fractional-coverage", test_fractional_presentation_coverage);
   g_test_add_func ("/ui/presentation/zoom-breakpoints", test_zoom_breakpoints);
+  g_test_add_func ("/ui/presentation/focus-restoration", test_zoom_focus_restoration);
   g_test_add_data_func ("/ui/load-position/library", GUINT_TO_POINTER (0), test_collection_replacement_anchor);
   g_test_add_data_func ("/ui/load-position/liked", GUINT_TO_POINTER (1), test_collection_replacement_anchor);
   g_test_add_data_func ("/ui/load-position/search-header", GUINT_TO_POINTER (2), test_collection_replacement_anchor);

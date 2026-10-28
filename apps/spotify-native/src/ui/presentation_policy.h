@@ -48,3 +48,20 @@ spotifygtk_presentation_logical_extent (int viewport, double scale, int minimum)
   return MAX (MAX (1, minimum),
               (int) MIN (ceil (nextafter (viewport / scale, -INFINITY)), G_MAXINT));
 }
+
+/* Reveal the nearest edge of a focused widget. A large focus target that
+ * already covers the viewport cannot be made wholly visible: moving to one
+ * end would make repeated focus restoration jump between opposite ends. */
+static inline double
+spotifygtk_presentation_focus_delta (double start, double size, double viewport)
+{
+  if (!isfinite (start) || !isfinite (size) || !isfinite (viewport) ||
+      size <= 0 || viewport <= 0)
+    return 0;
+  double end = start + size;
+  if (size > viewport) {
+    if (start <= 0 && end >= viewport) return 0;
+    return start > 0 ? start : end - viewport;
+  }
+  return start < 0 ? start : MAX (0, end - viewport);
+}

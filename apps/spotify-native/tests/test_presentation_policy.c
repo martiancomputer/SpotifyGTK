@@ -66,6 +66,19 @@ test_logical_allocation (void)
   g_assert_cmpint (spotifygtk_presentation_logical_extent (G_MAXINT, 0.25, 1), ==, G_MAXINT);
 }
 
+static void
+test_focus_visibility (void)
+{
+  g_assert_cmpfloat (spotifygtk_presentation_focus_delta (20, 80, 600), ==, 0);
+  g_assert_cmpfloat (spotifygtk_presentation_focus_delta (-20, 80, 600), ==, -20);
+  g_assert_cmpfloat (spotifygtk_presentation_focus_delta (580, 80, 600), ==, 60);
+  g_assert_cmpfloat (spotifygtk_presentation_focus_delta (-100, 1200, 600), ==, 0);
+  g_assert_cmpfloat (spotifygtk_presentation_focus_delta (100, 1200, 600), ==, 100);
+  g_assert_cmpfloat (spotifygtk_presentation_focus_delta (-700, 1200, 600), ==, -100);
+  g_assert_cmpfloat (spotifygtk_presentation_focus_delta (NAN, 80, 600), ==, 0);
+  g_assert_cmpfloat (spotifygtk_presentation_focus_delta (10, 80, 0), ==, 0);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -73,5 +86,6 @@ main (int argc, char **argv)
   g_test_add_func ("/presentation/ranges", test_ranges);
   g_test_add_func ("/presentation/geometry", test_geometry);
   g_test_add_func ("/presentation/logical-allocation", test_logical_allocation);
+  g_test_add_func ("/presentation/focus-visibility", test_focus_visibility);
   return g_test_run ();
 }
