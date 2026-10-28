@@ -775,6 +775,7 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
 
   GtkScrolledWindow *scroller =
     spotifygtk_track_list_get_scroller (self->results);
+  gtk_widget_add_css_class (GTK_WIDGET (scroller), "glass-scroller");
   /* EXTERNAL, unlike NEVER, preserves the viewport's independent size while
    * omitting its internal scrollbar. GTK documents it for a shared/external
    * bar. Both this overlay bar and the list use the same GtkAdjustment. */

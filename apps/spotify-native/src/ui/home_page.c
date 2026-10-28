@@ -476,7 +476,7 @@ spotifygtk_home_page_set_feed (SpotifyGtkHomePage *self, const SpotifyHomeFeed *
   gtk_label_set_text (liked->subtitle, "Your collection");
   gtk_widget_set_tooltip_text (liked->open, "Liked Songs");
   gtk_image_set_from_icon_name (g_object_get_data (G_OBJECT (liked->tile), "placeholder"),
-                                "emblem-favorite-symbolic");
+                                "spotifygtk-heart-outline-symbolic");
   set_quick_visible (liked, TRUE);
   for (guint i = next; i < G_N_ELEMENTS (self->quick); i++) {
     release_quick (&self->quick[i]);
@@ -876,7 +876,7 @@ spotifygtk_home_page_init (SpotifyGtkHomePage *self)
   gtk_flow_box_insert (GTK_FLOW_BOX (rotation), create_rotation_tile (self,
     "Local collection", "Your music, on this device", "folder-music-symbolic", "home-local-icon", "local"), -1);
   gtk_flow_box_insert (GTK_FLOW_BOX (rotation), create_rotation_tile (self,
-    "Recently liked", "The latest additions to your library", "emblem-favorite-symbolic", "home-liked-icon", "liked"), -1);
+    "Recently liked", "The latest additions to your library", "spotifygtk-heart-outline-symbolic", "home-liked-icon", "liked"), -1);
   gtk_box_append (GTK_BOX (self->rotation_box), rotation);
   gtk_box_append (self->content, self->rotation_box);
   gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroller), GTK_WIDGET (self->content));

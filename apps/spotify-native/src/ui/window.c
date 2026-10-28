@@ -88,6 +88,8 @@ struct _SpotifyGtkNativeWindow {
   GtkPaned *main_paned;       /* Sidebar | Content+Queue */
   GtkPaned *content_paned;    /* Main content | Queue panel */
   GtkBox *root_box;
+  AdwBreakpoint *sidebar_breakpoint, *panel_breakpoint; /* window-owned */
+  double breakpoint_scale;
   GtkProgressBar *loading_bar; /* shell overlay, outside layout measurement */
   GHashTable     *loading_sources; /* direct pointers; aggregate concurrent work */
   guint           loading_tick_id;
@@ -6657,6 +6659,10 @@ static const gchar *theme_body =
    * empty. Nothing in this UI wants a filled list surface. */
   "list, list > row, scrolledwindow, scrolledwindow > viewport, viewport, .view"
   "  { background-color: transparent; background-image: none; }"
+  /* Glass already fades the content at this edge. The platform theme's
+   * separate scroll shadow otherwise leaves a dark seam through the fade. */
+  "scrolledwindow.glass-scroller undershoot.top"
+  "  { background: none; box-shadow: none; border: none; }"
   /* A horizontal ListView paints its own row surface above and beside the
    * card buttons. Search shows that surface as hairlines at both clip edges. */
   "listview.search-album-shelf, listview.search-album-shelf > row"
@@ -7246,8 +7252,24 @@ on_decoration_layout_changed (GtkHeaderBar *header)
 static void
 on_presentation_scale_changed (SpotifyGtkSettings *settings, SpotifyGtkNativeWindow *self)
 {
-  if (!self->presentation_base) return;
   guint percent = spotifygtk_settings_get_ui_scale (settings);
+  double scale = spotifygtk_presentation_scale (percent);
+  if (self->sidebar_breakpoint && self->panel_breakpoint &&
+      self->breakpoint_scale != scale) {
+    /* Window breakpoints use surface coordinates; the panes below the zoom
+     * wrapper use logical coordinates. Compare the same available space at
+     * every zoom, before their combined minimum overflows the native window. */
+    g_autoptr(AdwBreakpointCondition) sidebar_condition =
+      adw_breakpoint_condition_new_length (ADW_BREAKPOINT_CONDITION_MAX_WIDTH,
+                                           1150 * scale, ADW_LENGTH_UNIT_PX);
+    g_autoptr(AdwBreakpointCondition) panel_condition =
+      adw_breakpoint_condition_new_length (ADW_BREAKPOINT_CONDITION_MAX_WIDTH,
+                                           1050 * scale, ADW_LENGTH_UNIT_PX);
+    adw_breakpoint_set_condition (self->sidebar_breakpoint, sidebar_condition);
+    adw_breakpoint_set_condition (self->panel_breakpoint, panel_condition);
+    self->breakpoint_scale = scale;
+  }
+  if (!self->presentation_base) return;
   gboolean native = percent == 0 || percent == 100;
   GtkWidget *current = adw_application_window_get_content (ADW_APPLICATION_WINDOW (self));
   if (native == (current == self->presentation_base)) return;
@@ -7821,14 +7843,17 @@ spotifygtk_native_window_constructed (GObject *object)
   gtk_widget_set_size_request (GTK_WIDGET (self), 600, 400);
   AdwBreakpoint *sidebar_breakpoint = adw_breakpoint_new (
     adw_breakpoint_condition_parse ("max-width: 1150px"));
+  self->sidebar_breakpoint = sidebar_breakpoint;
   adw_breakpoint_add_setters (sidebar_breakpoint, G_OBJECT (self->sidebar), "visible", FALSE, NULL);
   adw_application_window_add_breakpoint (ADW_APPLICATION_WINDOW (self), sidebar_breakpoint);
   AdwBreakpoint *panel_breakpoint = adw_breakpoint_new (
     adw_breakpoint_condition_parse ("max-width: 1050px"));
+  self->panel_breakpoint = panel_breakpoint;
   adw_breakpoint_add_setters (panel_breakpoint,
     G_OBJECT (self->sidebar), "visible", FALSE,
     G_OBJECT (self->now_playing_panel), "visible", FALSE, NULL);
   adw_application_window_add_breakpoint (ADW_APPLICATION_WINDOW (self), panel_breakpoint);
+  on_presentation_scale_changed (settings, self);
   mpris_start (self);
 
   self->queue_expanded = TRUE;
@@ -7924,6 +7949,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->loading_sources, g_hash_table_unref);
   g_signal_handlers_disconnect_by_data (spotifygtk_settings_get_default (), self);
   g_clear_object (&self->presentation_base);
+  self->sidebar_breakpoint = self->panel_breakpoint = NULL;
   g_clear_pointer (&self->held_shortcuts, g_hash_table_unref);
   self->header_handle = NULL;
   spotifygtk_settings_flush (spotifygtk_settings_get_default ());

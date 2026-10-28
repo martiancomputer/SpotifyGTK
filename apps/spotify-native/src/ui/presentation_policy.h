@@ -43,7 +43,8 @@ spotifygtk_presentation_extent (int value, double scale)
 static inline int
 spotifygtk_presentation_logical_extent (int viewport, double scale, int minimum)
 {
-  /* Ceil creates 1..2 physical pixels of artificial overflow at fractional
-   * zoom even when the content fits. Only real minimum sizes may overflow. */
-  return MAX (MAX (1, minimum), (int) MIN (floor (viewport / scale), G_MAXINT));
+  /* Cover the final device pixel at fractional zoom. Overflow negotiation
+   * uses the real child minimum, not this rounded-up allocation. */
+  return MAX (MAX (1, minimum),
+              (int) MIN (ceil (nextafter (viewport / scale, -INFINITY)), G_MAXINT));
 }

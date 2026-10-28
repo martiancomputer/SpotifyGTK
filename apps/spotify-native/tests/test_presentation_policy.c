@@ -47,12 +47,15 @@ test_logical_allocation (void)
   /* Default/100% is an exact identity allocation when content fits. */
   g_assert_cmpint (spotifygtk_presentation_logical_extent (1920, 1, 900), ==, 1920);
   g_assert_cmpint (spotifygtk_presentation_logical_extent (900, 1, 900), ==, 900);
-  /* No tiny phantom scrollbar from rounding up fractional zoom. */
-  const double scales[] = { 0.25, 0.5, 0.75, 1, 1.37, 1.5, 3 };
+  /* Fractional allocations cover the full viewport rather than leaving a
+   * partially unpainted edge. Rounding is bounded by one logical pixel. */
+  const double scales[] = { 0.25, 0.5, 0.75, 0.9, 1, 1.3, 1.37, 1.5, 3 };
   for (guint i = 0; i < G_N_ELEMENTS (scales); i++) {
     for (int viewport = 30; viewport < 2000; viewport++) {
       int logical = spotifygtk_presentation_logical_extent (viewport, scales[i], 1);
-      g_assert_cmpint (spotifygtk_presentation_extent (logical, scales[i]), <=, viewport);
+      gint physical = spotifygtk_presentation_extent (logical, scales[i]);
+      g_assert_cmpint (physical, >=, viewport);
+      g_assert_cmpint (physical - viewport, <=, (gint) ceil (scales[i]));
     }
   }
   /* Real content minimums overflow predictably; scrollbar visibility cannot

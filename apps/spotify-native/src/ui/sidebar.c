@@ -98,7 +98,7 @@ static const struct {
 } NAV_ITEMS[] = {
   { "home",    "Home",        "go-home-symbolic" },
   { "search",  "Search",      "system-search-symbolic" },
-  { "liked",   "Liked Songs", "emblem-favorite-symbolic" },
+  { "liked",   "Liked Songs", "spotifygtk-heart-outline-symbolic" },
   { "library", "Library",     "view-list-symbolic" },
   { "playlists","Playlists",  "view-app-grid-symbolic" },
   { "settings","Settings",    "preferences-system-symbolic" },

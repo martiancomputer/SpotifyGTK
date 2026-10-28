@@ -634,6 +634,8 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   refresh_sort_labels (self);
 
   self->list = spotifygtk_track_list_new ();
+  gtk_widget_add_css_class (GTK_WIDGET (spotifygtk_track_list_get_scroller (self->list)),
+                            "glass-scroller");
 
   /* This page IS the liked set, so a heart on every row is noise -- see
    * spotifygtk_track_list_set_show_like(). */

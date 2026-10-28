@@ -102,8 +102,11 @@ presentation_allocate (GtkWidget *widget, int width, int height, int baseline)
   int logical_height = spotifygtk_presentation_logical_extent (height, self->scale, minimum_height);
 
   self->configuring = TRUE;
-  int content_width = spotifygtk_presentation_extent (logical_width, self->scale);
-  int content_height = spotifygtk_presentation_extent (logical_height, self->scale);
+  /* Rounding the allocation up must fill the viewport, without inventing
+   * a scrollbar for a fraction of a logical pixel. Only a real minimum may
+   * expose overflow; the wrapper clips the rounded edge. */
+  int content_width = MAX (width, spotifygtk_presentation_extent (minimum_width, self->scale));
+  int content_height = MAX (height, spotifygtk_presentation_extent (minimum_height, self->scale));
   configure_axis (self->horizontal, content_width, width);
   configure_axis (self->vertical, content_height, height);
   /* Overlay bars never take space from the content. Showing one cannot change
