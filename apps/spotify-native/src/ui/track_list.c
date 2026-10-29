@@ -100,21 +100,20 @@ header_backdrop_clip (GtkWidget *page, const graphene_rect_t *band)
   return clip;
 }
 
-void
-spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *content,
-                                                   GtkScrolledWindow *scroller,
-                                                   GtkSnapshot *snapshot)
+static float
+snapshot_header_backdrop (GtkWidget *page, GtkWidget *content,
+                          GtkScrolledWindow *scroller, GtkSnapshot *snapshot)
 {
   graphene_rect_t content_bounds;
   if (!gtk_widget_compute_bounds (content, page, &content_bounds))
-    return;
+    return 0;
   float left = gtk_widget_get_margin_start (page);
   float right = gtk_widget_get_margin_end (page);
   float top = gtk_widget_get_margin_top (page);
   float height = content_bounds.origin.y + top;
   float width = gtk_widget_get_width (page) + left + right;
   if (width <= 0 || height <= 0)
-    return;
+    return 0;
 
   /* Named palette colours are still exposed through GtkStyleContext in GTK4.
    * Keep that lookup here; it neither changes CSS nor requests layout. */
@@ -124,7 +123,8 @@ spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *co
     gtk_widget_get_style_context (page), "bg_content", &tint);
   G_GNUC_END_IGNORE_DEPRECATIONS
   if (!have_tint)
-    return;
+    return 0;
+  float painted_edge = 0;
   gint64 work_started = spotifygtk_frame_stats_work_begin ();
   GskColorStop stops[] = { { 0.0f, tint }, { 1.0f, tint } };
   stops[0].color.alpha = 0.92f;
@@ -170,6 +170,7 @@ spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *co
        * under source-over compositing. Back the shared device pixel fully;
        * the blur and tint still fade to zero at the original header edge. */
       graphene_rect_t backing_clip = header_backdrop_clip (page, &band);
+      painted_edge = backing_clip.origin.y + backing_clip.size.height;
       gtk_snapshot_push_clip (snapshot, &backing_clip);
       gtk_snapshot_append_node (snapshot, node);
       /* Both frosting and tint fade continuously to clear at the lower edge.
@@ -188,6 +189,32 @@ spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *co
   gtk_snapshot_append_linear_gradient (snapshot, &band, &start, &end,
                                         stops, G_N_ELEMENTS (stops));
   spotifygtk_frame_stats_work_end (page, SPOTIFYGTK_FRAME_WORK_GLASS, work_started);
+  return painted_edge;
+}
+
+void
+spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *content,
+                                                   GtkScrolledWindow *scroller,
+                                                   GtkSnapshot *snapshot)
+{
+  float edge = snapshot_header_backdrop (page, content, scroller, snapshot);
+  GtkWidget *content_root = content;
+  while (gtk_widget_get_parent (content_root) && gtk_widget_get_parent (content_root) != page)
+    content_root = gtk_widget_get_parent (content_root);
+  /* Use the same device-pixel boundary for both halves. An opaque texture
+   * drawn through a second fractional clip can otherwise overwrite the
+   * covered edge with another partially covered pixel. */
+  graphene_rect_t clip = GRAPHENE_RECT_INIT (-gtk_widget_get_margin_start (page), edge,
+    gtk_widget_get_width (page) + gtk_widget_get_margin_start (page) +
+      gtk_widget_get_margin_end (page),
+    MAX (0, gtk_widget_get_height (page) + gtk_widget_get_margin_bottom (page) - edge));
+  for (GtkWidget *child = gtk_widget_get_first_child (page); child;
+       child = gtk_widget_get_next_sibling (child)) {
+    gboolean clipped = child == content_root && edge > 0;
+    if (clipped) gtk_snapshot_push_clip (snapshot, &clip);
+    gtk_widget_snapshot_child (page, child, snapshot);
+    if (clipped) gtk_snapshot_pop (snapshot);
+  }
 }
 
 void
