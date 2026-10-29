@@ -79,6 +79,27 @@ ensure_header_backdrop_extent (GtkWidget *view, gint extent)
     state->update = g_idle_add (apply_header_backdrop_extent, state);
 }
 
+static graphene_rect_t
+header_backdrop_clip (GtkWidget *page, const graphene_rect_t *band)
+{
+  graphene_rect_t clip = *band;
+  GtkNative *native = gtk_widget_get_native (page);
+  graphene_point_t edge = GRAPHENE_POINT_INIT (0, band->origin.y + band->size.height);
+  graphene_point_t next = GRAPHENE_POINT_INIT (0, edge.y + 1);
+  graphene_point_t native_edge, native_next;
+  if (native && gtk_widget_compute_point (page, GTK_WIDGET (native), &edge, &native_edge) &&
+      gtk_widget_compute_point (page, GTK_WIDGET (native), &next, &native_next)) {
+    double surface_x, surface_y;
+    gtk_native_get_surface_transform (native, &surface_x, &surface_y);
+    double scale = gdk_surface_get_scale (gtk_native_get_surface (native));
+    double pixel_edge = (native_edge.y + surface_y) * scale;
+    double pixels_per_unit = fabs (native_next.y - native_edge.y) * scale;
+    if (pixels_per_unit > 0)
+      clip.size.height += MAX (0, ceil (pixel_edge - 0.00001) - pixel_edge) / pixels_per_unit;
+  }
+  return clip;
+}
+
 void
 spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *content,
                                                    GtkScrolledWindow *scroller,
@@ -144,10 +165,15 @@ spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *co
       const GskColorStop mask[] = {
         { 0.0f, { 1, 1, 1, 1 } }, { 1.0f, { 1, 1, 1, 0 } },
       };
-      gtk_snapshot_push_clip (snapshot, &band);
+      /* The sharp replay and the scroller meet at the same logical edge.
+       * At fractional scale their antialiased clips leave partial coverage
+       * under source-over compositing. Back the shared device pixel fully;
+       * the blur and tint still fade to zero at the original header edge. */
+      graphene_rect_t backing_clip = header_backdrop_clip (page, &band);
+      gtk_snapshot_push_clip (snapshot, &backing_clip);
+      gtk_snapshot_append_node (snapshot, node);
       /* Both frosting and tint fade continuously to clear at the lower edge.
        * Controls are drawn afterwards and remain sharp. */
-      gtk_snapshot_append_node (snapshot, node);
       gtk_snapshot_push_mask (snapshot, GSK_MASK_MODE_ALPHA);
       gtk_snapshot_append_linear_gradient (snapshot, &band, &start, &end,
                                             mask, G_N_ELEMENTS (mask));
