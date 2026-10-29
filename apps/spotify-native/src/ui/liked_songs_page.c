@@ -65,7 +65,8 @@ struct _SpotifyGtkLikedSongsPage {
   /* Sort controls: which key, and whether it runs the natural way round. */
   GtkWidget *sort_buttons[3];
   GtkWidget *controls;
-  guint      align_tick;
+  GdkFrameClock *align_clock;
+  gulong     align_handler;
   guint      align_attempts;
   guint      sort_key;
   gboolean   sort_desc[3];   /* remembered per key, so switching back restores it */
@@ -253,37 +254,52 @@ rebuild_sorted (SpotifyGtkLikedSongsPage *self)
   sort_visible (self, self->sorted_tracks);
 }
 
-/* Rebuild the visible list from all_tracks under the current filter text. */
-static gboolean
-align_sort_controls (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
+/* Coalesce alignment measurements without sampling partially allocated rows. */
+static void
+cancel_sort_alignment (SpotifyGtkLikedSongsPage *self)
+{
+  if (self->align_clock && self->align_handler)
+    g_signal_handler_disconnect (self->align_clock, self->align_handler);
+  self->align_handler = 0;
+  g_clear_object (&self->align_clock);
+}
+
+static void
+align_sort_controls (GdkFrameClock *clock, gpointer data)
 {
   SpotifyGtkLikedSongsPage *self = data;
-  (void) widget; (void) clock;
+  (void) clock;
   gdouble inset = 0;
   if (spotifygtk_track_list_duration_inset (self->list, &inset)) {
     gint margin = MAX (0, (gint) (inset + 0.5));
     if (gtk_widget_get_margin_end (self->controls) != margin)
       gtk_widget_set_margin_end (self->controls, margin);
-    self->align_tick = 0;
-    return G_SOURCE_REMOVE;
+    cancel_sort_alignment (self);
+    return;
   }
   /* Empty/error pages must not keep a frame clock running. A later model
    * replacement or map retries after the virtualized rows have allocated. */
-  if (++self->align_attempts >= 24) {
-    self->align_tick = 0;
-    return G_SOURCE_REMOVE;
-  }
-  return G_SOURCE_CONTINUE;
+  if (++self->align_attempts >= 3)
+    cancel_sort_alignment (self);
+  else
+    gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
 static void
 queue_sort_alignment (SpotifyGtkLikedSongsPage *self)
 {
-  if (self->align_tick || !gtk_widget_get_mapped (GTK_WIDGET (self)))
+  if (self->align_handler || !gtk_widget_get_mapped (GTK_WIDGET (self)))
     return;
+  GdkFrameClock *clock = gtk_widget_get_frame_clock (GTK_WIDGET (self));
+  if (!clock) return;
   self->align_attempts = 0;
-  self->align_tick = gtk_widget_add_tick_callback (
-    GTK_WIDGET (self), align_sort_controls, self, NULL);
+  /* Tick callbacks run in UPDATE, before recycled rows receive their new
+   * allocation. A stale row edge becomes a page-sized margin and feeds back
+   * into the window's minimum width. Read only after the frame was laid out. */
+  self->align_clock = g_object_ref (clock);
+  self->align_handler = g_signal_connect (clock, "after-paint",
+                                         G_CALLBACK (align_sort_controls), self);
+  gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
 static void
@@ -298,10 +314,7 @@ on_liked_page_unmap (GtkWidget *widget, gpointer data)
 {
   (void) data;
   SpotifyGtkLikedSongsPage *self = SPOTIFYGTK_LIKED_SONGS_PAGE (widget);
-  if (self->align_tick) {
-    gtk_widget_remove_tick_callback (widget, self->align_tick);
-    self->align_tick = 0;
-  }
+  cancel_sort_alignment (self);
 }
 
 static void
@@ -634,6 +647,8 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   refresh_sort_labels (self);
 
   self->list = spotifygtk_track_list_new ();
+  gtk_widget_add_css_class (GTK_WIDGET (spotifygtk_track_list_get_scroller (self->list)),
+                            "glass-scroller");
 
   /* This page IS the liked set, so a heart on every row is noise -- see
    * spotifygtk_track_list_set_show_like(). */

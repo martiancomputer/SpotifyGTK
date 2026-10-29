@@ -137,7 +137,7 @@ on_save_clicked (GtkButton *button, gpointer user_data)
   SpotifyGtkAlbumPage *self = user_data;
   self->is_saved = !self->is_saved;
   gtk_button_set_icon_name (self->save_btn,
-                            self->is_saved ? "heart-filled-symbolic" : "heart-outline-symbolic");
+                            self->is_saved ? "spotifygtk-heart-filled-symbolic" : "spotifygtk-heart-outline-symbolic");
   if (self->album_id)
     g_signal_emit (self, signals[TOGGLE_SAVED], 0, self->album_id, self->is_saved);
   (void) button;
@@ -241,7 +241,7 @@ spotifygtk_album_page_init (SpotifyGtkAlbumPage *self)
   self->shuffle_btn = GTK_BUTTON (gtk_button_new_with_label ("Shuffle"));
   gtk_widget_add_css_class (GTK_WIDGET (self->shuffle_btn), "pill");
 
-  self->save_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("heart-outline-symbolic"));
+  self->save_btn = GTK_BUTTON (gtk_button_new_from_icon_name ("spotifygtk-heart-outline-symbolic"));
   gtk_widget_add_css_class (GTK_WIDGET (self->save_btn), "circular");
 
   g_signal_connect (self->play_btn, "clicked", G_CALLBACK (on_play_clicked), self);
@@ -341,5 +341,5 @@ spotifygtk_album_page_set_saved (SpotifyGtkAlbumPage *self, gboolean is_saved)
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_PAGE (self));
   self->is_saved = is_saved;
   gtk_button_set_icon_name (self->save_btn,
-                            is_saved ? "heart-filled-symbolic" : "heart-outline-symbolic");
+                            is_saved ? "spotifygtk-heart-filled-symbolic" : "spotifygtk-heart-outline-symbolic");
 }

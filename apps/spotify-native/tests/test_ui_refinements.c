@@ -191,12 +191,21 @@ static void
 test_header_transparency_preserves_geometry (void)
 {
   const SpotifyGtkTheme themes[] = { SPOTIFYGTK_THEME_LIGHT, SPOTIFYGTK_THEME_DARK_PLUS };
+  const guint scales[] = { 75, 100, 130 };
+  GtkCssProvider *edge_theme = gtk_css_provider_new ();
+  gtk_css_provider_load_from_string (edge_theme,
+    "scrolledwindow undershoot.top { background: black; }");
+  gtk_style_context_add_provider_for_display (gdk_display_get_default (),
+    GTK_STYLE_PROVIDER (edge_theme), GTK_STYLE_PROVIDER_PRIORITY_THEME + 1);
   GtkCssProvider *fixture = gtk_css_provider_new ();
   gtk_css_provider_load_from_string (fixture,
     ".glass-fixture listview > row { background-color: #2040c0; }");
   gtk_style_context_add_provider_for_display (gdk_display_get_default (),
     GTK_STYLE_PROVIDER (fixture), GTK_STYLE_PROVIDER_PRIORITY_USER);
-  for (guint theme = 0; theme < G_N_ELEMENTS (themes); theme++) {
+  for (guint sample = 0; sample < G_N_ELEMENTS (themes) * G_N_ELEMENTS (scales); sample++) {
+    guint theme = sample / G_N_ELEMENTS (scales);
+    guint scale = scales[sample % G_N_ELEMENTS (scales)];
+    spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), scale, TRUE);
     apply_theme (themes[theme]);
     GtkWidget *window = gtk_window_new ();
     gtk_window_set_default_size (GTK_WINDOW (window), 1200, 620);
@@ -208,7 +217,7 @@ test_header_transparency_preserves_geometry (void)
       .artists = "Test artist", .duration_ms = 180000 };
     for (guint i = 0; i < 40; i++) g_ptr_array_add (tracks, &track);
     spotifygtk_track_list_set_native_tracks (list, tracks);
-    gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+    gtk_window_set_child (GTK_WINDOW (window), spotifygtk_presentation_wrap (GTK_WIDGET (page)));
     gtk_window_present (GTK_WINDOW (window));
     settle ();
     GtkWidget *scroller = GTK_WIDGET (spotifygtk_track_list_get_scroller (list));
@@ -245,17 +254,63 @@ test_header_transparency_preserves_geometry (void)
     const guint8 *edge = pixels + ((gint) scroll_after.origin.y - 1) * stride + x * 4;
     g_assert_cmpint (abs ((gint) edge[0] - 192), <=, 6);
     g_assert_cmpint (abs ((gint) edge[2] - 32), <=, 6);
+    const guint8 *below = pixels + ((gint) ceil (scroll_after.origin.y) + 2) * stride + x * 4;
+    g_assert_cmpint (abs ((gint) below[0] - 192), <=, 6);
+    g_assert_cmpint (abs ((gint) below[2] - 32), <=, 6);
     if (theme == 0)
       g_assert_cmpint (middle[2], >, 100);
     else
       g_assert_cmpint (middle[2], <, 32);
-    save_preview (window, theme == 0 ? "checkpoint-glass-white.png" : "checkpoint-glass-dark.png");
+    g_autofree gchar *preview = g_strdup_printf ("checkpoint-glass-%s-%u.png",
+      theme == 0 ? "white" : "dark", scale);
+    save_preview (window, preview);
     gtk_window_destroy (GTK_WINDOW (window));
     settle ();
   }
   gtk_style_context_remove_provider_for_display (gdk_display_get_default (), GTK_STYLE_PROVIDER (fixture));
   g_object_unref (fixture);
+  gtk_style_context_remove_provider_for_display (gdk_display_get_default (), GTK_STYLE_PROVIDER (edge_theme));
+  g_object_unref (edge_theme);
+  spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), 0, FALSE);
   apply_theme (SPOTIFYGTK_THEME_DARK_PLUS);
+}
+
+static void
+test_liked_sort_stale_allocation (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1600, 600);
+  SpotifyGtkLikedSongsPage *page = spotifygtk_liked_songs_page_new ();
+  SpotifyGtkTrackList *list = spotifygtk_liked_songs_page_get_list (page);
+  SpotifyNativeTrack track = { .uri = "local:track:layout-fixture", .name = "Track",
+    .artists = "Artist", .album = "Album", .duration_ms = 180000 };
+  g_autoptr(GPtrArray) tracks = g_ptr_array_new ();
+  g_ptr_array_add (tracks, &track);
+  spotifygtk_track_list_set_native_tracks (list, tracks);
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkWidget *controls = gtk_widget_get_parent (find_type (GTK_WIDGET (page), GTK_TYPE_SEARCH_ENTRY));
+  gint stable_inset = gtk_widget_get_margin_end (controls);
+  g_assert_cmpint (stable_inset, <, 128);
+  GtkWidget *row = find_type (GTK_WIDGET (list), SPOTIFYGTK_TYPE_TRACK_ROW);
+  g_assert_nonnull (row);
+  g_autoptr(GtkWidget) retained_row = g_object_ref (row);
+  gint row_height = gtk_widget_get_height (row), minimum;
+  gtk_widget_measure (row, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, NULL, NULL, NULL);
+  /* A remapped/recycled row remains mapped with its previous width until
+   * LAYOUT. UPDATE callbacks must not turn that width into a header margin. */
+  gtk_widget_set_visible (GTK_WIDGET (page), FALSE);
+  gtk_widget_set_visible (GTK_WIDGET (page), TRUE);
+  g_assert_true (gtk_widget_get_mapped (row));
+  gtk_widget_allocate (row, MAX (minimum, 300), row_height, -1, NULL);
+  g_signal_emit_by_name (gtk_widget_get_frame_clock (window), "update");
+  g_test_message ("stable inset=%d, before-layout inset=%d", stable_inset,
+                   gtk_widget_get_margin_end (controls));
+  g_assert_cmpint (gtk_widget_get_margin_end (controls), ==, stable_inset);
+  settle ();
+  g_assert_cmpint (gtk_widget_get_margin_end (controls), <, 128);
+  gtk_window_destroy (GTK_WINDOW (window));
 }
 
 static void
@@ -1408,6 +1463,110 @@ test_collection_replacement_anchor (gconstpointer data)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+static void
+test_fractional_presentation_coverage (void)
+{
+  const guint scales[] = { 75, 90, 130, 150 };
+  for (guint i = 0; i < G_N_ELEMENTS (scales); i++) {
+    spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), scales[i], TRUE);
+    GtkWidget *window = gtk_window_new ();
+    gtk_window_set_default_size (GTK_WINDOW (window), 601, 403);
+    GtkWidget *content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *wrapper = spotifygtk_presentation_wrap (content);
+    gtk_window_set_child (GTK_WINDOW (window), wrapper);
+    gtk_window_present (GTK_WINDOW (window));
+    settle ();
+    graphene_rect_t area = bounds (content, window);
+    g_assert_cmpfloat (area.origin.x + area.size.width, >=, gtk_widget_get_width (window));
+    g_assert_cmpfloat (area.origin.y + area.size.height, >=, gtk_widget_get_height (window));
+    for (GtkWidget *child = gtk_widget_get_first_child (wrapper); child;
+         child = gtk_widget_get_next_sibling (child))
+      if (GTK_IS_SCROLLBAR (child))
+        g_assert_false (gtk_widget_get_visible (child));
+    gtk_window_destroy (GTK_WINDOW (window));
+  }
+  spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), 0, FALSE);
+}
+
+static void
+test_zoom_breakpoints (void)
+{
+  const struct { guint scale; gint width; } cases[] = {
+    { 130, 1280 }, { 75, 800 }, { 100, 1280 }
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
+    spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), cases[i].scale, TRUE);
+    SpotifyGtkNativeWindow *window = spotifygtk_native_window_new (NULL);
+    g_autofree gchar *long_text = g_strnfill (512, 'W');
+    spotifygtk_playback_bar_set_track (window->playback_bar, long_text, long_text);
+    spotifygtk_now_playing_panel_set_track (window->now_playing_panel,
+                                           long_text, long_text, long_text);
+    gtk_window_set_default_size (GTK_WINDOW (window), cases[i].width, 752);
+    gtk_widget_set_visible (window->login_gate, FALSE);
+    navigate_to_page (window, "settings");
+    gtk_window_present (GTK_WINDOW (window));
+    /* Exercise reparenting back to native scale and into zoom again, not
+     * only the initial layout of newly constructed windows. */
+    for (guint pass = 0; pass < 3; pass++) {
+      guint scale = pass == 1 ? 100 : cases[i].scale;
+      spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), scale, TRUE);
+      settle ();
+      double logical_width = gtk_widget_get_width (GTK_WIDGET (window)) /
+                             spotifygtk_presentation_scale (scale);
+      g_assert_cmpint (gtk_widget_get_visible (GTK_WIDGET (window->sidebar)), ==,
+                      logical_width > 1150);
+      g_assert_cmpint (gtk_widget_get_visible (GTK_WIDGET (window->now_playing_panel)), ==,
+                      logical_width > 1050);
+      gint minimum;
+      gtk_widget_measure (window->presentation_base, GTK_ORIENTATION_HORIZONTAL, -1,
+                          &minimum, NULL, NULL, NULL);
+      g_assert_cmpint (minimum, <=, (gint) ceil (logical_width));
+    }
+    gtk_window_destroy (GTK_WINDOW (window));
+    settle ();
+  }
+  spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), 0, FALSE);
+}
+
+static void
+test_zoom_focus_restoration (void)
+{
+  SpotifyGtkSettings *settings = spotifygtk_settings_get_default ();
+  spotifygtk_settings_set_ui_scale (settings, 130, TRUE);
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 601, 403);
+  GtkWidget *target = gtk_button_new_with_label ("Large focus target");
+  gtk_widget_set_size_request (target, 1200, 800);
+  GtkWidget *wrapper = spotifygtk_presentation_wrap (target);
+  gtk_window_set_child (GTK_WINDOW (window), wrapper);
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkAdjustment *horizontal = NULL, *vertical = NULL;
+  for (GtkWidget *child = gtk_widget_get_first_child (wrapper); child;
+       child = gtk_widget_get_next_sibling (child)) {
+    if (!GTK_IS_SCROLLBAR (child)) continue;
+    GtkAdjustment *adjustment = gtk_scrollbar_get_adjustment (GTK_SCROLLBAR (child));
+    if (gtk_orientable_get_orientation (GTK_ORIENTABLE (child)) == GTK_ORIENTATION_HORIZONTAL)
+      horizontal = adjustment;
+    else
+      vertical = adjustment;
+  }
+  g_assert_nonnull (horizontal);
+  g_assert_nonnull (vertical);
+  gtk_adjustment_set_value (horizontal, 100);
+  gtk_adjustment_set_value (vertical, 100);
+  settle ();
+  for (guint i = 0; i < 4; i++) {
+    gtk_root_set_focus (GTK_ROOT (window), NULL);
+    gtk_root_set_focus (GTK_ROOT (window), target);
+    settle ();
+    g_assert_cmpfloat (gtk_adjustment_get_value (horizontal), ==, 100);
+    g_assert_cmpfloat (gtk_adjustment_get_value (vertical), ==, 100);
+  }
+  gtk_window_destroy (GTK_WINDOW (window));
+  spotifygtk_settings_set_ui_scale (settings, 0, FALSE);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1427,12 +1586,16 @@ main (int argc, char **argv)
   adw_init ();
   g_object_set (gtk_settings_get_default (), "gtk-enable-animations", FALSE, NULL);
   apply_theme (SPOTIFYGTK_THEME_DARK_PLUS);
+  g_test_add_func ("/ui/presentation/fractional-coverage", test_fractional_presentation_coverage);
+  g_test_add_func ("/ui/presentation/zoom-breakpoints", test_zoom_breakpoints);
+  g_test_add_func ("/ui/presentation/focus-restoration", test_zoom_focus_restoration);
   g_test_add_data_func ("/ui/load-position/library", GUINT_TO_POINTER (0), test_collection_replacement_anchor);
   g_test_add_data_func ("/ui/load-position/liked", GUINT_TO_POINTER (1), test_collection_replacement_anchor);
   g_test_add_data_func ("/ui/load-position/search-header", GUINT_TO_POINTER (2), test_collection_replacement_anchor);
   g_test_add_func ("/ui/library/local-empty-and-create", test_library_local_empty_and_create_position);
   g_test_add_func ("/ui/liked/sort-alignment-resize", test_liked_sort_alignment);
   g_test_add_func ("/ui/liked/header-transparency-preserves-geometry", test_header_transparency_preserves_geometry);
+  g_test_add_func ("/ui/liked/sort-recycled-allocation", test_liked_sort_stale_allocation);
   g_test_add_func ("/ui/now-playing/collapse-style", test_right_collapse_style);
   g_test_add_func ("/ui/dialog/theme-palettes", test_dialog_palette);
   g_test_add_func ("/ui/artwork/borderless-centered", test_artwork_overlay);

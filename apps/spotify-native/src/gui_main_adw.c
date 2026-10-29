@@ -91,7 +91,14 @@ on_activate (GtkApplication *app, gpointer user_data)
       if (!pango_font_map_add_font_file (pango_cairo_font_map_get_default (), path, &error))
         g_warning ("Could not load a bundled interface font: %s", error ? error->message : "unsupported backend");
     }
+    /* Preserve fractional glyph advances before interface zoom is applied.
+     * Integer metric hinting disables subpixel positioning, while RGB
+     * subpixel antialiasing is unsuitable for transformed text. */
     g_object_set (gtk_settings_get_default (), "gtk-font-name", "Adwaita Sans 10",
+      "gtk-hint-font-metrics", FALSE,
+      "gtk-xft-antialias", 1,
+      "gtk-xft-hintstyle", "hintslight",
+      "gtk-xft-rgba", "none",
       "gtk-primary-button-warps-slider", TRUE, NULL);
     fonts_loaded = TRUE;
   }

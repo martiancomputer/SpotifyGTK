@@ -1746,7 +1746,25 @@ spotifygtk_track_list_duration_inset (SpotifyGtkTrackList *self,
   for (guint i = 0; i < self->bound_rows->len; i++) {
     GtkWidget *row = g_ptr_array_index (self->bound_rows, i);
     gdouble edge = 0;
-    if (gtk_widget_get_mapped (row) &&
+    gboolean current_width = TRUE;
+    GtkWidget *child = row;
+    /* A mapped recycling slot can still have its previous viewport width.
+     * Compare allocation slots (including CSS/margins), not content widths,
+     * before converting a child position into a layout-affecting inset. */
+    while (child && child != GTK_WIDGET (self->list)) {
+      GtkWidget *parent = gtk_widget_get_parent (child);
+      if (!parent) { current_width = FALSE; break; }
+      G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+      gint allocated = gtk_widget_get_allocated_width (child);
+      G_GNUC_END_IGNORE_DEPRECATIONS
+      if (ABS (allocated - gtk_widget_get_width (parent)) > 1) {
+        current_width = FALSE;
+        break;
+      }
+      child = parent;
+    }
+    if (current_width && child == GTK_WIDGET (self->list) &&
+        row_in_allocated_viewport (self, row) &&
         spotifygtk_track_row_duration_edge (SPOTIFYGTK_TRACK_ROW (row),
                                             GTK_WIDGET (self), &edge) &&
         edge > 0) {

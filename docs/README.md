@@ -447,6 +447,9 @@ Useful switches are:
 SPOTIFY_COVER_STATS   cover queue/cache statistics at settle boundaries
 SPOTIFY_SCROLL_STATS  per-gesture wheel/frame-gap, row binding, overscan and
                       style-provider reload summaries (no per-frame log I/O)
+SPOTIFYGTK_LAYOUT_DIAGNOSTICS
+                      bounded widget minimum-size trees on new window overflows;
+                      includes zoomed content, never catalogue text (off by default)
 SPOTIFY_NAV_PROBE     development navigation probe
 SPOTIFY_DEV_START_PAGE  page to open for a probe
 ```

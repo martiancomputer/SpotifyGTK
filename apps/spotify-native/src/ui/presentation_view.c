@@ -102,8 +102,11 @@ presentation_allocate (GtkWidget *widget, int width, int height, int baseline)
   int logical_height = spotifygtk_presentation_logical_extent (height, self->scale, minimum_height);
 
   self->configuring = TRUE;
-  int content_width = spotifygtk_presentation_extent (logical_width, self->scale);
-  int content_height = spotifygtk_presentation_extent (logical_height, self->scale);
+  /* Rounding the allocation up must fill the viewport, without inventing
+   * a scrollbar for a fraction of a logical pixel. Only a real minimum may
+   * expose overflow; the wrapper clips the rounded edge. */
+  int content_width = MAX (width, spotifygtk_presentation_extent (minimum_width, self->scale));
+  int content_height = MAX (height, spotifygtk_presentation_extent (minimum_height, self->scale));
   configure_axis (self->horizontal, content_width, width);
   configure_axis (self->vertical, content_height, height);
   /* Overlay bars never take space from the content. Showing one cannot change
@@ -161,12 +164,12 @@ focus_changed (GtkRoot *root, GParamSpec *pspec, SpotifyGtkPresentationView *sel
   graphene_rect_t bounds;
   if (!focus || !gtk_widget_is_ancestor (focus, GTK_WIDGET (self)) ||
       !gtk_widget_compute_bounds (focus, GTK_WIDGET (self), &bounds)) return;
-  double right = bounds.origin.x + bounds.size.width;
-  double bottom = bounds.origin.y + bounds.size.height;
   int width = gtk_widget_get_width (GTK_WIDGET (self));
   int height = gtk_widget_get_height (GTK_WIDGET (self));
-  pan_axis (self->horizontal, bounds.origin.x < 0 ? bounds.origin.x : MAX (0, right - width));
-  pan_axis (self->vertical, bounds.origin.y < 0 ? bounds.origin.y : MAX (0, bottom - height));
+  pan_axis (self->horizontal, spotifygtk_presentation_focus_delta (
+    bounds.origin.x, bounds.size.width, width));
+  pan_axis (self->vertical, spotifygtk_presentation_focus_delta (
+    bounds.origin.y, bounds.size.height, height));
   (void) pspec;
 }
 

@@ -1061,6 +1061,7 @@ spotifygtk_artist_page_init (SpotifyGtkArtistPage *self)
                     G_CALLBACK (on_track_activated), self);
   GtkWidget *scroller = GTK_WIDGET (spotifygtk_track_list_get_scroller (self->releases_list));
   self->scroller = scroller;
+  gtk_widget_add_css_class (scroller, "glass-scroller");
   gtk_widget_set_vexpand (scroller, TRUE);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller),
                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);

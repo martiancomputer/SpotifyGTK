@@ -1,4 +1,6 @@
 #include "frame_stats.h"
+#include <adwaita.h>
+#include <math.h>
 
 typedef struct {
   GtkWidget *window; /* owned by the window's data slot */
@@ -8,8 +10,33 @@ typedef struct {
   gint64 total_paint_us, max_paint_us, max_gap_us;
   guint frames, late_frames;
   gint width, height;
+  gboolean trace_layout;
+  gint last_minimum;
   struct { gint64 total_us, max_us; guint count; } work[SPOTIFYGTK_FRAME_WORK_COUNT];
 } FrameStats;
+
+/* Opt-in incident capture: record geometry, never catalogue text. */
+static void
+trace_minimum_tree (GtkWidget *widget, guint depth, guint *remaining)
+{
+  if (!*remaining || depth > 32 ||
+      (depth > 0 && !gtk_widget_should_layout (widget))) return;
+  (*remaining)--;
+  gint minimum, natural, request_width, request_height;
+  gtk_widget_measure (widget, GTK_ORIENTATION_HORIZONTAL, -1,
+                      &minimum, &natural, NULL, NULL);
+  gtk_widget_get_size_request (widget, &request_width, &request_height);
+  g_auto(GStrv) classes = gtk_widget_get_css_classes (widget);
+  g_autofree gchar *css = g_strjoinv (" ", classes);
+  g_message ("layout-minimum: depth=%u type=%s css=%s min=%d natural=%d"
+             " allocated=%dx%d request=%dx%d",
+             depth, G_OBJECT_TYPE_NAME (widget), css, minimum, natural,
+             gtk_widget_get_width (widget), gtk_widget_get_height (widget),
+             request_width, request_height);
+  for (GtkWidget *child = gtk_widget_get_first_child (widget); child;
+       child = gtk_widget_get_next_sibling (child))
+    trace_minimum_tree (child, depth + 1, remaining);
+}
 
 gint64
 spotifygtk_frame_stats_work_begin (void)
@@ -64,6 +91,30 @@ after_paint (GdkFrameClock *clock, gpointer data)
   gdk_frame_clock_get_refresh_info (clock, frame, &refresh, NULL);
   gint width = gtk_widget_get_width (stats->window);
   gint height = gtk_widget_get_height (stats->window);
+  if (stats->trace_layout) {
+    GtkWidget *content = ADW_IS_APPLICATION_WINDOW (stats->window)
+      ? adw_application_window_get_content (ADW_APPLICATION_WINDOW (stats->window))
+      : gtk_window_get_child (GTK_WINDOW (stats->window));
+    if (GTK_IS_OVERLAY (content)) {
+      GtkWidget *view = gtk_overlay_get_child (GTK_OVERLAY (content));
+      if (view && g_str_equal (gtk_widget_get_css_name (view), "presentation-view"))
+        content = gtk_widget_get_first_child (view);
+    }
+    if (!content) content = stats->window;
+    gint minimum;
+    gtk_widget_measure (content, GTK_ORIENTATION_HORIZONTAL, -1,
+                        &minimum, NULL, NULL, NULL);
+    graphene_rect_t area;
+    if (gtk_widget_get_width (content) > 0 &&
+        gtk_widget_compute_bounds (content, stats->window, &area))
+      minimum = (gint) MIN (G_MAXINT,
+        ceil (minimum * (double) area.size.width / gtk_widget_get_width (content)));
+    if (minimum > width && minimum != stats->last_minimum) {
+      guint remaining = 300;
+      trace_minimum_tree (stats->window, 0, &remaining);
+    }
+    stats->last_minimum = minimum > width ? minimum : 0;
+  }
   if (width != stats->width || height != stats->height) {
     g_message ("frame-profile: resize %dx%d -> %dx%d", stats->width,
                stats->height, width, height);
@@ -124,7 +175,7 @@ after_paint (GdkFrameClock *clock, gpointer data)
 void
 spotifygtk_frame_stats_attach (GtkWidget *window)
 {
-  if (!g_getenv ("SPOTIFY_SCROLL_STATS") ||
+  if ((!g_getenv ("SPOTIFY_SCROLL_STATS") && !g_getenv ("SPOTIFYGTK_LAYOUT_DIAGNOSTICS")) ||
       g_object_get_data (G_OBJECT (window), "frame-stats"))
     return;
   GdkFrameClock *clock = gtk_widget_get_frame_clock (window);
@@ -132,6 +183,7 @@ spotifygtk_frame_stats_attach (GtkWidget *window)
     return;
   FrameStats *stats = g_new0 (FrameStats, 1);
   stats->window = window;
+  stats->trace_layout = g_getenv ("SPOTIFYGTK_LAYOUT_DIAGNOSTICS") != NULL;
   stats->clock = g_object_ref (clock);
   stats->started_us = g_get_monotonic_time ();
   stats->before_id = g_signal_connect (clock, "before-paint",
