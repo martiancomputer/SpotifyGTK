@@ -6660,9 +6660,12 @@ static const gchar *theme_body =
   "list, list > row, scrolledwindow, scrolledwindow > viewport, viewport, .view"
   "  { background-color: transparent; background-image: none; }"
   /* Glass already fades the content at this edge. The platform theme's
-   * separate scroll shadow otherwise leaves a dark seam through the fade. */
+   * scroll frame and undershoot can otherwise leave a one-pixel seam through
+   * the fade, especially when fractional scaling rounds the viewport edge. */
+  "scrolledwindow.glass-scroller, scrolledwindow.glass-scroller > viewport"
+  "  { border: none; outline: none; box-shadow: none; }"
   "scrolledwindow.glass-scroller undershoot.top"
-  "  { background: none; box-shadow: none; border: none; }"
+  "  { background: none; background-image: none; box-shadow: none; border: none; }"
   /* A horizontal ListView paints its own row surface above and beside the
    * card buttons. Search shows that surface as hairlines at both clip edges. */
   "listview.search-album-shelf, listview.search-album-shelf > row"
