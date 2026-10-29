@@ -7,7 +7,7 @@ This build is self-signed by `CN=SpotifyGTK`, not signed by Spotify or a public
 certificate authority. Only trust the included certificate if you trust the
 source of this package. No private signing key is distributed.
 
-1. Keep `spotifygtk-1.1.5-release-windows-x86-64.cer` beside the `.msix` file.
+1. Keep `spotifygtk-1.1.6-release-windows-x86-64.cer` beside the `.msix` file.
 2. Double-click the `.cer`, choose **Install Certificate**, then
    **Local Machine**. Approve the administrator prompt.
 3. Choose **Place all certificates in the following store**, browse to
@@ -18,7 +18,7 @@ source of this package. No private signing key is distributed.
 Alternatively, in an administrator PowerShell window opened in this directory:
 
 ```powershell
-$version = '1.1.5'
+$version = '1.1.6'
 Import-Certificate -FilePath ".\spotifygtk-$version-release-windows-x86-64.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPeople
 ```
 

@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 package_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-package_version="${SPOTIFYGTK_MSIX_VERSION:-1.1.5.0}"
+package_version="${SPOTIFYGTK_MSIX_VERSION:-1.1.6.0}"
 package_bundle="${SPOTIFYGTK_BUNDLE_DIR:-$package_root/build/dist}"
 package_output="${SPOTIFYGTK_MSIX_OUTPUT:-$package_root/out}"
 package_signing="${SPOTIFYGTK_SIGNING_DIR:-$package_root/.signing}"
