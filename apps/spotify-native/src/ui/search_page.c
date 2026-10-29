@@ -673,7 +673,6 @@ spotifygtk_search_page_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 {
   SpotifyGtkSearchPage *self = SPOTIFYGTK_SEARCH_PAGE (widget);
   spotifygtk_snapshot_header_transparency (widget, self->scroll_overlay, self->results, snapshot);
-  GTK_WIDGET_CLASS (spotifygtk_search_page_parent_class)->snapshot (widget, snapshot);
 }
 
 static void

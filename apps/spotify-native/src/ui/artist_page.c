@@ -972,7 +972,6 @@ spotifygtk_artist_page_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
   SpotifyGtkArtistPage *self = SPOTIFYGTK_ARTIST_PAGE (widget);
   spotifygtk_snapshot_scrolled_header_transparency (widget, self->scroller,
     GTK_SCROLLED_WINDOW (self->scroller), snapshot);
-  GTK_WIDGET_CLASS (spotifygtk_artist_page_parent_class)->snapshot (widget, snapshot);
 }
 
 static void

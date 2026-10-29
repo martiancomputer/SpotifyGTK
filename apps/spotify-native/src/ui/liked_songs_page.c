@@ -549,7 +549,6 @@ spotifygtk_liked_songs_page_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 {
   SpotifyGtkLikedSongsPage *self = SPOTIFYGTK_LIKED_SONGS_PAGE (widget);
   spotifygtk_snapshot_header_transparency (widget, GTK_WIDGET (self->list), self->list, snapshot);
-  GTK_WIDGET_CLASS (spotifygtk_liked_songs_page_parent_class)->snapshot (widget, snapshot);
 }
 
 static void

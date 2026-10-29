@@ -69,7 +69,7 @@ if get_option('tests')
       dependencies: all_deps + [gtk4_dep, adw_check],
       c_args: ['-DSPOTIFYGTK_ENGINE_LIBRARY'],
     )
-    test('ui-refinements', test_ui_refinements, timeout: 60)
+    test('ui-refinements', test_ui_refinements, timeout: 180)
     test_pending_cards = executable('test-pending-cards',
       'test_pending_cards.c', '../src/ui/context_menu.c',
       '../src/ui/smooth_scroll.c', '../src/ui/settings.c', '../src/log_file.c',

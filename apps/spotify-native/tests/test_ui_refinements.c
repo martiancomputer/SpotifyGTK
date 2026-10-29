@@ -71,24 +71,36 @@ bounds (GtkWidget *child, GtkWidget *root)
 }
 
 static GdkTexture *
-render (GtkWidget *window)
+render_with_renderer (GtkWidget *window, double scale, GskRenderer *renderer)
 {
   g_autoptr(GdkPaintable) paintable = gtk_widget_paintable_new (window);
   GtkSnapshot *snapshot = gtk_snapshot_new ();
   graphene_rect_t outer;
   g_assert_true (gtk_widget_compute_bounds (window, window, &outer));
-  /* WidgetPaintable includes CSS padding/borders. Keep a 1:1 snapshot and
-   * crop to the content coordinates used by bounds(), rather than shrinking
-   * the whole paintable and sampling several pixels outside the artwork. */
+  /* WidgetPaintable includes CSS padding/borders. Crop to the content
+   * coordinates used by bounds(), then apply the requested device scale. */
+  gtk_snapshot_scale (snapshot, scale, scale);
   gtk_snapshot_translate (snapshot, &outer.origin);
   gdk_paintable_snapshot (paintable, GDK_SNAPSHOT (snapshot),
     outer.size.width, outer.size.height);
   g_autoptr(GskRenderNode) node = gtk_snapshot_free_to_node (snapshot);
   g_assert_nonnull (node);
   graphene_rect_t viewport = GRAPHENE_RECT_INIT (0, 0,
-    gtk_widget_get_width (window), gtk_widget_get_height (window));
+    gtk_widget_get_width (window) * scale, gtk_widget_get_height (window) * scale);
   return gsk_renderer_render_texture (
-    gtk_native_get_renderer (GTK_NATIVE (window)), node, &viewport);
+    renderer ? renderer : gtk_native_get_renderer (GTK_NATIVE (window)), node, &viewport);
+}
+
+static GdkTexture *
+render_at_scale (GtkWidget *window, double scale)
+{
+  return render_with_renderer (window, scale, NULL);
+}
+
+static GdkTexture *
+render (GtkWidget *window)
+{
+  return render_at_scale (window, 1);
 }
 
 static void
@@ -922,6 +934,130 @@ test_account_and_actions (void)
 }
 
 static void
+test_artist_glass_boundary (gconstpointer data)
+{
+  gboolean textured = GPOINTER_TO_UINT (data) != 0;
+  guint mismatches = 0;
+  g_autoptr(GskRenderer) renderer = NULL;
+  if (textured) {
+    renderer = gsk_vulkan_renderer_new ();
+    g_autoptr(GError) error = NULL;
+    if (!gsk_renderer_realize_for_display (renderer, gdk_display_get_default (), &error)) {
+      g_test_skip (error ? error->message : "Vulkan renderer unavailable");
+      return;
+    }
+  }
+  g_autoptr(GdkTexture) artwork = NULL;
+  if (textured) {
+    guint8 *rgba = g_malloc (1024 * 512 * 4);
+    for (guint y = 0; y < 512; y++) {
+      for (guint x = 0; x < 1024; x++) {
+        guint8 *pixel = rgba + (y * 1024 + x) * 4;
+        pixel[0] = 160 + 40 * sin (y * 0.17);
+        pixel[1] = 110 + 50 * sin (y * 0.11);
+        pixel[2] = 140 + 30 * cos (y * 0.23);
+        pixel[3] = 255;
+      }
+    }
+    g_autoptr(GBytes) bytes = g_bytes_new_take (rgba, 1024 * 512 * 4);
+    artwork = gdk_memory_texture_new (1024, 512, GDK_MEMORY_R8G8B8A8, bytes, 1024 * 4);
+  }
+  const SpotifyGtkTheme themes[] = { SPOTIFYGTK_THEME_LIGHT, SPOTIFYGTK_THEME_DARK_PLUS };
+  const guint scales[] = { 75, 90, 100, 130 };
+  GtkCssProvider *fixture = gtk_css_provider_new ();
+  gtk_css_provider_load_from_string (fixture,
+    ".glass-boundary .artist-hero { background: #d49aca; border-radius: 0; }");
+  gtk_style_context_add_provider_for_display (gdk_display_get_default (),
+    GTK_STYLE_PROVIDER (fixture), GTK_STYLE_PROVIDER_PRIORITY_USER);
+  for (guint sample = 0; sample < G_N_ELEMENTS (themes) * G_N_ELEMENTS (scales); sample++) {
+    guint theme = sample / G_N_ELEMENTS (scales);
+    guint scale = scales[sample % G_N_ELEMENTS (scales)];
+    spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), scale, TRUE);
+    apply_theme (themes[theme]);
+    GtkWidget *window = gtk_window_new ();
+    gtk_window_set_default_size (GTK_WINDOW (window), theme ? 1200 : 901, 620);
+    SpotifyGtkArtistPage *page = spotifygtk_artist_page_new ();
+    spotifygtk_artist_page_set_following (page, FALSE);
+    gtk_widget_add_css_class (GTK_WIDGET (page), "glass-boundary");
+    gtk_widget_set_margin_start (GTK_WIDGET (page), 36);
+    gtk_widget_set_margin_end (GTK_WIDGET (page), 36);
+    gtk_widget_set_margin_top (GTK_WIDGET (page), 24);
+    gtk_window_set_child (GTK_WINDOW (window), spotifygtk_presentation_wrap (GTK_WIDGET (page)));
+    gtk_window_present (GTK_WINDOW (window));
+    settle ();
+    GtkWidget *hero = find_class (GTK_WIDGET (page), "artist-hero");
+    if (artwork)
+      gtk_picture_set_paintable (GTK_PICTURE (find_type (hero, GTK_TYPE_PICTURE)),
+                                  GDK_PAINTABLE (artwork));
+    GtkWidget *spacer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request (spacer, -1, 1600);
+    gtk_box_append (GTK_BOX (gtk_widget_get_parent (hero)), spacer);
+    settle ();
+    GtkWidget *scroller = find_type (GTK_WIDGET (page), GTK_TYPE_SCROLLED_WINDOW);
+    gtk_adjustment_set_value (gtk_scrolled_window_get_vadjustment (
+      GTK_SCROLLED_WINDOW (scroller)), 160.25);
+    settle ();
+    graphene_rect_t edge = bounds (scroller, window);
+    double device_scale = gdk_surface_get_scale (
+      gtk_native_get_surface (GTK_NATIVE (window)));
+    g_autoptr(GdkTexture) image = render_with_renderer (window, device_scale, renderer);
+    gint stride = gdk_texture_get_width (image) * 4;
+    g_autofree guint8 *pixels = g_malloc (stride * gdk_texture_get_height (image));
+    gdk_texture_download (image, pixels, stride);
+    g_autofree guint8 *reference = NULL;
+    if (artwork) {
+      GtkWidget *parent = gtk_widget_get_parent (hero);
+      GtkSnapshot *snapshot = gtk_snapshot_new ();
+      graphene_matrix_t transform;
+      g_assert_true (gtk_widget_compute_transform (parent, window, &transform));
+      gtk_snapshot_scale (snapshot, device_scale, device_scale);
+      gtk_snapshot_transform_matrix (snapshot, &transform);
+      gtk_widget_snapshot_child (parent, hero, snapshot);
+      g_autoptr(GskRenderNode) node = gtk_snapshot_free_to_node (snapshot);
+      graphene_rect_t viewport = GRAPHENE_RECT_INIT (0, 0,
+        gtk_widget_get_width (window) * device_scale,
+        gtk_widget_get_height (window) * device_scale);
+      g_autoptr(GdkTexture) expected_image = gsk_renderer_render_texture (
+        renderer ? renderer : gtk_native_get_renderer (GTK_NATIVE (window)), node, &viewport);
+      reference = g_malloc (stride * gdk_texture_get_height (image));
+      gdk_texture_download (expected_image, reference, stride);
+    }
+    double edge_pixel = edge.origin.y * device_scale;
+    gint x = gtk_widget_get_width (window) * device_scale / 2;
+    gint y = (gint) floor (edge_pixel);
+    g_autofree gchar *preview = g_strdup_printf ("artist-boundary-%s-%u-%u.png",
+      theme ? "dark" : "white", scale, textured);
+    const gchar *dir = g_getenv ("SPOTIFYGTK_TEST_PREVIEWS");
+    if (dir && *dir) {
+      g_autofree gchar *path = g_build_filename (dir, preview, NULL);
+      g_assert_true (gdk_texture_save_to_png (image, path));
+    }
+    for (gint row = y - 2; row <= y + 2; row++) {
+      const guint8 *pixel = pixels + row * stride + x * 4;
+      g_test_message ("theme=%u scale=%u edge=%.2f row=%d B=%u G=%u R=%u",
+        theme, scale, edge_pixel, row, pixel[0], pixel[1], pixel[2]);
+    }
+    const guint8 solid[] = { 202, 154, 212 };
+    for (gint row = y; row <= (gint) ceil (edge_pixel) + 1; row++) {
+      const guint8 *pixel = pixels + row * stride + x * 4;
+      const guint8 *expected = reference ? reference + row * stride + x * 4 : solid;
+      g_test_message ("row=%d expected B=%u G=%u R=%u", row,
+        expected[0], expected[1], expected[2]);
+      for (guint channel = 0; channel < G_N_ELEMENTS (solid); channel++)
+        mismatches += abs ((gint) pixel[channel] - expected[channel]) > 5;
+    }
+    gtk_window_destroy (GTK_WINDOW (window));
+    settle ();
+  }
+  gtk_style_context_remove_provider_for_display (gdk_display_get_default (), GTK_STYLE_PROVIDER (fixture));
+  g_object_unref (fixture);
+  spotifygtk_settings_set_ui_scale (spotifygtk_settings_get_default (), 0, FALSE);
+  apply_theme (SPOTIFYGTK_THEME_DARK_PLUS);
+  if (renderer) gsk_renderer_unrealize (renderer);
+  g_assert_cmpuint (mismatches, ==, 0);
+}
+
+static void
 test_artist_follow_alignment (void)
 {
   spotifygtk_settings_set_compact_mode (spotifygtk_settings_get_default (), TRUE);
@@ -1605,6 +1741,8 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/cards/shared-library-search-design", test_shared_card_design);
   g_test_add_func ("/ui/settings/account-actions", test_account_and_actions);
   g_test_add_func ("/ui/artist/follow-alignment", test_artist_follow_alignment);
+  g_test_add_data_func ("/ui/artist/glass-boundary", GUINT_TO_POINTER (0), test_artist_glass_boundary);
+  g_test_add_data_func ("/ui/artist/glass-vulkan-boundary", GUINT_TO_POINTER (1), test_artist_glass_boundary);
   g_test_add_func ("/ui/artist/release-layout", test_artist_release_layout);
   g_test_add_data_func ("/ui/artist/large-discography", GUINT_TO_POINTER (14), test_artist_large_discography);
   g_test_add_data_func ("/ui/artist/dense-section-extents", GUINT_TO_POINTER (1), test_artist_large_discography);
