@@ -46,12 +46,16 @@ bounded; downloaded artwork is available offline.
 
 | | |
 |:---:|:---:|
-| ![Artist page, dark theme](media/01-artist-dark.png) | ![Album page, dark theme](media/03-album-dark.png) |
-| **Artist** — top tracks, follow and discography | **Album** — artwork, track list and save controls |
-| ![Search results](media/05-search.png) | ![Liked Songs](media/08-liked-dark.png) |
-| **Search** — tracks and albums together | **Liked Songs** — filter and sort your tracks |
-| ![Now Playing panel](media/06-now-playing.png) | ![Artist page, light theme](media/02-artist-light.png) |
-| **Now Playing** — artwork, queue and lyrics | **Light theme** — artist page |
+| ![Artist page, dark theme](media/01-artist-dark.png) | ![Artist page, light theme](media/02-artist-light.png) |
+| **Artist** — top tracks, follow and discography | **Light theme** — artist banner and releases |
+| ![Album page, dark theme](media/03-album-dark.png) | ![Album page, light theme](media/04-album-light.png) |
+| **Album** — artwork, track list and save controls | **Light theme** — artwork, track list and playback |
+| ![Search results](media/05-search.png) | ![Library](media/09-library-light.png) |
+| **Search** — tracks and albums together | **Library** — saved albums and collection filters |
+| ![Liked Songs, dark theme](media/08-liked-dark.png) | ![Liked Songs, light theme](media/10-liked-light.png) |
+| **Liked Songs** — filter and sort your tracks | **Light theme** — liked tracks and sorting |
+| ![Now Playing panel](media/06-now-playing.png) | ![Album page during playback](media/11-album-playback-stray-dogs.png) |
+| **Now Playing** — artwork, queue and lyrics | **Album playback** — track list and synchronized player |
 
 ## Download
 
