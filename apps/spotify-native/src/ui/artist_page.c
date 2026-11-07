@@ -70,9 +70,9 @@
  * first -- exactly what the sort on Liked Songs does.
  *
  * "All" is the fourth key and the default: no kind is promoted and the
- * releases keep the order the catalogue gave them, which is roughly newest
- * first. It is not a filter reset -- nothing is ever hidden here -- it is the
- * way back to an unsorted page, which the other three had no way to restore.
+ * releases are ordered by year, newest first. It is not a filter reset --
+ * nothing is ever hidden here -- it restores chronological ordering without
+ * promoting a release kind.
  */
 typedef enum {
   RELEASE_ALL = 0,
@@ -556,7 +556,7 @@ release_kind_of (const Release *r)
   return (r->tracks && r->tracks->len <= 2) ? RELEASE_SINGLE : RELEASE_ALBUM;
 }
 
-/* Chosen kind first; everything else keeps the order the resolve gave it. */
+/* Chosen kind first; newest releases first within each group. */
 static gint
 compare_releases (gconstpointer a, gconstpointer b, gpointer user_data)
 {
@@ -564,17 +564,25 @@ compare_releases (gconstpointer a, gconstpointer b, gpointer user_data)
   const Release *x = *(const Release **) a;
   const Release *y = *(const Release **) b;
 
-  /* "All" promotes nothing; the tiebreak below is the whole order. */
+  /* "All" promotes nothing; the year comparison below is the primary key. */
   if (self->sort_kind != RELEASE_ALL) {
     gboolean xf = (release_kind_of (x) == self->sort_kind);
     gboolean yf = (release_kind_of (y) == self->sort_kind);
     if (xf != yf)
       return self->sort_desc[self->sort_kind] ? (xf - yf) : (yf - xf);
-  } else if (self->sort_desc[RELEASE_ALL]) {
-    return (x->first_seen < y->first_seen) - (x->first_seen > y->first_seen);
   }
 
-  /* Stable within a group: the resolve's own order, which is Spotify's. */
+  /* Catalogue order can mix years. Unknown years stay last in either direction;
+   * equal years retain the catalogue order rather than shuffling editions. */
+  if ((x->year > 0) != (y->year > 0))
+    return (y->year > 0) - (x->year > 0);
+  if (x->year != y->year) {
+    gint newest_first = (y->year > x->year) - (y->year < x->year);
+    return self->sort_kind == RELEASE_ALL && self->sort_desc[RELEASE_ALL]
+      ? -newest_first : newest_first;
+  }
+
+  /* Stable within a year: the catalogue's own order. */
   return (x->first_seen > y->first_seen) - (x->first_seen < y->first_seen);
 }
 

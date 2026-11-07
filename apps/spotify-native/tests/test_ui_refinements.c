@@ -1221,6 +1221,60 @@ test_artist_large_discography (gconstpointer data)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+/* Exercise ordering through the page's public release and sort controls. */
+static void
+test_artist_release_order (void)
+{
+  spotifygtk_settings_set_compact_mode (spotifygtk_settings_get_default (), FALSE);
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1100, 800);
+  SpotifyGtkArtistPage *page = spotifygtk_artist_page_new ();
+  g_autoptr(GPtrArray) releases = g_ptr_array_new_with_free_func (
+    (GDestroyNotify) spotifygtk_native_release_free);
+  const gint years[] = { 2025, 2026, 2019, 2026, 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (years); i++) {
+    SpotifyNativeRelease *r = g_new0 (SpotifyNativeRelease, 1);
+    r->uri = g_strdup_printf ("spotify:album:000000000000000000000%u", i);
+    r->name = g_strdup_printf ("Fixture release %u", i);
+    r->year = years[i];
+    r->type = i == 0 ? SPOTIFY_ALBUM_TYPE_SINGLE : SPOTIFY_ALBUM_TYPE_ALBUM;
+    r->tracks = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) spotifygtk_native_track_free);
+    g_autofree gchar *track_uri = g_strdup_printf ("spotify:track:000000000000000000000%u", i);
+    SpotifyNativeTrack track = { .uri = track_uri, .name = r->name,
+      .artists = "Fixture artist", .album_uri = r->uri, .duration_ms = 180000 };
+    g_ptr_array_add (r->tracks, spotifygtk_native_track_copy (&track));
+    g_ptr_array_add (releases, r);
+  }
+  spotifygtk_artist_page_set_releases (page, releases);
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkWidget *header = find_class (GTK_WIDGET (page), "artist-release-header");
+  g_assert_nonnull (header);
+  SpotifyGtkTrackList *list = SPOTIFYGTK_TRACK_LIST (
+    gtk_widget_get_ancestor (header, SPOTIFYGTK_TYPE_TRACK_LIST));
+  const guint expected[][5] = {
+    { 1, 3, 0, 2, 4 }, /* All: newest first, stable ties, unknown last. */
+    { 2, 0, 1, 3, 4 }, /* Reverse All: oldest first, unknown still last. */
+    { 0, 1, 3, 2, 4 }, /* Singles promoted; each group newest first. */
+    { 1, 3, 2, 4, 0 }, /* Reverse Singles: other kinds promoted. */
+  };
+  const gchar *buttons[] = { NULL, "All ↑", "Singles", "Singles ↑" };
+  for (guint step = 0; step < G_N_ELEMENTS (expected); step++) {
+    if (buttons[step])
+      g_signal_emit_by_name (button_for (GTK_WIDGET (page), buttons[step]), "clicked");
+    g_autoptr(GPtrArray) tracks = spotifygtk_track_list_snapshot (list);
+    g_assert_cmpuint (tracks->len, ==, G_N_ELEMENTS (years));
+    for (guint j = 0; j < tracks->len; j++) {
+      SpotifyNativeTrack *track = g_ptr_array_index (tracks, j);
+      SpotifyNativeRelease *r = g_ptr_array_index (releases, expected[step][j]);
+      g_assert_cmpstr (track->album_uri, ==, r->uri);
+    }
+  }
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 static void
 test_artist_release_layout (void)
 {
@@ -1743,6 +1797,7 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/artist/follow-alignment", test_artist_follow_alignment);
   g_test_add_data_func ("/ui/artist/glass-boundary", GUINT_TO_POINTER (0), test_artist_glass_boundary);
   g_test_add_data_func ("/ui/artist/glass-vulkan-boundary", GUINT_TO_POINTER (1), test_artist_glass_boundary);
+  g_test_add_func ("/ui/artist/release-order", test_artist_release_order);
   g_test_add_func ("/ui/artist/release-layout", test_artist_release_layout);
   g_test_add_data_func ("/ui/artist/large-discography", GUINT_TO_POINTER (14), test_artist_large_discography);
   g_test_add_data_func ("/ui/artist/dense-section-extents", GUINT_TO_POINTER (1), test_artist_large_discography);
