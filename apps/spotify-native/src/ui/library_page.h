@@ -48,10 +48,13 @@ SpotifyGtkAlbumGrid *spotifygtk_library_page_get_album_grid (SpotifyGtkLibraryPa
 SpotifyGtkAlbumGrid *spotifygtk_library_page_get_alt_album_grid (SpotifyGtkLibraryPage *self);
 SpotifyGtkAlbumGrid *spotifygtk_library_page_get_artist_grid (SpotifyGtkLibraryPage *self);
 
-/* Copies the window's authoritative followed-artist URI set. Artist metadata
+/* Copies the followed-artist URI set, ordering it by the optional timestamp map.
+ * Dates use integer seconds as pointer values, matching the collection API.
+ * Artist metadata
  * is resolved lazily when its card first becomes visible. */
 void spotifygtk_library_page_set_followed_artists (SpotifyGtkLibraryPage *self,
-                                                   GHashTable            *uris);
+                                                   GHashTable            *uris,
+                                                   GHashTable            *dates);
 
 /* Drop textures held by hidden Library widgets, or restore only the currently
  * visible grid. The disk cache remains untouched. */

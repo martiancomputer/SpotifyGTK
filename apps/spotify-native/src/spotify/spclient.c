@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include "protobuf_min.h"
 #include "track_meta.h"
+#include "home_feed.h"
 
 #include <libsoup/soup.h>
 #include <json-glib/json-glib.h>
@@ -1286,7 +1287,7 @@ spotifygtk_spclient_build_home_body (const gchar *timezone)
   json_builder_set_member_name (b, "timeZone"); json_builder_add_string_value (b, timezone ?: "UTC");
   json_builder_set_member_name (b, "sp_t"); json_builder_add_string_value (b, "");
   json_builder_set_member_name (b, "facet"); json_builder_add_string_value (b, "");
-  json_builder_set_member_name (b, "sectionItemsLimit"); json_builder_add_int_value (b, 10);
+  json_builder_set_member_name (b, "sectionItemsLimit"); json_builder_add_int_value (b, SPOTIFYGTK_HOME_MAX_CARDS);
   json_builder_set_member_name (b, "includeEpisodeContentRatingsV2"); json_builder_add_boolean_value (b, TRUE);
   json_builder_end_object (b);
   json_builder_set_member_name (b, "extensions"); json_builder_begin_object (b);

@@ -256,6 +256,8 @@ struct _SpotifyGtkTrackList {
    */
   GHashTable *liked_set;
   GHashTable *unavailable_set;   /* borrowed, like liked_set */
+  gchar      *playing_uri;
+  gboolean    playing;
   gchar      *playlist_uri;      /* set only while showing a playlist */
 
   /* Scroll settle detection. Cover loading is suppressed while the adjustment
@@ -459,13 +461,17 @@ is_section_header_placeholder (const SpotifyNativeTrack *track)
 /* Grouping belongs to this view, never to a playable track passed to another
  * page, the queue or Liked Songs. Preserve the separate device-only marker. */
 static SpotifyGtkTrackItem *
-playable_item_new (const SpotifyNativeTrack *track, guint number)
+playable_item_new (SpotifyGtkTrackList *self, const SpotifyNativeTrack *track, guint number)
 {
   SpotifyNativeTrack playable = *track;
   playable.section_title = NULL;
   if (track->section_title)
     playable.section_detail = NULL;
-  return spotifygtk_track_item_new (&playable, number);
+  SpotifyGtkTrackItem *item = spotifygtk_track_item_new (&playable, number);
+  gboolean current = track->uri && self->playing_uri &&
+    g_str_equal (track->uri, self->playing_uri);
+  spotifygtk_track_item_set_playing (item, current, current && !self->playing);
+  return item;
 }
 
 static GtkWidget *
@@ -1403,6 +1409,7 @@ spotifygtk_track_list_dispose (GObject *object)
 
   g_clear_object (&self->page_header);
 
+  g_clear_pointer (&self->playing_uri, g_free);
   g_clear_object (&self->store);
   G_OBJECT_CLASS (spotifygtk_track_list_parent_class)->dispose (object);
 }
@@ -1713,7 +1720,7 @@ spotifygtk_track_list_insert_native_track (SpotifyGtkTrackList      *self,
 
   /* The number is set from the position on bind, so the value passed here is
    * only a placeholder. */
-  g_autoptr(SpotifyGtkTrackItem) item = playable_item_new (track, position + 1);
+  g_autoptr(SpotifyGtkTrackItem) item = playable_item_new (self, track, position + 1);
   g_list_store_insert (self->store, position, item);
 
   spotifygtk_track_list_set_status (self, NULL);
@@ -1739,6 +1746,13 @@ spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position
       SpotifyNativeTrack *track = (SpotifyNativeTrack *) spotifygtk_track_item_get_track (item);
       if (track && track->device_index > device_index) track->device_index--;
     }
+}
+
+void
+spotifygtk_track_list_remove_native_track (SpotifyGtkTrackList *self, guint position)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+  spotifygtk_track_list_remove_position (self, position + header_prefix_len (self));
 }
 
 gint
@@ -2084,7 +2098,7 @@ spotifygtk_track_list_set_native_tracks (SpotifyGtkTrackList *self, GPtrArray *t
     }
     section_number++;
     guint number = self->sectioned ? section_number : items->len + 1;
-    g_ptr_array_add (items, playable_item_new (track, number));
+    g_ptr_array_add (items, playable_item_new (self, track, number));
   }
 
   /* Only declare equal-height groups to runtimes that advertise this optional
@@ -2260,6 +2274,12 @@ spotifygtk_track_list_set_playing_uri (SpotifyGtkTrackList *self,
                                        gboolean     playing)
 {
   g_return_if_fail (SPOTIFYGTK_IS_TRACK_LIST (self));
+
+  if (g_strcmp0 (self->playing_uri, uri) != 0) {
+    g_free (self->playing_uri);
+    self->playing_uri = g_strdup (uri);
+  }
+  self->playing = playing;
 
   guint n = g_list_model_get_n_items (G_LIST_MODEL (self->store));
   for (guint i = 0; i < n; i++) {

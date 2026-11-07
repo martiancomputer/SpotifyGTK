@@ -153,6 +153,10 @@ struct _SpotifyGtkNativeWindow {
   /* Followed artists. Their own collection set, unlike saved albums, which
    * share liked_uris because the catalogue keeps them in the same set. */
   GHashTable *followed_uris;
+  GHashTable *followed_dates;
+  gchar *playlist_action_uri;
+  guint playlist_action_account;
+  gboolean playlist_action_owned;
 
   /*
    * The set under construction while a read is in flight. The live set is only
@@ -2053,6 +2057,7 @@ typedef struct {
   guint generation;
   gchar *next;
   GPtrArray *uris;
+  GHashTable *dates;
 } FollowedPageResult;
 
 static void followed_fetch_page (SpotifyGtkNativeWindow *self, const gchar *token);
@@ -2066,17 +2071,22 @@ followed_page_to_ui (gpointer data)
     if (!self->followed_uris)
       self->followed_uris = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                    g_free, NULL);
-    for (guint i = 0; i < r->uris->len; i++)
-      g_hash_table_add (self->followed_uris,
-                        g_strdup (g_ptr_array_index (r->uris, i)));
+    if (!self->followed_dates)
+      self->followed_dates = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < r->uris->len; i++) {
+      const gchar *uri = r->uris->pdata[i];
+      g_hash_table_add (self->followed_uris, g_strdup (uri));
+      g_hash_table_replace (self->followed_dates, g_strdup (uri), g_hash_table_lookup (r->dates, uri));
+    }
     if (r->next && *r->next)
       followed_fetch_page (self, r->next);
     else if (self->library_page)
       spotifygtk_library_page_set_followed_artists (self->library_page,
-                                                    self->followed_uris);
+                                                    self->followed_uris, self->followed_dates);
   }
   g_weak_ref_clear (&r->window);
   g_ptr_array_unref (r->uris);
+  g_hash_table_unref (r->dates);
   g_free (r->next);
   g_free (r);
   return G_SOURCE_REMOVE;
@@ -2098,9 +2108,12 @@ on_followed_page (gboolean ok, guint16 status, SpotifyCollectionItem *items,
       r->generation = read->generation;
       r->next = g_strdup (next_token);
       r->uris = g_ptr_array_new_with_free_func (g_free);
+      r->dates = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
       for (guint i = 0; i < n_items; i++)
-        if (items[i].uri && !items[i].is_removed)
+        if (items[i].uri && !items[i].is_removed) {
           g_ptr_array_add (r->uris, g_strdup (items[i].uri));
+          g_hash_table_insert (r->dates, g_strdup (items[i].uri), GINT_TO_POINTER ((gint) items[i].added_at));
+        }
       g_idle_add (followed_page_to_ui, r);
     }
   }
@@ -2126,6 +2139,7 @@ static void
 spotifygtk_native_window_reload_followed (SpotifyGtkNativeWindow *self)
 {
   g_clear_pointer (&self->followed_uris, g_hash_table_unref);
+  g_clear_pointer (&self->followed_dates, g_hash_table_unref);
   followed_fetch_page (self, NULL);
 }
 
@@ -3942,7 +3956,7 @@ on_library_write_done (gboolean ok, guint16 status, gpointer user_data)
         else
           g_hash_table_remove (self->followed_uris, op->uri);
         spotifygtk_library_page_set_followed_artists (self->library_page,
-                                                      self->followed_uris);
+                                                      self->followed_uris, self->followed_dates);
         spotifygtk_artist_page_set_following (self->artist_page,
                                               op->is_removed);
       }
@@ -4020,6 +4034,49 @@ artist_is_followed (SpotifyGtkNativeWindow *self, const gchar *uri)
          g_hash_table_contains (self->followed_uris, uri);
 }
 
+typedef struct {
+  GWeakRef window;
+  gchar *uri;
+  guint account_generation;
+} PlaylistOwnerRead;
+
+static gboolean
+playlist_owner_matches (const guint8 *data, gsize length, const gchar *username)
+{
+  /* SelectedListContent.owner_username = 16 (playlist4 protocol).
+   * Schema: https://github.com/librespot-org/librespot/blob/dev/protocol/proto/playlist4_external.proto */
+  const guint8 *owner = NULL;
+  gsize owner_length = 0;
+  return username && *username && pb_find_bytes_field (data, length, 16, &owner, &owner_length) &&
+    owner_length == strlen (username) && memcmp (owner, username, owner_length) == 0;
+}
+
+static void
+on_playlist_owner_read (MercuryResponse *response, gpointer data)
+{
+  PlaylistOwnerRead *read = data;
+  g_autoptr(SpotifyGtkNativeWindow) self = g_weak_ref_get (&read->window);
+  if (self && read->account_generation == self->account_generation &&
+      g_strcmp0 (read->uri, self->playlist_action_uri) == 0 && response &&
+      response->status_code >= 200 && response->status_code < 300 &&
+      response->parts && response->parts->len) {
+    gsize length = 0;
+    const guint8 *bytes = g_bytes_get_data (response->parts->pdata[0], &length);
+    g_autofree gchar *username = spotifygtk_native_session_dup_username (self->session);
+    self->playlist_action_owned = playlist_owner_matches (bytes, length, username);
+    spotifygtk_context_page_set_action (self->context_page,
+      self->playlist_action_owned ? "Delete playlist" : "", self->playlist_action_owned, TRUE);
+  } else if (self && read->account_generation == self->account_generation &&
+             g_strcmp0 (read->uri, self->playlist_action_uri) == 0) {
+    /* A transient read failure must allow the next navigation to retry. */
+    g_clear_pointer (&self->playlist_action_uri, g_free);
+    self->playlist_action_owned = FALSE;
+  }
+  g_weak_ref_clear (&read->window);
+  g_free (read->uri);
+  g_free (read);
+}
+
 static void
 context_refresh_action (SpotifyGtkNativeWindow *self, const gchar *uri,
                         const gchar *kind)
@@ -4035,6 +4092,12 @@ context_refresh_action (SpotifyGtkNativeWindow *self, const gchar *uri,
     (uri && (g_str_has_prefix (uri, "spotify:playlist:") ||
              g_str_has_prefix (uri, "local:playlist:"))) ? uri : NULL);
 
+  if (g_strcmp0 (self->playlist_action_uri, uri) != 0 ||
+      self->playlist_action_account != self->account_generation) {
+    g_free (self->playlist_action_uri);
+    self->playlist_action_uri = NULL;
+    self->playlist_action_owned = FALSE;
+  }
   gboolean signed_in = self->session &&
     spotifygtk_native_session_get_state (self->session) == SPOTIFYGTK_SESSION_READY;
   if (signed_in && uri && g_str_has_prefix (uri, "spotify:album:")) {
@@ -4043,7 +4106,21 @@ context_refresh_action (SpotifyGtkNativeWindow *self, const gchar *uri,
   } else if (signed_in && uri &&
              g_str_has_prefix (uri, "spotify:playlist:")) {
     spotifygtk_context_page_set_action (self->context_page,
-      "Delete playlist", TRUE, TRUE);
+      self->playlist_action_owned ? "Delete playlist" : "", self->playlist_action_owned, TRUE);
+    if (!self->playlist_action_uri) {
+      SpotifyMercury *mercury = spotifygtk_native_session_get_mercury (self->session);
+      if (mercury) {
+        self->playlist_action_uri = g_strdup (uri);
+        self->playlist_action_account = self->account_generation;
+        PlaylistOwnerRead *read = g_new0 (PlaylistOwnerRead, 1);
+        g_weak_ref_init (&read->window, self);
+        read->uri = g_strdup (uri);
+        read->account_generation = self->account_generation;
+        g_autofree gchar *head = g_strdup_printf (
+          "hm://playlist/v2/playlist/%s?from=0&length=0", uri + strlen ("spotify:playlist:"));
+        spotifygtk_mercury_request (mercury, MERCURY_METHOD_GET, head, NULL, on_playlist_owner_read, read);
+      }
+    }
   } else if (uri && g_str_has_prefix (uri, "local:playlist:")) {
     spotifygtk_context_page_set_action (self->context_page,
       "Delete device playlist", TRUE, TRUE);
@@ -4103,7 +4180,9 @@ on_context_action (const gchar *uri, const gchar *kind, gpointer user_data)
     return;
   }
 
-  if (g_str_has_prefix (uri, "spotify:playlist:"))
+  if (g_str_has_prefix (uri, "spotify:playlist:") &&
+      self->playlist_action_owned && self->playlist_action_account == self->account_generation &&
+      g_strcmp0 (uri, self->playlist_action_uri) == 0)
     spotifygtk_playlist_remove (m, user, uri, on_playlist_removed, self);
 }
 
@@ -4136,12 +4215,17 @@ on_artist_follow_toggled (const gchar *artist_uri, gpointer user_data)
     SPOTIFYGTK_COLLECTION_SET_ARTISTS, LIBRARY_WRITE_ARTIST, following);
   if (!issue_library_write (self, op))
     queue_library_write (self, op);
+  if (!self->followed_dates)
+    self->followed_dates = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  if (following) g_hash_table_remove (self->followed_dates, artist_uri);
+  else g_hash_table_replace (self->followed_dates, g_strdup (artist_uri),
+    GINT_TO_POINTER ((gint) (g_get_real_time () / G_USEC_PER_SEC)));
   if (following) g_hash_table_remove (self->followed_uris, artist_uri);
   else           g_hash_table_add (self->followed_uris, g_strdup (artist_uri));
 
   if (self->library_page)
     spotifygtk_library_page_set_followed_artists (self->library_page,
-                                                  self->followed_uris);
+                                                  self->followed_uris, self->followed_dates);
 
   spotifygtk_artist_page_set_following (self->artist_page,
                                         !following);
@@ -6838,8 +6922,6 @@ static const gchar *theme_body =
   /* Suppress ListView's row hover/focus fill around the single card button. */
   ".home-shelf listview, .home-shelf listview > row"
   " { background: transparent; border: none; box-shadow: none; padding: 0; margin: 0; outline: none; }"
-  ".home-dialog-row { background: @bg_card; padding: 10px 12px; border-radius: 8px; }"
-  ".home-dialog-row:hover { background: @bg_hover; }"
 
   /* ── Transport ─────────────────────────────────────────────── */
   /* min-width/height must match the widget size request, or GTK button
@@ -7985,7 +8067,9 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_pointer (&self->liked_uris, g_hash_table_unref);
   g_clear_pointer (&self->local_favorites, spotifygtk_local_favorites_free);
   g_clear_pointer (&self->device_playlists, spotifygtk_device_playlists_free);
+  g_clear_pointer (&self->playlist_action_uri, g_free);
   g_clear_pointer (&self->followed_uris, g_hash_table_unref);
+  g_clear_pointer (&self->followed_dates, g_hash_table_unref);
   g_clear_pointer (&self->liked_building, g_hash_table_unref);
   /* Unhook first: a weak-ref callback firing after this point would write
    * into a window that is already going away. */

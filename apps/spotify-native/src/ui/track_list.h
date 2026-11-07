@@ -73,6 +73,9 @@ void spotifygtk_track_list_set_show_like (SpotifyGtkTrackList *self, gboolean sh
 void spotifygtk_track_list_insert_native_track (SpotifyGtkTrackList      *self,
                                                 guint                     position,
                                                 const SpotifyNativeTrack *track);
+/* Playable position, matching insert_native_track; excludes the page header. */
+void spotifygtk_track_list_remove_native_track (SpotifyGtkTrackList *self, guint position);
+/* Raw model position, including page/section headers (playlist row actions). */
 void spotifygtk_track_list_remove_position (SpotifyGtkTrackList *self, guint position);
 /* Index within device-only playlist entries before a visible row; -1 if the
  * row is not device-only. Includes the virtual page header in position. */

@@ -4202,7 +4202,7 @@ home_cache_key (SpotifyNativeSession *self)
   if (!username || !*username) return NULL;
   g_autofree gchar *account = g_compute_checksum_for_string (G_CHECKSUM_SHA256, username, -1);
   g_autoptr(GTimeZone) tz = g_time_zone_new_local ();
-  return g_strdup_printf ("home-v1:%s:%s:%s", account,
+  return g_strdup_printf ("home-v2:%s:%s:%s", account,
                            g_time_zone_get_identifier (tz), g_get_language_names ()[0]);
 }
 
@@ -4215,6 +4215,12 @@ spotifygtk_native_session_get_cached_home (SpotifyNativeSession *self)
   /* Stale-while-revalidate: keep Home browsable across restarts/offline days.
    * Freshness is checked separately by load_home; this is only display data. */
   g_autoptr(GBytes) bytes = spotifygtk_catalog_cache_get (key, SPOTIFYGTK_HOME_SAVED_SECONDS);
+  /* The expanded request gets a new freshness key. Keep the previous smaller
+   * snapshot as an offline display fallback, never as proof that v2 is fresh. */
+  if (!bytes) {
+    g_autofree gchar *legacy = g_strconcat ("home-v1:", key + strlen ("home-v2:"), NULL);
+    bytes = spotifygtk_catalog_cache_get (legacy, SPOTIFYGTK_HOME_SAVED_SECONDS);
+  }
   return spotifygtk_home_feed_decode (bytes);
 }
 

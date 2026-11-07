@@ -392,7 +392,7 @@ test_home_body (void)
   g_assert_cmpstr (json_object_get_string_member (root, "operationName"), ==, "home");
   JsonObject *variables = json_object_get_object_member (root, "variables");
   g_assert_cmpstr (json_object_get_string_member (variables, "sp_t"), ==, "");
-  g_assert_cmpint (json_object_get_int_member (variables, "sectionItemsLimit"), ==, 10);
+  g_assert_cmpint (json_object_get_int_member (variables, "sectionItemsLimit"), ==, SPOTIFYGTK_HOME_MAX_CARDS);
   g_assert_cmpstr (json_object_get_string_member (variables, "homeEndUserIntegration"), ==, "INTEGRATION_DESKTOP");
 }
 

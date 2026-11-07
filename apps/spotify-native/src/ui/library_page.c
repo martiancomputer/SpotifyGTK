@@ -26,9 +26,9 @@ typedef enum {
   LIBRARY_ALBUMS,
   LIBRARY_EPS,
   LIBRARY_SINGLES,
-  LIBRARY_ARTISTS,
-  LIBRARY_LOCAL,
   LIBRARY_PLAYLISTS,
+  LIBRARY_LOCAL,
+  LIBRARY_ARTISTS,
   N_LIBRARY_VIEWS
 } LibraryView;
 
@@ -49,6 +49,7 @@ struct _SpotifyGtkLibraryPage {
   GtkSearchEntry       *filter_entry;
   GtkWidget            *view_buttons[N_LIBRARY_VIEWS];
   LibraryView           active_view;
+  gboolean              sort_desc[N_LIBRARY_VIEWS];
   GPtrArray            *saved_releases; /* SpotifyNativeRelease*, owned */
   GPtrArray            *playlists; /* owned playlist card snapshots */
   gboolean              separate_playlists;
@@ -151,6 +152,22 @@ on_new_playlist_clicked (GtkButton *button, gpointer user_data)
  */
 typedef struct { GWeakRef page; guint generation; } LibLoad;
 static void start_library_load (SpotifyGtkLibraryPage *self);
+static void on_view_clicked (GtkToggleButton *button, gpointer user_data);
+static const gchar *const VIEW_NAMES[] = {
+  "All", "Albums", "EPs", "Singles", "Playlists", "Local Files", "Artists"
+};
+
+static void
+refresh_view_labels (SpotifyGtkLibraryPage *self)
+{
+  for (guint i = 0; i < N_LIBRARY_VIEWS; i++) {
+    g_autofree gchar *label = i == self->active_view
+      ? g_strdup_printf ("%s %s", VIEW_NAMES[i], self->sort_desc[i] ? "↓" : "↑")
+      : g_strdup (VIEW_NAMES[i]);
+    gtk_button_set_label (GTK_BUTTON (self->view_buttons[i]), label);
+  }
+}
+
 
 static gboolean
 on_library_timeout (gpointer user_data)
@@ -250,12 +267,15 @@ library_playlist_free (gpointer data)
 }
 
 static gint
-library_card_compare (gconstpointer a, gconstpointer b)
+library_card_compare (gconstpointer a, gconstpointer b, gpointer data)
 {
+  SpotifyGtkLibraryPage *self = data;
   const LibraryCardEntry *left = a;
   const LibraryCardEntry *right = b;
   if (left->date != right->date)
-    return left->date > right->date ? -1 : 1;
+    return self->sort_desc[self->active_view]
+      ? (left->date > right->date ? 1 : -1)
+      : (left->date > right->date ? -1 : 1);
   const gchar *left_name = left->playlist ? left->playlist->title :
     left->local ? left->local->title : left->release->name;
   const gchar *right_name = right->playlist ? right->playlist->title :
@@ -306,7 +326,7 @@ show_release_view (SpotifyGtkLibraryPage *self)
   }
 
   /* Sort once before the grid's batched model replacement. */
-  g_array_sort (entries, library_card_compare);
+  g_array_sort_with_data (entries, library_card_compare, self);
 
   g_autofree SpotifyGtkCardSpec *specs = g_new0 (SpotifyGtkCardSpec,
                                                  MAX (entries->len, 1));
@@ -399,9 +419,10 @@ on_library_settings_changed (SpotifyGtkSettings *settings,
   self->separate_playlists = separate;
   gtk_widget_set_visible (self->view_buttons[LIBRARY_PLAYLISTS], !separate);
   gtk_widget_set_visible (self->new_playlist_button, !separate);
-  if (separate && self->active_view == LIBRARY_PLAYLISTS)
-    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (
-      self->view_buttons[LIBRARY_ALL]), TRUE);
+  if (separate && self->active_view == LIBRARY_PLAYLISTS) {
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->view_buttons[LIBRARY_ALL]), TRUE);
+    on_view_clicked (GTK_TOGGLE_BUTTON (self->view_buttons[LIBRARY_ALL]), self);
+  }
   else if (self->active_view == LIBRARY_ALL)
     show_release_view (self);
 }
@@ -883,7 +904,7 @@ populate_artist_cards (SpotifyGtkLibraryPage *self)
   g_autofree SpotifyGtkCardSpec *specs = g_new0 (SpotifyGtkCardSpec, MAX (n, 1));
   g_autoptr(GPtrArray) identities = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < n; i++) {
-    const gchar *uri = g_ptr_array_index (self->followed_artist_uris, i);
+    const gchar *uri = g_ptr_array_index (self->followed_artist_uris, self->sort_desc[LIBRARY_ARTISTS] ? n - 1 - i : i);
     specs[i].uri = uri;
     specs[i].title = "Artist";
     specs[i].subtitle = "Followed artist";
@@ -901,9 +922,19 @@ populate_artist_cards (SpotifyGtkLibraryPage *self)
                       n == 0 ? "No followed artists yet." : "");
 }
 
+static gint
+followed_date_compare (gconstpointer a, gconstpointer b, gpointer data)
+{
+  const gchar *left = *(gchar *const *) a, *right = *(gchar *const *) b;
+  GHashTable *dates = data;
+  gint da = dates ? GPOINTER_TO_INT (g_hash_table_lookup (dates, left)) : 0;
+  gint db = dates ? GPOINTER_TO_INT (g_hash_table_lookup (dates, right)) : 0;
+  return da != db ? (db > da) - (db < da) : g_strcmp0 (left, right);
+}
+
 void
 spotifygtk_library_page_set_followed_artists (SpotifyGtkLibraryPage *self,
-                                              GHashTable            *uris)
+                                              GHashTable            *uris, GHashTable *dates)
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
 
@@ -917,6 +948,7 @@ spotifygtk_library_page_set_followed_artists (SpotifyGtkLibraryPage *self,
       if (g_str_has_prefix ((const gchar *) key, "spotify:artist:"))
         g_ptr_array_add (self->followed_artist_uris, g_strdup (key));
   }
+  g_ptr_array_sort_with_data (self->followed_artist_uris, followed_date_compare, dates);
   self->artists_populated = FALSE;
   if (self->content_stack &&
       g_strcmp0 (gtk_stack_get_visible_child_name (self->content_stack), "artists") == 0)
@@ -1021,6 +1053,7 @@ on_view_clicked (GtkToggleButton *button, gpointer user_data)
                               view != self->active_view;
   SpotifyGtkAlbumGrid *outgoing = changing_release ? self->albums : NULL;
   self->active_view = view;
+  refresh_view_labels (self);
 
   /* GtkStack keeps the hidden child alive, including each card's texture.
    * Switching views must relinquish those widget references; the compressed
@@ -1055,6 +1088,19 @@ on_view_clicked (GtkToggleButton *button, gpointer user_data)
   spotifygtk_album_grid_reload_covers (artists ? self->artists : self->albums);
 }
 
+/* Match Liked Songs and Artist: click the active segment to reverse its
+ * date order; switching segment retains the remembered direction. */
+static void
+on_view_sort_clicked (GtkButton *button, gpointer data)
+{
+  SpotifyGtkLibraryPage *self = data;
+  LibraryView view = GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (button), "library-view"));
+  if (view == self->active_view)
+    self->sort_desc[view] = !self->sort_desc[view];
+  self->artists_populated = FALSE;
+  on_view_clicked (GTK_TOGGLE_BUTTON (button), self);
+}
+
 static void
 on_local_catalog_changed (SpotifyGtkLocalCatalog *catalog, gpointer user_data)
 {
@@ -1073,6 +1119,7 @@ spotifygtk_library_page_show_local (SpotifyGtkLibraryPage *self)
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIBRARY_PAGE (self));
   gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->view_buttons[LIBRARY_LOCAL]), TRUE);
+  on_view_clicked (GTK_TOGGLE_BUTTON (self->view_buttons[LIBRARY_LOCAL]), self);
 }
 
 static void
@@ -1223,17 +1270,14 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   adw_wrap_box_set_line_spacing (ADW_WRAP_BOX (view_group), 4);
   gtk_widget_add_css_class (view_group, "linked");
   gtk_widget_set_valign (view_group, GTK_ALIGN_CENTER);
-  const gchar *view_names[] = {
-    "All", "Albums", "EPs", "Singles", "Artists", "Local Files", "Playlists"
-  };
   for (guint i = 0; i < N_LIBRARY_VIEWS; i++) {
-    GtkWidget *button = gtk_toggle_button_new_with_label (view_names[i]);
+    GtkWidget *button = gtk_toggle_button_new_with_label (VIEW_NAMES[i]);
     gtk_widget_add_css_class (button, "flat");
     g_object_set_data (G_OBJECT (button), "library-view", GUINT_TO_POINTER (i));
     if (i > 0)
       gtk_toggle_button_set_group (GTK_TOGGLE_BUTTON (button),
                                    GTK_TOGGLE_BUTTON (self->view_buttons[0]));
-    g_signal_connect (button, "toggled", G_CALLBACK (on_view_clicked), self);
+    g_signal_connect (button, "clicked", G_CALLBACK (on_view_sort_clicked), self);
     self->view_buttons[i] = button;
     adw_wrap_box_append (ADW_WRAP_BOX (view_group), button);
   }
@@ -1323,6 +1367,7 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
   g_signal_connect_object (settings, "changed",
                            G_CALLBACK (on_library_settings_changed), self, 0);
   gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (self->view_buttons[0]), TRUE);
+  refresh_view_labels (self);
 
   SpotifyGtkLocalCatalog *catalog = spotifygtk_local_catalog_get_default ();
   self->local_snapshot = spotifygtk_local_catalog_ref_snapshot ();

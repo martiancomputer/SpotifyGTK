@@ -3,6 +3,7 @@
 #include "../src/ui/window.c"
 #include "../src/ui/artwork_viewer.h"
 #include "../src/ui/track_row.h"
+#include "../src/ui/track_item.h"
 
 static void
 settle (void)
@@ -132,8 +133,7 @@ test_library_local_empty_and_create_position (void)
   g_assert_cmpfloat (a.origin.x - e.origin.x - e.size.width, <=, 12);
   g_assert_cmpfloat (fabs ((a.origin.y + a.size.height / 2) -
                           (e.origin.y + e.size.height / 2)), <=, 1);
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (
-    button_for (GTK_WIDGET (page), "Local Files")), TRUE);
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "Local Files"), "clicked");
   settle ();
   GtkWidget *stack = find_type (GTK_WIDGET (page), GTK_TYPE_STACK);
   GtkWidget *current = gtk_stack_get_visible_child (GTK_STACK (stack));
@@ -150,14 +150,12 @@ test_library_local_empty_and_create_position (void)
   g_assert_nonnull (find_label (state,
     "Enable Local files and add a folder to get started."));
   save_preview (window, "local-files-dark-plus.png");
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (
-    button_for (GTK_WIDGET (page), "Albums")), TRUE);
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "Albums"), "clicked");
   settle ();
   current = gtk_stack_get_visible_child (GTK_STACK (stack));
   state = find_class (current, "local-files-empty-state");
   g_assert_false (gtk_widget_get_visible (state));
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (
-    button_for (GTK_WIDGET (page), "Local Files")), TRUE);
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "Local Files"), "clicked");
   settle ();
   g_assert_true (gtk_widget_get_mapped (find_class (
     gtk_stack_get_visible_child (GTK_STACK (stack)), "local-files-empty-state")));
@@ -863,7 +861,7 @@ test_home_dashboard (void)
     g_signal_emit_by_name (previous_arrow, "clicked");
     settle ();
     g_assert_cmpfloat (gtk_adjustment_get_value (adjustment), ==, 0);
-    gtk_adjustment_set_value (adjustment, 80);
+    gtk_adjustment_set_value (adjustment, gtk_adjustment_get_page_size (adjustment) * 0.6);
     settle ();
     g_assert_cmpfloat (gtk_adjustment_get_value (adjustment), >, 0);
     gtk_adjustment_set_value (adjustment, 0);
@@ -882,12 +880,8 @@ test_home_dashboard (void)
   g_assert_cmpint (gtk_widget_get_width (window), <=, 640);
   g_assert_cmpfloat (bounds (third, window).origin.y, >, bounds (first, window).origin.y);
   save_preview (window, "home-dashboard-narrow.png");
-  g_signal_emit_by_name (button_for (gtk_widget_get_parent (primary), "See all  ›"), "clicked");
-  settle ();
-  AdwDialog *dialog = adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (window));
-  g_assert_nonnull (dialog);
-  g_assert_nonnull (find_label (GTK_WIDGET (dialog), "New releases for you"));
-  adw_dialog_close (dialog); settle ();
+  g_assert_null (find_label (GTK_WIDGET (page), "See all  ›"));
+  g_assert_null (adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (window)));
   spotifygtk_home_page_clear_cache (page);
   g_assert_false (gtk_widget_get_mapped (first));
   g_assert_nonnull (find_label (GTK_WIDGET (page), "Your library"));
@@ -1519,6 +1513,204 @@ test_liked_mixed_dates (void)
 }
 
 static void
+test_playing_survives_model_replace (void)
+{
+  g_autoptr(SpotifyGtkTrackList) list = g_object_ref_sink (spotifygtk_track_list_new ());
+  SpotifyNativeTrack track = { .uri = "spotify:track:0000000000000000000001", .name = "Fixture" };
+  g_autoptr(GPtrArray) tracks = g_ptr_array_new ();
+  g_ptr_array_add (tracks, &track);
+  spotifygtk_track_list_set_playing_uri (list, track.uri, TRUE);
+  for (guint i = 0; i < 3; i++) {
+    spotifygtk_track_list_set_native_tracks (list, tracks);
+    GtkListView *view = GTK_LIST_VIEW (find_type (GTK_WIDGET (list), GTK_TYPE_LIST_VIEW));
+    g_autoptr(SpotifyGtkTrackItem) item = g_list_model_get_item (
+      G_LIST_MODEL (gtk_list_view_get_model (view)), 0);
+    g_assert_true (spotifygtk_track_item_get_playing (item));
+    g_assert_cmpint (spotifygtk_track_item_get_paused (item), ==, i > 0);
+    spotifygtk_track_list_set_playing_uri (list, track.uri, FALSE);
+  }
+}
+
+static void
+test_liked_remove_preserves_anchor (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1100, 650);
+  SpotifyGtkLikedSongsPage *page = spotifygtk_liked_songs_page_new ();
+  SpotifyGtkTrackList *list = spotifygtk_liked_songs_page_get_list (page);
+  for (guint i = 0; i < 120; i++) {
+    g_autofree gchar *uri = g_strdup_printf ("local:track:fixture%03u", i);
+    SpotifyNativeTrack track = { .uri = uri, .name = uri, .liked_at = 1000 - i };
+    spotifygtk_liked_songs_page_add_track (page, &track);
+  }
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkListView *view = GTK_LIST_VIEW (find_type (GTK_WIDGET (list), GTK_TYPE_LIST_VIEW));
+  GListModel *model = G_LIST_MODEL (gtk_list_view_get_model (view));
+  gtk_list_view_scroll_to (view, 61, GTK_LIST_SCROLL_FOCUS, NULL);
+  settle ();
+  GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment (spotifygtk_track_list_get_scroller (list));
+  gdouble before = gtk_adjustment_get_value (adj);
+  g_assert_cmpfloat (before, >, 500);
+  g_autoptr(GObject) kept = g_list_model_get_item (model, 62);
+  spotifygtk_liked_songs_page_remove_track (page, "local:track:fixture060");
+  settle ();
+  g_autoptr(GObject) after = g_list_model_get_item (model, 61);
+  g_assert_true (kept == after);
+  g_assert_cmpfloat (fabs (gtk_adjustment_get_value (adj) - before), <, 100);
+  /* The first playable track is index zero even with a page-header sentinel. */
+  spotifygtk_liked_songs_page_remove_track (page, "local:track:fixture000");
+  g_autoptr(GPtrArray) snapshot = spotifygtk_track_list_snapshot (list);
+  g_assert_cmpuint (snapshot->len, ==, 118);
+  g_assert_cmpstr (((SpotifyNativeTrack *) snapshot->pdata[0])->uri, ==, "local:track:fixture001");
+  /* Completing an unchanged collection date read must not replace the model. */
+  g_autoptr(GObject) unchanged = g_list_model_get_item (model, 61);
+  g_autoptr(GHashTable) dates = g_hash_table_new (g_str_hash, g_str_equal);
+  spotifygtk_liked_songs_page_update_dates (page, dates, TRUE);
+  g_autoptr(GObject) same = g_list_model_get_item (model, 61);
+  g_assert_true (unchanged == same);
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
+static void
+test_playlist_owner_guard (void)
+{
+  g_autoptr(GByteArray) bytes = g_byte_array_new ();
+  const gchar *owner = "fixture-owner";
+  pb_write_bytes_field (bytes, 16, (const guint8 *) owner, strlen (owner));
+  g_assert_true (playlist_owner_matches (bytes->data, bytes->len, owner));
+  g_assert_false (playlist_owner_matches (bytes->data, bytes->len, "another-owner"));
+  g_assert_false (playlist_owner_matches (bytes->data, bytes->len, "fixture"));
+  g_assert_false (playlist_owner_matches (bytes->data, bytes->len, NULL));
+  g_assert_false (playlist_owner_matches (bytes->data, 0, owner));
+}
+
+static void
+test_home_responsive_shelf (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  SpotifyGtkHomePage *page = spotifygtk_home_page_new ();
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+  SpotifyHomeCard fixtures[64] = {0};
+  g_autoptr(GPtrArray) cards = g_ptr_array_new ();
+  for (guint i = 0; i < G_N_ELEMENTS (fixtures); i++) {
+    fixtures[i] = (SpotifyHomeCard) {
+      g_strdup_printf ("spotify:album:%022u", i), g_strdup_printf ("Fixture %u", i), "Artist", "" };
+    g_ptr_array_add (cards, &fixtures[i]);
+  }
+  SpotifyHomeSection section = { "All recommendations", "", cards };
+  g_autoptr(GPtrArray) sections = g_ptr_array_new ();
+  g_ptr_array_add (sections, &section);
+  SpotifyHomeFeed feed = { "", sections };
+  spotifygtk_home_page_set_feed (page, &feed);
+  gtk_window_set_default_size (GTK_WINDOW (window), 1100, 850);
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  SpotifyGtkAlbumGrid *grid = spotifygtk_home_page_get_grids (page)->pdata[0];
+  GtkScrolledWindow *scroller = spotifygtk_album_grid_get_scroller (grid);
+  GtkListView *view = GTK_LIST_VIEW (gtk_scrolled_window_get_child (scroller));
+  g_assert_cmpuint (g_list_model_get_n_items (G_LIST_MODEL (gtk_list_view_get_model (view))), ==, 64);
+  g_assert_null (find_label (GTK_WIDGET (page), "See all  ›"));
+  guint last_visible = 0;
+  const gint widths[] = { 1100, 760, 1400 };
+  for (guint step = 0; step < G_N_ELEMENTS (widths); step++) {
+    gtk_window_set_default_size (GTK_WINDOW (window), widths[step], 850);
+    settle ();
+    guint visible = 0;
+    gdouble right = 0;
+    for (guint i = 0; i < 12; i++) {
+      g_autofree gchar *title = g_strdup_printf ("Fixture %u", i);
+      GtkWidget *label = find_label (GTK_WIDGET (grid), title);
+      if (!label) continue;
+      GtkWidget *card = gtk_widget_get_ancestor (label, GTK_TYPE_BUTTON);
+      graphene_rect_t r = bounds (card, GTK_WIDGET (scroller));
+      if (r.origin.x >= 0 && r.origin.x < gtk_widget_get_width (GTK_WIDGET (scroller))) {
+        g_assert_cmpfloat (r.origin.x + r.size.width, <=,
+          gtk_widget_get_width (GTK_WIDGET (scroller)) + 1);
+        right = MAX (right, r.origin.x + r.size.width);
+        visible++;
+      }
+    }
+    g_assert_cmpuint (visible, >, 0);
+    if (step == 1) g_assert_cmpuint (visible, <, last_visible);
+    if (step == 2) g_assert_cmpuint (visible, >, last_visible);
+    g_assert_cmpfloat (right, >, gtk_widget_get_width (GTK_WIDGET (scroller)) - 80);
+    last_visible = visible;
+  }
+  gtk_window_destroy (GTK_WINDOW (window));
+  for (guint i = 0; i < G_N_ELEMENTS (fixtures); i++) { g_free (fixtures[i].uri); g_free (fixtures[i].title); }
+}
+
+static void
+test_library_order_and_direction (void)
+{
+  spotifygtk_settings_set_show_playlists_separately (spotifygtk_settings_get_default (), FALSE);
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1300, 780);
+  SpotifyGtkLibraryPage *page = spotifygtk_library_page_new ();
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+  SpotifyGtkCardSpec cards[] = {
+    { .uri = "spotify:playlist:0000000000000000000001", .title = "Oldest fixture", .subtitle = "Playlist", .added_at = 100 },
+    { .uri = "spotify:playlist:0000000000000000000002", .title = "Newest fixture", .subtitle = "Playlist", .added_at = 300 },
+    { .uri = "spotify:playlist:0000000000000000000003", .title = "Middle fixture", .subtitle = "Playlist", .added_at = 200 },
+  };
+  spotifygtk_library_page_set_playlists (page, cards, G_N_ELEMENTS (cards));
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  const gchar *labels[] = { "All ↑", "Albums", "EPs", "Singles", "Playlists", "Local Files", "Artists" };
+  double previous_x = -1;
+  for (guint i = 0; i < G_N_ELEMENTS (labels); i++) {
+    GtkWidget *button = button_for (GTK_WIDGET (page), labels[i]);
+    graphene_rect_t r = bounds (button, window);
+    g_assert_cmpfloat (r.origin.x, >, previous_x);
+    previous_x = r.origin.x;
+  }
+  SpotifyGtkAlbumGrid *grid = spotifygtk_library_page_get_album_grid (page);
+  g_assert_cmpfloat (bounds (find_label (GTK_WIDGET (grid), "Newest fixture"), window).origin.x,
+    <, bounds (find_label (GTK_WIDGET (grid), "Oldest fixture"), window).origin.x);
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "All ↑"), "clicked");
+  settle ();
+  g_assert_nonnull (button_for (GTK_WIDGET (page), "All ↓"));
+  g_assert_cmpfloat (bounds (find_label (GTK_WIDGET (grid), "Oldest fixture"), window).origin.x,
+    <, bounds (find_label (GTK_WIDGET (grid), "Newest fixture"), window).origin.x);
+  /* A category has its own direction, and switching back restores All's. */
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "Playlists"), "clicked");
+  settle ();
+  g_assert_nonnull (button_for (GTK_WIDGET (page), "Playlists ↑"));
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "All"), "clicked");
+  settle ();
+  g_assert_nonnull (button_for (GTK_WIDGET (page), "All ↓"));
+  /* Artist order comes from follow timestamps, not hash-table iteration. */
+  const gchar *artist_uris[] = { "spotify:artist:0000000000000000000001", "spotify:artist:0000000000000000000002" };
+  g_autoptr(GHashTable) artists = g_hash_table_new (g_str_hash, g_str_equal);
+  g_autoptr(GHashTable) dates = g_hash_table_new (g_str_hash, g_str_equal);
+  for (guint i = 0; i < 2; i++) {
+    g_hash_table_add (artists, (gpointer) artist_uris[i]);
+    g_hash_table_insert (dates, (gpointer) artist_uris[i], GINT_TO_POINTER (i ? 300 : 100));
+    spotifygtk_catalog_card_put (artist_uris[i], i ? "New artist fixture" : "Old artist fixture",
+      "", spotifygtk_catalog_cache_epoch ());
+  }
+  spotifygtk_library_page_set_followed_artists (page, artists, dates);
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "Artists"), "clicked");
+  settle ();
+  SpotifyGtkAlbumGrid *artist_grid = spotifygtk_library_page_get_artist_grid (page);
+  g_assert_cmpfloat (bounds (find_label (GTK_WIDGET (artist_grid), "New artist fixture"), window).origin.x,
+    <, bounds (find_label (GTK_WIDGET (artist_grid), "Old artist fixture"), window).origin.x);
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "Artists ↑"), "clicked");
+  settle ();
+  g_assert_cmpfloat (bounds (find_label (GTK_WIDGET (artist_grid), "Old artist fixture"), window).origin.x,
+    <, bounds (find_label (GTK_WIDGET (artist_grid), "New artist fixture"), window).origin.x);
+  g_signal_emit_by_name (button_for (GTK_WIDGET (page), "All"), "clicked");
+  settle ();
+  apply_theme (SPOTIFYGTK_THEME_LIGHT); settle ();
+  save_preview (window, "library-makeover-light.png");
+  apply_theme (SPOTIFYGTK_THEME_DARK_PLUS); settle ();
+  save_preview (window, "library-makeover-dark.png");
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
+static void
 test_overlay_delete_mapping (void)
 {
   g_autoptr(SpotifyGtkTrackList) list = g_object_ref_sink (spotifygtk_track_list_new ());
@@ -1797,6 +1989,11 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/artist/follow-alignment", test_artist_follow_alignment);
   g_test_add_data_func ("/ui/artist/glass-boundary", GUINT_TO_POINTER (0), test_artist_glass_boundary);
   g_test_add_data_func ("/ui/artist/glass-vulkan-boundary", GUINT_TO_POINTER (1), test_artist_glass_boundary);
+  g_test_add_func ("/ui/home/responsive-shelf", test_home_responsive_shelf);
+  g_test_add_func ("/ui/liked/remove-anchor", test_liked_remove_preserves_anchor);
+  g_test_add_func ("/ui/tracks/playing-model-replace", test_playing_survives_model_replace);
+  g_test_add_func ("/ui/library/order-direction", test_library_order_and_direction);
+  g_test_add_func ("/ui/playlists/owner-guard", test_playlist_owner_guard);
   g_test_add_func ("/ui/artist/release-order", test_artist_release_order);
   g_test_add_func ("/ui/artist/release-layout", test_artist_release_layout);
   g_test_add_data_func ("/ui/artist/large-discography", GUINT_TO_POINTER (14), test_artist_large_discography);

@@ -90,15 +90,30 @@ test_bounds (void)
   JsonArray *cards = json_object_get_array_member (json_object_get_object_member (
     json_node_get_object (section), "sectionItems"), "items");
   JsonNode *card = json_array_get_element (cards, 0);
-  for (guint i = 0; i < 100; i++) json_array_add_element (cards, json_node_copy (card));
-  for (guint i = 0; i < 100; i++) json_array_add_element (sections, json_node_copy (section));
+  for (guint i = 0; i < 100; i++) {
+    g_autofree gchar *json = json_to_string (card, FALSE);
+    JsonNode *copy = json_from_string (json, NULL);
+    JsonObject *data = json_object_get_object_member (json_object_get_object_member (
+      json_node_get_object (copy), "content"), "data");
+    g_autofree gchar *uri = g_strdup_printf ("spotify:album:%022u", i + 1);
+    json_object_set_string_member (data, "uri", uri);
+    json_array_add_element (cards, copy);
+  }
+  for (guint i = 0; i < 100; i++) {
+    g_autofree gchar *json = json_to_string (section, FALSE);
+    JsonNode *copy = json_from_string (json, NULL);
+    JsonObject *data = json_object_get_object_member (json_node_get_object (copy), "data");
+    g_autofree gchar *title = g_strdup_printf ("Shelf %u", i);
+    json_object_set_string_member (json_object_get_object_member (data, "title"), "transformedLabel", title);
+    json_array_add_element (sections, copy);
+  }
   g_autoptr(SpotifyHomeFeed) feed = spotifygtk_home_feed_parse (root, NULL);
   g_assert_cmpuint (feed->sections->len, ==, SPOTIFYGTK_HOME_MAX_SECTIONS);
   for (guint i = 0; i < feed->sections->len; i++)
     g_assert_cmpuint (((SpotifyHomeSection *) g_ptr_array_index (feed->sections, i))->cards->len,
                      <=, SPOTIFYGTK_HOME_MAX_CARDS);
   g_autoptr(GBytes) bytes = spotifygtk_home_feed_encode (feed);
-  g_assert_cmpuint (g_bytes_get_size (bytes), <, 1024 * 1024);
+  g_assert_cmpuint (g_bytes_get_size (bytes), <, 16 * 1024 * 1024);
 }
 
 static void
@@ -110,16 +125,67 @@ test_long_snapshot (void)
   g_autofree gchar *cover = g_strconcat ("https://mosaic.scdn.co/", path, NULL);
   SpotifyHomeCard card = { "spotify:album:" ID, name, subtitle, cover };
   g_autoptr(GPtrArray) cards = g_ptr_array_new ();
-  for (guint i = 0; i < SPOTIFYGTK_HOME_MAX_CARDS; i++) g_ptr_array_add (cards, &card);
+  SpotifyHomeCard unique[SPOTIFYGTK_HOME_MAX_CARDS];
+  for (guint i = 0; i < SPOTIFYGTK_HOME_MAX_CARDS; i++) {
+    unique[i] = card;
+    unique[i].uri = g_strdup_printf ("spotify:album:%022u", i);
+    g_ptr_array_add (cards, &unique[i]);
+  }
   SpotifyHomeSection section = { name, "", cards };
   g_autoptr(GPtrArray) sections = g_ptr_array_new ();
-  for (guint i = 0; i < SPOTIFYGTK_HOME_MAX_SECTIONS; i++) g_ptr_array_add (sections, &section);
+  SpotifyHomeSection unique_sections[SPOTIFYGTK_HOME_MAX_SECTIONS];
+  for (guint i = 0; i < SPOTIFYGTK_HOME_MAX_SECTIONS; i++) {
+    unique_sections[i] = section;
+    unique_sections[i].title = g_strdup_printf ("%u%s", i, name + 3);
+    g_ptr_array_add (sections, &unique_sections[i]);
+  }
   SpotifyHomeFeed feed = { "", sections };
   g_autoptr(GBytes) bytes = spotifygtk_home_feed_encode (&feed);
   g_assert_cmpuint (g_bytes_get_size (bytes), >, 1024 * 1024);
   g_autoptr(SpotifyHomeFeed) decoded = spotifygtk_home_feed_decode (bytes);
   g_assert_nonnull (decoded);
   g_assert_cmpuint (decoded->sections->len, ==, SPOTIFYGTK_HOME_MAX_SECTIONS);
+  for (guint i = 0; i < G_N_ELEMENTS (unique); i++) g_free (unique[i].uri);
+  for (guint i = 0; i < G_N_ELEMENTS (unique_sections); i++) g_free (unique_sections[i].title);
+}
+
+static void
+test_collection_identity_and_duplicates (void)
+{
+  g_autoptr(JsonNode) root = root_new ();
+  JsonArray *sections = sections_of (root);
+  JsonNode *section = json_array_get_element (sections, 0);
+  JsonArray *cards = json_object_get_array_member (json_object_get_object_member (
+    json_node_get_object (section), "sectionItems"), "items");
+  JsonNode *playlist = json_array_get_element (cards, 0);
+  JsonObject *data = json_object_get_object_member (json_object_get_object_member (
+    json_node_get_object (playlist), "content"), "data");
+  json_object_set_string_member (data, "name", "Liked Songs");
+  JsonObject *source = json_array_get_object_element (json_object_get_array_member (
+    json_array_get_object_element (json_object_get_array_member (json_object_get_object_member (
+      data, "images"), "items"), 0), "sources"), 0);
+  json_object_set_string_member (source, "url", "https://misc.scdn.co/liked-songs/liked-songs-300.png");
+  json_array_add_element (cards, json_node_copy (playlist));
+  json_array_add_element (sections, json_node_copy (section));
+  g_autoptr(SpotifyHomeFeed) feed = spotifygtk_home_feed_parse (root, NULL);
+  g_assert_cmpuint (feed->sections->len, ==, 3);
+  SpotifyHomeSection *first = feed->sections->pdata[0];
+  g_assert_cmpuint (first->cards->len, ==, 1);
+  SpotifyHomeCard *liked = first->cards->pdata[0];
+  g_assert_cmpstr (liked->uri, ==, "spotify:collection:tracks");
+  g_autoptr(GBytes) snapshot = spotifygtk_home_feed_encode (feed);
+  g_autoptr(SpotifyHomeFeed) cached = spotifygtk_home_feed_decode (snapshot);
+  g_assert_cmpuint (cached->sections->len, ==, 3);
+  /* A user-chosen playlist name alone never changes its navigation target. */
+  g_autoptr(JsonNode) ordinary = root_new ();
+  JsonObject *s = json_array_get_object_element (sections_of (ordinary), 0);
+  JsonObject *c = json_array_get_object_element (json_object_get_array_member (
+    json_object_get_object_member (s, "sectionItems"), "items"), 0);
+  JsonObject *v = json_object_get_object_member (json_object_get_object_member (c, "content"), "data");
+  json_object_set_string_member (v, "name", "Liked Songs");
+  g_autoptr(SpotifyHomeFeed) named = spotifygtk_home_feed_parse (ordinary, NULL);
+  g_assert_cmpstr (((SpotifyHomeCard *) ((SpotifyHomeSection *) named->sections->pdata[0])->cards->pdata[0])->uri,
+    ==, "spotify:playlist:" ID);
 }
 
 static void
@@ -182,6 +248,7 @@ int main (int argc, char **argv)
   g_test_add_func ("/home/validation", test_validation);
   g_test_add_func ("/home/long-snapshot", test_long_snapshot);
   g_test_add_func ("/home/saved-feed-lifetime", test_saved_feed_lifetime);
+  g_test_add_func ("/home/collection-and-duplicates", test_collection_identity_and_duplicates);
   gint result = g_test_run ();
   spotifygtk_catalog_cache_clear ();
   g_autofree gchar *cache = g_build_filename (temp, "spotifygtk", "catalog-v1", NULL);

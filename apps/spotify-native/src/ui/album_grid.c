@@ -173,6 +173,7 @@ struct _SpotifyGtkAlbumGrid {
   GtkCustomFilter *filter;
   gchar       *filter_text;
   gboolean    wrap;
+  guint       geometry_idle;
   gboolean    full_card_shelf;
   gboolean    home_style;
   gboolean    shelf_snapping;
@@ -335,6 +336,29 @@ on_grid_geometry_changed (GtkWidget *widget, GParamSpec *pspec,
   if (!self->settle_id)
     self->settle_id = g_timeout_add (GRID_SETTLE_MS,
                                      on_grid_settled, self);
+}
+
+/* GtkAdjustment::changed includes viewport page-size changes. GtkWidget has
+ * no notifying width/height properties; listening only to notify::width left
+ * existing shelf cards at their pre-resize width. */
+static gboolean
+reconcile_grid_geometry (gpointer data)
+{
+  SpotifyGtkAlbumGrid *self = data;
+  self->geometry_idle = 0;
+  on_grid_geometry_changed (NULL, NULL, self);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_grid_viewport_changed (GtkAdjustment *adjustment, gpointer data)
+{
+  SpotifyGtkAlbumGrid *self = data;
+  /* Adjustment changes can occur inside ListView allocation. Changing card
+   * requests there invalidates measurements still in use by that allocation. */
+  if (!self->geometry_idle)
+    self->geometry_idle = g_idle_add (reconcile_grid_geometry, self);
+  (void) adjustment;
 }
 
 static gboolean
@@ -1684,6 +1708,13 @@ spotifygtk_album_grid_dispose (GObject *object)
 {
   SpotifyGtkAlbumGrid *self = SPOTIFYGTK_ALBUM_GRID (object);
 
+  /* Model detachment can change the adjustment; disconnect before cancelling
+   * timers so teardown cannot schedule another geometry scan. */
+  if (self->vadj) g_signal_handlers_disconnect_by_data (self->vadj, self);
+  if (self->scroller) g_signal_handlers_disconnect_by_data (self->scroller, self);
+
+  g_clear_handle_id (&self->geometry_idle, g_source_remove);
+
   /* The settle timer holds a plain pointer to this grid. */
   if (self->trace_id) {
     g_source_remove (self->trace_id);
@@ -1709,6 +1740,8 @@ spotifygtk_album_grid_dispose (GObject *object)
 
   g_clear_object (&self->store);
   G_OBJECT_CLASS (spotifygtk_album_grid_parent_class)->dispose (object);
+  self->vadj = NULL;
+  self->scroller = self->view = NULL;
 }
 
 static void
@@ -1887,9 +1920,10 @@ album_grid_new (gboolean wrap)
   self->vadj = wrap
     ? gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (scroller))
     : gtk_scrolled_window_get_hadjustment (GTK_SCROLLED_WINDOW (scroller));
-  if (self->vadj)
-    g_signal_connect (self->vadj, "value-changed",
-                      G_CALLBACK (on_grid_scrolled), self);
+  if (self->vadj) {
+    g_signal_connect (self->vadj, "value-changed", G_CALLBACK (on_grid_scrolled), self);
+    g_signal_connect (self->vadj, "changed", G_CALLBACK (on_grid_viewport_changed), self);
+  }
 
   return self;
 }

@@ -3,7 +3,7 @@
 #include <gio/gio.h>
 
 #define SPOTIFYGTK_HOME_MAX_SECTIONS 32
-#define SPOTIFYGTK_HOME_MAX_CARDS 10
+#define SPOTIFYGTK_HOME_MAX_CARDS 64
 #define SPOTIFYGTK_HOME_MAX_BYTES (4 * 1024 * 1024)
 /* Display snapshots can survive offline days; only fresh snapshots suppress
  * the asynchronous server refresh. Neither duration retains decoded artwork. */

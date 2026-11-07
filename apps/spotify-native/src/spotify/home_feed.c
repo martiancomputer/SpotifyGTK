@@ -129,6 +129,56 @@ contributors (JsonArray *items, gboolean profiles)
   return g_string_free (names, FALSE);
 }
 
+/* Home can advertise the collection under a synthetic playlist URI. Its
+ * dedicated service artwork distinguishes it from a user-named playlist. */
+static void
+normalize_collection_card (SpotifyHomeCard *card)
+{
+  if (g_str_has_prefix (card->cover, "https://misc.scdn.co/liked-songs/") ||
+      g_str_equal (card->uri, "spotify:collection:tracks") ||
+      g_str_has_suffix (card->uri, ":collection")) {
+    g_free (card->uri);
+    card->uri = g_strdup ("spotify:collection:tracks");
+    g_free (card->subtitle);
+    card->subtitle = g_strdup ("Collection");
+  }
+}
+
+/* Merge repeated recommendation headings, retaining distinct items and their
+ * server order. URI deduplication is shelf-local: one album may legitimately
+ * appear in both Recently played and a recommendation shelf. */
+static void
+append_section (SpotifyHomeFeed *feed, SpotifyHomeSection *section)
+{
+  SpotifyHomeSection *target = NULL;
+  for (guint i = 0; i < feed->sections->len; i++) {
+    SpotifyHomeSection *other = g_ptr_array_index (feed->sections, i);
+    if (g_str_equal (section->title, other->title) &&
+        g_str_equal (section->subtitle, other->subtitle)) { target = other; break; }
+  }
+  if (!target) {
+    target = section;
+    g_ptr_array_add (feed->sections, target);
+  }
+  g_autoptr(GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
+  if (target != section)
+    for (guint i = 0; i < target->cards->len; i++)
+      g_hash_table_add (seen, ((SpotifyHomeCard *) target->cards->pdata[i])->uri);
+  for (guint i = 0; i < section->cards->len;) {
+    SpotifyHomeCard *card = section->cards->pdata[i];
+    if (g_hash_table_contains (seen, card->uri) ||
+        (target != section && target->cards->len >= SPOTIFYGTK_HOME_MAX_CARDS)) {
+      g_ptr_array_remove_index (section->cards, i);
+      continue;
+    }
+    g_hash_table_add (seen, card->uri);
+    if (target != section)
+      g_ptr_array_add (target->cards, g_ptr_array_steal_index (section->cards, i));
+    else i++;
+  }
+  if (target != section) section_free (section);
+}
+
 static SpotifyHomeCard *
 parse_card (JsonObject *o, const gchar *fallback_uri)
 {
@@ -164,6 +214,7 @@ parse_card (JsonObject *o, const gchar *fallback_uri)
   SpotifyHomeCard *c = g_new0 (SpotifyHomeCard, 1);
   c->uri = g_strdup (uri); c->title = g_strdup (name);
   c->subtitle = subtitle ?: g_strdup (""); c->cover = cover_from_sources (sources);
+  normalize_collection_card (c);
   return c;
 }
 
@@ -211,7 +262,7 @@ spotifygtk_home_feed_parse (JsonNode *root, GError **error)
         if (c) g_ptr_array_add (s->cards, c);
       }
     }
-    if (s->cards->len) g_ptr_array_add (f->sections, s);
+    if (s->cards->len) append_section (f, s);
     else section_free (s);
   }
   if (!f->sections->len) {
@@ -245,9 +296,8 @@ spotifygtk_home_feed_encode (const SpotifyHomeFeed *f)
 SpotifyHomeFeed *
 spotifygtk_home_feed_decode (GBytes *bytes)
 {
-  /* All 320 bounded cards can legitimately exceed 1 MiB with long CDN URLs
-   * and contributor names. Two MiB still exceeds the worst valid snapshot. */
-  if (!bytes || g_bytes_get_size (bytes) > 2 * 1024 * 1024) return NULL;
+  /* Bounded display metadata only; 32 shelves of 64 maximal cards fit here. */
+  if (!bytes || g_bytes_get_size (bytes) > 16 * 1024 * 1024) return NULL;
   g_autoptr(GVariant) v = g_variant_ref_sink (g_variant_new_from_bytes (
     G_VARIANT_TYPE ("(sa(ssa(ssss)))"), bytes, FALSE));
   if (!g_variant_is_normal_form (v)) return NULL;
@@ -278,10 +328,17 @@ spotifygtk_home_feed_decode (GBytes *bytes)
       SpotifyHomeCard *c = g_new0 (SpotifyHomeCard, 1);
       c->uri = g_strdup (uri); c->title = g_strdup (name);
       c->subtitle = g_strdup (sub); c->cover = g_strdup (cover);
+      normalize_collection_card (c);
       g_ptr_array_add (s->cards, c);
     }
   }
-  if (f->sections->len) return f;
+  if (f->sections->len) {
+    GPtrArray *raw = f->sections;
+    f->sections = g_ptr_array_new_with_free_func ((GDestroyNotify) section_free);
+    while (raw->len) append_section (f, g_ptr_array_steal_index (raw, 0));
+    g_ptr_array_unref (raw);
+    return f;
+  }
 invalid:
   spotifygtk_home_feed_free (f);
   return NULL;

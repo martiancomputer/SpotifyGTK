@@ -69,6 +69,7 @@ struct _SpotifyGtkLikedSongsPage {
   gulong     align_handler;
   guint      align_attempts;
   guint      sort_key;
+  gboolean   dates_changed;
   gboolean   sort_desc[3];   /* remembered per key, so switching back restores it */
 
   gboolean loaded;
@@ -745,12 +746,16 @@ spotifygtk_liked_songs_page_set_liked_filter (SpotifyGtkLikedSongsPage *self,
   /* Metadata and membership arrive independently. If metadata won the race,
    * reconcile the retained snapshot now instead of leaving loaded=TRUE on a
    * stale or prematurely emptied page until the next app restart. */
-  guint dropped = spotifygtk_catalog_tracks_filter (self->all_tracks, liked_uris);
-  if (dropped) {
-    clear_track_indexes (self);
-    rebuild_sorted (self);
-    apply_filter (self);
-  }
+  /* Reconcile removals in place: rebuilding the whole model discards GTK's
+   * current item anchor even when only one liked song disappeared. */
+  if (self->all_tracks && liked_uris)
+    for (guint i = self->all_tracks->len; i > 0; i--) {
+      SpotifyNativeTrack *track = self->all_tracks->pdata[i - 1];
+      if (!g_hash_table_contains (liked_uris, track->uri)) {
+        g_autofree gchar *uri = g_strdup (track->uri);
+        spotifygtk_liked_songs_page_remove_track (self, uri);
+      }
+    }
 }
 
 void
@@ -793,6 +798,7 @@ spotifygtk_liked_songs_page_update_dates (SpotifyGtkLikedSongsPage *self,
                                          GHashTable *dates, gboolean complete)
 {
   g_return_if_fail (SPOTIFYGTK_IS_LIKED_SONGS_PAGE (self));
+  gboolean changed = FALSE;
   GHashTableIter iter; gpointer uri, value;
   g_hash_table_iter_init (&iter, dates);
   while (g_hash_table_iter_next (&iter, &uri, &value)) {
@@ -800,6 +806,9 @@ spotifygtk_liked_songs_page_update_dates (SpotifyGtkLikedSongsPage *self,
     if (date <= 0 || !g_str_has_prefix (uri, "spotify:track:") || strlen (uri) > 128) continue;
     if (!g_hash_table_contains (self->liked_dates, uri) &&
         g_hash_table_size (self->liked_dates) >= LIKED_SONGS_LIMIT) continue;
+    const gint64 *previous = g_hash_table_lookup (self->liked_dates, uri);
+    if (previous && *previous == date) continue;
+    changed = TRUE;
     gint64 *copy = g_new (gint64, 1); *copy = date;
     g_hash_table_replace (self->liked_dates, g_strdup (uri), copy);
   }
@@ -812,10 +821,12 @@ spotifygtk_liked_songs_page_update_dates (SpotifyGtkLikedSongsPage *self,
     g_autoptr(GBytes) bytes = g_variant_get_data_as_bytes (data);
     spotifygtk_catalog_cache_put (self->dates_key, bytes, spotifygtk_catalog_cache_epoch ());
   }
-  if (complete && self->all_tracks && self->sort_key == SORT_ADDED) {
+  self->dates_changed |= changed;
+  if (complete && self->dates_changed && self->all_tracks && self->sort_key == SORT_ADDED) {
     rebuild_sorted (self);
     apply_filter (self);
   }
+  if (complete) self->dates_changed = FALSE;
 }
 
 /* Position in the filtered, sorted list, or -1 when the filter hides it. */
@@ -951,7 +962,7 @@ spotifygtk_liked_songs_page_remove_track (SpotifyGtkLikedSongsPage *self,
   /* Remove the visible entry before releasing the page's source track. GTK
    * may retain the old item for focus; its metadata remains independently owned. */
   if (visible >= 0)
-    spotifygtk_track_list_remove_position (self->list, (guint) visible);
+    spotifygtk_track_list_remove_native_track (self->list, (guint) visible);
   g_ptr_array_remove_index (self->all_tracks, at);
 
   /* Emptied by that removal: apply_filter is what knows which message to show,
