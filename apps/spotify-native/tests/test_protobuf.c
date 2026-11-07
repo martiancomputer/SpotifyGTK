@@ -96,6 +96,56 @@ test_multibyte_field_tag (void)
   g_byte_array_free (buf, TRUE);
 }
 
+static void
+test_field_bounds (void)
+{
+  /* Include lengths that wrap a 64-bit cursor or truncate on 32-bit, plus
+   * a length that fits before reading its varint but not after it. */
+  const guint64 lengths[] = { G_MAXUINT64, G_MAXUINT64 - 10,
+                              (guint64) G_MAXUINT32 + 1, 128 };
+  for (guint i = 0; i < G_N_ELEMENTS (lengths); i++) {
+    g_autoptr(GByteArray) bytes = g_byte_array_new ();
+    pb_write_tag (bytes, 1, PB_WIRE_LENGTH_DELIMITED);
+    pb_write_varint (bytes, lengths[i]);
+    guint8 padding[127] = { 0 };
+    g_byte_array_append (bytes, padding, i == 3 ? sizeof padding : 1);
+    gsize pos = 0, size = 0;
+    guint32 field;
+    PbWireType wire;
+    const guint8 *data = NULL;
+    g_assert_false (pb_read_field (bytes->data, bytes->len, &pos,
+                                  &field, &wire, &data, &size, NULL));
+    g_assert_null (data);
+    g_assert_cmpuint (size, ==, 0);
+    g_assert_cmpuint (pos, <=, bytes->len);
+    g_assert_false (pb_find_bytes_field (bytes->data, bytes->len, 1,
+                                        &data, &size));
+  }
+
+  /* Fixed-width fields must have their entire payload, including when the
+   * tag consumes the final byte. Exact-sized payloads remain valid. */
+  const PbWireType wires[] = { PB_WIRE_FIXED32, PB_WIRE_FIXED64,
+                               PB_WIRE_LENGTH_DELIMITED };
+  const gsize sizes[] = { 4, 8, 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (wires); i++) {
+    guint8 bytes[9] = { 0 };
+    bytes[0] = (1 << 3) | wires[i];
+    for (gsize len = 1; len <= sizes[i] + 1; len++) {
+      gsize pos = 0;
+      guint32 field;
+      PbWireType wire;
+      g_assert_cmpint (pb_read_field (bytes, len, &pos, &field, &wire,
+                                     NULL, NULL, NULL), ==,
+                       i < 2 && len == sizes[i] + 1);
+    }
+  }
+  const guint8 empty[] = { 0x0a, 0x00 };
+  const guint8 *data = NULL;
+  gsize size = 1;
+  g_assert_true (pb_find_bytes_field (empty, sizeof empty, 1, &data, &size));
+  g_assert_cmpuint (size, ==, 0);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -104,5 +154,6 @@ main (int argc, char *argv[])
   g_test_add_func ("/protobuf/bytes-field-roundtrip",  test_bytes_field_roundtrip);
   g_test_add_func ("/protobuf/nested-message",         test_nested_message);
   g_test_add_func ("/protobuf/multibyte-field-tag",     test_multibyte_field_tag);
+  g_test_add_func ("/protobuf/field-bounds", test_field_bounds);
   return g_test_run ();
 }

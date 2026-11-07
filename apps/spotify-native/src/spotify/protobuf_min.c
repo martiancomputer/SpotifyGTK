@@ -100,18 +100,20 @@ pb_read_field (const guint8 *buf, gsize len, gsize *pos,
     case PB_WIRE_LENGTH_DELIMITED: {
       guint64 flen;
       if (!pb_read_varint_raw (buf, len, pos, &flen)) return FALSE;
-      if (*pos + (gsize) flen > len) return FALSE;  /* truncated */
+      /* Compare before narrowing or adding: an untrusted length can wrap
+       * both gsize on 32-bit systems and the cursor addition on 64-bit. */
+      if (flen > (guint64) (len - *pos)) return FALSE;
       if (out_data) *out_data = buf + *pos;
       if (out_len)  *out_len  = (gsize) flen;
       *pos += (gsize) flen;
       return TRUE;
     }
     case PB_WIRE_FIXED64:
-      if (*pos + 8 > len) return FALSE;
+      if (len - *pos < 8) return FALSE;
       *pos += 8;
       return TRUE;
     case PB_WIRE_FIXED32:
-      if (*pos + 4 > len) return FALSE;
+      if (len - *pos < 4) return FALSE;
       *pos += 4;
       return TRUE;
     default:
