@@ -124,3 +124,5 @@ whether work is queued or pushed in the handoff.
    unless explicitly instructed and confirmed safe.
 8. Use sanitized examples in documentation, logs, commit messages, and notes.
    Do not copy private local paths or identifiers into public project content.
+
+- **Optional AI model identification (non-blocking):** When an AI agent creates a commit, it is encouraged to identify its actual model in the commit message (for example, `Model: GPT-6.1`, `Model: Astra 6`, or `Model: Opus 5.5`). If the model name is unavailable, omit it; this guideline must never delay or prevent a commit.
