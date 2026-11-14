@@ -159,6 +159,50 @@ test_overlay_position_survives_refresh (void)
   spotifygtk_device_playlists_free (store);
 }
 
+typedef struct { SpotifyGtkDevicePlaylists *store; gboolean done, ok; GError *error; } ArtResult;
+static void
+art_saved (GObject *source, GAsyncResult *result, gpointer data)
+{
+  ArtResult *art = data;
+  art->ok = spotifygtk_device_playlists_set_artwork_finish (art->store, result, &art->error);
+  art->done = TRUE; (void) source;
+}
+static void
+test_playlist_artwork_persistence (void)
+{
+  SpotifyGtkDevicePlaylists *store = spotifygtk_device_playlists_new ();
+  g_autofree gchar *uri = spotifygtk_device_playlists_create (store, "Artwork fixture");
+  /* The store preserves bounded encoder output verbatim; codec correctness is
+   * covered by the crop editor test, not duplicated by this storage test. */
+  const guint8 payload[] = { 0xff, 0xd8, 0xff, 0xd9 };
+  g_autoptr(GBytes) jpeg = g_bytes_new_static (payload, sizeof payload);
+  ArtResult result = { .store = store };
+  spotifygtk_device_playlists_set_artwork (store, uri, jpeg, NULL, art_saved, &result);
+  gint64 end = g_get_monotonic_time () + 3 * G_USEC_PER_SEC;
+  while (!result.done && g_get_monotonic_time () < end) { g_main_context_iteration (NULL, FALSE); g_usleep (1000); }
+  g_assert_true (result.done); g_assert_true (result.ok); g_assert_no_error (result.error);
+  wait_for_save ("artwork=");
+  spotifygtk_device_playlists_free (store);
+  store = spotifygtk_device_playlists_new ();
+  g_autoptr(GPtrArray) lists = spotifygtk_device_playlists_list (store);
+  gchar *cover = NULL;
+  for (guint i = 0; i < lists->len; i++) {
+    SpotifyGtkDevicePlaylistInfo *info = lists->pdata[i];
+    if (g_strcmp0 (info->uri, uri) == 0) cover = info->cover_id;
+  }
+  g_assert_nonnull (cover);
+  g_autofree gchar *path = spotifygtk_device_playlists_dup_art_path (cover);
+  g_autofree gchar *contents = NULL; gsize size = 0;
+  g_assert_true (g_file_get_contents (path, &contents, &size, NULL));
+  g_assert_cmpmem (contents, size, payload, sizeof payload);
+  g_assert_null (spotifygtk_device_playlists_dup_art_path ("local:playlist-art:../../file"));
+  g_assert_true (spotifygtk_device_playlists_delete (store, uri));
+  end = g_get_monotonic_time () + 3 * G_USEC_PER_SEC;
+  while (g_file_test (path, G_FILE_TEST_EXISTS) && g_get_monotonic_time () < end) { g_main_context_iteration (NULL, FALSE); g_usleep (1000); }
+  g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+  spotifygtk_device_playlists_free (store);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -169,6 +213,7 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/device-playlists/mixed-and-overlay", test_mixed_playlist_and_overlay);
   g_test_add_func ("/device-playlists/stable-position", test_overlay_position_survives_refresh);
+  g_test_add_func ("/device-playlists/artwork-persistence", test_playlist_artwork_persistence);
   int result = g_test_run ();
   g_free (test_dir);
   return result;

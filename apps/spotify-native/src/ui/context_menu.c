@@ -8,6 +8,7 @@
 
 struct _SpotifyGtkContextMenu {
   GtkWidget *box;
+  gboolean has_submenu;
 };
 
 SpotifyGtkContextMenu *
@@ -17,6 +18,34 @@ spotifygtk_context_menu_new (void)
   menu->box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
   gtk_widget_set_size_request (menu->box, MENU_MIN_WIDTH, -1);
   return menu;
+}
+
+static void
+close_other_submenus (GtkWidget *entry)
+{
+  GtkWidget *box = gtk_widget_get_parent (entry);
+  for (GtkWidget *child = gtk_widget_get_first_child (box); child;
+       child = gtk_widget_get_next_sibling (child))
+    if (child != entry && GTK_IS_MENU_BUTTON (child))
+      gtk_menu_button_popdown (GTK_MENU_BUTTON (child));
+}
+
+static void
+entry_hovered (GtkEventControllerMotion *motion, double x, double y, gpointer data)
+{
+  GtkWidget *entry = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (motion));
+  close_other_submenus (entry);
+  if (GTK_IS_MENU_BUTTON (entry))
+    gtk_menu_button_popup (GTK_MENU_BUTTON (entry));
+  (void) x; (void) y; (void) data;
+}
+
+static void
+watch_entry_hover (GtkWidget *entry)
+{
+  GtkEventController *motion = gtk_event_controller_motion_new ();
+  g_signal_connect (motion, "enter", G_CALLBACK (entry_hovered), NULL);
+  gtk_widget_add_controller (entry, motion);
 }
 
 void
@@ -42,6 +71,35 @@ spotifygtk_context_menu_add (SpotifyGtkContextMenu *menu, const gchar *label,
   if (enabled && cb)
     g_signal_connect (button, "clicked", cb, cb_data);
 
+  if (menu->has_submenu) watch_entry_hover (button);
+  gtk_box_append (GTK_BOX (menu->box), button);
+}
+
+void
+spotifygtk_context_menu_add_submenu (SpotifyGtkContextMenu *menu, const gchar *label,
+                                      GtkMenuButtonCreatePopupFunc create_popup)
+{
+  if (!menu->has_submenu) {
+    menu->has_submenu = TRUE;
+    for (GtkWidget *child = gtk_widget_get_first_child (menu->box); child;
+         child = gtk_widget_get_next_sibling (child))
+      if (GTK_IS_BUTTON (child)) watch_entry_hover (child);
+  }
+  GtkWidget *button = gtk_menu_button_new ();
+  GtkWidget *content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget *text = gtk_label_new (label);
+  gtk_label_set_xalign (GTK_LABEL (text), 0);
+  gtk_widget_set_hexpand (text, TRUE);
+  gtk_box_append (GTK_BOX (content), text);
+  gtk_box_append (GTK_BOX (content), gtk_image_new_from_icon_name ("go-next-symbolic"));
+  gtk_menu_button_set_child (GTK_MENU_BUTTON (button), content);
+  gtk_menu_button_set_direction (GTK_MENU_BUTTON (button), GTK_ARROW_RIGHT);
+  gtk_menu_button_set_has_frame (GTK_MENU_BUTTON (button), FALSE);
+  gtk_accessible_update_property (GTK_ACCESSIBLE (button),
+    GTK_ACCESSIBLE_PROPERTY_LABEL, label, -1);
+  gtk_widget_add_css_class (button, "context-submenu");
+  gtk_menu_button_set_create_popup_func (GTK_MENU_BUTTON (button), create_popup, NULL, NULL);
+  watch_entry_hover (button);
   gtk_box_append (GTK_BOX (menu->box), button);
 }
 
@@ -61,7 +119,7 @@ static gboolean
 menu_unparent_idle (gpointer data)
 {
   GtkWidget *popover = data;
-  if (GTK_IS_WIDGET (popover))
+  if (gtk_widget_get_parent (popover))
     gtk_widget_unparent (popover);
   g_object_unref (popover);
   return G_SOURCE_REMOVE;
@@ -80,6 +138,12 @@ menu_anchor_destroyed (GtkWidget *anchor, gpointer user_data)
 static void
 menu_close_deferred (GtkPopover *popover, gpointer user_data)
 {
+  GtkWidget *box = gtk_popover_get_child (popover);
+  if (box) {
+    for (GtkWidget *child = gtk_widget_get_first_child (box); child;
+         child = gtk_widget_get_next_sibling (child))
+      if (GTK_IS_MENU_BUTTON (child)) gtk_menu_button_popdown (GTK_MENU_BUTTON (child));
+  }
   (void) user_data;
   g_idle_add (menu_unparent_idle, g_object_ref (popover));
 }
@@ -93,6 +157,7 @@ spotifygtk_context_menu_present (SpotifyGtkContextMenu *menu, GtkWidget *anchor,
 
   GtkWidget *popover = gtk_popover_new ();
   gtk_widget_add_css_class (popover, "menu");
+  if (menu->has_submenu) gtk_widget_add_css_class (popover, "track-context-menu");
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
   gtk_widget_set_halign (popover, GTK_ALIGN_START);
   gtk_popover_set_child (GTK_POPOVER (popover), menu->box);

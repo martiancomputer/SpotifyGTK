@@ -952,6 +952,20 @@ spotifygtk_settings_add_pin (SpotifyGtkSettings *self, const gchar *uri,
 }
 
 void
+spotifygtk_settings_update_pin_cover (SpotifyGtkSettings *self, const gchar *uri, const gchar *cover)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));
+  for (guint i = 0; self->pins && i < self->pins->len; i++) {
+    SpotifyGtkPin *pin = self->pins->pdata[i];
+    if (g_strcmp0 (pin->uri, uri) != 0 || g_strcmp0 (pin->cover_id, cover) == 0) continue;
+    g_free (pin->cover_id); pin->cover_id = g_strdup (cover);
+    save (self);
+    g_signal_emit (self, signals[CHANGED], 0);
+    return;
+  }
+}
+
+void
 spotifygtk_settings_remove_pin (SpotifyGtkSettings *self, const gchar *uri)
 {
   g_return_if_fail (SPOTIFYGTK_IS_SETTINGS (self));

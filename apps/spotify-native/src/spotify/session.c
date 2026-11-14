@@ -18,6 +18,7 @@
 #include "login5.h"
 #include "native_auth.h"
 #include "spclient.h"
+#include "playlist.h"
 #include "track_meta.h"
 #include "../log_file.h"
 #include "../log_verbose.h"
@@ -59,6 +60,7 @@ struct _SpotifyNativeSession {
   gboolean  reconnect_pending;
   GList    *pending_ops;
   GList    *pending_home; /* GTask references waiting for login5 refresh */
+  GList    *pending_playlist_images;
 
   /*
    * One shared copy of the collection.
@@ -321,6 +323,7 @@ generate_device_id (void)
 
 static void flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok);
 static gboolean start_home_catalog (gpointer user_data);
+static gboolean start_playlist_image (gpointer user_data);
 static void on_session_ap_disconnected (SpotifyApSession *ap, GError *error,
                                         gpointer user_data);
 
@@ -3640,6 +3643,16 @@ run_load_op (LoadTracksOp *op)
 static void
 flush_pending_ops (SpotifyNativeSession *self, gboolean refresh_ok)
 {
+  GList *images = g_steal_pointer (&self->pending_playlist_images);
+  for (GList *l = images; l; l = l->next) {
+    GTask *task = l->data;
+    if (refresh_ok) start_playlist_image (task);
+    else {
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED, "Playlist image credentials could not be renewed.");
+      g_object_unref (task);
+    }
+  }
+  g_list_free (images);
   GList *home = self->pending_home;
   self->pending_home = NULL;
   for (GList *l = home; l; l = l->next) {
@@ -5086,6 +5099,13 @@ spotifygtk_native_session_dispose (GObject *object)
     g_object_unref (task);
   }
   g_clear_pointer (&self->pending_home, g_list_free);
+  for (GList *l = self->pending_playlist_images; l; l = l->next) {
+    GTask *task = l->data;
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Session shut down");
+    g_object_unref (task);
+  }
+  g_clear_pointer (&self->pending_playlist_images, g_list_free);
+
 
   g_clear_pointer (&self->loop, g_main_loop_unref);
   g_clear_pointer (&self->context, g_main_context_unref);
@@ -5193,4 +5213,203 @@ spotifygtk_native_session_connect_is_active (SpotifyNativeSession *self)
 {
   (void) self;
   return g_atomic_int_get (&connect_claim_won);
+}
+
+/* Owner-checked transaction: JPEG upload, JSON registration, picture change. */
+typedef struct {
+  gchar *uri, *username, *bearer, *client;
+  GBytes *jpeg;
+  gchar *cover_id;
+  gint auth_generation;
+} PlaylistImageOp;
+static void
+playlist_image_op_free (gpointer data)
+{
+  PlaylistImageOp *op = data;
+  g_free (op->uri); g_free (op->username); g_free (op->bearer); g_free (op->client);
+  g_bytes_unref (op->jpeg); g_free (op->cover_id); g_free (op);
+}
+static gboolean
+playlist_image_current (GTask *task)
+{
+  SpotifyNativeSession *self = g_task_get_source_object (task);
+  PlaylistImageOp *op = g_task_get_task_data (task);
+  if (g_task_return_error_if_cancelled (task)) return FALSE;
+  if (op->auth_generation != g_atomic_int_get (&self->auth_generation) || g_atomic_int_get (&self->signed_out)) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Playlist image session changed."); return FALSE;
+  }
+  return TRUE;
+}
+static gboolean
+playlist_image_write_guard (gpointer data)
+{
+  GTask *task = data;
+  SpotifyNativeSession *self = g_task_get_source_object (task);
+  PlaylistImageOp *op = g_task_get_task_data (task);
+  GCancellable *cancel = g_task_get_cancellable (task);
+  return (!cancel || !g_cancellable_is_cancelled (cancel)) &&
+    !g_atomic_int_get (&self->signed_out) && op->auth_generation == g_atomic_int_get (&self->auth_generation);
+}
+static void
+playlist_image_applied (gboolean ok, gint32 status, gpointer data)
+{
+  GTask *task = data; PlaylistImageOp *op = g_task_get_task_data (task);
+  if (playlist_image_current (task)) {
+    if (ok) g_task_return_pointer (task, g_strdup (op->cover_id ?: ""), g_free);
+    else g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+      "The image was registered, but updating the playlist failed (status %d).", status);
+  }
+  g_object_unref (task);
+}
+static void
+playlist_image_registered (GObject *source, GAsyncResult *result, gpointer data)
+{
+  GTask *task = data; SpotifyNativeSession *self = g_task_get_source_object (task);
+  PlaylistImageOp *op = g_task_get_task_data (task);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) bytes = spotifygtk_spclient_playlist_image_request_finish (SPOTIFYGTK_SPCLIENT (source), result, &error);
+  if (!playlist_image_current (task)) { g_object_unref (task); return; }
+  if (!bytes) { g_task_return_error (task, g_steal_pointer (&error)); g_object_unref (task); return; }
+  gsize size; const gchar *raw = g_bytes_get_data (bytes, &size);
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  JsonObject *object = NULL;
+  if (json_parser_load_from_data (parser, raw, size, NULL)) {
+    JsonNode *root = json_parser_get_root (parser);
+    if (JSON_NODE_HOLDS_OBJECT (root)) object = json_node_get_object (root);
+  }
+  JsonNode *node = object ? json_object_get_member (object, "picture") : NULL;
+  const gchar *encoded = node && JSON_NODE_HOLDS_VALUE (node) && json_node_get_value_type (node) == G_TYPE_STRING
+    ? json_node_get_string (node) : NULL;
+  gboolean valid = encoded && *encoded && strlen (encoded) <= 4096;
+  for (const gchar *p = encoded; valid && p && *p; p++)
+    valid = g_ascii_isalnum (*p) || *p == '+' || *p == '/' || *p == '=';
+  if (!valid) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "The image service returned no valid picture identifier.");
+    g_object_unref (task); return;
+  }
+  gsize picture_size = 0;
+  g_autofree guchar *picture = g_base64_decode (encoded, &picture_size);
+  if (!picture_size) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Empty picture identifier.");
+    g_object_unref (task); return;
+  }
+  if (picture_size == 20) {
+    op->cover_id = g_malloc (41);
+    for (guint i = 0; i < 20; i++) g_snprintf (op->cover_id + i * 2, 3, "%02x", picture[i]);
+  }
+  SpotifyMercury *mercury = spotifygtk_native_session_get_mercury (self);
+  if (!mercury) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED, "Reconnect to apply the registered playlist image.");
+    g_object_unref (task); return;
+  }
+  g_autoptr(GBytes) value = g_bytes_new (picture, picture_size);
+  spotifygtk_playlist_set_picture (mercury, op->uri, value,
+    playlist_image_write_guard, playlist_image_applied, task);
+}
+static void
+playlist_image_uploaded (GObject *source, GAsyncResult *result, gpointer data)
+{
+  GTask *task = data; SpotifyNativeSession *self = g_task_get_source_object (task);
+  PlaylistImageOp *op = g_task_get_task_data (task);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) bytes = spotifygtk_spclient_playlist_image_request_finish (SPOTIFYGTK_SPCLIENT (source), result, &error);
+  if (!playlist_image_current (task)) { g_object_unref (task); return; }
+  if (!bytes) { g_task_return_error (task, g_steal_pointer (&error)); g_object_unref (task); return; }
+  gsize size; const gchar *raw = g_bytes_get_data (bytes, &size);
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  JsonObject *object = NULL;
+  if (json_parser_load_from_data (parser, raw, size, NULL)) {
+    JsonNode *root = json_parser_get_root (parser);
+    if (JSON_NODE_HOLDS_OBJECT (root)) object = json_node_get_object (root);
+  }
+  JsonNode *node = object ? json_object_get_member (object, "uploadToken") : NULL;
+  const gchar *token = node && JSON_NODE_HOLDS_VALUE (node) && json_node_get_value_type (node) == G_TYPE_STRING
+    ? json_node_get_string (node) : NULL;
+  if (!token || !*token || strlen (token) > 8192) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "The playlist image service returned no upload token.");
+    g_object_unref (task); return;
+  }
+  g_autoptr(JsonBuilder) builder = json_builder_new ();
+  json_builder_begin_object (builder); json_builder_set_member_name (builder, "uploadToken");
+  json_builder_add_string_value (builder, token); json_builder_end_object (builder);
+  g_autoptr(JsonNode) root = json_builder_get_root (builder);
+  g_autoptr(JsonGenerator) generator = json_generator_new ();
+  json_generator_set_root (generator, root);
+  gsize payload_size; g_autofree gchar *body = json_generator_to_data (generator, &payload_size);
+  g_autoptr(GBytes) payload = g_bytes_new (body, payload_size);
+  spotifygtk_spclient_playlist_image_request (self->spclient, op->uri, payload, op->bearer, op->client,
+    g_task_get_cancellable (task), playlist_image_registered, task);
+}
+static void
+playlist_image_owner (MercuryResponse *response, gpointer data)
+{
+  GTask *task = data; SpotifyNativeSession *self = g_task_get_source_object (task);
+  PlaylistImageOp *op = g_task_get_task_data (task);
+  if (!playlist_image_current (task)) { g_object_unref (task); return; }
+  const guint8 *owner = NULL; gsize owner_size = 0, size = 0;
+  const guint8 *bytes = response && response->parts && response->parts->len
+    ? g_bytes_get_data (response->parts->pdata[0], &size) : NULL;
+  if (!response || response->status_code < 200 || response->status_code >= 300 ||
+      !bytes || !pb_find_bytes_field (bytes, size, 16, &owner, &owner_size) ||
+      owner_size != strlen (op->username) || memcmp (owner, op->username, owner_size) != 0) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
+      "Playlist artwork can only be changed by its owner."); g_object_unref (task); return;
+  }
+  spotifygtk_spclient_playlist_image_request (self->spclient, NULL, op->jpeg, op->bearer, op->client,
+    g_task_get_cancellable (task), playlist_image_uploaded, task);
+}
+static gboolean
+start_playlist_image (gpointer data)
+{
+  GTask *task = data; SpotifyNativeSession *self = g_task_get_source_object (task);
+  PlaylistImageOp *op = g_task_get_task_data (task);
+  if (!playlist_image_current (task)) { g_object_unref (task); return G_SOURCE_REMOVE; }
+  g_mutex_lock (&self->lock);
+  gboolean ready = self->state == SPOTIFYGTK_SESSION_READY;
+  gint64 expires_at = self->bearer_expires_at;
+  if (ready && (self->refreshing || (expires_at > 0 &&
+      g_get_monotonic_time () > expires_at - BEARER_REFRESH_MARGIN_US))) {
+    g_mutex_unlock (&self->lock);
+    self->pending_playlist_images = g_list_append (self->pending_playlist_images, task);
+    if (!self->refreshing) start_bearer_refresh (self);
+    return G_SOURCE_REMOVE;
+  }
+  op->username = g_strdup (self->username); op->bearer = g_strdup (self->bearer_token);
+  op->client = g_strdup (self->client_token);
+  g_mutex_unlock (&self->lock);
+  SpotifyMercury *mercury = ready ? spotifygtk_native_session_get_mercury (self) : NULL;
+  if (!mercury || !self->spclient || !op->username || !op->bearer) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_CONNECTED, "Sign in to change Spotify playlist artwork.");
+    g_object_unref (task); return G_SOURCE_REMOVE;
+  }
+  g_autofree gchar *head = g_strdup_printf ("hm://playlist/v2/playlist/%s?from=0&length=0",
+    op->uri + strlen ("spotify:playlist:"));
+  spotifygtk_mercury_request (mercury, MERCURY_METHOD_GET, head, NULL, playlist_image_owner, task);
+  return G_SOURCE_REMOVE;
+}
+void
+spotifygtk_native_session_set_playlist_artwork (SpotifyNativeSession *self, const gchar *uri,
+  GBytes *jpeg, GCancellable *cancel, GAsyncReadyCallback callback, gpointer data)
+{
+  GTask *task = g_task_new (self, cancel, callback, data);
+  const gchar *id = uri && g_str_has_prefix (uri, "spotify:playlist:") ? uri + strlen ("spotify:playlist:") : NULL;
+  gboolean valid = id && strlen (id) == 22;
+  for (const gchar *p = id; valid && p && *p; p++) valid = g_ascii_isalnum (*p);
+  gsize size = jpeg ? g_bytes_get_size (jpeg) : 0;
+  const guint8 *bytes = jpeg ? g_bytes_get_data (jpeg, NULL) : NULL;
+  if (!valid || !self->context || size < 4 || size > 192 * 1024 || bytes[0] != 0xff || bytes[1] != 0xd8) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid cropped playlist image or unavailable session.");
+    g_object_unref (task); return;
+  }
+  PlaylistImageOp *op = g_new0 (PlaylistImageOp, 1);
+  op->uri = g_strdup (uri); op->jpeg = g_bytes_ref (jpeg);
+  op->auth_generation = g_atomic_int_get (&self->auth_generation);
+  g_task_set_task_data (task, op, playlist_image_op_free);
+  g_main_context_invoke_full (self->context, G_PRIORITY_DEFAULT, start_playlist_image, task, NULL);
+}
+gchar *
+spotifygtk_native_session_set_playlist_artwork_finish (SpotifyNativeSession *self, GAsyncResult *result, GError **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+  return g_task_propagate_pointer (G_TASK (result), error);
 }

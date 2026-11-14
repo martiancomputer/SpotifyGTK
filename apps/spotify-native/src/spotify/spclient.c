@@ -2119,3 +2119,88 @@ spotifygtk_spclient_get_context (SpotifySpclient        *self,
     request_context_resolve (self, context_uri, bearer_token, client_token,
                              callback, user_data);
 }
+
+/* Playlist artwork is a small upload followed by an explicit registration.
+ * Keep replies bounded and disable redirects on both authenticated requests. */
+typedef struct { SoupMessage *message; GInputStream *stream; GByteArray *body; } PlaylistImageHttp;
+static void playlist_image_read_next (GTask *task);
+static void
+playlist_image_http_free (gpointer data)
+{
+  PlaylistImageHttp *http = data;
+  g_clear_object (&http->message); g_clear_object (&http->stream);
+  g_byte_array_unref (http->body); g_free (http);
+}
+static void
+playlist_image_bytes (GObject *source, GAsyncResult *result, gpointer data)
+{
+  GTask *task = data; PlaylistImageHttp *http = g_task_get_task_data (task);
+  g_autoptr(GError) error = NULL;
+  g_autoptr(GBytes) bytes = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &error);
+  if (!bytes) { g_task_return_error (task, g_steal_pointer (&error)); g_object_unref (task); return; }
+  gsize size; const guint8 *payload = g_bytes_get_data (bytes, &size);
+  if (size > 65536 - http->body->len) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Playlist image response exceeds its limit.");
+    g_object_unref (task); return;
+  }
+  if (size) { g_byte_array_append (http->body, payload, size); playlist_image_read_next (task); return; }
+  GBytes *body = g_bytes_new (http->body->data, http->body->len);
+  g_task_return_pointer (task, body, (GDestroyNotify) g_bytes_unref); g_object_unref (task);
+}
+static void
+playlist_image_read_next (GTask *task)
+{
+  PlaylistImageHttp *http = g_task_get_task_data (task);
+  g_input_stream_read_bytes_async (http->stream, 8192, G_PRIORITY_DEFAULT,
+    g_task_get_cancellable (task), playlist_image_bytes, task);
+}
+static void
+playlist_image_response (GObject *source, GAsyncResult *result, gpointer data)
+{
+  GTask *task = data; PlaylistImageHttp *http = g_task_get_task_data (task);
+  g_autoptr(GError) error = NULL;
+  http->stream = soup_session_send_finish (SOUP_SESSION (source), result, &error);
+  if (error) { g_task_return_error (task, g_steal_pointer (&error)); g_object_unref (task); return; }
+  guint status = soup_message_get_status (http->message);
+  if (status < 200 || status >= 300) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED, "Playlist image request returned HTTP %u.", status);
+    g_object_unref (task); return;
+  }
+  playlist_image_read_next (task);
+}
+void
+spotifygtk_spclient_playlist_image_request (SpotifySpclient *self, const gchar *playlist_uri,
+  GBytes *payload, const gchar *bearer, const gchar *client, GCancellable *cancel,
+  GAsyncReadyCallback callback, gpointer data)
+{
+  GTask *task = g_task_new (self, cancel, callback, data);
+  const gchar *id = playlist_uri && g_str_has_prefix (playlist_uri, "spotify:playlist:")
+    ? playlist_uri + strlen ("spotify:playlist:") : NULL;
+  gboolean valid = !playlist_uri || (id && strlen (id) == 22);
+  for (const gchar *p = id; valid && p && *p; p++) valid = g_ascii_isalnum (*p);
+  if (!valid || !payload || !bearer || !*bearer || g_bytes_get_size (payload) > 192 * 1024) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid playlist image request.");
+    g_object_unref (task); return;
+  }
+  g_autofree gchar *url = playlist_uri
+    ? g_strdup_printf ("https://%s/playlist/v2/playlist/%s/register-image", SPCLIENT_FALLBACK_HOST, id)
+    : g_strdup ("https://image-upload.spotify.com/v4/playlist");
+  PlaylistImageHttp *http = g_new0 (PlaylistImageHttp, 1);
+  http->body = g_byte_array_new (); http->message = soup_message_new (SOUP_METHOD_POST, url);
+  g_task_set_task_data (task, http, playlist_image_http_free);
+  soup_message_add_flags (http->message, SOUP_MESSAGE_NO_REDIRECT);
+  soup_message_set_request_body_from_bytes (http->message, playlist_uri ? "application/json" : "image/jpeg", payload);
+  soup_message_headers_replace (soup_message_get_request_headers (http->message), "Accept",
+    "application/json");
+  SoupMessageHeaders *headers = soup_message_get_request_headers (http->message);
+  g_autofree gchar *auth = g_strdup_printf ("Bearer %s", bearer);
+  soup_message_headers_replace (headers, "Authorization", auth);
+  if (client && *client) soup_message_headers_replace (headers, "Client-Token", client);
+  soup_session_send_async (self->session, http->message, G_PRIORITY_DEFAULT, cancel, playlist_image_response, task);
+}
+GBytes *
+spotifygtk_spclient_playlist_image_request_finish (SpotifySpclient *self, GAsyncResult *result, GError **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+  return g_task_propagate_pointer (G_TASK (result), error);
+}

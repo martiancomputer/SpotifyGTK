@@ -3,6 +3,7 @@
  */
 
 #include "playlist.h"
+#include "image_uri.h"
 #include "protobuf_min.h"
 #include <string.h>
 
@@ -595,43 +596,49 @@ on_remove_rootlist_head (MercuryResponse *response, gpointer user_data)
 }
 
 
-/* ── Renaming ───────────────────────────────────────────────────────────── */
+/* ── Revision-checked attribute updates ─────────────────────────────────── */
 
 typedef struct {
   SpotifyMercury           *mercury;
   gchar                    *id;
   gchar                    *name;
+  GBytes                   *picture;
+  gboolean                (*guard) (gpointer data);
   SpotifyPlaylistOpCallback callback;
   gpointer                  user_data;
-} RenameCtx;
+} AttributeUpdateCtx;
 
 static void
-rename_ctx_free (RenameCtx *ctx)
+attribute_update_free (AttributeUpdateCtx *ctx)
 {
   g_clear_object (&ctx->mercury);
   g_free (ctx->id);
   g_free (ctx->name);
+  g_clear_pointer (&ctx->picture, g_bytes_unref);
   g_free (ctx);
 }
 
 static void
-on_renamed (MercuryResponse *response, gpointer user_data)
+on_attributes_updated (MercuryResponse *response, gpointer user_data)
 {
-  RenameCtx *ctx = user_data;
+  AttributeUpdateCtx *ctx = user_data;
   gboolean ok = status_ok (response);
   if (!ok)
-    g_warning ("playlist: renaming %s failed (status %d)",
-               ctx->id, response ? response->status_code : 0);
+    g_warning ("playlist: attribute update failed (status %d)", response ? response->status_code : 0);
   if (ctx->callback)
     ctx->callback (ok, response ? response->status_code : 0, ctx->user_data);
-  rename_ctx_free (ctx);
+  attribute_update_free (ctx);
 }
 
 static void
-on_rename_head (MercuryResponse *response, gpointer user_data)
+on_attributes_head (MercuryResponse *response, gpointer user_data)
 {
-  RenameCtx *ctx = user_data;
+  AttributeUpdateCtx *ctx = user_data;
 
+  if (ctx->guard && !ctx->guard (ctx->user_data)) {
+    if (ctx->callback) ctx->callback (FALSE, 499, ctx->user_data);
+    attribute_update_free (ctx); return;
+  }
   const guint8 *rev = NULL; gsize rev_len = 0;
   if (status_ok (response) && response->parts && response->parts->len > 0) {
     gsize hlen = 0;
@@ -639,11 +646,16 @@ on_rename_head (MercuryResponse *response, gpointer user_data)
     pb_find_bytes_field (hd, hlen, PL_SLC_REVISION, &rev, &rev_len);
   }
 
-  g_message ("playlist: renaming %s to \"%s\"", ctx->id, ctx->name);
-
+  if (ctx->picture && (!rev || !rev_len)) {
+    if (ctx->callback) ctx->callback (FALSE, response ? response->status_code : 0, ctx->user_data);
+    attribute_update_free (ctx); return;
+  }
   g_autoptr(GByteArray) attrs = g_byte_array_new ();
-  pb_write_bytes_field (attrs, PL_LISTATTR_NAME,
-                        (const guint8 *) ctx->name, strlen (ctx->name));
+  if (ctx->picture) {
+    gsize size; const guint8 *bytes = g_bytes_get_data (ctx->picture, &size);
+    pb_write_bytes_field (attrs, 3, bytes, size); /* ListAttributes.picture */
+  } else
+    pb_write_bytes_field (attrs, PL_LISTATTR_NAME, (const guint8 *) ctx->name, strlen (ctx->name));
 
   g_autoptr(GByteArray) partial = g_byte_array_new ();
   pb_write_message_field (partial, PL_LAPS_VALUES, attrs->data, attrs->len);
@@ -667,7 +679,7 @@ on_rename_head (MercuryResponse *response, gpointer user_data)
     g_strdup_printf ("hm://playlist/v2/playlist/%s/changes", ctx->id);
   g_autoptr(GBytes) body = g_bytes_new (changes->data, changes->len);
   spotifygtk_mercury_request_full (ctx->mercury, MERCURY_METHOD_SEND, "POST",
-                                   uri, body, on_renamed, ctx);
+                                   uri, body, on_attributes_updated, ctx);
 }
 
 void
@@ -684,7 +696,7 @@ spotifygtk_playlist_rename (SpotifyMercury            *mercury,
     return;
   }
 
-  RenameCtx *ctx = g_new0 (RenameCtx, 1);
+  AttributeUpdateCtx *ctx = g_new0 (AttributeUpdateCtx, 1);
   ctx->mercury   = g_object_ref (mercury);
   ctx->id        = g_strdup (playlist_id_of (playlist_uri));
   ctx->name      = g_strdup (new_name);
@@ -694,7 +706,27 @@ spotifygtk_playlist_rename (SpotifyMercury            *mercury,
   /* Head first: the change names the revision it is based on. */
   g_autofree gchar *head = g_strdup_printf ("hm://playlist/v2/playlist/%s", ctx->id);
   spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_GET, "GET",
-                                   head, NULL, on_rename_head, ctx);
+                                   head, NULL, on_attributes_head, ctx);
+}
+
+void
+spotifygtk_playlist_set_picture (SpotifyMercury *mercury, const gchar *playlist_uri, GBytes *picture,
+  gboolean (*guard) (gpointer data), SpotifyPlaylistOpCallback callback, gpointer data)
+{
+  gsize size = picture ? g_bytes_get_size (picture) : 0;
+  const gchar *id = playlist_uri && g_str_has_prefix (playlist_uri, "spotify:playlist:")
+    ? playlist_uri + strlen ("spotify:playlist:") : NULL;
+  gboolean valid = id && strlen (id) == 22;
+  for (const gchar *p = id; valid && p && *p; p++) valid = g_ascii_isalnum (*p);
+  if (!mercury || !valid || size == 0 || size > 4096) {
+    if (callback) callback (FALSE, 400, data);
+    return;
+  }
+  AttributeUpdateCtx *ctx = g_new0 (AttributeUpdateCtx, 1);
+  ctx->mercury = g_object_ref (mercury); ctx->id = g_strdup (playlist_id_of (playlist_uri));
+  ctx->picture = g_bytes_ref (picture); ctx->guard = guard; ctx->callback = callback; ctx->user_data = data;
+  g_autofree gchar *head = g_strdup_printf ("hm://playlist/v2/playlist/%s?from=0&length=0", ctx->id);
+  spotifygtk_mercury_request_full (mercury, MERCURY_METHOD_GET, "GET", head, NULL, on_attributes_head, ctx);
 }
 
 /* ── Removing one track from a playlist ─────────────────────────────────── */
@@ -895,4 +927,43 @@ spotifygtk_playlist_list (SpotifyMercury *mercury, const gchar *username,
   ctx->callback  = callback;
   ctx->user_data = user_data;
   request_rootlist (ctx);
+}
+
+gboolean
+spotifygtk_playlist_parse_identity (const guint8 *data, gsize length, gchar **name, gchar **cover)
+{
+  *name = NULL; *cover = NULL;
+  const guint8 *attrs = NULL, *value = NULL; gsize attrs_len = 0, len = 0;
+  if (!pb_find_bytes_field (data, length, 3, &attrs, &attrs_len)) return FALSE;
+  if (pb_find_bytes_field (attrs, attrs_len, 1, &value, &len) && len && len <= 4096 &&
+      !memchr (value, 0, len) && g_utf8_validate ((const gchar *) value, len, NULL))
+    *name = g_strndup ((const gchar *) value, len);
+  /* Newer heads include PictureSize URLs; older heads carry a raw image id. */
+  if (pb_find_bytes_field (attrs, attrs_len, 13, &value, &len)) {
+    const guint8 *url; gsize url_len;
+    if (pb_find_bytes_field (value, len, 2, &url, &url_len) && url_len > 0 && url_len <= 2048 &&
+        !memchr (url, 0, url_len)) {
+      gchar *candidate = g_strndup ((const gchar *) url, url_len);
+      if (spotifygtk_image_uri_allowed (candidate)) *cover = candidate;
+      else g_free (candidate);
+    }
+  }
+  if (!*cover && pb_find_bytes_field (attrs, attrs_len, 3, &value, &len) && len == 20) {
+    *cover = g_malloc (41);
+    for (guint i = 0; i < 20; i++) g_snprintf (*cover + i * 2, 3, "%02x", value[i]);
+  }
+  return *name != NULL;
+}
+
+gboolean
+spotifygtk_playlist_can_edit_items (const guint8 *data, gsize length, const gchar *username)
+{
+  const guint8 *caps = NULL, *owner = NULL; gsize caps_len = 0, owner_len = 0;
+  guint64 allowed = 0;
+  /* playlist_permission.Capabilities.can_edit_items = 5. Explicit service
+   * capability takes precedence; ownership is the older-head fallback. */
+  if (pb_find_bytes_field (data, length, 18, &caps, &caps_len) &&
+      pb_find_varint_field (caps, caps_len, 5, &allowed)) return allowed != 0;
+  return username && *username && pb_find_bytes_field (data, length, 16, &owner, &owner_len) &&
+    owner_len == strlen (username) && memcmp (owner, username, owner_len) == 0;
 }

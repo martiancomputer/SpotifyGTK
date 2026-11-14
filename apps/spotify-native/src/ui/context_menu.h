@@ -41,6 +41,11 @@ void spotifygtk_context_menu_add (SpotifyGtkContextMenu *menu,
 /* A non-interactive divider between groups of entries. */
 void spotifygtk_context_menu_add_separator (SpotifyGtkContextMenu *menu);
 
+/* Append a side submenu, populated by create_popup on first activation or hover. */
+void spotifygtk_context_menu_add_submenu (SpotifyGtkContextMenu *menu,
+                                          const gchar *label,
+                                          GtkMenuButtonCreatePopupFunc create_popup);
+
 /*
  * Pop the menu up at (x, y) within `anchor`, and hand it `ctx` — arbitrary
  * per-menu state retrievable by handlers via

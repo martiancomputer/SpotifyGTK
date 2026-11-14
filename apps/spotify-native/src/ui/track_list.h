@@ -29,6 +29,9 @@ void spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page,
                                                         GtkWidget *content,
                                                         GtkScrolledWindow *scroller,
                                                         GtkSnapshot *snapshot);
+void spotifygtk_snapshot_menu_header_transparency (GtkWidget *menu,
+                                                    GtkScrolledWindow *scroller,
+                                                    GtkSnapshot *snapshot);
 
 /* Borrow the shared set of liked URIs. Not copied -- consulted on bind. */
 typedef GtkWidget *(*SpotifyGtkTrackSectionFunc) (const SpotifyNativeTrack *track,
@@ -201,7 +204,7 @@ GPtrArray *spotifygtk_track_list_snapshot (SpotifyGtkTrackList *self);
  *
  * - add-to-liked (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - remove-from-liked (gpointer track) — the same entry when already saved
- * - add-to-playlist (gpointer track)  — opens the playlist chooser
+ * - add-to-playlist (gpointer track, GtkPopover *submenu) — populates the side menu
  * - add-to-queue (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - go-to-album  (gpointer track)   — SpotifyNativeTrack*, right-click menu
  * - go-to-artist (gpointer track)   — SpotifyNativeTrack*, right-click menu

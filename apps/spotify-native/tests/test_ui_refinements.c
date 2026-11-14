@@ -1584,6 +1584,199 @@ test_playlist_owner_guard (void)
   g_assert_false (playlist_owner_matches (bytes->data, bytes->len, "fixture"));
   g_assert_false (playlist_owner_matches (bytes->data, bytes->len, NULL));
   g_assert_false (playlist_owner_matches (bytes->data, 0, owner));
+  g_assert_true (spotifygtk_playlist_can_edit_items (bytes->data, bytes->len, owner));
+  g_autoptr(GByteArray) caps = g_byte_array_new ();
+  pb_write_varint_field (caps, 5, 0);
+  pb_write_message_field (bytes, 18, caps->data, caps->len);
+  g_assert_false (spotifygtk_playlist_can_edit_items (bytes->data, bytes->len, owner));
+  g_byte_array_set_size (bytes, 0); g_byte_array_set_size (caps, 0);
+  pb_write_varint_field (caps, 5, 1);
+  pb_write_message_field (bytes, 18, caps->data, caps->len);
+  g_assert_true (spotifygtk_playlist_can_edit_items (bytes->data, bytes->len, "collaborator"));
+}
+
+static void
+move_to_widget (GtkWidget *widget, const gchar *action, const gchar *button)
+{
+  GtkNative *native = gtk_widget_get_native (widget);
+  graphene_rect_t rect = bounds (widget, GTK_WIDGET (native));
+  double x, y;
+  gtk_native_get_surface_transform (native, &x, &y);
+  GdkSurface *surface = gtk_native_get_surface (native);
+  while (GDK_IS_POPUP (surface)) {
+    x += gdk_popup_get_position_x (GDK_POPUP (surface));
+    y += gdk_popup_get_position_y (GDK_POPUP (surface));
+    surface = gdk_popup_get_parent (GDK_POPUP (surface));
+  }
+  g_autofree gchar *command = g_strdup_printf (
+    "xdotool search --name '^SpotifyGTK playlist submenu fixture$' mousemove --window %%1 %d %d sleep 0.1 %s %s",
+    (int) (x + rect.origin.x + rect.size.width / 2),
+    (int) (y + rect.origin.y + rect.size.height / 2),
+    action, button);
+  g_test_message ("Pointer target %s at %d,%d", G_OBJECT_TYPE_NAME (widget),
+                  (int) (x + rect.origin.x + rect.size.width / 2),
+                  (int) (y + rect.origin.y + rect.size.height / 2));
+  gint status;
+  g_assert_true (g_spawn_command_line_sync (command, NULL, NULL, &status, NULL));
+  g_assert_cmpint (status, ==, 0);
+}
+
+static GtkPopover *
+open_playlist_menu (GtkWidget *row, gboolean real)
+{
+  if (real) {
+    move_to_widget (row, "click", "3");
+  } else {
+    g_autoptr(GListModel) controllers = gtk_widget_observe_controllers (row);
+    for (guint i = 0; i < g_list_model_get_n_items (controllers); i++) {
+      g_autoptr(GObject) controller = g_list_model_get_item (controllers, i);
+      if (GTK_IS_GESTURE_CLICK (controller) &&
+          gtk_gesture_single_get_button (GTK_GESTURE_SINGLE (controller)) == GDK_BUTTON_SECONDARY) {
+        g_signal_emit_by_name (controller, "pressed", 1, 100.0, 30.0);
+        break;
+      }
+    }
+  }
+  settle ();
+  GtkPopover *menu = GTK_POPOVER (find_type (row, GTK_TYPE_POPOVER));
+  g_assert_nonnull (menu);
+  return menu;
+}
+
+static PlaylistPick *
+open_playlist_submenu (GtkPopover *menu, gboolean real)
+{
+  GtkWidget *entry = find_type (gtk_popover_get_child (menu), GTK_TYPE_MENU_BUTTON);
+  g_assert_nonnull (entry);
+  g_assert_null (gtk_menu_button_get_popover (GTK_MENU_BUTTON (entry)));
+  if (real) {
+    move_to_widget (entry, "sleep", "0.1");
+  } else {
+    g_autoptr(GListModel) controllers = gtk_widget_observe_controllers (entry);
+    for (guint i = 0; i < g_list_model_get_n_items (controllers); i++) {
+      g_autoptr(GObject) controller = g_list_model_get_item (controllers, i);
+      if (GTK_IS_EVENT_CONTROLLER_MOTION (controller)) {
+        g_signal_emit_by_name (controller, "enter", 10.0, 10.0);
+        break;
+      }
+    }
+  }
+  settle ();
+  GtkPopover *submenu = gtk_menu_button_get_popover (GTK_MENU_BUTTON (entry));
+  g_assert_nonnull (submenu);
+  g_assert_true (gtk_widget_get_mapped (GTK_WIDGET (submenu)));
+  return g_object_get_data (G_OBJECT (submenu), "pick");
+}
+
+static void
+test_playlist_picker_and_shared_create (gconstpointer data)
+{
+  int width = GPOINTER_TO_INT (data);
+  gboolean real = g_getenv ("SPOTIFYGTK_TEST_REAL_POINTER") != NULL;
+  SpotifyGtkNativeWindow *window = spotifygtk_native_window_new (NULL);
+  apply_theme (width < 1000 ? SPOTIFYGTK_THEME_LIGHT : SPOTIFYGTK_THEME_DARK_PLUS);
+  gtk_window_set_default_size (GTK_WINDOW (window), width, 720);
+  gtk_window_set_title (GTK_WINDOW (window), "SpotifyGTK playlist submenu fixture");
+  gtk_widget_set_visible (window->login_gate, FALSE);
+  gtk_window_present (GTK_WINDOW (window));
+  g_autofree gchar *alpha = spotifygtk_device_playlists_create (window->device_playlists, "Picker Alpha");
+  g_autofree gchar *target = g_strdup_printf ("Beta %d", width);
+  g_autofree gchar *beta = spotifygtk_device_playlists_create (window->device_playlists, target);
+  g_autofree gchar *created_name = g_strdup_printf ("Created from song %d", width);
+  for (guint i = 0; i < 20; i++) {
+    g_autofree gchar *name = g_strdup_printf ("Picker library %02u", i);
+    g_autofree gchar *uri = spotifygtk_device_playlists_create (window->device_playlists, name);
+  }
+  SpotifyNativeTrack track = { .uri = "local:track:picker-fixture", .name = "Picker song", .artists = "Fixture artist" };
+  spotifygtk_page_stack_show (window->page_stack, "liked");
+  spotifygtk_liked_songs_page_add_track (window->liked_page, &track);
+  settle ();
+  SpotifyGtkTrackList *list = spotifygtk_liked_songs_page_get_list (window->liked_page);
+  GtkWidget *view = find_type (GTK_WIDGET (list), GTK_TYPE_LIST_VIEW);
+  GtkWidget *row = NULL;
+  for (GtkWidget *child = gtk_widget_get_first_child (view); child;
+       child = gtk_widget_get_next_sibling (child)) {
+    GtkWidget *candidate = find_type (child, SPOTIFYGTK_TYPE_TRACK_ROW);
+    if (candidate && g_object_get_data (G_OBJECT (candidate), "bound-item")) {
+      row = candidate;
+      break;
+    }
+  }
+  g_assert_nonnull (row);
+
+  for (guint create = 0; create < 2; create++) {
+    g_autoptr(GtkPopover) menu = g_object_ref (open_playlist_menu (row, real));
+    PlaylistPick *pick = open_playlist_submenu (menu, real);
+    g_autoptr(GtkPopover) submenu = g_object_ref (pick->popover);
+    g_assert_null (adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (window)));
+    GtkWidget *new_playlist = button_for (GTK_WIDGET (pick->popover), "New Playlist");
+    if (create) {
+      if (real) move_to_widget (new_playlist, "click", "1");
+      else g_signal_emit_by_name (new_playlist, "clicked");
+      settle ();
+      break;
+    }
+
+    GtkWidget *scrollbar = find_type (gtk_popover_get_child (pick->popover), GTK_TYPE_SCROLLBAR);
+    GtkWidget *layout = gtk_widget_get_parent (scrollbar);
+    graphene_rect_t list_bounds = bounds (GTK_WIDGET (pick->scroller), layout);
+    graphene_rect_t bar_bounds = bounds (scrollbar, layout);
+    g_assert_cmpfloat (list_bounds.origin.x, ==, bar_bounds.size.width);
+    g_assert_cmpfloat (list_bounds.origin.y, ==, bar_bounds.origin.y);
+    if (real) {
+      GtkWidget *playlist = find_type (GTK_WIDGET (pick->view), SPOTIFYGTK_TYPE_TRACK_ROW);
+      move_to_widget (playlist, "click", "5");
+      settle ();
+      g_assert_cmpfloat (gtk_adjustment_get_value (pick->adjustment), >, 0);
+      if (g_getenv ("SPOTIFYGTK_TEST_PREVIEWS")) {
+        g_autofree gchar *path = g_build_filename (g_getenv ("SPOTIFYGTK_TEST_PREVIEWS"),
+          width < 1000 ? "playlist-submenu-light.png" : "playlist-submenu-dark.png", NULL);
+        gchar *command[] = { "import", "-window", "root", path, NULL };
+        g_spawn_sync (NULL, command, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL, NULL, NULL);
+      }
+      move_to_widget (GTK_WIDGET (pick->search), "click", "1");
+      settle ();
+      g_assert_true (gtk_widget_get_mapped (GTK_WIDGET (submenu)));
+      g_assert_true (gtk_widget_has_focus (gtk_root_get_focus (GTK_ROOT (window))));
+      g_autofree gchar *command = g_strdup_printf ("xdotool type 'beta %d'", width);
+      g_assert_true (g_spawn_command_line_sync (command, NULL, NULL, NULL, NULL));
+    } else {
+      gtk_editable_set_text (GTK_EDITABLE (pick->search), target);
+    }
+    settle ();
+    g_assert_true (gtk_widget_get_mapped (GTK_WIDGET (submenu)));
+    GtkSelectionModel *model = gtk_list_view_get_model (pick->view);
+    g_assert_cmpuint (g_list_model_get_n_items (G_LIST_MODEL (model)), ==, 1);
+    if (real) move_to_widget (find_type (GTK_WIDGET (pick->view), SPOTIFYGTK_TYPE_TRACK_ROW), "click", "1");
+    else g_signal_emit_by_name (pick->view, "activate", 0);
+    settle ();
+    g_assert_null (adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (window)));
+    g_autoptr(GPtrArray) beta_tracks = spotifygtk_device_playlists_tracks (window->device_playlists, beta, NULL);
+    g_assert_cmpuint (beta_tracks->len, ==, 1);
+    g_assert_cmpstr (((SpotifyNativeTrack *) beta_tracks->pdata[0])->uri, ==, track.uri);
+  }
+  AdwDialog *dialog = adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (window));
+  g_assert_true (SPOTIFYGTK_IS_PLAYLIST_CREATE_DIALOG (dialog));
+  g_signal_emit_by_name (button_for (GTK_WIDGET (dialog), "Next"), "clicked");
+  GtkWidget *name = find_type (GTK_WIDGET (dialog), GTK_TYPE_ENTRY);
+  gtk_editable_set_text (GTK_EDITABLE (name), created_name);
+  g_signal_emit_by_name (button_for (GTK_WIDGET (dialog), "Next"), "clicked");
+  settle ();
+  g_assert_nonnull (find_label (GTK_WIDGET (dialog), "Choose image…"));
+  g_signal_emit_by_name (button_for (GTK_WIDGET (dialog), "Skip image"), "clicked");
+  settle ();
+  g_autoptr(GPtrArray) lists = spotifygtk_device_playlists_list (window->device_playlists);
+  gboolean found = FALSE;
+  for (guint i = 0; i < lists->len; i++) {
+    SpotifyGtkDevicePlaylistInfo *info = lists->pdata[i];
+    if (g_strcmp0 (info->name, created_name) != 0) continue;
+    g_autoptr(GPtrArray) tracks = spotifygtk_device_playlists_tracks (window->device_playlists, info->uri, NULL);
+    g_assert_cmpuint (tracks->len, ==, 1);
+    g_assert_cmpstr (((SpotifyNativeTrack *) tracks->pdata[0])->uri, ==, track.uri);
+    found = TRUE;
+  }
+  g_assert_true (found);
+  gtk_window_destroy (GTK_WINDOW (window));
 }
 
 static void
@@ -1993,6 +2186,10 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/liked/remove-anchor", test_liked_remove_preserves_anchor);
   g_test_add_func ("/ui/tracks/playing-model-replace", test_playing_survives_model_replace);
   g_test_add_func ("/ui/library/order-direction", test_library_order_and_direction);
+  g_test_add_data_func ("/ui/playlists/picker-shared-create", GINT_TO_POINTER (1100),
+                        test_playlist_picker_and_shared_create);
+  g_test_add_data_func ("/ui/playlists/picker-narrow-light", GINT_TO_POINTER (850),
+                        test_playlist_picker_and_shared_create);
   g_test_add_func ("/ui/playlists/owner-guard", test_playlist_owner_guard);
   g_test_add_func ("/ui/artist/release-order", test_artist_release_order);
   g_test_add_func ("/ui/artist/release-layout", test_artist_release_layout);

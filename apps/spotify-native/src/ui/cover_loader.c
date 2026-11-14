@@ -3,6 +3,7 @@
  */
 
 #include "cover_loader.h"
+#include "device_playlists.h"
 #include <stdlib.h>
 #include <string.h>
 #include <setjmp.h>
@@ -1531,7 +1532,8 @@ cover_load_internal (const gchar          *cover_id,
   q->cache_key = g_strdup (cache_key);
   q->target_px = target_px;
   q->playback = playback_surface;
-  q->disk_path = local ? spotifygtk_local_catalog_dup_art_path (cover_id)
+  q->disk_path = g_str_has_prefix (cover_id, "local:playlist-art:")
+    ? spotifygtk_device_playlists_dup_art_path (cover_id) : local ? spotifygtk_local_catalog_dup_art_path (cover_id)
     : caching_enabled () ? disk_cache_read_path (cover_id) : NULL;
   GQueue *queue = q->disk_path ? &cover_disk_queue : &cover_queue;
 

@@ -220,7 +220,7 @@ struct _SpotifyGtkAlbumGrid {
 G_DEFINE_FINAL_TYPE (SpotifyGtkAlbumGrid, spotifygtk_album_grid, GTK_TYPE_BOX)
 
 enum { ALBUM_ACTIVATED, ALBUM_ADD_TO_LIKED, ALBUM_ADD_TO_QUEUE,
-       ALBUM_TOGGLE_PIN, ALBUM_RENAME, CARD_NEEDS_RESOLVE, N_SIGNALS };
+       ALBUM_TOGGLE_PIN, ALBUM_RENAME, PLAYLIST_ARTWORK, CARD_NEEDS_RESOLVE, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 #define GRID_SETTLE_MS 180
@@ -957,6 +957,7 @@ static void on_album_menu_like  (GtkButton *b, gpointer d) { (void) d; album_men
 static void on_album_menu_pin   (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_TOGGLE_PIN); }
 static void on_album_menu_queue (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_ADD_TO_QUEUE); }
 static void on_album_menu_rename (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, ALBUM_RENAME); }
+static void on_playlist_menu_artwork (GtkButton *b, gpointer d) { (void) d; album_menu_emit_and_close (b, PLAYLIST_ARTWORK); }
 
 static void
 on_album_menu_share (GtkButton *button, gpointer user_data)
@@ -1008,6 +1009,9 @@ spotifygtk_album_grid_present_context_menu (SpotifyGtkAlbumGrid      *self,
   if (g_str_has_prefix (uri, "spotify:playlist:"))
     spotifygtk_context_menu_add (menu, "Rename…", TRUE, NULL,
                                  G_CALLBACK (on_album_menu_rename), NULL);
+
+  if (g_str_has_prefix (uri, "spotify:playlist:") || g_str_has_prefix (uri, "local:playlist:"))
+    spotifygtk_context_menu_add (menu, "Change image…", TRUE, NULL, G_CALLBACK (on_playlist_menu_artwork), NULL);
 
   spotifygtk_context_menu_add (menu, pinned ? "Unpin from sidebar"
                                             : "Pin to sidebar",
@@ -1789,6 +1793,8 @@ spotifygtk_album_grid_class_init (SpotifyGtkAlbumGridClass *klass)
 
   /* Same three arguments as the pin, so it can share album_menu_emit_and_close;
    * only the uri and name are of any use to a rename. */
+  signals[PLAYLIST_ARTWORK] = g_signal_new ("playlist-artwork", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
+    NULL, NULL, NULL, G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
   signals[ALBUM_RENAME] = g_signal_new (
     "album-rename", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
     NULL, NULL, NULL, G_TYPE_NONE, 3,

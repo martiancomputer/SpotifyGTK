@@ -1,6 +1,7 @@
 #pragma once
 
 #include "spotify/session.h"
+#include <string.h>
 
 G_BEGIN_DECLS
 
@@ -47,5 +48,22 @@ void spotifygtk_device_playlist_info_free (SpotifyGtkDevicePlaylistInfo *info);
 GPtrArray *spotifygtk_device_playlists_tracks (SpotifyGtkDevicePlaylists *self,
                                                const gchar *playlist_uri,
                                                GPtrArray *server_tracks);
+
+/* Only accepts the editor's bounded JPEG output. File I/O runs off the UI thread. */
+void spotifygtk_device_playlists_set_artwork (SpotifyGtkDevicePlaylists *self,
+  const gchar *uri, GBytes *jpeg, GCancellable *cancel, GAsyncReadyCallback callback, gpointer data);
+gboolean spotifygtk_device_playlists_set_artwork_finish (SpotifyGtkDevicePlaylists *self,
+  GAsyncResult *result, GError **error);
+/* Shared pure resolver: persisted ids can never name arbitrary local files. */
+static inline gchar *
+spotifygtk_device_playlists_dup_art_path (const gchar *cover_id)
+{
+  const gchar *prefix = "local:playlist-art:";
+  if (!cover_id || !g_str_has_prefix (cover_id, prefix)) return NULL;
+  const gchar *id = cover_id + strlen (prefix);
+  if (strlen (id) != 64) return NULL;
+  for (const gchar *p = id; *p; p++) if (!g_ascii_isxdigit (*p)) return NULL;
+  return g_build_filename (g_get_user_data_dir (), "spotifygtk", "playlist-art", id, NULL);
+}
 
 G_END_DECLS

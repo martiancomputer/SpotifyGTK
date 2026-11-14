@@ -886,3 +886,13 @@ spotifygtk_context_page_set_playing_uri (SpotifyGtkContextPage *self,
   g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
   spotifygtk_track_list_set_playing_uri (self->list, uri, playing);
 }
+
+void
+spotifygtk_context_page_update_artwork (SpotifyGtkContextPage *self, const gchar *uri, const gchar *cover)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_CONTEXT_PAGE (self));
+  if (!cover || g_strcmp0 (self->current_uri, uri) != 0) return;
+  g_free (self->context_cover_id); self->context_cover_id = g_strdup (cover);
+  g_free (self->hero_cover_id); self->hero_cover_id = g_strdup (cover);
+  refresh_hero_cover (self);
+}

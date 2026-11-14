@@ -361,4 +361,12 @@ gchar *spotifygtk_spclient_build_collection_uri (const gchar *user_id);
 
 void spclient_cdn_urls_free (SpclientCdnUrls *urls);
 
+/* NULL playlist_uri uploads a JPEG; a playlist URI registers the token as JSON.
+ * Responses are bounded to 64 KiB. Ownership and account guards live in session. */
+void spotifygtk_spclient_playlist_image_request (SpotifySpclient *self, const gchar *playlist_uri,
+  GBytes *payload, const gchar *bearer, const gchar *client, GCancellable *cancel,
+  GAsyncReadyCallback callback, gpointer data);
+GBytes *spotifygtk_spclient_playlist_image_request_finish (SpotifySpclient *self,
+  GAsyncResult *result, GError **error);
+
 G_END_DECLS

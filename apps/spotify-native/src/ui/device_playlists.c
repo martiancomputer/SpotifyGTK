@@ -25,6 +25,8 @@ anchor_free (gpointer data)
 typedef struct {
   gchar *uri;
   gchar *name; /* NULL for a Spotify playlist overlay */
+  gchar *artwork;
+  guint artwork_generation;
   gchar *display_name; /* cached, device-only label for an overlay */
   gint64 added_at;
   GPtrArray *tracks; /* owned SpotifyNativeTrack, ordered */
@@ -49,10 +51,26 @@ playlist_free (gpointer data)
   DevicePlaylist *list = data;
   g_free (list->uri);
   g_free (list->name);
+  g_free (list->artwork);
   g_free (list->display_name);
   g_ptr_array_unref (list->tracks);
   g_ptr_array_unref (list->anchors);
   g_free (list);
+}
+
+static void
+remove_unused_art (SpotifyGtkDevicePlaylists *self, const gchar *cover_id)
+{
+  if (!cover_id) return;
+  GHashTableIter it; gpointer value;
+  g_hash_table_iter_init (&it, self->lists);
+  while (g_hash_table_iter_next (&it, NULL, &value))
+    if (g_strcmp0 (((DevicePlaylist *) value)->artwork, cover_id) == 0) return;
+  g_autofree gchar *path = spotifygtk_device_playlists_dup_art_path (cover_id);
+  if (path) {
+    g_autoptr(GFile) file = g_file_new_for_path (path);
+    g_file_delete_async (file, G_PRIORITY_LOW, NULL, NULL, NULL);
+  }
 }
 
 static DevicePlaylist *
@@ -145,6 +163,7 @@ save_playlists (gpointer data)
     if (list->display_name)
       g_key_file_set_string (key, group, "display-name", list->display_name);
     g_key_file_set_int64 (key, group, "added-at", list->added_at);
+    if (list->artwork) g_key_file_set_string (key, group, "artwork", list->artwork);
     g_key_file_set_integer (key, group, "count", list->tracks->len);
     for (guint j = 0; j < list->tracks->len; j++) {
       SpotifyNativeTrack *track = g_ptr_array_index (list->tracks, j);
@@ -226,6 +245,9 @@ spotifygtk_device_playlists_new (void)
     gint count = g_key_file_get_integer (key, group, "count", NULL);
     if (count < 0 || (guint) count > MAX_PLAYLIST_ENTRIES - entries) continue;
     DevicePlaylist *list = playlist_new (uri, name);
+    g_autofree gchar *artwork = g_key_file_get_string (key, group, "artwork", NULL);
+    g_autofree gchar *art_path = spotifygtk_device_playlists_dup_art_path (artwork);
+    if (name && art_path) list->artwork = g_strdup (artwork);
     gint64 added_at = g_key_file_get_int64 (key, group, "added-at", NULL);
     if (added_at > 0) list->added_at = added_at;
     else list->added_at = 0; /* old files have no trustworthy creation time */
@@ -323,7 +345,9 @@ spotifygtk_device_playlists_delete (SpotifyGtkDevicePlaylists *self,
   DevicePlaylist *list = self && uri ? g_hash_table_lookup (self->lists, uri) : NULL;
   if (!list || !g_str_has_prefix (uri, "local:playlist:")) return FALSE;
   self->entry_count -= list->tracks->len;
+  g_autofree gchar *artwork = g_strdup (list->artwork);
   g_hash_table_remove (self->lists, uri);
+  remove_unused_art (self, artwork);
   schedule_save (self);
   return TRUE;
 }
@@ -338,6 +362,7 @@ spotifygtk_device_playlists_set_overlay_name (SpotifyGtkDevicePlaylists *self,
       !g_str_has_prefix (uri, "spotify:playlist:"))
     return;
   if (g_strcmp0 (list->display_name, name) == 0) return;
+  g_free (list->artwork);
   g_free (list->display_name);
   list->display_name = g_strdup (name);
   schedule_save (self);
@@ -443,7 +468,8 @@ spotifygtk_device_playlists_list (SpotifyGtkDevicePlaylists *self)
       list->display_name ? list->display_name : "Spotify playlist with device tracks");
     info->overlay = !list->name;
     info->added_at = list->added_at;
-    if (list->tracks->len)
+    if (list->artwork) info->cover_id = g_strdup (list->artwork);
+    else if (list->tracks->len)
       info->cover_id = g_strdup (((SpotifyNativeTrack *)
         g_ptr_array_index (list->tracks, 0))->cover_id);
     g_ptr_array_add (out, info);
@@ -518,4 +544,81 @@ spotifygtk_device_playlists_tracks (SpotifyGtkDevicePlaylists *self,
     if (i < n) g_ptr_array_add (out, spotifygtk_native_track_copy (g_ptr_array_index (server_tracks, i)));
   }
   return out;
+}
+
+typedef struct {
+  SpotifyGtkDevicePlaylists *store;
+  gchar *uri, *cover_id;
+  GBytes *jpeg;
+  guint generation;
+} ArtworkSave;
+
+static void
+artwork_save_free (gpointer data)
+{
+  ArtworkSave *save = data;
+  store_unref (save->store);
+  g_free (save->uri); g_free (save->cover_id); g_bytes_unref (save->jpeg); g_free (save);
+}
+
+static void
+artwork_save_worker (GTask *task, gpointer source, gpointer data, GCancellable *cancel)
+{
+  ArtworkSave *save = data;
+  g_autofree gchar *path = spotifygtk_device_playlists_dup_art_path (save->cover_id);
+  g_autofree gchar *dir = g_path_get_dirname (path);
+  g_autoptr(GError) error = NULL;
+  if (g_mkdir_with_parents (dir, 0700) != 0) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not create the playlist image directory."); return;
+  }
+  g_autoptr(GFile) file = g_file_new_for_path (path);
+  gsize size; const gchar *bytes = g_bytes_get_data (save->jpeg, &size);
+  if (!g_file_replace_contents (file, bytes, size, NULL, FALSE, G_FILE_CREATE_PRIVATE, NULL, cancel, &error)) {
+    g_task_return_error (task, g_steal_pointer (&error)); return;
+  }
+  g_task_return_boolean (task, TRUE); (void) source;
+}
+
+void
+spotifygtk_device_playlists_set_artwork (SpotifyGtkDevicePlaylists *self,
+                                        const gchar *uri, GBytes *jpeg,
+                                        GCancellable *cancel, GAsyncReadyCallback callback, gpointer data)
+{
+  GTask *task = g_task_new (NULL, cancel, callback, data);
+  g_task_set_source_tag (task, spotifygtk_device_playlists_set_artwork);
+  DevicePlaylist *list = self && uri ? g_hash_table_lookup (self->lists, uri) : NULL;
+  gsize size = jpeg ? g_bytes_get_size (jpeg) : 0;
+  const guint8 *bytes = jpeg ? g_bytes_get_data (jpeg, NULL) : NULL;
+  if (!list || !list->name || size < 4 || size > 192 * 1024 || bytes[0] != 0xff || bytes[1] != 0xd8) {
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Choose a device playlist and a valid cropped JPEG image.");
+    g_object_unref (task); return;
+  }
+  ArtworkSave *save = g_new0 (ArtworkSave, 1);
+  g_atomic_ref_count_inc (&self->refs); save->store = self;
+  save->uri = g_strdup (uri); save->jpeg = g_bytes_ref (jpeg);
+  save->generation = ++list->artwork_generation;
+  /* Never reuse a filename while an obsolete version may be deleting. */
+  g_autofree gchar *nonce = g_uuid_string_random ();
+  g_autofree gchar *hash = g_compute_checksum_for_string (G_CHECKSUM_SHA256, nonce, -1);
+  save->cover_id = g_strconcat ("local:playlist-art:", hash, NULL);
+  g_task_set_task_data (task, save, artwork_save_free);
+  g_task_run_in_thread (task, artwork_save_worker); g_object_unref (task);
+}
+
+gboolean
+spotifygtk_device_playlists_set_artwork_finish (SpotifyGtkDevicePlaylists *self, GAsyncResult *result, GError **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, NULL), FALSE);
+  if (!g_task_propagate_boolean (G_TASK (result), error)) return FALSE;
+  ArtworkSave *save = g_task_get_task_data (G_TASK (result));
+  g_return_val_if_fail (save->store == self, FALSE);
+  DevicePlaylist *list = g_hash_table_lookup (self->lists, save->uri);
+  if (!list || list->artwork_generation != save->generation) {
+    remove_unused_art (self, save->cover_id);
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "The playlist changed while saving its image."); return FALSE;
+  }
+  g_autofree gchar *previous = g_steal_pointer (&list->artwork);
+  list->artwork = g_strdup (save->cover_id);
+  remove_unused_art (self, previous); schedule_save (self);
+  return TRUE;
 }

@@ -15,7 +15,15 @@
 #include <string.h>
 
 #include "spotify/collection.h"
+#include "spotify/playlist.h"
 #include "spotify/protobuf_min.h"
+
+static gboolean capture_playlist_transport;
+static MercuryCallback captured_callback;
+static gpointer captured_data;
+static GBytes *captured_payload;
+static guint captured_requests;
+static MercuryMethod captured_method;
 
 /* Transport stubs. These tests exercise the encoder, and linking the real
  * Mercury would drag in the AP connection, Shannon and OpenSSL for code that
@@ -37,6 +45,12 @@ spotifygtk_mercury_request_full (SpotifyMercury *self, MercuryMethod method,
                                  gpointer user_data)
 {
   (void) self; (void) method; (void) method_override; (void) uri;
+  if (capture_playlist_transport) {
+    captured_requests++; captured_method = method;
+    captured_callback = callback; captured_data = user_data;
+    g_clear_pointer (&captured_payload, g_bytes_unref);
+    if (payload) captured_payload = g_bytes_ref (payload);
+  }
   (void) payload; (void) callback; (void) user_data;
 }
 
@@ -309,6 +323,70 @@ test_page_response_empty_is_not_an_error (void)
   spotifygtk_collection_items_free (items, n);
 }
 
+typedef struct { gboolean allowed, done, ok; gint32 status; } PictureWrite;
+static gboolean picture_guard (gpointer data) { return ((PictureWrite *) data)->allowed; }
+static void picture_done (gboolean ok, gint32 status, gpointer data)
+{
+  PictureWrite *write = data; write->done = TRUE; write->ok = ok; write->status = status;
+}
+static void
+test_picture_write_transaction (void)
+{
+  capture_playlist_transport = TRUE;
+  g_autoptr(GObject) transport = g_object_new (G_TYPE_OBJECT, NULL);
+  const guint8 image_id[20] = { 1, 2, 3 };
+  const guint8 revision[] = { 0xaa, 0xbb };
+  g_autoptr(GBytes) picture = g_bytes_new_static (image_id, sizeof image_id);
+  g_autoptr(GByteArray) head = g_byte_array_new ();
+  pb_write_bytes_field (head, 1, revision, sizeof revision);
+  g_autoptr(GPtrArray) parts = g_ptr_array_new_with_free_func ((GDestroyNotify) g_bytes_unref);
+  g_ptr_array_add (parts, g_bytes_new (head->data, head->len));
+  MercuryResponse response = { .status_code = 200, .parts = parts };
+  for (guint cancel = 0; cancel < 2; cancel++) {
+    captured_requests = 0;
+    PictureWrite write = { .allowed = TRUE };
+    spotifygtk_playlist_set_picture ((SpotifyMercury *) transport,
+      "spotify:playlist:0000000000000000000001", picture, picture_guard, picture_done, &write);
+    g_assert_cmpuint (captured_requests, ==, 1); /* Head read, never blind write. */
+    g_assert_cmpint (captured_method, ==, MERCURY_METHOD_GET);
+    if (cancel) write.allowed = FALSE;
+    captured_callback (&response, captured_data);
+    if (cancel) {
+      g_assert_cmpuint (captured_requests, ==, 1);
+      g_assert_true (write.done); g_assert_false (write.ok); g_assert_cmpint (write.status, ==, 499);
+      continue;
+    }
+    g_assert_cmpuint (captured_requests, ==, 2);
+    g_assert_cmpint (captured_method, ==, MERCURY_METHOD_SEND);
+    gsize size; const guint8 *bytes = g_bytes_get_data (captured_payload, &size);
+    const guint8 *value = NULL; gsize length = 0;
+    g_assert_true (pb_find_bytes_field (bytes, size, 1, &value, &length));
+    g_assert_cmpmem (value, length, revision, sizeof revision);
+    /* ListChanges.deltas -> Delta.ops -> Op.update_list_attributes ->
+     * new_attributes -> values -> picture. Name is deliberately absent. */
+    const guint fields[] = { 2, 2, 6, 1, 1 };
+    for (guint i = 0; i < G_N_ELEMENTS (fields); i++) {
+      g_assert_true (pb_find_bytes_field (bytes, size, fields[i], &value, &length));
+      bytes = value; size = length;
+    }
+    g_assert_false (pb_find_bytes_field (bytes, size, 1, &value, &length));
+    g_assert_true (pb_find_bytes_field (bytes, size, 3, &value, &length));
+    g_assert_cmpmem (value, length, image_id, sizeof image_id);
+    g_assert_false (write.done);
+    captured_callback (&response, captured_data);
+    g_assert_true (write.done); g_assert_true (write.ok);
+  }
+  captured_requests = 0;
+  PictureWrite failed = { .allowed = TRUE };
+  spotifygtk_playlist_set_picture ((SpotifyMercury *) transport,
+    "spotify:playlist:0000000000000000000001", picture, picture_guard, picture_done, &failed);
+  g_ptr_array_set_size (parts, 0); /* Missing revision must never cause a POST. */
+  captured_callback (&response, captured_data);
+  g_assert_true (failed.done); g_assert_false (failed.ok); g_assert_cmpuint (captured_requests, ==, 1);
+  g_clear_pointer (&captured_payload, g_bytes_unref);
+  capture_playlist_transport = FALSE;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -325,5 +403,6 @@ main (int argc, char **argv)
   g_test_add_func ("/collection/page-response",       test_page_response_decoding);
   g_test_add_func ("/collection/page-added-at",       test_page_response_added_at_is_not_zigzag);
   g_test_add_func ("/collection/page-empty",          test_page_response_empty_is_not_an_error);
+  g_test_add_func ("/playlist/picture-transaction", test_picture_write_transaction);
   return g_test_run ();
 }

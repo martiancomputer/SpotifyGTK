@@ -1,5 +1,6 @@
 #include "../src/ui/playlist_create_dialog.c"
 #include "../src/ui/dialog_host.c"
+#include <glib/gstdio.h>
 
 typedef struct {
   guint count;
@@ -38,18 +39,21 @@ test_steps_and_retry (void)
   go_next (dialog->next, dialog);
   g_assert_cmpstr (gtk_editable_get_text (GTK_EDITABLE (dialog->name)), ==, "  New playlist  ");
   go_next (dialog->next, dialog);
-  go_next (dialog->next, dialog);
+  g_assert_cmpuint (dialog->step, ==, 2);
+  g_assert_cmpuint (creation.count, ==, 0);
+  skip_image (GTK_BUTTON (dialog->skip), dialog);
+  skip_image (GTK_BUTTON (dialog->skip), dialog);
   g_assert_cmpuint (creation.count, ==, 1);
   g_assert_true (creation.spotify);
   g_assert_cmpstr (creation.name, ==, "New playlist");
   g_assert_true (dialog->busy);
   go_back (dialog->back, dialog);
-  g_assert_true (dialog->naming);
+  g_assert_cmpuint (dialog->step, ==, 2);
   spotifygtk_playlist_create_dialog_complete (dialog, "Try again");
   g_assert_false (dialog->busy);
   g_assert_true (gtk_widget_get_visible (GTK_WIDGET (dialog->error)));
-  g_assert_true (gtk_widget_get_sensitive (GTK_WIDGET (dialog->next)));
-  go_next (dialog->next, dialog);
+  g_assert_true (gtk_widget_get_sensitive (dialog->skip));
+  skip_image (GTK_BUTTON (dialog->skip), dialog);
   g_assert_cmpuint (creation.count, ==, 2);
   g_free (creation.name);
 }
@@ -73,6 +77,7 @@ test_signed_out_and_byte_limit (void)
   g_assert_cmpuint (creation.count, ==, 0);
   gtk_editable_set_text (GTK_EDITABLE (dialog->name), "Device playlist");
   go_next (dialog->next, dialog);
+  skip_image (GTK_BUTTON (dialog->skip), dialog);
   g_assert_cmpuint (creation.count, ==, 1);
   g_assert_false (creation.spotify);
   g_free (creation.name);
@@ -118,6 +123,8 @@ test_present_keyboard_and_close (void)
   gtk_editable_set_text (GTK_EDITABLE (dialog->name), "Keyboard playlist");
   g_signal_emit_by_name (dialog->name, "activate");
   settle ();
+  g_assert_cmpuint (dialog->step, ==, 2);
+  skip_image (GTK_BUTTON (dialog->skip), dialog);
   g_assert_cmpuint (creation.count, ==, 1);
   g_assert_false (dialog->closed);
   spotifygtk_playlist_create_dialog_complete (dialog, NULL);
@@ -125,6 +132,109 @@ test_present_keyboard_and_close (void)
   g_assert_true (dialog->closed);
   gtk_window_destroy (GTK_WINDOW (parent));
   g_free (creation.name);
+}
+
+static void
+save_artwork_preview (GtkWidget *window, const gchar *name)
+{
+  const gchar *dir = g_getenv ("SPOTIFYGTK_TEST_PREVIEWS");
+  if (!dir) return;
+  g_autoptr(GdkPaintable) paintable = gtk_widget_paintable_new (window);
+  GtkSnapshot *snapshot = gtk_snapshot_new ();
+  gdk_paintable_snapshot (paintable, GDK_SNAPSHOT (snapshot), gtk_widget_get_width (window), gtk_widget_get_height (window));
+  g_autoptr(GskRenderNode) node = gtk_snapshot_free_to_node (snapshot);
+  g_assert_nonnull (node);
+  g_autoptr(GdkTexture) texture = gsk_renderer_render_texture (gtk_native_get_renderer (GTK_NATIVE (window)), node, NULL);
+  g_autofree gchar *path = g_build_filename (dir, name, NULL);
+  g_assert_true (gdk_texture_save_to_png (texture, path));
+}
+
+static void
+test_crop_encoding (void)
+{
+  g_autoptr(SpotifyGtkPlaylistCreateDialog) dialog = g_object_ref_sink (
+    spotifygtk_playlist_create_dialog_new (FALSE));
+  Creation creation = {0};
+  g_signal_connect (dialog, "create-requested", G_CALLBACK (requested), &creation);
+  go_next (dialog->next, dialog);
+  gtk_editable_set_text (GTK_EDITABLE (dialog->name), "Cropped fixture");
+  go_next (dialog->next, dialog);
+  g_assert_cmpuint (dialog->step, ==, 2);
+  GtkWidget *parent = adw_application_window_new (NULL);
+  spotifygtk_dialog_host_bind (ADW_APPLICATION_WINDOW (parent));
+  gtk_window_set_default_size (GTK_WINDOW (parent), 860, 800);
+  gtk_window_present (GTK_WINDOW (parent));
+  spotifygtk_dialog_prepare (ADW_DIALOG (dialog));
+  adw_dialog_present (ADW_DIALOG (dialog), parent);
+  settle ();
+  /* A non-square, two-colour input detects both crop position and stretching. */
+  g_autoptr(GdkPixbuf) image = gdk_pixbuf_new (GDK_COLORSPACE_RGB, FALSE, 8, 400, 200);
+  gdk_pixbuf_fill (image, 0xff0000ff);
+  g_autoptr(GdkPixbuf) right = gdk_pixbuf_new_subpixbuf (image, 200, 0, 200, 200);
+  gdk_pixbuf_fill (right, 0x0000ffff);
+  g_autofree gchar *dir = g_dir_make_tmp ("spotifygtk-crop-test-XXXXXX", NULL);
+  g_autofree gchar *path = g_build_filename (dir, "input.png", NULL);
+  g_assert_true (gdk_pixbuf_save (image, path, "png", NULL, NULL));
+  GTask *task = g_task_new (NULL, dialog->image_cancel, image_loaded, g_object_ref (dialog));
+  g_task_set_task_data (task, g_file_new_for_path (path), g_object_unref);
+  dialog->busy = TRUE;
+  g_task_run_in_thread (task, load_image_worker); g_object_unref (task);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  while (dialog->busy && g_get_monotonic_time () < deadline) { g_main_context_iteration (NULL, FALSE); g_usleep (1000); }
+  g_assert_nonnull (dialog->image); g_assert_nonnull (dialog->image_surface);
+  g_assert_cmpuint (dialog->step, ==, 3);
+  gtk_range_set_value (GTK_RANGE (dialog->zoom), 2);
+  if (g_getenv ("SPOTIFYGTK_TEST_REAL_POINTER")) {
+    gtk_window_set_title (GTK_WINDOW (parent), "SpotifyGTK crop pointer fixture");
+    settle ();
+    graphene_rect_t rect;
+    g_assert_true (gtk_widget_compute_bounds (dialog->crop, parent, &rect));
+    int x = rect.origin.x + rect.size.width * 0.8;
+    int y = rect.origin.y + rect.size.height / 2;
+    int end_x = rect.origin.x + rect.size.width * 0.15;
+    g_autofree gchar *drag = g_strdup_printf (
+      "xdotool search --name '^SpotifyGTK crop pointer fixture$' mousemove --window %%1 %d %d "
+      "mousedown 1 sleep 0.1 mousemove --window %%1 %d %d sleep 0.1 mouseup 1",
+      x, y, end_x, y);
+    gint status;
+    g_assert_true (g_spawn_command_line_sync (drag, NULL, NULL, &status, NULL));
+    g_assert_cmpint (status, ==, 0);
+    settle ();
+    g_assert_cmpfloat (dialog->crop_x, >, 250);
+    g_autofree gchar *click = g_strdup_printf (
+      "xdotool search --name '^SpotifyGTK crop pointer fixture$' mousemove --window %%1 %d %d "
+      "click --repeat 2 --delay 75 1", end_x, y);
+    g_assert_true (g_spawn_command_line_sync (click, NULL, NULL, &status, NULL));
+    g_assert_cmpint (status, ==, 0);
+    settle ();
+    g_assert_false (gtk_window_is_maximized (GTK_WINDOW (parent)));
+    g_assert_false (gtk_window_is_fullscreen (GTK_WINDOW (parent)));
+    g_assert_true (adw_application_window_get_visible_dialog (ADW_APPLICATION_WINDOW (parent)) == ADW_DIALOG (dialog));
+  } else {
+    dialog->crop_x = 300;
+    dialog->crop_y = 100;
+    gtk_widget_queue_draw (dialog->crop);
+  }
+  settle (); save_artwork_preview (parent, "playlist-image-crop.png");
+  go_next (dialog->next, dialog);
+  deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  while (!creation.count && g_get_monotonic_time () < deadline) { g_main_context_iteration (NULL, FALSE); g_usleep (1000); }
+  g_assert_cmpuint (creation.count, ==, 1);
+  g_autoptr(GBytes) bytes = spotifygtk_playlist_create_dialog_dup_artwork (dialog);
+  g_assert_nonnull (bytes); g_assert_cmpuint (g_bytes_get_size (bytes), <=, ART_OUTPUT_LIMIT);
+  g_autoptr(GInputStream) input = g_memory_input_stream_new_from_bytes (bytes);
+  g_autoptr(GdkPixbuf) output = gdk_pixbuf_new_from_stream (input, NULL, NULL);
+  g_assert_nonnull (output);
+  g_assert_cmpint (gdk_pixbuf_get_width (output), ==, 640);
+  g_assert_cmpint (gdk_pixbuf_get_height (output), ==, 640);
+  g_assert_false (gdk_pixbuf_get_has_alpha (output));
+  const guint8 *pixel = gdk_pixbuf_read_pixels (output) + 320 * gdk_pixbuf_get_rowstride (output) + 320 * 3;
+  g_assert_cmpint (pixel[0], <, 20); g_assert_cmpint (pixel[2], >, 230);
+  /* Guides belong to the editor only, never to encoded artwork. */
+  pixel = gdk_pixbuf_read_pixels (output) + 200 * gdk_pixbuf_get_rowstride (output) + 213 * 3;
+  g_assert_cmpint (pixel[0], <, 20);
+  g_unlink (path); g_rmdir (dir); g_free (creation.name);
+  gtk_window_destroy (GTK_WINDOW (parent));
 }
 
 static void
@@ -337,6 +447,7 @@ main (int argc, char **argv)
 #endif
   adw_init ();
   g_object_set (gtk_settings_get_default (), "gtk-enable-animations", FALSE, NULL);
+  g_test_add_func ("/playlist-create/crop-encoding", test_crop_encoding);
   g_test_add_func ("/playlist-create/steps-retry", test_steps_and_retry);
   g_test_add_func ("/playlist-create/signed-out-byte-limit", test_signed_out_and_byte_limit);
   g_test_add_func ("/playlist-create/present-keyboard-close", test_present_keyboard_and_close);

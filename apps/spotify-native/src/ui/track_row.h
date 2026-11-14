@@ -94,4 +94,8 @@ const gchar *spotifygtk_track_row_get_id (SpotifyGtkTrackRow *self);
  * - album-activated (const gchar *album_id)
  */
 
+/* Optional icon while artwork is missing; leaves normal track rows unchanged. */
+void spotifygtk_track_row_set_cover_placeholder (SpotifyGtkTrackRow *self, const gchar *icon);
+void spotifygtk_track_row_hide_action (SpotifyGtkTrackRow *self);
+
 G_END_DECLS

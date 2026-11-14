@@ -139,4 +139,16 @@ void spotifygtk_playlist_list (SpotifyMercury              *mercury,
                                SpotifyPlaylistListCallback  callback,
                                gpointer                     user_data);
 
+
+/* Display identity from a bounded playlist head, without resolving its tracks. */
+gboolean spotifygtk_playlist_parse_identity (const guint8 *data, gsize length,
+  gchar **name, gchar **cover);
+
+gboolean spotifygtk_playlist_can_edit_items (const guint8 *data, gsize length, const gchar *username);
+
+/* Apply registered opaque picture bytes with a fresh revision. The optional
+ * guard is checked after the head read, immediately before issuing a write. */
+void spotifygtk_playlist_set_picture (SpotifyMercury *mercury, const gchar *playlist_uri, GBytes *picture,
+  gboolean (*guard) (gpointer data), SpotifyPlaylistOpCallback callback, gpointer data);
+
 G_END_DECLS

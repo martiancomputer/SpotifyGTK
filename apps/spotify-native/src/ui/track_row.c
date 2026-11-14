@@ -36,6 +36,7 @@ struct _SpotifyGtkTrackRow {
 
   GtkBox *root_box;
   GtkImage *album_art;
+  gchar *cover_placeholder;
   GtkLabel *track_num;
   GtkLabel *title_label;
   GtkWidget *type_label;
@@ -100,6 +101,7 @@ spotifygtk_track_row_dispose (GObject *object)
     g_clear_object (&self->cover_cancellable);
   }
   g_clear_pointer (&self->pending_cover_id, g_free);
+  g_clear_pointer (&self->cover_placeholder, g_free);
   if (self->eq_tick_id != 0 && self->eq_area) {
     gtk_widget_remove_tick_callback (GTK_WIDGET (self->eq_area), self->eq_tick_id);
     self->eq_tick_id = 0;
@@ -243,6 +245,29 @@ eq_set_running (SpotifyGtkTrackRow *self, gboolean running)
 }
 
 static void
+row_show_placeholder (SpotifyGtkTrackRow *self)
+{
+  if (!self->cover_placeholder || self->cover_shown || !self->show_cover) return;
+  gtk_image_set_from_icon_name (self->album_art, self->cover_placeholder);
+  gtk_widget_set_visible (GTK_WIDGET (self->album_art), TRUE);
+}
+
+void
+spotifygtk_track_row_set_cover_placeholder (SpotifyGtkTrackRow *self, const gchar *icon)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+  g_free (self->cover_placeholder); self->cover_placeholder = g_strdup (icon);
+  row_show_placeholder (self);
+}
+
+void
+spotifygtk_track_row_hide_action (SpotifyGtkTrackRow *self)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_TRACK_ROW (self));
+  gtk_widget_set_visible (GTK_WIDGET (self->action_box), FALSE);
+}
+
+static void
 on_row_cover_loaded (GdkTexture *texture, gpointer user_data)
 {
   SpotifyGtkTrackRow *self = user_data;
@@ -253,8 +278,7 @@ on_row_cover_loaded (GdkTexture *texture, gpointer user_data)
    * the next retry, but that object by itself is not an outstanding load. */
   self->cover_request_pending = FALSE;
 
-  if (!texture)
-    return;   /* keep the placeholder icon; retry_cover() may come back for it */
+  if (!texture) { row_show_placeholder (self); return; }
 
   self->cover_shown = TRUE;
   gtk_image_set_from_paintable (self->album_art, GDK_PAINTABLE (texture));
@@ -371,6 +395,7 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
     self->cover_shown = FALSE;
     gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
     gtk_widget_set_visible (GTK_WIDGET (self->track_num), self->row_number > 0);
+    row_show_placeholder (self);
     return;
   }
 
@@ -383,6 +408,7 @@ row_request_cover (SpotifyGtkTrackRow *self, const gchar *cover_id)
   self->cover_shown = FALSE;
   gtk_widget_set_visible (GTK_WIDGET (self->album_art), FALSE);
   gtk_widget_set_visible (GTK_WIDGET (self->track_num), self->row_number > 0);
+  row_show_placeholder (self);
 
   /*
    * Held: the list this row belongs to is mid-scroll, so the row is very
@@ -884,6 +910,7 @@ spotifygtk_track_row_release_cover (SpotifyGtkTrackRow *self)
   gtk_widget_set_visible (GTK_WIDGET (self->track_num), self->row_number > 0);
   self->cover_shown = FALSE;
   self->cover_cancellable = g_cancellable_new ();
+  row_show_placeholder (self);
 }
 
 void

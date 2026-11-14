@@ -14,4 +14,9 @@ SpotifyGtkPlaylistCreateDialog *spotifygtk_playlist_create_dialog_new (gboolean 
 void spotifygtk_playlist_create_dialog_complete (SpotifyGtkPlaylistCreateDialog *self,
                                                  const gchar *error);
 
+/* Optional 640px square JPEG; owned reference, ready when create-requested fires. */
+GBytes *spotifygtk_playlist_create_dialog_dup_artwork (SpotifyGtkPlaylistCreateDialog *self);
+/* Same editor without destination/name steps; emits artwork-requested (GBytes). */
+SpotifyGtkPlaylistCreateDialog *spotifygtk_playlist_artwork_dialog_new (void);
+
 G_END_DECLS

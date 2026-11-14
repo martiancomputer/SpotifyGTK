@@ -388,4 +388,11 @@ void spotifygtk_native_session_invalidate_context (SpotifyNativeSession *self,
 
 /* Signal: state-changed (SpotifyNativeSessionState state, const gchar *message) */
 
+/* Owner-checked, account-bound image upload and registration. Returns a cover
+ * id, or an empty string when the service does not return one, on success. */
+void spotifygtk_native_session_set_playlist_artwork (SpotifyNativeSession *self, const gchar *uri,
+  GBytes *jpeg, GCancellable *cancel, GAsyncReadyCallback callback, gpointer data);
+gchar *spotifygtk_native_session_set_playlist_artwork_finish (SpotifyNativeSession *self,
+  GAsyncResult *result, GError **error);
+
 G_END_DECLS

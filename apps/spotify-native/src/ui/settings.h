@@ -273,4 +273,6 @@ void spotifygtk_settings_add_pin (SpotifyGtkSettings *self, const gchar *uri,
                                   const gchar *cover_id);
 void spotifygtk_settings_remove_pin (SpotifyGtkSettings *self, const gchar *uri);
 
+void spotifygtk_settings_update_pin_cover (SpotifyGtkSettings *self, const gchar *uri, const gchar *cover);
+
 G_END_DECLS

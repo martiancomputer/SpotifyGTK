@@ -984,6 +984,7 @@ spotifygtk_settings_page_init (SpotifyGtkSettingsPage *self)
     GTK_RANGE (scroll_scale),
     spotifygtk_settings_get_scroll_smoothness (self->settings));
   gtk_scale_set_draw_value (GTK_SCALE (scroll_scale), FALSE);
+  gtk_widget_add_css_class (scroll_scale, "scroll-smoothness-scale");
   gtk_widget_set_size_request (scroll_scale, 220, -1);
   gtk_scale_add_mark (GTK_SCALE (scroll_scale), 0.0, GTK_POS_BOTTOM, "Responsive");
   gtk_scale_add_mark (GTK_SCALE (scroll_scale), 100.0, GTK_POS_BOTTOM, "Glide");

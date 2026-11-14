@@ -102,7 +102,8 @@ header_backdrop_clip (GtkWidget *page, const graphene_rect_t *band)
 
 static float
 snapshot_header_backdrop (GtkWidget *page, GtkWidget *content,
-                          GtkScrolledWindow *scroller, GtkSnapshot *snapshot)
+                          GtkScrolledWindow *scroller, const gchar *palette_color,
+                          GtkSnapshot *snapshot)
 {
   graphene_rect_t content_bounds;
   if (!gtk_widget_compute_bounds (content, page, &content_bounds))
@@ -120,7 +121,7 @@ snapshot_header_backdrop (GtkWidget *page, GtkWidget *content,
   GdkRGBA tint;
   G_GNUC_BEGIN_IGNORE_DEPRECATIONS
   gboolean have_tint = gtk_style_context_lookup_color (
-    gtk_widget_get_style_context (page), "bg_content", &tint);
+    gtk_widget_get_style_context (page), palette_color, &tint);
   G_GNUC_END_IGNORE_DEPRECATIONS
   if (!have_tint)
     return 0;
@@ -192,12 +193,12 @@ snapshot_header_backdrop (GtkWidget *page, GtkWidget *content,
   return painted_edge;
 }
 
-void
-spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *content,
-                                                   GtkScrolledWindow *scroller,
-                                                   GtkSnapshot *snapshot)
+static void
+snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *content,
+                                       GtkScrolledWindow *scroller, const gchar *palette_color,
+                                       GtkSnapshot *snapshot)
 {
-  float edge = snapshot_header_backdrop (page, content, scroller, snapshot);
+  float edge = snapshot_header_backdrop (page, content, scroller, palette_color, snapshot);
   GtkWidget *content_root = content;
   while (gtk_widget_get_parent (content_root) && gtk_widget_get_parent (content_root) != page)
     content_root = gtk_widget_get_parent (content_root);
@@ -215,6 +216,21 @@ spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *co
     gtk_widget_snapshot_child (page, child, snapshot);
     if (clipped) gtk_snapshot_pop (snapshot);
   }
+}
+
+void
+spotifygtk_snapshot_menu_header_transparency (GtkWidget *menu, GtkScrolledWindow *scroller,
+                                               GtkSnapshot *snapshot)
+{
+  snapshot_scrolled_header_transparency (menu, GTK_WIDGET (scroller), scroller, "bg_card", snapshot);
+}
+
+void
+spotifygtk_snapshot_scrolled_header_transparency (GtkWidget *page, GtkWidget *content,
+                                                   GtkScrolledWindow *scroller,
+                                                   GtkSnapshot *snapshot)
+{
+  snapshot_scrolled_header_transparency (page, content, scroller, "bg_content", snapshot);
 }
 
 void
@@ -958,8 +974,24 @@ menu_emit_and_close (GtkButton *button, guint signal_id)
 
 static void on_menu_add_to_liked      (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_LIKED); }
 static void on_menu_remove_from_liked (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, REMOVE_FROM_LIKED); }
-static void on_menu_add_to_playlist (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_PLAYLIST); }
 static void on_menu_add_to_queue (GtkButton *b, gpointer d) { (void) d; menu_emit_and_close (b, ADD_TO_QUEUE); }
+
+static void
+populate_playlist_submenu (GtkMenuButton *button, gpointer data)
+{
+  if (gtk_menu_button_get_popover (button)) return;
+  MenuCtx *ctx = spotifygtk_context_menu_get_context (GTK_WIDGET (button));
+  if (!ctx) return;
+  GtkWidget *popover = gtk_popover_new ();
+  gtk_widget_add_css_class (popover, "menu");
+  gtk_widget_add_css_class (popover, "playlist-submenu");
+  gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
+  gtk_widget_set_valign (popover, GTK_ALIGN_START);
+  gtk_popover_set_offset (GTK_POPOVER (popover), 5, 0);
+  g_signal_emit (ctx->list, signals[ADD_TO_PLAYLIST], 0, ctx->track, popover);
+  gtk_menu_button_set_popover (button, popover);
+  (void) data;
+}
 
 static void
 on_menu_remove_from_playlist (GtkButton *b, gpointer d)
@@ -1039,8 +1071,8 @@ on_row_secondary_pressed (GtkGestureClick *gesture, gint n_press,
     spotifygtk_context_menu_add (menu, "Remove from this Playlist", TRUE, NULL,
                                  G_CALLBACK (on_menu_remove_from_playlist), NULL);
   else
-    spotifygtk_context_menu_add (menu, "Add to Playlist…", TRUE, NULL,
-                                 G_CALLBACK (on_menu_add_to_playlist), NULL);
+    spotifygtk_context_menu_add_submenu (menu, "Add to Playlist",
+                                         populate_playlist_submenu);
   spotifygtk_context_menu_add (menu, "Add to Queue", TRUE, NULL,
                                G_CALLBACK (on_menu_add_to_queue), NULL);
   spotifygtk_context_menu_add (menu, "Go to Artist",
@@ -1455,7 +1487,7 @@ spotifygtk_track_list_class_init (SpotifyGtkTrackListClass *klass)
 
   signals[ADD_TO_PLAYLIST] = g_signal_new ("add-to-playlist",
     G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-    G_TYPE_NONE, 1, G_TYPE_POINTER);
+    G_TYPE_NONE, 2, G_TYPE_POINTER, GTK_TYPE_POPOVER);
 
   /* Carries the row as well as the track: a playlist may hold the same track
    * twice, and the position is what makes the removal unambiguous. */
