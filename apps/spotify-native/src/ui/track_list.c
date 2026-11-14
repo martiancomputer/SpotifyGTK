@@ -987,7 +987,8 @@ populate_playlist_submenu (GtkMenuButton *button, gpointer data)
   gtk_widget_add_css_class (popover, "playlist-submenu");
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
   gtk_widget_set_valign (popover, GTK_ALIGN_START);
-  gtk_popover_set_offset (GTK_POPOVER (popover), 5, 0);
+  /* Align the first action with the trigger, allowing for the popover inset. */
+  gtk_popover_set_offset (GTK_POPOVER (popover), 5, -5);
   g_signal_emit (ctx->list, signals[ADD_TO_PLAYLIST], 0, ctx->track, popover);
   gtk_menu_button_set_popover (button, popover);
   (void) data;

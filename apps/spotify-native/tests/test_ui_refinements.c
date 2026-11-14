@@ -1717,12 +1717,22 @@ test_playlist_picker_and_shared_create (gconstpointer data)
       break;
     }
 
-    GtkWidget *scrollbar = find_type (gtk_popover_get_child (pick->popover), GTK_TYPE_SCROLLBAR);
+    GtkWidget *scrollbar = find_class (gtk_popover_get_child (pick->popover), "search-page-scrollbar");
     GtkWidget *layout = gtk_widget_get_parent (scrollbar);
     graphene_rect_t list_bounds = bounds (GTK_WIDGET (pick->scroller), layout);
     graphene_rect_t bar_bounds = bounds (scrollbar, layout);
+    graphene_rect_t search_bounds = bounds (GTK_WIDGET (pick->search), layout);
+    GtkWidget *icon = find_type (new_playlist, GTK_TYPE_IMAGE);
+    g_assert_true (gtk_icon_theme_has_icon (gtk_icon_theme_get_for_display (
+      gtk_widget_get_display (icon)), gtk_image_get_icon_name (GTK_IMAGE (icon))));
+    g_assert_cmpint (gtk_widget_get_width (icon), ==, gtk_widget_get_height (icon));
+    g_assert_cmpint (gtk_widget_get_width (layout), <=, 232);
     g_assert_cmpfloat (list_bounds.origin.x, ==, bar_bounds.size.width);
     g_assert_cmpfloat (list_bounds.origin.y, ==, bar_bounds.origin.y);
+    g_assert_cmpfloat (search_bounds.origin.x, ==, list_bounds.origin.x);
+    g_assert_cmpfloat (search_bounds.size.width, ==, list_bounds.size.width);
+    g_assert_cmpfloat (list_bounds.origin.x + list_bounds.size.width, ==, bar_bounds.origin.x);
+    g_assert_cmpfloat (bar_bounds.origin.x + bar_bounds.size.width, ==, gtk_widget_get_width (layout));
     if (real) {
       GtkWidget *playlist = find_type (GTK_WIDGET (pick->view), SPOTIFYGTK_TYPE_TRACK_ROW);
       move_to_widget (playlist, "click", "5");

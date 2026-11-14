@@ -3396,6 +3396,7 @@ static void
 on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
                          GtkPopover *popover, SpotifyGtkNativeWindow *self)
 {
+  enum { PICKER_WIDTH = 224, PICKER_GUTTER = 8, PICKER_LIST_HEIGHT = 208 };
   if (!track || !track->uri) return;
   PlaylistPick *pick = g_new0 (PlaylistPick, 1);
   pick->window = self;
@@ -3406,15 +3407,16 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   pick->bound_rows = g_ptr_array_new ();
   pick->store = g_list_store_new (SPOTIFYGTK_TYPE_TRACK_ITEM);
   pick->filter = gtk_custom_filter_new (pick_matches, pick, NULL);
-  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
   gtk_widget_add_css_class (box, "playlist-picker");
-  gtk_widget_set_size_request (box, 268, -1);
+  gtk_widget_set_size_request (box, PICKER_WIDTH, -1);
   GtkWidget *create = gtk_button_new ();
+  gtk_widget_add_css_class (create, "playlist-picker-create");
   gtk_button_set_has_frame (GTK_BUTTON (create), FALSE);
   GtkWidget *create_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
-  GtkWidget *plus = gtk_image_new_from_icon_name ("list-add-symbolic");
-  gtk_image_set_pixel_size (GTK_IMAGE (plus), 12);
-  gtk_widget_add_css_class (plus, "playlist-picker-plus");
+  GtkWidget *plus = gtk_image_new_from_icon_name ("spotifygtk-add-circle-symbolic");
+  gtk_image_set_pixel_size (GTK_IMAGE (plus), 18);
+  gtk_widget_set_valign (plus, GTK_ALIGN_CENTER);
   gtk_box_append (GTK_BOX (create_content), plus);
   gtk_box_append (GTK_BOX (create_content), gtk_label_new ("New Playlist"));
   gtk_button_set_child (GTK_BUTTON (create), create_content);
@@ -3425,11 +3427,13 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   GtkWidget *layout = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   PlaylistPickerList *destinations = g_object_new (playlist_picker_list_get_type (), NULL);
   gtk_widget_set_hexpand (GTK_WIDGET (destinations), TRUE);
-  gtk_widget_set_margin_start (GTK_WIDGET (destinations), 12);
+  gtk_widget_set_margin_start (GTK_WIDGET (destinations), PICKER_GUTTER);
   gtk_box_append (GTK_BOX (layout), GTK_WIDGET (destinations));
   pick->search = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
   gtk_search_entry_set_placeholder_text (pick->search, "Search playlists");
-  gtk_widget_set_margin_bottom (GTK_WIDGET (pick->search), 6);
+  gtk_editable_set_width_chars (GTK_EDITABLE (pick->search), 12);
+  gtk_editable_set_max_width_chars (GTK_EDITABLE (pick->search), 12);
+  gtk_widget_set_margin_bottom (GTK_WIDGET (pick->search), 4);
   g_signal_connect (pick->search, "search-changed", G_CALLBACK (pick_search_changed), pick);
   gtk_box_append (GTK_BOX (destinations), GTK_WIDGET (pick->search));
 
@@ -3460,7 +3464,7 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   GtkWidget *scroller = gtk_scrolled_window_new ();
   gtk_widget_add_css_class (scroller, "glass-scroller");
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller), GTK_POLICY_NEVER, GTK_POLICY_EXTERNAL);
-  gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (scroller), 224);
+  gtk_scrolled_window_set_min_content_height (GTK_SCROLLED_WINDOW (scroller), PICKER_LIST_HEIGHT);
   pick->scroller = destinations->scroller = GTK_SCROLLED_WINDOW (scroller);
   pick->adjustment = g_object_ref (gtk_scrolled_window_get_vadjustment (pick->scroller));
   g_signal_connect (pick->adjustment, "value-changed", G_CALLBACK (pick_schedule_artwork), pick);
@@ -3477,7 +3481,7 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   GtkWidget *scrollbar = gtk_scrollbar_new (GTK_ORIENTATION_VERTICAL, pick->adjustment);
   gtk_widget_add_css_class (scrollbar, "search-page-scrollbar");
   gtk_widget_set_valign (scrollbar, GTK_ALIGN_END);
-  gtk_widget_set_size_request (scrollbar, 12, 224);
+  gtk_widget_set_size_request (scrollbar, PICKER_GUTTER, PICKER_LIST_HEIGHT);
   gtk_box_append (GTK_BOX (layout), scrollbar);
   gtk_box_append (GTK_BOX (box), layout);
 
@@ -7233,11 +7237,16 @@ static const gchar *theme_body =
   "popover.playlist-submenu, popover.track-context-menu"
   "  { background: transparent; border: none; box-shadow: none; }"
   "popover .context-submenu button:checked { background-color: @bg_hover; }"
-  ".playlist-picker-plus { border: 1px solid currentColor; border-radius: 50%;"
-  "  min-width: 16px; min-height: 16px; }"
+  ".playlist-picker-create { min-height: 24px; padding: 4px 8px; }"
   ".playlist-picker-list > row { padding: 0; }"
-  ".playlist-picker searchentry { background-color: alpha(@bg_selected, 0.58); }"
-  ".playlist-picker scrollbar slider { border-radius: 0; }"
+  ".playlist-picker searchentry { min-height: 28px; padding: 0 8px;"
+  "  background-color: alpha(@bg_selected, 0.58); }"
+  ".playlist-picker scrollbar.search-page-scrollbar,"
+  ".playlist-picker scrollbar.search-page-scrollbar > range,"
+  ".playlist-picker scrollbar.search-page-scrollbar > range > trough"
+  "  { min-width: 0; margin: 0; padding: 0; border: 0; }"
+  ".playlist-picker scrollbar.search-page-scrollbar > range > trough > slider"
+  "  { min-width: 6px; margin: 0 1px; padding: 0; border: 0; border-radius: 0; }"
 
   /* ── Scrollbars ────────────────────────────────────────────── */
   /* Non-overlay, so it sits in a gutter beside the list, not over it. */
