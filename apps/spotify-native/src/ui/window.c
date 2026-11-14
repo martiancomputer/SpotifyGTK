@@ -3396,7 +3396,13 @@ static void
 on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
                          GtkPopover *popover, SpotifyGtkNativeWindow *self)
 {
-  enum { PICKER_WIDTH = 224, PICKER_INSET = 4, PICKER_SCROLLBAR_WIDTH = 8, PICKER_LIST_HEIGHT = 208 };
+  enum {
+    PICKER_WIDTH = 224,
+    PICKER_INSET = 4,
+    PICKER_SCROLLBAR_INSET = 8,
+    PICKER_SCROLLBAR_WIDTH = 8,
+    PICKER_LIST_HEIGHT = 208
+  };
   if (!track || !track->uri) return;
   PlaylistPick *pick = g_new0 (PlaylistPick, 1);
   pick->window = self;
@@ -3412,10 +3418,13 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   gtk_widget_set_size_request (box, PICKER_WIDTH, -1);
   GtkWidget *create = gtk_button_new ();
   gtk_widget_add_css_class (create, "playlist-picker-create");
+  gtk_widget_set_margin_top (create, 8);
+  gtk_widget_set_margin_start (create, PICKER_INSET);
+  gtk_widget_set_margin_end (create, PICKER_SCROLLBAR_INSET + PICKER_SCROLLBAR_WIDTH);
   gtk_button_set_has_frame (GTK_BUTTON (create), FALSE);
   GtkWidget *create_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
   gtk_widget_set_halign (create_content, GTK_ALIGN_START);
-  gtk_widget_set_valign (create_content, GTK_ALIGN_END);
+  gtk_widget_set_valign (create_content, GTK_ALIGN_CENTER);
   GtkWidget *plus = gtk_image_new_from_icon_name ("spotifygtk-add-circle-symbolic");
   gtk_image_set_pixel_size (GTK_IMAGE (plus), 18);
   gtk_widget_set_valign (plus, GTK_ALIGN_CENTER);
@@ -3424,7 +3433,10 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   gtk_button_set_child (GTK_BUTTON (create), create_content);
   g_signal_connect (create, "clicked", G_CALLBACK (pick_create), pick);
   gtk_box_append (GTK_BOX (box), create);
-  gtk_box_append (GTK_BOX (box), gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
+  GtkWidget *separator = gtk_separator_new (GTK_ORIENTATION_HORIZONTAL);
+  gtk_widget_set_margin_start (separator, PICKER_INSET);
+  gtk_widget_set_margin_end (separator, PICKER_SCROLLBAR_INSET + PICKER_SCROLLBAR_WIDTH);
+  gtk_box_append (GTK_BOX (box), separator);
 
   GtkWidget *layout = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   PlaylistPickerList *destinations = g_object_new (playlist_picker_list_get_type (), NULL);
@@ -3483,7 +3495,7 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   GtkWidget *scrollbar = gtk_scrollbar_new (GTK_ORIENTATION_VERTICAL, pick->adjustment);
   gtk_widget_add_css_class (scrollbar, "search-page-scrollbar");
   gtk_widget_set_valign (scrollbar, GTK_ALIGN_END);
-  gtk_widget_set_margin_end (scrollbar, PICKER_INSET);
+  gtk_widget_set_margin_end (scrollbar, PICKER_SCROLLBAR_INSET);
   gtk_widget_set_size_request (scrollbar, PICKER_SCROLLBAR_WIDTH, PICKER_LIST_HEIGHT);
   gtk_box_append (GTK_BOX (layout), scrollbar);
   gtk_box_append (GTK_BOX (box), layout);
@@ -7240,7 +7252,8 @@ static const gchar *theme_body =
   "popover.playlist-submenu, popover.track-context-menu"
   "  { background: transparent; border: none; box-shadow: none; }"
   "popover .context-submenu button:checked { background-color: @bg_hover; }"
-  ".playlist-picker-create { min-height: 24px; padding: 12px 16px 0; }"
+  ".playlist-picker-create { min-height: 24px; padding: 6px 12px; }"
+  "popover .playlist-picker > separator { margin: 2px 0; }"
   ".playlist-picker-list > row { padding: 0; }"
   ".playlist-picker searchentry { min-height: 28px; padding: 0 8px;"
   "  background-color: alpha(@bg_selected, 0.58); }"

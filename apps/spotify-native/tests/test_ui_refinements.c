@@ -1728,25 +1728,36 @@ test_playlist_picker_and_shared_create (gconstpointer data)
     g_assert_cmpint (gtk_widget_get_width (icon), ==, gtk_widget_get_height (icon));
     g_assert_cmpint (gtk_widget_get_width (layout), <=, 232);
     GtkWidget *picker = gtk_popover_get_child (pick->popover);
+    graphene_rect_t button_bounds = bounds (new_playlist, picker);
     graphene_rect_t action_bounds = bounds (gtk_button_get_child (GTK_BUTTON (new_playlist)), picker);
     graphene_rect_t separator_bounds = bounds (find_type (picker, GTK_TYPE_SEPARATOR), picker);
-    g_assert_cmpfloat (action_bounds.origin.x - separator_bounds.origin.x, ==, 16);
-    float action_gap = separator_bounds.origin.y - action_bounds.origin.y - action_bounds.size.height;
-    g_assert_cmpfloat (action_gap, >, 0);
-    g_assert_cmpfloat (action_gap, <=, 10);
+    graphene_rect_t search_in_picker = bounds (GTK_WIDGET (pick->search), picker);
+    g_assert_cmpfloat (action_bounds.origin.x - button_bounds.origin.x, ==, 12);
+    float action_top = action_bounds.origin.y - button_bounds.origin.y;
+    float action_bottom = button_bounds.size.height - action_top - action_bounds.size.height;
+    g_assert_cmpfloat (fabsf (action_top - action_bottom), <=, 1);
+    g_assert_cmpfloat (button_bounds.origin.x, ==, search_in_picker.origin.x);
+    g_assert_cmpfloat (button_bounds.size.width, ==, search_in_picker.size.width);
+    g_assert_cmpfloat (separator_bounds.origin.x, ==, search_in_picker.origin.x);
+    g_assert_cmpfloat (separator_bounds.size.width, ==, search_in_picker.size.width);
+    float gap_above = separator_bounds.origin.y - button_bounds.origin.y - button_bounds.size.height;
+    float gap_below = search_in_picker.origin.y - separator_bounds.origin.y - separator_bounds.size.height;
+    g_assert_cmpfloat (gap_above, >, 0);
+    g_assert_cmpfloat (gap_above, ==, gap_below);
     g_assert_cmpfloat (list_bounds.origin.y, ==, bar_bounds.origin.y);
     g_assert_cmpfloat (search_bounds.origin.x, ==, list_bounds.origin.x);
     g_assert_cmpfloat (search_bounds.size.width, ==, list_bounds.size.width);
     g_assert_cmpfloat (list_bounds.origin.x + list_bounds.size.width, ==, bar_bounds.origin.x);
     float right_inset = gtk_widget_get_width (layout) - bar_bounds.origin.x - bar_bounds.size.width;
-    g_assert_cmpfloat (right_inset, >, 0);
-    g_assert_cmpfloat (list_bounds.origin.x, ==, right_inset);
+    g_assert_cmpfloat (right_inset, ==, list_bounds.origin.x + 4);
     if (real) {
       GtkWidget *playlist = find_type (GTK_WIDGET (pick->view), SPOTIFYGTK_TYPE_TRACK_ROW);
       move_to_widget (playlist, "click", "5");
       settle ();
       g_assert_cmpfloat (gtk_adjustment_get_value (pick->adjustment), >, 0);
       if (g_getenv ("SPOTIFYGTK_TEST_PREVIEWS")) {
+        move_to_widget (new_playlist, "sleep", "0.1");
+        settle ();
         g_autofree gchar *path = g_build_filename (g_getenv ("SPOTIFYGTK_TEST_PREVIEWS"),
           width < 1000 ? "playlist-submenu-light.png" : "playlist-submenu-dark.png", NULL);
         gchar *command[] = { "import", "-window", "root", path, NULL };
