@@ -3414,8 +3414,8 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   gtk_widget_add_css_class (create, "playlist-picker-create");
   gtk_button_set_has_frame (GTK_BUTTON (create), FALSE);
   GtkWidget *create_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
-  gtk_widget_set_halign (create_content, GTK_ALIGN_CENTER);
-  gtk_widget_set_valign (create_content, GTK_ALIGN_CENTER);
+  gtk_widget_set_halign (create_content, GTK_ALIGN_START);
+  gtk_widget_set_valign (create_content, GTK_ALIGN_END);
   GtkWidget *plus = gtk_image_new_from_icon_name ("spotifygtk-add-circle-symbolic");
   gtk_image_set_pixel_size (GTK_IMAGE (plus), 18);
   gtk_widget_set_valign (plus, GTK_ALIGN_CENTER);
@@ -7240,7 +7240,7 @@ static const gchar *theme_body =
   "popover.playlist-submenu, popover.track-context-menu"
   "  { background: transparent; border: none; box-shadow: none; }"
   "popover .context-submenu button:checked { background-color: @bg_hover; }"
-  ".playlist-picker-create { min-height: 24px; padding: 4px 8px; }"
+  ".playlist-picker-create { min-height: 24px; padding: 12px 16px 0; }"
   ".playlist-picker-list > row { padding: 0; }"
   ".playlist-picker searchentry { min-height: 28px; padding: 0 8px;"
   "  background-color: alpha(@bg_selected, 0.58); }"

@@ -1730,9 +1730,10 @@ test_playlist_picker_and_shared_create (gconstpointer data)
     GtkWidget *picker = gtk_popover_get_child (pick->popover);
     graphene_rect_t action_bounds = bounds (gtk_button_get_child (GTK_BUTTON (new_playlist)), picker);
     graphene_rect_t separator_bounds = bounds (find_type (picker, GTK_TYPE_SEPARATOR), picker);
-    g_assert_cmpfloat (fabs (action_bounds.origin.x + action_bounds.size.width / 2 -
-                            separator_bounds.origin.x - separator_bounds.size.width / 2), <=, 1);
-    g_assert_cmpfloat (action_bounds.origin.y + action_bounds.size.height, <, separator_bounds.origin.y);
+    g_assert_cmpfloat (action_bounds.origin.x - separator_bounds.origin.x, ==, 16);
+    float action_gap = separator_bounds.origin.y - action_bounds.origin.y - action_bounds.size.height;
+    g_assert_cmpfloat (action_gap, >, 0);
+    g_assert_cmpfloat (action_gap, <=, 10);
     g_assert_cmpfloat (list_bounds.origin.y, ==, bar_bounds.origin.y);
     g_assert_cmpfloat (search_bounds.origin.x, ==, list_bounds.origin.x);
     g_assert_cmpfloat (search_bounds.size.width, ==, list_bounds.size.width);
