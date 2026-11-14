@@ -555,11 +555,43 @@ start_uri_internal (SpotifyNativePlayerService *self,
   return TRUE;
 }
 
+const gchar *
+spotifygtk_player_service_get_audible_position (SpotifyNativePlayerService *self,
+                                                gint64 *position_ms)
+{
+  if (!self->inflight->len) return NULL;
+  guint64 seq = spotifygtk_audio_sink_current_seq (spotifygtk_audio_sink_get ());
+  for (guint i = 0; seq && i < self->inflight->len; i++) {
+    InflightTrack *track = g_ptr_array_index (self->inflight, i);
+    if (spotifygtk_native_engine_control_get_sink_seq (track->control) == seq) {
+      *position_ms = spotifygtk_native_engine_control_get_position_ms (track->control);
+      return track->uri;
+    }
+  }
+  return NULL;
+}
+
+gboolean
+spotifygtk_player_service_start_uri_at (SpotifyNativePlayerService *self,
+                                        const gchar *track_uri, gint64 position_ms,
+                                        GError **error)
+{
+  g_return_val_if_fail (SPOTIFYGTK_IS_PLAYER_SERVICE (self), FALSE);
+  g_clear_pointer (&self->pending_seek_uri, g_free);
+  self->pending_seek_uri = position_ms > 0 ? g_strdup (track_uri) : NULL;
+  self->pending_seek_ms = MAX (position_ms, 0);
+  if (start_uri_internal (self, track_uri, FALSE, FALSE, error))
+    return TRUE;
+  g_clear_pointer (&self->pending_seek_uri, g_free);
+  self->pending_seek_ms = 0;
+  return FALSE;
+}
+
 gboolean
 spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
                                      const gchar *track_uri, GError **error)
 {
-  return start_uri_internal (self, track_uri, FALSE, FALSE, error);
+  return spotifygtk_player_service_start_uri_at (self, track_uri, 0, error);
 }
 
 void

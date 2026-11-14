@@ -2171,6 +2171,28 @@ test_zoom_focus_restoration (void)
   spotifygtk_settings_set_ui_scale (settings, 0, FALSE);
 }
 
+static void
+test_restore_playback_bookmark (void)
+{
+  g_autofree gchar *path = playback_bookmark_path ();
+  g_autofree gchar *dir = g_path_get_dirname (path);
+  g_assert_cmpint (g_mkdir_with_parents (dir, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (path,
+    "[Playback]\naccount=fixture-account\nuri=spotify:track:0000000000000000000001\n"
+    "title=Saved song\nduration-ms=180000\nposition-ms=73457\n", -1, NULL));
+  SpotifyGtkNativeWindow *window = spotifygtk_native_window_new (NULL);
+  restore_playback_bookmark (window, "other-account");
+  g_assert_null (window->current_track_uri);
+  restore_playback_bookmark (window, "fixture-account");
+  g_assert_cmpstr (window->current_track_uri, ==, "spotify:track:0000000000000000000001");
+  g_assert_cmpint (window->last_position_ms, ==, 73457);
+  g_assert_true (window->resume_pending);
+  g_assert_false (spotifygtk_player_service_is_active (window->player));
+  g_assert_cmpstr (mpris_playback_status (window), ==, "Paused");
+  gtk_window_destroy (GTK_WINDOW (window));
+  g_assert_cmpint (g_unlink (path), ==, 0);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2180,6 +2202,7 @@ main (int argc, char **argv)
   g_setenv ("XDG_CONFIG_HOME", isolated, TRUE);
   g_setenv ("XDG_DATA_HOME", isolated, TRUE);
   g_setenv ("XDG_CACHE_HOME", isolated, TRUE);
+  g_setenv ("XDG_STATE_HOME", isolated, TRUE);
   if (!gtk_init_check ()) return 77;
 #if GTK_CHECK_VERSION(4, 24, 0)
   g_object_set (gtk_settings_get_default (), "gtk-interface-color-scheme",
@@ -2190,6 +2213,7 @@ main (int argc, char **argv)
   adw_init ();
   g_object_set (gtk_settings_get_default (), "gtk-enable-animations", FALSE, NULL);
   apply_theme (SPOTIFYGTK_THEME_DARK_PLUS);
+  g_test_add_func ("/ui/playback/restore-bookmark", test_restore_playback_bookmark);
   g_test_add_func ("/ui/presentation/fractional-coverage", test_fractional_presentation_coverage);
   g_test_add_func ("/ui/presentation/zoom-breakpoints", test_zoom_breakpoints);
   g_test_add_func ("/ui/presentation/focus-restoration", test_zoom_focus_restoration);

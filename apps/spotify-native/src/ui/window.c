@@ -64,6 +64,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <glib/gstdio.h>
 
 #ifdef G_OS_WIN32
 #include <windows.h>
@@ -242,6 +243,9 @@ struct _SpotifyGtkNativeWindow {
   gchar *current_track_uri;
   gchar *local_player_uri; /* remote metadata must not masquerade as this engine's track */
   gint64 last_position_ms;   /* last reported position, for Connect */
+  gchar *last_audible_uri;
+  gboolean resume_pending; /* restored in the UI, waiting for the user to play */
+  gint64 bookmark_written_us;
   /* Play state a transfer asked for, applied once that track is sounding. */
   gchar   *pending_pause_uri;
   gboolean pending_paused;
@@ -1220,6 +1224,7 @@ prune_display_tracks (SpotifyGtkNativeWindow *self)
       /* These two entries can still be needed by the progress/like UI or by
        * the sink's next now-playing handover. */
       if (g_strcmp0 (uri, self->current_track_uri) == 0 ||
+          g_strcmp0 (uri, self->last_audible_uri) == 0 ||
           g_strcmp0 (uri, self->awaiting_uri) == 0)
         continue;
 
@@ -1249,6 +1254,125 @@ remember_display_track (SpotifyGtkNativeWindow *self,
                         spotifygtk_native_track_copy (track));
 }
 
+static gboolean
+local_playback_uri (const gchar *uri)
+{
+  return uri && g_str_has_prefix (uri, "local:track:");
+}
+
+#define PLAYBACK_BOOKMARK_GROUP "Playback"
+#define PLAYBACK_BOOKMARK_LIMIT (16 * 1024)
+
+static gchar *
+playback_bookmark_account (SpotifyGtkNativeWindow *self)
+{
+  if (!native_auth_has_credentials (self->auth)) return NULL;
+  g_autofree gchar *name = spotifygtk_native_session_dup_username (self->session);
+  return name && *name ? g_compute_checksum_for_string (G_CHECKSUM_SHA256, name, -1) : NULL;
+}
+
+static gchar *
+playback_bookmark_path (void)
+{
+  return g_build_filename (g_get_user_state_dir (), "spotifygtk", "playback.ini", NULL);
+}
+
+static GKeyFile *
+read_playback_bookmark (void)
+{
+  g_autofree gchar *path = playback_bookmark_path ();
+  g_autoptr(GFile) file = g_file_new_for_path (path);
+  g_autoptr(GFileInputStream) stream = g_file_read (file, NULL, NULL);
+  if (!stream) return NULL;
+  gchar contents[PLAYBACK_BOOKMARK_LIMIT + 1];
+  gsize size;
+  if (!g_input_stream_read_all (G_INPUT_STREAM (stream), contents, sizeof contents, &size, NULL, NULL) ||
+      size > PLAYBACK_BOOKMARK_LIMIT) return NULL;
+  g_autoptr(GKeyFile) key = g_key_file_new ();
+  return g_key_file_load_from_data (key, contents, size, G_KEY_FILE_NONE, NULL)
+    ? g_steal_pointer (&key) : NULL;
+}
+
+static void
+save_playback_bookmark (SpotifyGtkNativeWindow *self)
+{
+  if (self->remote_mode || !self->display_tracks) return;
+  gint64 position = 0;
+  const gchar *uri = spotifygtk_player_service_get_audible_position (self->player, &position);
+  /* A drained track is still the last song, but Play should replay it. While
+   * a new selection buffers, keep the preceding checkpoint instead. */
+  if (!uri && spotifygtk_player_service_get_state (self->player) == SPOTIFYGTK_PLAYER_IDLE)
+    uri = self->last_audible_uri;
+  if (!uri) return;
+  const SpotifyNativeTrack *track = g_hash_table_lookup (self->display_tracks, uri);
+  if (!track) return;
+  gboolean local = local_playback_uri (uri);
+  g_autofree gchar *account = local ? NULL : playback_bookmark_account (self);
+  if (!local && (!account || !g_str_has_prefix (uri, "spotify:track:"))) return;
+  self->bookmark_written_us = g_get_monotonic_time ();
+
+  g_autoptr(GKeyFile) key = g_key_file_new ();
+  const gchar *group = PLAYBACK_BOOKMARK_GROUP;
+  g_key_file_set_string (key, group, "uri", track->uri);
+  if (account) g_key_file_set_string (key, group, "account", account);
+  if (track->name) g_key_file_set_string (key, group, "title", track->name);
+  if (track->artists) g_key_file_set_string (key, group, "artists", track->artists);
+  if (track->album) g_key_file_set_string (key, group, "album", track->album);
+  if (track->cover_id) g_key_file_set_string (key, group, "cover", track->cover_id);
+  if (track->album_uri) g_key_file_set_string (key, group, "album-uri", track->album_uri);
+  if (track->artist_uri) g_key_file_set_string (key, group, "artist-uri", track->artist_uri);
+  g_key_file_set_int64 (key, group, "duration-ms", track->duration_ms);
+  g_key_file_set_int64 (key, group, "position-ms",
+    position > 0 && (track->duration_ms <= 0 || position < track->duration_ms) ? position : 0);
+  gsize size;
+  g_autofree gchar *contents = g_key_file_to_data (key, &size, NULL);
+  g_autofree gchar *path = playback_bookmark_path ();
+  g_autofree gchar *dir = g_path_get_dirname (path);
+  if (size <= PLAYBACK_BOOKMARK_LIMIT && g_mkdir_with_parents (dir, 0700) == 0)
+    g_file_set_contents_full (path, contents, size, G_FILE_SET_CONTENTS_CONSISTENT, 0600, NULL);
+}
+
+static void
+restore_playback_bookmark (SpotifyGtkNativeWindow *self, const gchar *account)
+{
+  if (self->current_track_uri || self->remote_mode) return;
+  g_autoptr(GKeyFile) key = read_playback_bookmark ();
+  if (!key) return;
+  const gchar *group = PLAYBACK_BOOKMARK_GROUP;
+  g_autofree gchar *uri = g_key_file_get_string (key, group, "uri", NULL);
+  g_autofree gchar *owner = g_key_file_get_string (key, group, "account", NULL);
+  if (!uri || strlen (uri) > 128) return;
+  if (g_str_equal (uri, "local:track:")) return;
+  if (!local_playback_uri (uri)) {
+    g_autofree gchar *share = spotifygtk_track_share_url (uri);
+    if (!share || !account || g_strcmp0 (account, owner) != 0) return;
+  } else if (!spotifygtk_settings_get_local_files_enabled (spotifygtk_settings_get_default ())) {
+    return;
+  }
+  g_autofree gchar *title = g_key_file_get_string (key, group, "title", NULL);
+  g_autofree gchar *artists = g_key_file_get_string (key, group, "artists", NULL);
+  g_autofree gchar *album = g_key_file_get_string (key, group, "album", NULL);
+  g_autofree gchar *cover = g_key_file_get_string (key, group, "cover", NULL);
+  g_autofree gchar *album_uri = g_key_file_get_string (key, group, "album-uri", NULL);
+  g_autofree gchar *artist_uri = g_key_file_get_string (key, group, "artist-uri", NULL);
+  SpotifyNativeTrack track = {
+    .uri = uri, .name = title, .artists = artists, .album = album, .cover_id = cover,
+    .album_uri = album_uri, .artist_uri = artist_uri,
+    .duration_ms = CLAMP (g_key_file_get_int64 (key, group, "duration-ms", NULL), 0, G_MAXINT32),
+  };
+  gint64 position = CLAMP (g_key_file_get_int64 (key, group, "position-ms", NULL), 0, G_MAXINT32);
+  if (track.duration_ms > 0 && position >= track.duration_ms) position = 0;
+  self->resume_pending = TRUE;
+  self->current_track_uri = g_strdup (uri);
+  self->current_track_duration_ms = track.duration_ms;
+  self->last_position_ms = position;
+  remember_display_track (self, &track);
+  show_now_playing (self, &track);
+  spotifygtk_native_window_set_progress (self, position, track.duration_ms);
+  mpris_emit_player_changed (self, "PlaybackStatus");
+  mpris_emit_player_changed (self, "CanPlay");
+}
+
 static gboolean control_remote (SpotifyGtkNativeWindow *self, const gchar *endpoint,
                                 gint64 value, const gchar *track_uri);
 
@@ -1270,6 +1394,7 @@ play_native_track (SpotifyGtkNativeWindow *self, const SpotifyNativeTrack *track
     show_sign_in_banner (self, "Sign in to play Spotify tracks.");
     return;
   }
+  self->resume_pending = FALSE;
 
   /*
    * Remember the track so the handover can render it later, then decide
@@ -4463,10 +4588,18 @@ on_play_clicked (SpotifyGtkPlaybackBar *bar, gpointer user_data)
     return;
   }
 
+  if (self->resume_pending && spotifygtk_player_service_is_active (self->player))
+    return;
+
   GError *error = NULL;
-  if (!spotifygtk_player_service_start_uri (self->player, self->current_track_uri, &error)) {
+  gint64 position = self->resume_pending ? self->last_position_ms : 0;
+  if (!spotifygtk_player_service_start_uri_at (self->player, self->current_track_uri,
+                                              position, &error)) {
     g_warning ("Playback failed: %s", error->message);
     g_error_free (error);
+  } else if (self->resume_pending) {
+    g_free (self->local_player_uri);
+    self->local_player_uri = g_strdup (self->current_track_uri);
   }
   (void) bar;
 }
@@ -4676,6 +4809,7 @@ on_connect_playback_changed (SpotifyNativeSession *session, gpointer data)
     spotifygtk_playback_bar_set_queue_count (self->playback_bar, 0);
   }
   self->remote_mode = TRUE;
+  self->resume_pending = FALSE;
   spotifygtk_player_service_pause (self->player);
   g_clear_pointer (&self->awaiting_uri, g_free);
   g_clear_pointer (&self->pending_pause_uri, g_free);
@@ -4828,6 +4962,14 @@ on_seek_requested (SpotifyGtkPlaybackBar *bar, gint64 position_ms, gpointer user
   SpotifyGtkNativeWindow *self = user_data;
   if (control_remote (self, "seek_to", MAX (position_ms, 0), NULL)) return;
   self->last_position_ms = MAX (position_ms, 0);
+  if (self->resume_pending && !spotifygtk_player_service_is_active (self->player)) {
+    if (self->current_track_duration_ms > 0)
+      self->last_position_ms = MIN (self->last_position_ms, self->current_track_duration_ms - 1);
+    spotifygtk_native_window_set_progress (self, self->last_position_ms,
+                                           self->current_track_duration_ms);
+    mpris_emit_seeked (self);
+    return;
+  }
   spotifygtk_player_service_seek (self->player, position_ms);
   broadcast_playing_uri (self);
   mpris_emit_seeked (self);
@@ -5089,6 +5231,8 @@ mpris_playback_status (SpotifyGtkNativeWindow *self)
     return "Playing";
   if (state == SPOTIFYGTK_PLAYER_PAUSED)
     return "Paused";
+  if (self->resume_pending && state == SPOTIFYGTK_PLAYER_IDLE)
+    return "Paused";
   return "Stopped";
 }
 
@@ -5205,7 +5349,10 @@ mpris_method_call (GDBusConnection *connection, const gchar *sender,
   (void) connection; (void) sender; (void) object_path;
   if (g_str_equal (interface_name, "org.mpris.MediaPlayer2")) {
     if (g_str_equal (method_name, "Raise")) gtk_window_present (GTK_WINDOW (self));
-    else if (g_str_equal (method_name, "Quit")) g_application_quit (g_application_get_default ());
+    else if (g_str_equal (method_name, "Quit")) {
+      save_playback_bookmark (self);
+      g_application_quit (g_application_get_default ());
+    }
     g_dbus_method_invocation_return_value (invocation, NULL);
     return;
   }
@@ -5217,7 +5364,11 @@ mpris_method_call (GDBusConnection *connection, const gchar *sender,
     if (g_str_equal (mpris_playback_status (self), "Playing")) on_pause_clicked (NULL, self);
     else on_play_clicked (NULL, self);
   } else if (g_str_equal (method_name, "Stop")) {
-    if (!control_remote (self, "pause", -1, NULL)) spotifygtk_player_service_stop (self->player);
+    if (!control_remote (self, "pause", -1, NULL)) {
+      save_playback_bookmark (self);
+      g_clear_pointer (&self->last_audible_uri, g_free);
+      spotifygtk_player_service_stop (self->player);
+    }
   } else if (g_str_equal (method_name, "Seek")) {
     gint64 offset_us; g_variant_get (parameters, "(x)", &offset_us);
     self->last_position_ms = CLAMP (self->last_position_ms + offset_us / 1000,
@@ -6046,7 +6197,7 @@ broadcast_playing_uri (SpotifyGtkNativeWindow *self)
 
   /* Spotify Connect needs the same news: a device registered as active while
    * reporting nothing playing gets dropped. */
-  if (self->session)
+  if (self->session && !self->resume_pending)
     spotifygtk_native_session_report_playback (
                                                self->session,
                                                uri && g_str_has_prefix (uri, "spotify:") ? uri : NULL,
@@ -6073,6 +6224,8 @@ on_player_state_changed (SpotifyNativePlayerService *player,
 {
   SpotifyGtkNativeWindow *self = user_data;
   if (self->remote_mode) return;
+  if (state == SPOTIFYGTK_PLAYER_PAUSED)
+    save_playback_bookmark (self);
 
   /* A track finishing on its own reaches the window as IDLE (a user switching
    * tracks never does — the service hands the pending URI straight to the
@@ -6146,17 +6299,18 @@ on_player_position_changed (SpotifyNativePlayerService *player,
   /* Kept, not reported: put_state is an HTTPS round trip and this fires four
    * times a second. PlayerState pairs a position with the timestamp it was
    * true at, so a controller extrapolates between our reports. */
-  self->last_position_ms = position_ms;
-
   /* Only a manual pick has already replaced the displayed track. During
    * natural read-ahead the outgoing song is still displayed and audible, so
    * keep its position moving until the sink announces the handover. */
   if (self->awaiting_uri && self->suppress_outgoing_position)
     return;
 
+  self->last_position_ms = position_ms;
+  if (!self->resume_pending && spotifygtk_player_service_get_state (player) != SPOTIFYGTK_PLAYER_PAUSED &&
+      g_get_monotonic_time () - self->bookmark_written_us >= 15 * G_TIME_SPAN_SECOND)
+    save_playback_bookmark (self);
   spotifygtk_native_window_set_progress (self, position_ms,
                                          self->current_track_duration_ms);
-  (void) player;
 }
 
 /* === Login gate ===
@@ -6391,6 +6545,25 @@ on_logout_choice (GObject *source, GAsyncResult *result, gpointer user_data)
 
   /* Local audio and its client-owned queue remain untouched. Spotify audio
    * must stop before the account transport is disconnected. */
+  if (!local_playback_uri (self->current_track_uri) && self->resume_pending) {
+    self->resume_pending = FALSE;
+    g_clear_pointer (&self->current_track_uri, g_free);
+    self->current_track_duration_ms = self->last_position_ms = 0;
+    SpotifyNativeTrack empty = { .name = "Nothing playing" };
+    show_now_playing (self, &empty);
+    spotifygtk_native_window_set_progress (self, 0, 0);
+  }
+  if (self->last_audible_uri && !local_playback_uri (self->last_audible_uri))
+    g_clear_pointer (&self->last_audible_uri, g_free);
+  if (g_strcmp0 (choice, "clear") == 0) {
+    g_autofree gchar *path = playback_bookmark_path ();
+    g_autoptr(GKeyFile) key = read_playback_bookmark ();
+    if (key && g_key_file_has_key (key, PLAYBACK_BOOKMARK_GROUP, "account", NULL)) {
+      g_autofree gchar *account = playback_bookmark_account (self);
+      g_autofree gchar *owner = g_key_file_get_string (key, PLAYBACK_BOOKMARK_GROUP, "account", NULL);
+      if (account && g_strcmp0 (account, owner) == 0) g_unlink (path);
+    }
+  }
   self->account_generation++;
   g_clear_pointer (&self->liked_building, g_hash_table_unref);
   if (self->player && self->current_track_uri &&
@@ -6487,6 +6660,8 @@ on_session_state_changed (SpotifyNativeSession *session, gint state,
       gtk_widget_set_visible (self->login_gate, FALSE);
     if (self->sign_in_banner)
       gtk_widget_set_visible (self->sign_in_banner, FALSE);
+    g_autofree gchar *bookmark_account = playback_bookmark_account (self);
+    if (bookmark_account) restore_playback_bookmark (self, bookmark_account);
     /* Pages that gave up with "Not signed in yet" can load for real now. */
     spotifygtk_liked_songs_page_set_liked_filter (self->liked_page, NULL);
     spotifygtk_search_page_set_session (self->search_page, session);
@@ -6836,7 +7011,6 @@ on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
 {
   SpotifyGtkNativeWindow *self = user_data;
   if (self->remote_mode) return;
-  (void) player;
 
   if (!uri || !self->display_tracks)
     return;
@@ -6853,14 +7027,21 @@ on_now_playing_changed (SpotifyNativePlayerService *player, const gchar *uri,
   if (!track)
     return;
 
+  gint64 position = 0;
+  if (g_strcmp0 (spotifygtk_player_service_get_audible_position (player, &position), uri) != 0)
+    position = self->resume_pending ? self->last_position_ms : 0;
+  self->resume_pending = FALSE;
+  g_free (self->last_audible_uri);
+  self->last_audible_uri = g_strdup (uri);
   g_free (self->current_track_uri);
   self->current_track_uri = g_strdup (uri);
-  self->last_position_ms = 0;
+  self->last_position_ms = position;
   self->current_track_duration_ms = track->duration_ms;
-  spotifygtk_native_window_set_progress (self, 0, track->duration_ms);
+  spotifygtk_native_window_set_progress (self, position, track->duration_ms);
   show_now_playing (self, track);
   refresh_transport_and_queue (self);
   prune_display_tracks (self);
+  save_playback_bookmark (self);
 
   /* The transfer that started this track said whether it should be playing.
    * This is the first moment an engine exists to be told. */
@@ -8218,6 +8399,7 @@ spotifygtk_native_window_constructed (GObject *object)
    * thread; "state-changed" arrives back here on the GTK thread. */
   self->auth = native_auth_new ();
   g_signal_connect (self->auth, "completed", G_CALLBACK (on_auth_completed), self);
+  restore_playback_bookmark (self, NULL);
 
   /* has_credentials, not has_valid_token: an hour-old access token refreshes
    * silently inside the session, and gating on validity put a login screen in
@@ -8254,6 +8436,7 @@ static void
 spotifygtk_native_window_dispose (GObject *object)
 {
   SpotifyGtkNativeWindow *self = SPOTIFYGTK_NATIVE_WINDOW (object);
+  if (self->player) save_playback_bookmark (self);
   clear_remote_playback_ui (self);
   cancel_connect_request (self);
   if (self->playback_bar)
@@ -8321,6 +8504,7 @@ spotifygtk_native_window_dispose (GObject *object)
   g_clear_object (&self->session);
   g_clear_pointer (&self->current_track_uri, g_free);
   g_clear_pointer (&self->local_player_uri, g_free);
+  g_clear_pointer (&self->last_audible_uri, g_free);
   g_clear_pointer (&self->play_context_uri, g_free);
   g_clear_pointer (&self->pending_pause_uri, g_free);
   g_clear_pointer (&self->play_context, g_ptr_array_unref);
@@ -8358,12 +8542,20 @@ spotifygtk_native_window_dispose (GObject *object)
   G_OBJECT_CLASS (spotifygtk_native_window_parent_class)->dispose (object);
 }
 
+static gboolean
+spotifygtk_native_window_close_request (GtkWindow *window)
+{
+  save_playback_bookmark (SPOTIFYGTK_NATIVE_WINDOW (window));
+  return GTK_WINDOW_CLASS (spotifygtk_native_window_parent_class)->close_request (window);
+}
+
 static void
 spotifygtk_native_window_class_init (SpotifyGtkNativeWindowClass *klass)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   object_class->constructed = spotifygtk_native_window_constructed;
   object_class->dispose = spotifygtk_native_window_dispose;
+  GTK_WINDOW_CLASS (klass)->close_request = spotifygtk_native_window_close_request;
 }
 
 

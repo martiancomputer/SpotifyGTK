@@ -44,6 +44,8 @@ typedef struct {
   GCancellable *cancellable;             /* referenced, may be NULL */
 
   guint64      written;        /* device frames written for this track */
+  guint64      position_frames; /* seek origin, in position_rate frames */
+  gint         position_rate;
   gint         stream_rate;    /* rate its PCM decoded to */
   gint         resampler_mode;
   SpotifyResampler *resampler; /* only when stream_rate != device rate */
@@ -328,6 +330,10 @@ sink_writer (gpointer user_data)
     GCancellable *cancel = t->cancellable;
     gint device_rate = self->device_rate;
     guint64 seq = t->seq;
+    if (t->position_rate > 0) {
+      t->written = (t->position_frames * device_rate + t->position_rate - 1) / t->position_rate;
+      t->position_rate = 0;
+    }
 
     g_autofree gint16 *scratch = NULL;
     gsize n_frames = 0;
@@ -566,14 +572,16 @@ spotifygtk_audio_sink_flush (SpotifyAudioSink *self, guint64 seq)
 
 void
 spotifygtk_audio_sink_set_position (SpotifyAudioSink *self, guint64 seq,
-                                    guint64 device_frames)
+                                    guint64 frames, gint rate)
 {
   g_return_if_fail (self != NULL);
 
   g_mutex_lock (&self->lock);
   SinkTrack *t = find_track (self, seq);
-  if (t)
-    t->written = device_frames;
+  if (t) {
+    t->position_frames = frames;
+    t->position_rate = rate;
+  }
   g_mutex_unlock (&self->lock);
 }
 

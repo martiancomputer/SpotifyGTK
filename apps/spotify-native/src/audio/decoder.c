@@ -223,6 +223,12 @@ spotifygtk_decoder_pull (SpotifyDecoder *self)
   return frame;
 }
 
+gint64
+spotifygtk_decoder_get_pcm_position (SpotifyDecoder *self)
+{
+  return self->vf_open ? ov_pcm_tell (&self->vf) : -1;
+}
+
 glong
 spotifygtk_decoder_get_bitrate_nominal (SpotifyDecoder *self)
 {

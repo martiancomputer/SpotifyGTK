@@ -8,8 +8,8 @@
 /* A counting sink proves that the local adapter emits bounded interleaved
  * PCM frames without touching the user's audio device. Production uses the
  * real sink with exactly these entry points. */
-struct _SpotifyAudioSink { guint64 frames; guint pushes; gboolean ended; };
-struct _SpotifyNativeEngineControl { guint64 seq; };
+struct _SpotifyAudioSink { guint64 frames, start_frame; guint pushes; gboolean ended; };
+struct _SpotifyNativeEngineControl { guint64 seq; gint64 seek_ms; };
 static SpotifyAudioSink sink;
 
 SpotifyAudioSink *spotifygtk_audio_sink_get (void) { return &sink; }
@@ -39,8 +39,11 @@ void spotifygtk_audio_sink_end_track (SpotifyAudioSink *self, guint64 seq)
 void spotifygtk_audio_sink_flush (SpotifyAudioSink *self, guint64 seq)
 { (void) self; (void) seq; }
 void spotifygtk_audio_sink_set_position (SpotifyAudioSink *self, guint64 seq,
-                                         guint64 frames)
-{ (void) self; (void) seq; (void) frames; }
+                                         guint64 frames, gint rate)
+{ (void) seq; g_assert_cmpint (rate, ==, 8000); self->start_frame = frames; }
+void spotifygtk_native_engine_control_report_position (
+  SpotifyNativeEngineControl *control, guint64 frames, gint rate)
+{ (void) control; (void) frames; (void) rate; }
 gint spotifygtk_audio_sink_device_rate (SpotifyAudioSink *self)
 { (void) self; return 8000; }
 
@@ -53,7 +56,12 @@ gboolean spotifygtk_native_engine_control_seek_pending (
   SpotifyNativeEngineControl *control) { (void) control; return FALSE; }
 gboolean spotifygtk_native_engine_control_take_seek (
   SpotifyNativeEngineControl *control, gint64 *position)
-{ (void) control; (void) position; return FALSE; }
+{
+  if (control->seek_ms <= 0) return FALSE;
+  *position = control->seek_ms;
+  control->seek_ms = 0;
+  return TRUE;
+}
 void pcm_frame_free (PcmFrame *frame)
 { g_free (frame->samples); g_free (frame); }
 
@@ -94,6 +102,11 @@ test_pcm_adapter (void)
   g_assert_cmpuint (sink.frames, ==, 8000);
   g_assert_cmpuint (sink.pushes, >, 0);
   g_assert_true (sink.ended);
+  memset (&sink, 0, sizeof sink);
+  control.seek_ms = 317;
+  g_assert_true (spotifygtk_local_playback_run (path, cancel, NULL, NULL, &control));
+  g_assert_cmpuint (sink.start_frame, ==, 2536);
+  g_assert_cmpuint (sink.frames, ==, 8000 - 2536);
   g_assert_cmpint (g_remove (path), ==, 0);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }

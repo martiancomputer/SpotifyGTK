@@ -38,6 +38,8 @@ gboolean spotifygtk_decoder_open_complete (SpotifyDecoder *self, GBytes *ogg_byt
 /* Pull the next decoded PCM frame, or NULL if more compressed data
  * is needed first (caller should feed more, then retry). */
 PcmFrame *spotifygtk_decoder_pull (SpotifyDecoder *self);
+/* Sample offset immediately after the last decoded PCM block. */
+gint64 spotifygtk_decoder_get_pcm_position (SpotifyDecoder *self);
 
 /* Nominal bitrate (bits/sec) from the Vorbis identification header, or 0 if
  * not open / not advertised. Used to estimate a byte offset for a time seek

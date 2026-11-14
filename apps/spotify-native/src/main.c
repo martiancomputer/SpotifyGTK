@@ -634,20 +634,13 @@ typedef struct {
   guint8             *header_prefix;
   gsize               header_prefix_len;
   guint               playback_generation;
-  /* Frames to discard after a seek lands, to close the gap between the Ogg
-   * page we landed on and the sample actually asked for. See do_seek. */
-  guint64             seek_discard_frames;
-  /* Rate the output device is actually running at, which is NOT the stream
-   * rate once the resampler is engaged. Written by the audio worker when it
-   * opens the device, read by the seek landing; a plain int written once per
-   * output open, so the race is benign. */
-  gint                device_rate;
+  /* One plus the target sample, until the decoder reaches it. */
+  guint64             seek_target_frame;
   glong               bitrate_nominal;   /* for the seek byte estimate */
   gint                stream_sample_rate;
   SpotifyDecoder     *stream_decoder;
   guint64             stream_frames;
   guint64             stream_position_frames;
-  guint64             output_frames;
   /*
    * This track's slot in the sink. The device, the writer and the queued audio
    * all live there now, above any one track -- see audio/sink.h. What stays
@@ -747,9 +740,7 @@ run_is_current (LiveTestState *state)
  * decoding away real seconds of audio -- so re-aim using the ratio we just
  * measured instead, once, and trim the remainder of that. */
 #define SEEK_REFINE_SEC      4
-/* Absolute ceiling on trimming, purely so a pathological granule cannot make
- * the engine sit there discarding forever. */
-#define SEEK_MAX_TRIM_SEC    60
+/* Bound byte-offset refinement before falling back to sequential decoding. */
 #define SEEK_MAX_REFINES     2
 
 #define CDN_SEEK_PROBE_OFFSET 4093
@@ -999,18 +990,26 @@ stream_decode_chunk (LiveTestState *state, GBytes *decrypted_chunk, gboolean fin
   PcmFrame *frame = NULL;
   while ((frame = spotifygtk_decoder_pull (state->stream_decoder)) != NULL) {
     /* Eat the post-seek shortfall before anything reaches the device. */
-    if (state->seek_discard_frames > 0) {
-      if (frame->n_frames <= state->seek_discard_frames) {
-        state->seek_discard_frames -= frame->n_frames;
+    if (state->seek_target_frame > 0) {
+      guint64 target = state->seek_target_frame - 1;
+      gint64 end = spotifygtk_decoder_get_pcm_position (state->stream_decoder);
+      if (end < 0 || (guint64) end < frame->n_frames || (guint64) end <= target) {
         pcm_frame_free (frame);
         continue;
       }
-      gsize drop = (gsize) state->seek_discard_frames;
+      guint64 start = (guint64) end - frame->n_frames;
+      gsize drop = target > start ? target - start : 0;
       gsize keep = frame->n_frames - drop;
-      memmove (frame->samples, frame->samples + drop * (gsize) frame->channels,
-               keep * (gsize) frame->channels * sizeof (gint16));
+      if (drop)
+        memmove (frame->samples, frame->samples + drop * (gsize) frame->channels,
+                 keep * (gsize) frame->channels * sizeof (gint16));
       frame->n_frames = keep;
-      state->seek_discard_frames = 0;
+      state->seek_target_frame = 0;
+      state->stream_position_frames = start + drop;
+      spotifygtk_audio_sink_set_position (state->sink, state->sink_seq,
+                                           state->stream_position_frames, frame->sample_rate);
+      spotifygtk_native_engine_control_report_position (
+        state->control, state->stream_position_frames, frame->sample_rate);
     }
 
     gsize frame_count = frame->n_frames;
@@ -1188,7 +1187,7 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
     }
 
     g_warning ("[seek] landing fetch failed: %s", error ? error->message : "unknown error");
-    state->ok = TRUE;                       /* treat as end-of-track */
+    state->ok = FALSE;
     g_main_loop_quit (state->loop);
     return;
   }
@@ -1208,10 +1207,9 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
   gint    rate          = state->stream_sample_rate > 0 ? state->stream_sample_rate : 44100;
   guint64 landed_frames = (guint64) granule;
 
-  /* Close the remaining gap by discarding decoded frames rather than reporting
-   * the landing point as the new position. Position is preset to the target so
-   * the progress bar reads correctly while those frames are being eaten. */
-  gint64 target_frames = target_ms * (gint64) rate / 1000;
+  /* The page end is only a bound for choosing a landing window. The decoder
+   * supplies the actual start of each PCM block. */
+  gint64 target_frames = (target_ms * (gint64) rate + 999) / 1000;
   gint64 shortfall     = target_frames - (gint64) landed_frames;
 
   g_message ("[seek] target %.1fs, landed %.1fs, shortfall %.1fs%s",
@@ -1276,41 +1274,23 @@ on_seek_landing_chunk (GBytes *decrypted_chunk, goffset offset, GError *error, g
     return;
   }
 
-  if (shortfall < 0) {
-    /* Both bounded corrections failed to land before the target. Reporting the
-     * later granule as the target would make the UI lie, but decoding from it
-     * is still preferable to treating the track as complete. */
-    g_warning ("[seek] still overshot after %u refinement(s); continuing from the earliest usable page",
-               refinements);
-    shortfall = 0;
+  if (overshot && req_off > 0) {
+    /* A byte estimate is only an optimization. Decode forward from the
+     * beginning if the bounded refinements cannot find an earlier page. */
+    SeekLanding *again = g_new0 (SeekLanding, 1);
+    again->state = state;
+    again->generation = state->playback_generation;
+    again->target_ms = target_ms;
+    again->refinements = refinements;
+    spotifygtk_cdn_fetch_chunk (state->cdn_fetcher, state->cdn_url, state->audio_key,
+                                0, CDN_FULL_DOWNLOAD_CHUNK, state,
+                                on_seek_landing_chunk, again);
+    return;
   }
 
-  if (shortfall > (gint64) rate * SEEK_MAX_TRIM_SEC)
-    shortfall = (gint64) rate * SEEK_MAX_TRIM_SEC;
-
-  state->seek_discard_frames = (guint64) shortfall;
-
-  /* output_frames is counted in DEVICE frames -- the audio worker adds what it
-   * writes to the device, and position is reported against the device rate. A
-   * granule is in STREAM frames. Those are the same number only when no
-   * resampling is happening; with the resampler engaged (44.1k -> 48k here)
-   * presetting a granule directly made every seek report a position short by
-   * the rate ratio, which is 8.1% -- about 20 s at the four-minute mark. */
-  gint    sink_rate     = spotifygtk_audio_sink_device_rate (state->sink);
-  gint    dev_rate      = sink_rate > 0 ? sink_rate : rate;
-  guint64 stream_frames = landed_frames + (guint64) shortfall;
-  state->stream_position_frames = stream_frames;
-  spotifygtk_native_engine_control_report_buffered_position (state->control, stream_frames, rate);
-  state->output_frames  = (guint64) ((gdouble) stream_frames
-                                     * (gdouble) dev_rate / (gdouble) rate);
-
-  /* The sink counts what it has written; a seek moves the track rather than
-   * restarting it, so its counter has to be moved too or position would resume
-   * from wherever the old one had got to. */
-  spotifygtk_audio_sink_set_position (state->sink, state->sink_seq,
-                                      state->output_frames);
-  spotifygtk_native_engine_control_report_position (state->control,
-                                                    state->output_frames, dev_rate);
+  /* A page granule describes the end of its PCM. Use the decoder's actual
+   * sample cursor to trim before queuing any audio at the new position. */
+  state->seek_target_frame = (guint64) target_frames + 1;
 
   g_message ("[seek] landed at logical byte %" G_GOFFSET_FORMAT "+%" G_GSIZE_FORMAT
              ", granule %" G_GINT64_FORMAT " (%.1fs; target %.1fs)",
@@ -1423,7 +1403,7 @@ do_seek (LiveTestState *state)
   if (offset < 0)
     offset = 0;
 
-  state->seek_discard_frames = 0;
+  state->seek_target_frame = 0;
 
   /* Invalidate any read-ahead fetch already in flight for the old position. */
   state->playback_generation++;
@@ -3503,7 +3483,7 @@ run_live_test (const gchar *token, GCancellable *cancellable,
     .initial_cdn_chunk = NULL,
     .next_download_offset = 0,
     .header_prefix = NULL, .header_prefix_len = 0, .playback_generation = 0,
-    .stream_decoder = NULL, .stream_frames = 0, .output_frames = 0,
+    .stream_decoder = NULL, .stream_frames = 0,
     .sink = NULL, .sink_seq = 0, .sink_started = FALSE,
     .timeout_source = NULL,
     .seek_source = NULL,

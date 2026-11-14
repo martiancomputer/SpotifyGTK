@@ -29,7 +29,8 @@
 static guint storage_calls, range_calls, auth_calls, metadata_calls;
 static goffset recovered_offset;
 static gpointer pending_landing;
-static guint64 fixture_seq, queued_pcm;
+static guint64 fixture_seq, queued_pcm, first_pcm_frame;
+static gint16 first_pcm_sample;
 static SpotifyAudioSink *
 fixture_sink (void)
 {
@@ -46,6 +47,7 @@ fixture_begin (SpotifyAudioSink *sink, SpotifyNativeEngineControl *control, GCan
 static gboolean
 fixture_push (SpotifyAudioSink *sink, guint64 seq, PcmFrame *frame)
 {
+  if (!queued_pcm) first_pcm_sample = frame->samples[0];
   queued_pcm += frame->n_frames;
   pcm_frame_free (frame);
   (void)sink;
@@ -59,17 +61,12 @@ fixture_sink_action (SpotifyAudioSink *sink, guint64 seq)
   (void)seq;
 }
 static void
-fixture_position (SpotifyAudioSink *sink, guint64 seq, guint64 frames)
+fixture_position (SpotifyAudioSink *sink, guint64 seq, guint64 frames, gint rate)
 {
   (void)sink;
   (void)seq;
-  (void)frames;
-}
-static gint
-fixture_rate (SpotifyAudioSink *sink)
-{
-  (void)sink;
-  return 48000;
+  first_pcm_frame = frames;
+  (void)rate;
 }
 static gboolean
 fixture_failed (SpotifyAudioSink *sink)
@@ -139,7 +136,6 @@ fixture_metadata (SpotifySpclient *client, const gchar *uri, const gchar *bearer
 #define spotifygtk_audio_sink_end_track fixture_sink_action
 #define spotifygtk_audio_sink_flush fixture_sink_action
 #define spotifygtk_audio_sink_set_position fixture_position
-#define spotifygtk_audio_sink_device_rate fixture_rate
 #define spotifygtk_audio_sink_failed fixture_failed
 #include "../src/main.c"
 #undef spotifygtk_spclient_get_audio_storage
@@ -152,7 +148,6 @@ fixture_metadata (SpotifySpclient *client, const gchar *uri, const gchar *bearer
 #undef spotifygtk_audio_sink_end_track
 #undef spotifygtk_audio_sink_flush
 #undef spotifygtk_audio_sink_set_position
-#undef spotifygtk_audio_sink_device_rate
 #undef spotifygtk_audio_sink_failed
 
 static gint engine_calls, engine_release;
@@ -451,6 +446,48 @@ test_initial_resume_seek (void)
 }
 
 static void
+test_seek_lands_on_requested_pcm (gconstpointer data)
+{
+#if SPOTIFYGTK_TEST_VORBISENC
+  g_autoptr(GBytes) ogg = fixture_ogg ();
+  g_autoptr(SpotifyDecoder) decoder = spotifygtk_decoder_new ();
+  g_assert_true (spotifygtk_decoder_open_complete (decoder, ogg));
+  gint64 target_ms = GPOINTER_TO_INT (data);
+  const guint64 target = (target_ms * 44100 + 999) / 1000;
+  guint64 decoded = 0;
+  PcmFrame *frame;
+  while ((frame = spotifygtk_decoder_pull (decoder))) {
+    if (decoded + frame->n_frames > target) break;
+    decoded += frame->n_frames;
+    pcm_frame_free (frame);
+  }
+  g_assert_nonnull (frame);
+  gint16 expected = frame->samples[target - decoded];
+  pcm_frame_free (frame);
+
+  LiveTestState state;
+  recovery_setup (&state);
+  state.stream_sample_rate = 44100;
+  state.sink = fixture_sink ();
+  state.sink_seq = 1;
+  gsize size;
+  const guint8 *bytes = g_bytes_get_data (ogg, &size);
+  state.header_prefix_len = ogg_header_prefix_len (bytes, size);
+  state.header_prefix = g_memdup2 (bytes, state.header_prefix_len);
+  SeekLanding *landing = g_new0 (SeekLanding, 1);
+  landing->state = &state;
+  landing->target_ms = target_ms;
+  on_seek_landing_chunk (ogg, 0, NULL, landing);
+  g_assert_cmpuint (queued_pcm, >, 0);
+  g_assert_cmpuint (first_pcm_frame, ==, target);
+  g_assert_cmpint (first_pcm_sample, ==, expected);
+  recovery_clear (&state);
+#else
+  g_test_skip ("Vorbis encoder not available to generate a synthetic stream");
+#endif
+}
+
+static void
 count_now_playing (SpotifyNativePlayerService *self, const gchar *uri, gpointer data)
 {
   (*(guint *)data)++;
@@ -543,6 +580,37 @@ test_player_retry (gconstpointer data)
       g_usleep (1000);
     }
   g_assert_cmpint (g_atomic_int_get (&engine_calls), ==, mode == 4 ? 2 : 1);
+}
+
+static void
+test_player_start_at (void)
+{
+  g_autoptr(SpotifyNativePlayerService) player = spotifygtk_player_service_new ();
+  g_autoptr(GError) error = NULL;
+  const gchar *uri = "spotify:track:fixture";
+  engine_calls = engine_release = 0;
+  fixture_seq = 0;
+  g_assert_true (spotifygtk_player_service_start_uri_at (player, uri, 73457, &error));
+  gint64 deadline = g_get_monotonic_time () + 3 * G_TIME_SPAN_SECOND;
+  while (!g_atomic_int_get (&engine_calls)) {
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    g_main_context_iteration (NULL, FALSE);
+    g_usleep (1000);
+  }
+  g_assert_true (engine_had_seek);
+  g_assert_cmpint (engine_seek, ==, 73457);
+  g_assert_cmpint (engine_position, ==, 73457);
+  fixture_seq = 124;
+  gint64 position = 0;
+  g_assert_cmpstr (spotifygtk_player_service_get_audible_position (player, &position), ==, uri);
+  g_assert_cmpint (position, ==, 73457);
+  fixture_seq = 0;
+  spotifygtk_player_service_stop (player);
+  while (player->task) {
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    g_main_context_iteration (NULL, FALSE);
+    g_usleep (1000);
+  }
 }
 
 typedef struct {
@@ -743,6 +811,11 @@ main (int argc, char *argv[])
   g_test_add_func ("/playback/recovery/cancel-and-stale", test_recovery_cancellation_and_stale_range);
   g_test_add_func ("/playback/recovery/checkpoint", test_resume_checkpoint);
   g_test_add_func ("/playback/recovery/initial-seek-no-zero-pcm", test_initial_resume_seek);
+  g_test_add_func ("/playback/start-at-bookmark", test_player_start_at);
+  g_test_add_data_func ("/playback/seek-lands-on-requested-pcm", GINT_TO_POINTER (1723),
+                        test_seek_lands_on_requested_pcm);
+  g_test_add_data_func ("/playback/seek-within-first-page", GINT_TO_POINTER (123),
+                        test_seek_lands_on_requested_pcm);
   const gchar *retry_modes[] = { "buffered-tail", "paused", "seek-zero", "cancelled", "replacement", "before-first-pcm" };
   for (guint i = 0; i < G_N_ELEMENTS (retry_modes); i++) {
     g_autofree gchar *path = g_strconcat ("/playback/retry/", retry_modes[i], NULL);

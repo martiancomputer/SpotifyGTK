@@ -1,6 +1,7 @@
 #include "config.h"
 #include "local_playback.h"
 #include "sink.h"
+#include <string.h>
 
 #if HAVE_LOCAL_AV
 #include <libavformat/avformat.h>
@@ -15,7 +16,7 @@ static gboolean
 queue_decoded (SwrContext *resampler, AVFrame *decoded,
                SpotifyAudioSink *sink, guint64 seq,
                SpotifyNativeEngineControl *control,
-               GCancellable *cancel, gint rate)
+               GCancellable *cancel, gint rate, gint skip)
 {
   if (decoded->nb_samples <= 0 || decoded->nb_samples > 32768)
     return FALSE;
@@ -34,11 +35,14 @@ queue_decoded (SwrContext *resampler, AVFrame *decoded,
     pcm_frame_free (pcm);
     return FALSE;
   }
-  pcm->n_frames = converted;
-  if (converted == 0) {
+  if (converted <= skip) {
     pcm_frame_free (pcm);
     return TRUE;
   }
+  pcm->n_frames = converted - skip;
+  if (skip > 0)
+    memmove (pcm->samples, pcm->samples + skip * 2,
+             pcm->n_frames * 2 * sizeof (gint16));
   if (g_cancellable_is_cancelled (cancel) ||
       spotifygtk_native_engine_control_seek_pending (control)) {
     pcm_frame_free (pcm);
@@ -100,28 +104,44 @@ spotifygtk_local_playback_run (const gchar *path, GCancellable *cancel,
   spotifygtk_native_engine_control_set_sink_seq (control, seq);
   if (!seq) goto done;
   gboolean eof = FALSE;
+  gint64 seek_sample = -1;
+  const gint64 origin = stream->start_time != AV_NOPTS_VALUE ? stream->start_time : 0;
+  AVRational samples = { 1, decoder->sample_rate };
   while (!g_cancellable_is_cancelled (cancel)) {
     if (!spotifygtk_native_engine_control_wait (control, cancel)) break;
     gint64 seek_ms;
     if (spotifygtk_native_engine_control_take_seek (control, &seek_ms)) {
-      gint64 timestamp = av_rescale_q (MAX (seek_ms, 0),
-                                      (AVRational) { 1, 1000 }, stream->time_base);
+      gint64 timestamp = origin + av_rescale_q_rnd (seek_ms,
+        (AVRational) { 1, 1000 }, stream->time_base, AV_ROUND_DOWN);
       if (av_seek_frame (format, index, timestamp, AVSEEK_FLAG_BACKWARD) >= 0) {
         avcodec_flush_buffers (decoder);
         swr_close (resampler);
         if (swr_init (resampler) < 0) break;
         spotifygtk_audio_sink_flush (sink, seq);
-        gint device_rate = spotifygtk_audio_sink_device_rate (sink);
-        spotifygtk_audio_sink_set_position (sink, seq,
-          (guint64) MAX (seek_ms, 0) * (device_rate > 0 ? device_rate :
-                                        decoder->sample_rate) / 1000);
+        seek_sample = av_rescale_q_rnd (seek_ms, (AVRational) { 1, 1000 },
+                                        samples, AV_ROUND_UP);
+        spotifygtk_audio_sink_set_position (sink, seq, seek_sample, decoder->sample_rate);
+        spotifygtk_native_engine_control_report_position (control, seek_ms, 1000);
         eof = FALSE;
+      } else if (!started) {
+        break;
       }
     }
     int received = avcodec_receive_frame (decoder, frame);
     if (received == 0) {
+      gint skip = 0;
+      if (seek_sample >= 0 && frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+        gint64 first = av_rescale_q (frame->best_effort_timestamp - origin,
+                                     stream->time_base, samples);
+        skip = CLAMP (seek_sample - first, 0, frame->nb_samples);
+        if (skip == frame->nb_samples) {
+          av_frame_unref (frame);
+          continue;
+        }
+      }
+      seek_sample = -1;
       gboolean queued = queue_decoded (resampler, frame, sink, seq, control,
-                                       cancel, decoder->sample_rate);
+                                       cancel, decoder->sample_rate, skip);
       av_frame_unref (frame);
       if (!queued) break;
       if (!started) {

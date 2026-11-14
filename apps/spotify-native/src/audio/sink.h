@@ -90,13 +90,14 @@ void spotifygtk_audio_sink_flush (SpotifyAudioSink *self, guint64 seq);
 void spotifygtk_audio_sink_abandon_queued (SpotifyAudioSink *self);
 
 /*
- * Reset this track's position counter, in device frames.
+ * Reset the track's position using frames at the supplied rate. The writer
+ * converts to the actual device rate when it writes the next block.
  *
  * A seek does not restart the track, it moves it: the sink keeps playing the
  * same slot, so the count it reports position from has to be moved with it.
  */
 void spotifygtk_audio_sink_set_position (SpotifyAudioSink *self, guint64 seq,
-                                         guint64 device_frames);
+                                         guint64 frames, gint rate);
 
 /* How many frames this track still has queued ahead of the device. The
  * prefetch decision reads this: it is the real measure of how much playing

@@ -30,6 +30,13 @@ gboolean spotifygtk_player_service_start (SpotifyNativePlayerService *self, GErr
 gboolean spotifygtk_player_service_start_uri (SpotifyNativePlayerService *self,
                                               const gchar *track_uri,
                                               GError **error);
+gboolean spotifygtk_player_service_start_uri_at (SpotifyNativePlayerService *self,
+                                                 const gchar *track_uri,
+                                                 gint64 position_ms,
+                                                 GError **error);
+/* Borrowed URI of the sounding track and its current output position. */
+const gchar *spotifygtk_player_service_get_audible_position (
+  SpotifyNativePlayerService *self, gint64 *position_ms);
 void     spotifygtk_player_service_stop  (SpotifyNativePlayerService *self);
 
 /*
