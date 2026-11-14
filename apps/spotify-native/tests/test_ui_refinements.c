@@ -1727,12 +1727,19 @@ test_playlist_picker_and_shared_create (gconstpointer data)
       gtk_widget_get_display (icon)), gtk_image_get_icon_name (GTK_IMAGE (icon))));
     g_assert_cmpint (gtk_widget_get_width (icon), ==, gtk_widget_get_height (icon));
     g_assert_cmpint (gtk_widget_get_width (layout), <=, 232);
-    g_assert_cmpfloat (list_bounds.origin.x, ==, bar_bounds.size.width);
+    GtkWidget *picker = gtk_popover_get_child (pick->popover);
+    graphene_rect_t action_bounds = bounds (gtk_button_get_child (GTK_BUTTON (new_playlist)), picker);
+    graphene_rect_t separator_bounds = bounds (find_type (picker, GTK_TYPE_SEPARATOR), picker);
+    g_assert_cmpfloat (fabs (action_bounds.origin.x + action_bounds.size.width / 2 -
+                            separator_bounds.origin.x - separator_bounds.size.width / 2), <=, 1);
+    g_assert_cmpfloat (action_bounds.origin.y + action_bounds.size.height, <, separator_bounds.origin.y);
     g_assert_cmpfloat (list_bounds.origin.y, ==, bar_bounds.origin.y);
     g_assert_cmpfloat (search_bounds.origin.x, ==, list_bounds.origin.x);
     g_assert_cmpfloat (search_bounds.size.width, ==, list_bounds.size.width);
     g_assert_cmpfloat (list_bounds.origin.x + list_bounds.size.width, ==, bar_bounds.origin.x);
-    g_assert_cmpfloat (bar_bounds.origin.x + bar_bounds.size.width, ==, gtk_widget_get_width (layout));
+    float right_inset = gtk_widget_get_width (layout) - bar_bounds.origin.x - bar_bounds.size.width;
+    g_assert_cmpfloat (right_inset, >, 0);
+    g_assert_cmpfloat (list_bounds.origin.x, ==, right_inset);
     if (real) {
       GtkWidget *playlist = find_type (GTK_WIDGET (pick->view), SPOTIFYGTK_TYPE_TRACK_ROW);
       move_to_widget (playlist, "click", "5");

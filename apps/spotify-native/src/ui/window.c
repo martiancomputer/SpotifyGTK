@@ -3396,7 +3396,7 @@ static void
 on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
                          GtkPopover *popover, SpotifyGtkNativeWindow *self)
 {
-  enum { PICKER_WIDTH = 224, PICKER_GUTTER = 8, PICKER_LIST_HEIGHT = 208 };
+  enum { PICKER_WIDTH = 224, PICKER_INSET = 4, PICKER_SCROLLBAR_WIDTH = 8, PICKER_LIST_HEIGHT = 208 };
   if (!track || !track->uri) return;
   PlaylistPick *pick = g_new0 (PlaylistPick, 1);
   pick->window = self;
@@ -3414,6 +3414,8 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   gtk_widget_add_css_class (create, "playlist-picker-create");
   gtk_button_set_has_frame (GTK_BUTTON (create), FALSE);
   GtkWidget *create_content = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_halign (create_content, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign (create_content, GTK_ALIGN_CENTER);
   GtkWidget *plus = gtk_image_new_from_icon_name ("spotifygtk-add-circle-symbolic");
   gtk_image_set_pixel_size (GTK_IMAGE (plus), 18);
   gtk_widget_set_valign (plus, GTK_ALIGN_CENTER);
@@ -3427,7 +3429,7 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   GtkWidget *layout = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
   PlaylistPickerList *destinations = g_object_new (playlist_picker_list_get_type (), NULL);
   gtk_widget_set_hexpand (GTK_WIDGET (destinations), TRUE);
-  gtk_widget_set_margin_start (GTK_WIDGET (destinations), PICKER_GUTTER);
+  gtk_widget_set_margin_start (GTK_WIDGET (destinations), PICKER_INSET);
   gtk_box_append (GTK_BOX (layout), GTK_WIDGET (destinations));
   pick->search = GTK_SEARCH_ENTRY (gtk_search_entry_new ());
   gtk_search_entry_set_placeholder_text (pick->search, "Search playlists");
@@ -3481,7 +3483,8 @@ on_list_add_to_playlist (SpotifyGtkTrackList *list, SpotifyNativeTrack *track,
   GtkWidget *scrollbar = gtk_scrollbar_new (GTK_ORIENTATION_VERTICAL, pick->adjustment);
   gtk_widget_add_css_class (scrollbar, "search-page-scrollbar");
   gtk_widget_set_valign (scrollbar, GTK_ALIGN_END);
-  gtk_widget_set_size_request (scrollbar, PICKER_GUTTER, PICKER_LIST_HEIGHT);
+  gtk_widget_set_margin_end (scrollbar, PICKER_INSET);
+  gtk_widget_set_size_request (scrollbar, PICKER_SCROLLBAR_WIDTH, PICKER_LIST_HEIGHT);
   gtk_box_append (GTK_BOX (layout), scrollbar);
   gtk_box_append (GTK_BOX (box), layout);
 
