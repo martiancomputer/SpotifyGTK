@@ -2,6 +2,9 @@
 
 #include <glib.h>
 
+#define SPOTIFYGTK_TRACK_GUTTER_START 35
+#define SPOTIFYGTK_TRACK_GUTTER_END 12
+
 /* Viewport scans and cover delivery must run before idle redraw sources.
  * Sustained rendering can otherwise starve even an already-decoded image. */
 #define SPOTIFYGTK_ARTWORK_PRIORITY G_PRIORITY_DEFAULT

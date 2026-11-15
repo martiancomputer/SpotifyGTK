@@ -1150,6 +1150,7 @@ factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer use
 {
   GtkWidget *row = GTK_WIDGET (spotifygtk_track_row_new ());
   SpotifyGtkTrackList *self = user_data;
+  gtk_widget_add_css_class (row, "search-track-surface");
   gtk_widget_set_margin_start (row, self->row_margin_start);
   gtk_widget_set_margin_end (row, self->row_margin_end);
   g_signal_connect_object (row, "map", G_CALLBACK (on_track_row_mapped), self, 0);

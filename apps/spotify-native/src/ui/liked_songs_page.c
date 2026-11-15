@@ -3,6 +3,7 @@
  */
 
 #include "liked_songs_page.h"
+#include "layout_policy.h"
 #include "spotify/catalog_snapshot.h"
 #include "track_list.h"
 #include "../log_file.h"
@@ -573,8 +574,8 @@ spotifygtk_liked_songs_page_init (SpotifyGtkLikedSongsPage *self)
   self->liked_dates = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   gtk_orientable_set_orientation (GTK_ORIENTABLE (self), GTK_ORIENTATION_VERTICAL);
   gtk_box_set_spacing (GTK_BOX (self), 12);
-  gtk_widget_set_margin_start (GTK_WIDGET (self), 35);
-  gtk_widget_set_margin_end (GTK_WIDGET (self), 12);
+  gtk_widget_set_margin_start (GTK_WIDGET (self), SPOTIFYGTK_TRACK_GUTTER_START);
+  gtk_widget_set_margin_end (GTK_WIDGET (self), SPOTIFYGTK_TRACK_GUTTER_END);
   gtk_widget_set_margin_top (GTK_WIDGET (self), 24);
   /*
    * No bottom margin. It reads as a band of dead page above the playback bar

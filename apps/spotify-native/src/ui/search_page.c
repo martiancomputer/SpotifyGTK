@@ -9,6 +9,8 @@
  */
 
 #include "search_page.h"
+#include "layout_policy.h"
+#include <math.h>
 #include "track_list.h"
 #include "album_grid.h"
 #include "smooth_scroll.h"
@@ -30,8 +32,8 @@ struct _SpotifyGtkSearchPage {
   GtkWidget           *page_header;    /* borrowed: owned by TrackList */
   GtkWidget           *scroll_overlay; /* borrowed: owned by this page */
   GtkWidget           *scrollbar;      /* borrowed: owned by overlay */
-  gdouble              header_extent;
   gint                 scrollbar_top;
+  gdouble              header_end;
   SpotifyGtkTrackList *results;
   SpotifyGtkAlbumGrid *albums;
   GtkWidget           *albums_section;
@@ -153,9 +155,6 @@ show_message (SpotifyGtkSearchPage *self, const gchar *text)
   gtk_widget_set_visible (GTK_WIDGET (self->message), text && *text);
 }
 
-static gint
-search_scrollbar_top (SpotifyGtkSearchPage *self, GtkAdjustment *adj);
-
 static void
 update_scrollbar_visibility (SpotifyGtkSearchPage *self)
 {
@@ -164,24 +163,31 @@ update_scrollbar_visibility (SpotifyGtkSearchPage *self)
   GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment (
     spotifygtk_track_list_get_scroller (self->results));
   gint height = gtk_widget_get_height (self->scroll_overlay);
-  gboolean scrollable = self->header_extent > 0 &&
+  gboolean scrollable = height > 0 &&
     gtk_adjustment_get_upper (adj) > gtk_adjustment_get_page_size (adj) + 1 &&
-    self->header_extent - gtk_adjustment_get_value (adj) < height;
+    (self->header_end - gtk_adjustment_get_value (adj) < height);
   gboolean changed = gtk_widget_get_visible (self->scrollbar) != scrollable;
   if (changed)
     gtk_widget_set_visible (self->scrollbar, scrollable);
-  if (scrollable && (changed ||
-      search_scrollbar_top (self, adj) != self->scrollbar_top))
-    gtk_widget_queue_allocate (self->scroll_overlay);
 }
 
 static gint
-search_scrollbar_top (SpotifyGtkSearchPage *self, GtkAdjustment *adj)
+search_scrollbar_top (SpotifyGtkSearchPage *self)
 {
   gint height = gtk_widget_get_height (self->scroll_overlay);
-  return CLAMP ((gint) (self->header_extent -
-                        gtk_adjustment_get_value (adj) + 0.5),
-                0, MAX (height, 0));
+  GtkWidget *row = self->page_header ? gtk_widget_get_parent (self->page_header) : NULL;
+  graphene_rect_t bounds;
+  if (row && gtk_widget_get_mapped (row) &&
+      gtk_widget_compute_bounds (row, self->scroll_overlay, &bounds) &&
+      bounds.size.height > 0) {
+    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment (
+      spotifygtk_track_list_get_scroller (self->results));
+    float bottom = bounds.origin.y + bounds.size.height;
+    self->header_end = bottom + gtk_adjustment_get_value (adj);
+    return CLAMP ((gint) ceilf (bottom), 0, MAX (height, 0));
+  }
+
+  return 0;
 }
 
 /* GtkOverlay positions this one child without contributing to the page's
@@ -200,13 +206,11 @@ position_search_scrollbar (GtkOverlay *overlay, GtkWidget *child,
                       &minimum, &natural, NULL, NULL);
   gint viewport_width = gtk_widget_get_width (GTK_WIDGET (overlay));
   gint viewport_height = gtk_widget_get_height (GTK_WIDGET (overlay));
-  gint width = MIN (viewport_width, CLAMP (natural, 12, 18));
-  GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment (
-    spotifygtk_track_list_get_scroller (self->results));
-  gint top = search_scrollbar_top (self, adj);
+  gint width = MIN (viewport_width, MAX (minimum, natural));
+  gint top = search_scrollbar_top (self);
   self->scrollbar_top = top;
   *allocation = (GdkRectangle) {
-    .x = MAX (viewport_width - width, 0), .y = top,
+    .x = MAX (viewport_width - width - SPOTIFYGTK_TRACK_GUTTER_END, 0), .y = top,
     .width = width, .height = MAX (viewport_height - top, 0)
   };
   return TRUE;
@@ -217,18 +221,8 @@ on_search_header_layout (GObject *object, GParamSpec *pspec,
                          gpointer user_data)
 {
   SpotifyGtkSearchPage *self = user_data;
-  graphene_rect_t bounds;
-  if (self->page_header && self->scroll_overlay &&
-      gtk_widget_get_parent (self->page_header) &&
-      gtk_widget_compute_bounds (self->page_header, self->scroll_overlay,
-                                 &bounds)) {
-    GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment (
-      spotifygtk_track_list_get_scroller (self->results));
-    self->header_extent = bounds.origin.y + bounds.size.height +
-                          gtk_widget_get_margin_bottom (self->page_header) +
-                          gtk_adjustment_get_value (adj);
-  }
   update_scrollbar_visibility (self);
+  if (self->scroll_overlay) gtk_widget_queue_allocate (self->scroll_overlay);
   (void) object;
   (void) pspec;
 }
@@ -255,9 +249,14 @@ on_search_scroll_value (GtkAdjustment *adj, gpointer user_data)
   /* The scrollbar updates its own thumb from the shared adjustment. Relayout
    * the overlay only while the header boundary actually crosses the screen;
    * no extra allocation pass is needed for the long track-list scroll. */
-  if (self->scroll_overlay &&
-      search_scrollbar_top (self, adj) != self->scrollbar_top)
+  if (!self->scroll_overlay) return;
+  gint height = gtk_widget_get_height (self->scroll_overlay);
+  gint top = CLAMP ((gint) ceil (self->header_end - gtk_adjustment_get_value (adj)),
+                    0, MAX (height, 0));
+  if (!gtk_widget_get_visible (self->scrollbar) || top >= height)
     update_scrollbar_visibility (self);
+  else if (top != self->scrollbar_top)
+    gtk_widget_queue_allocate (self->scroll_overlay);
 }
 
 /* Search returns a ranked track list. The first distinct albums in that list
@@ -710,8 +709,7 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   self->results = spotifygtk_track_list_new ();
   /* Inset only track rows, leaving the shelf's horizontal viewport flush
    * with the page edges. The external vertical bar does not reserve width. */
-  spotifygtk_track_list_set_content_margins (self->results, 0, 0);
-  spotifygtk_track_list_set_row_margins (self->results, 35, 12);
+  gtk_widget_add_css_class (GTK_WIDGET (self->results), "search-tracks");
   spotifygtk_track_list_set_show_type (self->results, TRUE);
   gtk_widget_set_vexpand (GTK_WIDGET (self->results), TRUE);
   g_signal_connect (self->results, "track-activated", G_CALLBACK (on_track_activated), self);
@@ -761,7 +759,7 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   spotifygtk_album_grid_set_full_card_shelf (self->albums, TRUE);
   /* The shelf has the whole page width. Track-row insets below do not alter
    * its horizontal clip boundary or card sizing. */
-  spotifygtk_album_grid_set_content_margins (self->albums, 0, 0);
+  spotifygtk_album_grid_set_content_margins (self->albums, SPOTIFYGTK_TRACK_GUTTER_START, 0);
   gtk_box_append (GTK_BOX (self->albums_section), GTK_WIDGET (self->albums));
   gtk_box_append (GTK_BOX (header), self->albums_section);
 
@@ -789,6 +787,11 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   self->scrollbar = gtk_scrollbar_new (GTK_ORIENTATION_VERTICAL, vadj);
   gtk_widget_add_css_class (self->scrollbar, "search-page-scrollbar");
   gtk_overlay_add_overlay (GTK_OVERLAY (self->scroll_overlay), self->scrollbar);
+  gint scrollbar_width = 0;
+  gtk_widget_measure (self->scrollbar, GTK_ORIENTATION_HORIZONTAL, -1,
+                      &scrollbar_width, NULL, NULL, NULL);
+  spotifygtk_track_list_set_row_margins (self->results, SPOTIFYGTK_TRACK_GUTTER_START,
+                                        SPOTIFYGTK_TRACK_GUTTER_END + scrollbar_width);
   gtk_overlay_set_measure_overlay (GTK_OVERLAY (self->scroll_overlay),
                                    self->scrollbar, FALSE);
   gtk_overlay_set_clip_overlay (GTK_OVERLAY (self->scroll_overlay),

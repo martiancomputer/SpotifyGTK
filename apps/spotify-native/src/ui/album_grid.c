@@ -175,6 +175,7 @@ struct _SpotifyGtkAlbumGrid {
   gboolean    wrap;
   guint       geometry_idle;
   gboolean    full_card_shelf;
+  gint        shelf_leading_inset;
   gboolean    home_style;
   gboolean    shelf_snapping;
   gint        shelf_width;
@@ -289,7 +290,8 @@ shelf_card_offset (SpotifyGtkAlbumGrid *self, guint position)
   gint base = self->shelf_width / (gint) self->shelf_columns;
   guint extra = self->shelf_width % (gint) self->shelf_columns;
   return (gdouble) (position / self->shelf_columns) * self->shelf_width +
-         (gdouble) column * base + MIN (column, extra);
+         (gdouble) column * base + MIN (column, extra) +
+         (position > 0 ? self->shelf_leading_inset : 0);
 }
 
 static void
@@ -1056,9 +1058,23 @@ on_card_secondary_pressed (GtkGestureClick *gesture, gint n_press,
 }
 
 static void
+update_shelf_card_inset (GtkListItem *item, GParamSpec *property, SpotifyGtkAlbumGrid *self)
+{
+  GtkWidget *card = gtk_list_item_get_child (item);
+  if (card)
+    gtk_widget_set_margin_start (card, gtk_list_item_get_position (item) == 0
+      ? self->shelf_leading_inset : 0);
+  (void) property;
+}
+
+static void
 factory_setup (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user_data)
 {
   SpotifyGtkAlbumGrid *self = user_data;
+
+  if (!self->wrap)
+    g_signal_connect_object (list_item, "notify::position",
+                             G_CALLBACK (update_shelf_card_inset), self, 0);
 
   GtkWidget *card = gtk_button_new ();
   gtk_widget_add_css_class (card, "media-card");
@@ -1174,6 +1190,7 @@ factory_bind (GtkListItemFactory *factory, GtkListItem *list_item, gpointer user
   if (!g_ptr_array_find (self->bound_cards, card, NULL))
     g_ptr_array_add (self->bound_cards, card);
   if (!self->wrap && position != GTK_INVALID_LIST_POSITION) {
+    update_shelf_card_inset (list_item, NULL, self);
     update_shelf_widths (self);
     gint width = shelf_card_width (self, position);
     if (self->full_card_shelf)
@@ -1997,7 +2014,16 @@ spotifygtk_album_grid_set_content_margins (SpotifyGtkAlbumGrid *self,
   g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
   if (!self->view)
     return;
-  gtk_widget_set_margin_start (self->view, start);
+  if (self->full_card_shelf) {
+    self->shelf_leading_inset = start;
+    for (guint i = 0; i < self->bound_cards->len; i++) {
+      GtkWidget *card = self->bound_cards->pdata[i];
+      gtk_widget_set_margin_start (card, GPOINTER_TO_UINT (
+        g_object_get_data (G_OBJECT (card), "bound-position")) == 1 ? start : 0);
+    }
+  } else {
+    gtk_widget_set_margin_start (self->view, start);
+  }
   gtk_widget_set_margin_end (self->view, end);
 }
 

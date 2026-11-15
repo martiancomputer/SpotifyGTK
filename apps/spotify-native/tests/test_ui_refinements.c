@@ -1,6 +1,7 @@
 /* Exercise the actual application CSS and widgets without starting playback,
  * authentication, or a window session. All persistent state is temporary. */
 #include "../src/ui/window.c"
+#include "../src/ui/layout_policy.h"
 #include "../src/ui/artwork_viewer.h"
 #include "../src/ui/track_row.h"
 #include "../src/ui/track_item.h"
@@ -194,6 +195,87 @@ test_liked_sort_alignment (void)
     settle ();
   }
   save_preview (window, "liked-sort-aligned.png");
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
+static void
+test_search_result_geometry (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1100, 720);
+  GtkWidget *stack = gtk_stack_new ();
+  gtk_window_set_child (GTK_WINDOW (window), stack);
+  SpotifyGtkSearchPage *search = spotifygtk_search_page_new ();
+  SpotifyGtkLikedSongsPage *liked = spotifygtk_liked_songs_page_new ();
+  gtk_stack_add_named (GTK_STACK (stack), GTK_WIDGET (search), "search");
+  gtk_stack_add_named (GTK_STACK (stack), GTK_WIDGET (liked), "liked");
+  SpotifyNativeTrack track = { .uri = "local:track:geometry", .name = "Fixture" };
+  g_autoptr(GPtrArray) tracks = g_ptr_array_new ();
+  for (guint i = 0; i < 80; i++) g_ptr_array_add (tracks, &track);
+  SpotifyGtkTrackList *results = spotifygtk_search_page_get_list (search);
+  spotifygtk_track_list_set_native_tracks (results, tracks);
+  spotifygtk_track_list_set_native_tracks (spotifygtk_liked_songs_page_get_list (liked), tracks);
+  SpotifyGtkAlbumGrid *albums = spotifygtk_search_page_get_album_grid (search);
+  GtkWidget *section = gtk_widget_get_parent (GTK_WIDGET (albums));
+  SpotifyGtkCardSpec cards[12] = {0};
+  for (guint i = 0; i < G_N_ELEMENTS (cards); i++) {
+    cards[i].uri = "spotify:album:0000000000000000000001";
+    cards[i].title = "Fixture album";
+  }
+  spotifygtk_album_grid_set_cards (albums, cards, G_N_ELEMENTS (cards));
+  gtk_widget_set_visible (section, TRUE);
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+  GtkWidget *card = find_class (GTK_WIDGET (albums), "media-card");
+  g_assert_nonnull (card);
+  g_assert_cmpint (gtk_widget_get_margin_start (card), ==, SPOTIFYGTK_TRACK_GUTTER_START);
+  GtkWidget *bar = find_class (GTK_WIDGET (search), "search-page-scrollbar");
+  GtkWidget *overlay = gtk_widget_get_parent (bar);
+  GtkWidget *header = gtk_widget_get_parent (section);
+  graphene_rect_t h = bounds (gtk_widget_get_parent (header), overlay);
+  graphene_rect_t b = bounds (bar, overlay);
+  g_assert_cmpfloat_with_epsilon (b.origin.y, h.origin.y + h.size.height, 1);
+  g_assert_cmpfloat_with_epsilon (b.origin.y + b.size.height, gtk_widget_get_height (overlay), 1);
+  GtkWidget *row = find_type (GTK_WIDGET (results), SPOTIFYGTK_TYPE_TRACK_ROW);
+  graphene_rect_t search_row = bounds (row, window);
+  GtkAdjustment *adjustment = gtk_scrolled_window_get_vadjustment (
+    spotifygtk_track_list_get_scroller (results));
+  gtk_adjustment_set_value (adjustment, 1800);
+  settle ();
+  g_assert_cmpfloat_with_epsilon (bounds (bar, overlay).origin.y, 0, 1);
+  gtk_adjustment_set_value (adjustment, 0);
+  settle ();
+  g_assert_cmpfloat_with_epsilon (bounds (bar, overlay).origin.y, b.origin.y, 1);
+  GtkAdjustment *horizontal = gtk_scrolled_window_get_hadjustment (
+    spotifygtk_album_grid_get_scroller (albums));
+  gtk_adjustment_set_value (horizontal, 400);
+  settle ();
+  g_assert_cmpfloat (gtk_adjustment_get_value (horizontal), >, 35);
+  gtk_widget_set_visible (section, FALSE);
+  settle ();
+  g_assert_cmpfloat (bounds (bar, overlay).origin.y, <, b.origin.y);
+  gtk_widget_set_visible (section, TRUE);
+  gtk_window_set_default_size (GTK_WINDOW (window), 850, 660);
+  const SpotifyGtkTheme themes[] = { SPOTIFYGTK_THEME_LIGHT, SPOTIFYGTK_THEME_MILK,
+    SPOTIFYGTK_THEME_DARK, SPOTIFYGTK_THEME_DARK_PLUS };
+  for (guint i = 0; i < G_N_ELEMENTS (themes); i++) {
+    apply_theme (themes[i]);
+    settle ();
+    h = bounds (gtk_widget_get_parent (header), overlay);
+    b = bounds (bar, overlay);
+    g_assert_cmpfloat_with_epsilon (b.origin.y, h.origin.y + h.size.height, 1);
+    g_assert_cmpfloat_with_epsilon (b.origin.y + b.size.height, gtk_widget_get_height (overlay), 1);
+  }
+  search_row = bounds (find_type (GTK_WIDGET (results), SPOTIFYGTK_TYPE_TRACK_ROW), window);
+  gtk_stack_set_visible_child_name (GTK_STACK (stack), "liked");
+  settle ();
+  row = find_type (GTK_WIDGET (liked), SPOTIFYGTK_TYPE_TRACK_ROW);
+  graphene_rect_t liked_row = bounds (row, window);
+  g_test_message ("Search %.0f..%.0f, Liked %.0f..%.0f", search_row.origin.x,
+    search_row.origin.x + search_row.size.width, liked_row.origin.x,
+    liked_row.origin.x + liked_row.size.width);
+  g_assert_cmpfloat_with_epsilon (search_row.origin.x, liked_row.origin.x, 1);
+  g_assert_cmpfloat_with_epsilon (search_row.size.width, liked_row.size.width, 1);
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
@@ -2221,6 +2303,7 @@ main (int argc, char **argv)
   g_test_add_data_func ("/ui/load-position/liked", GUINT_TO_POINTER (1), test_collection_replacement_anchor);
   g_test_add_data_func ("/ui/load-position/search-header", GUINT_TO_POINTER (2), test_collection_replacement_anchor);
   g_test_add_func ("/ui/library/local-empty-and-create", test_library_local_empty_and_create_position);
+  g_test_add_func ("/ui/search/result-geometry", test_search_result_geometry);
   g_test_add_func ("/ui/liked/sort-alignment-resize", test_liked_sort_alignment);
   g_test_add_func ("/ui/liked/header-transparency-preserves-geometry", test_header_transparency_preserves_geometry);
   g_test_add_func ("/ui/liked/sort-recycled-allocation", test_liked_sort_stale_allocation);
