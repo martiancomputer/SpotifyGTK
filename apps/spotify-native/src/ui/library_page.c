@@ -13,6 +13,7 @@
 #include "album_grid.h"
 #include "local_catalog.h"
 #include "settings.h"
+#include "smooth_scroll.h"
 #include "../log_file.h"
 #include "../spotify/collection.h"
 #include "../spotify/catalog_cache.h"
@@ -1052,6 +1053,8 @@ on_view_clicked (GtkToggleButton *button, gpointer user_data)
   gboolean changing_release = !artists && self->active_view != LIBRARY_ARTISTS &&
                               view != self->active_view;
   SpotifyGtkAlbumGrid *outgoing = changing_release ? self->albums : NULL;
+  if (self->active_view != view)
+    gtk_revealer_set_reveal_child (GTK_REVEALER (self->header_revealer), TRUE);
   self->active_view = view;
   refresh_view_labels (self);
 
@@ -1152,30 +1155,81 @@ spotifygtk_library_page_set_covers_loaded (SpotifyGtkLibraryPage *self,
   spotifygtk_album_grid_reload_covers (artists ? self->artists : self->albums);
 }
 
-/* Fold the header with hysteresis. It is not the source of the grid stutter;
- * keeping this behavior also preserves the vertical space while browsing. */
 #define HEADER_HIDE_AT   90.0
 #define HEADER_SHOW_AT   12.0
 
 static void
-on_albums_scrolled (GtkAdjustment *adj, gpointer user_data)
+on_library_scroll_intent (GtkScrolledWindow *scroller, double destination,
+                          double delta, gpointer data)
 {
-  SpotifyGtkLibraryPage *self = user_data;
+  SpotifyGtkLibraryPage *self = data;
   const gchar *visible = gtk_stack_get_visible_child_name (self->content_stack);
   SpotifyGtkAlbumGrid *active = g_strcmp0 (visible, "artists") == 0
     ? self->artists : self->albums;
-  if (adj != spotifygtk_album_grid_get_vadjustment (active))
+  if (scroller != spotifygtk_album_grid_get_scroller (active))
     return;
-  gdouble value = gtk_adjustment_get_value (adj);
-  gboolean revealed =
-    gtk_revealer_get_reveal_child (GTK_REVEALER (self->header_revealer));
 
-  if (revealed && value > HEADER_HIDE_AT)
-    gtk_revealer_set_reveal_child (GTK_REVEALER (self->header_revealer), FALSE);
-  else if (!revealed && value < HEADER_SHOW_AT)
-    gtk_revealer_set_reveal_child (GTK_REVEALER (self->header_revealer), TRUE);
+  /* reveal-child is the requested state. child-revealed reports animation
+   * completion. Neither grid re-anchoring nor animation progress is input. */
+  GtkRevealer *header = GTK_REVEALER (self->header_revealer);
+  gboolean requested = gtk_revealer_get_reveal_child (header);
+  if (requested && delta > 0 && destination > HEADER_HIDE_AT)
+    gtk_revealer_set_reveal_child (header, FALSE);
+  else if (!requested && delta < 0 && destination < HEADER_SHOW_AT)
+    gtk_revealer_set_reveal_child (header, TRUE);
 }
 
+static gboolean
+on_library_scrollbar_change (GtkRange *range, GtkScrollType type,
+                              double destination, SpotifyGtkLibraryPage *self)
+{
+  GtkWidget *scroller = gtk_widget_get_ancestor (GTK_WIDGET (range), GTK_TYPE_SCROLLED_WINDOW);
+  if (scroller)
+    on_library_scroll_intent (GTK_SCROLLED_WINDOW (scroller), destination,
+      destination - gtk_adjustment_get_value (gtk_range_get_adjustment (range)), self);
+  (void) type;
+  return FALSE;
+}
+
+static gboolean
+on_library_scroll_child (GtkScrolledWindow *scroller, GtkScrollType type,
+                          gboolean horizontal, SpotifyGtkLibraryPage *self)
+{
+  if (horizontal) return FALSE;
+  GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment (scroller);
+  double value = gtk_adjustment_get_value (adj);
+  double destination;
+  switch (type) {
+    case GTK_SCROLL_STEP_UP:
+    case GTK_SCROLL_STEP_BACKWARD: destination = value - gtk_adjustment_get_step_increment (adj); break;
+    case GTK_SCROLL_STEP_DOWN:
+    case GTK_SCROLL_STEP_FORWARD: destination = value + gtk_adjustment_get_step_increment (adj); break;
+    case GTK_SCROLL_PAGE_UP:
+    case GTK_SCROLL_PAGE_BACKWARD: destination = value - gtk_adjustment_get_page_increment (adj); break;
+    case GTK_SCROLL_PAGE_DOWN:
+    case GTK_SCROLL_PAGE_FORWARD: destination = value + gtk_adjustment_get_page_increment (adj); break;
+    case GTK_SCROLL_START: destination = gtk_adjustment_get_lower (adj); break;
+    case GTK_SCROLL_END: destination = gtk_adjustment_get_upper (adj); break;
+    default: return FALSE;
+  }
+  destination = CLAMP (destination, gtk_adjustment_get_lower (adj),
+                      MAX (gtk_adjustment_get_lower (adj),
+                           gtk_adjustment_get_upper (adj) - gtk_adjustment_get_page_size (adj)));
+  on_library_scroll_intent (scroller, destination, destination - value, self);
+  return FALSE;
+}
+
+static void
+bind_library_scroll_intent (SpotifyGtkLibraryPage *self, SpotifyGtkAlbumGrid *grid)
+{
+  GtkScrolledWindow *scroller = spotifygtk_album_grid_get_scroller (grid);
+  spotifygtk_smooth_scroll_set_intent_observer (scroller, on_library_scroll_intent, G_OBJECT (self));
+  g_signal_connect_object (scroller, "scroll-child", G_CALLBACK (on_library_scroll_child), self, 0);
+  GtkWidget *bar = gtk_scrolled_window_get_vscrollbar (scroller);
+  GtkWidget *range = gtk_widget_get_first_child (bar);
+  if (GTK_IS_RANGE (range))
+    g_signal_connect_object (range, "change-value", G_CALLBACK (on_library_scrollbar_change), self, 0);
+}
 
 /* === Building blocks === */
 
@@ -1375,15 +1429,9 @@ spotifygtk_library_page_init (SpotifyGtkLibraryPage *self)
                            G_CALLBACK (on_local_catalog_changed), self, 0);
   show_release_view (self);
 
-  GtkAdjustment *vadj = spotifygtk_album_grid_get_vadjustment (self->albums);
-  if (vadj)
-    g_signal_connect (vadj, "value-changed", G_CALLBACK (on_albums_scrolled), self);
-  vadj = spotifygtk_album_grid_get_vadjustment (self->albums_alt);
-  if (vadj)
-    g_signal_connect (vadj, "value-changed", G_CALLBACK (on_albums_scrolled), self);
-  vadj = spotifygtk_album_grid_get_vadjustment (self->artists);
-  if (vadj)
-    g_signal_connect (vadj, "value-changed", G_CALLBACK (on_albums_scrolled), self);
+  bind_library_scroll_intent (self, self->albums_primary);
+  bind_library_scroll_intent (self, self->albums_alt);
+  bind_library_scroll_intent (self, self->artists);
 }
 
 SpotifyGtkLibraryPage *

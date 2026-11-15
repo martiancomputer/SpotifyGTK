@@ -178,6 +178,7 @@ struct _SpotifyGtkAlbumGrid {
   gint        shelf_leading_inset;
   gboolean    home_style;
   gboolean    shelf_snapping;
+  gboolean    free_shelf_scroll;
   gint        shelf_width;
   gint        shelf_minimum;
   gint        shelf_row_minimum; /* style floor, independent of bound text */
@@ -716,7 +717,7 @@ on_grid_settled (gpointer user_data)
       (gint64) GRID_SETTLE_MS * 1000)
     return G_SOURCE_CONTINUE;
 
-  if (self->full_card_shelf && self->shelf_width > 0 &&
+  if (self->full_card_shelf && !self->free_shelf_scroll && self->shelf_width > 0 &&
       self->shelf_columns > 0 && self->vadj) {
     gdouble smooth_target;
     if (spotifygtk_smooth_scroll_get_target (
@@ -2060,6 +2061,13 @@ spotifygtk_album_grid_get_scroller (SpotifyGtkAlbumGrid *self)
 {
   g_return_val_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self), NULL);
   return GTK_SCROLLED_WINDOW (self->scroller);
+}
+
+void
+spotifygtk_album_grid_set_free_shelf_scroll (SpotifyGtkAlbumGrid *self, gboolean enabled)
+{
+  g_return_if_fail (SPOTIFYGTK_IS_ALBUM_GRID (self));
+  self->free_shelf_scroll = !!enabled;
 }
 
 void

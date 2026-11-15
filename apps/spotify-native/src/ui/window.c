@@ -7583,7 +7583,7 @@ static const gchar *palette_dark_plus =
   ".recording .keycap { border-image-source: url('resource:///com/github/spotifygtk/SpotifyNative/keycaps/dark-plus-active.svg'); }"
   "@define-color keycap_bg #151515; @define-color keycap_border #484848;"
   "@define-color bg_chrome #000000;  @define-color bg_panel #000000;"
-  "@define-color bg_content #080808; @define-color bg_card #121212;"
+  "@define-color bg_content #040404; @define-color bg_card #121212;"
   "@define-color bg_hover #1a1a1a;   @define-color bg_hover_row #161616;"
   "@define-color bg_selected #202020;@define-color bg_selected_row #202020;"
   "@define-color border #242424;"
@@ -8382,7 +8382,7 @@ spotifygtk_native_window_constructed (GObject *object)
   /* Breakpoints negotiate a small minimum BEFORE the window manager tiles
    * the native surface. Hiding side panes only after allocation is too late:
    * the old combined minimum prevented half-screen snapping on Windows. */
-  gtk_widget_set_size_request (GTK_WIDGET (self), 600, 400);
+  gtk_widget_set_size_request (GTK_WIDGET (self), 784, 815);
   AdwBreakpoint *sidebar_breakpoint = adw_breakpoint_new (
     adw_breakpoint_condition_parse ("max-width: 1150px"));
   self->sidebar_breakpoint = sidebar_breakpoint;

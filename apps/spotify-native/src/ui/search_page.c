@@ -757,9 +757,10 @@ spotifygtk_search_page_init (SpotifyGtkSearchPage *self)
   gtk_widget_set_visible (self->albums_section, FALSE);
   self->albums = spotifygtk_album_grid_new_shelf ();
   spotifygtk_album_grid_set_full_card_shelf (self->albums, TRUE);
+  spotifygtk_album_grid_set_free_shelf_scroll (self->albums, TRUE);
   /* The shelf has the whole page width. Track-row insets below do not alter
    * its horizontal clip boundary or card sizing. */
-  spotifygtk_album_grid_set_content_margins (self->albums, SPOTIFYGTK_TRACK_GUTTER_START, 0);
+  spotifygtk_album_grid_set_content_margins (self->albums, 18, 0);
   gtk_box_append (GTK_BOX (self->albums_section), GTK_WIDGET (self->albums));
   gtk_box_append (GTK_BOX (header), self->albums_section);
 

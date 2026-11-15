@@ -52,4 +52,13 @@ gboolean spotifygtk_smooth_scroll_get_target (GtkScrolledWindow *scroller,
  * contents of a scroller. Does not otherwise move its adjustment. */
 void spotifygtk_smooth_scroll_cancel (GtkScrolledWindow *scroller);
 
+/* Observe a destination requested by wheel or touchpad input. Layout and
+ * interpolation never call this observer. Owner is weakly held. */
+typedef void (*SpotifyGtkScrollIntentFunc) (GtkScrolledWindow *scroller,
+                                             double destination, double delta,
+                                             gpointer owner);
+void spotifygtk_smooth_scroll_set_intent_observer (GtkScrolledWindow *scroller,
+                                                    SpotifyGtkScrollIntentFunc observer,
+                                                    GObject *owner);
+
 G_END_DECLS

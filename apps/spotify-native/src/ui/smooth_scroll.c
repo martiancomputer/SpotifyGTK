@@ -24,6 +24,8 @@
 typedef struct {
   GtkScrolledWindow *scroller;      /* borrowed; owns this via set_data */
   GWeakRef           nested_horizontal;
+  GWeakRef           intent_owner;
+  SpotifyGtkScrollIntentFunc intent_observer;
   gboolean           nested_hover;
   GtkOrientation     orientation;
   guint              tick;
@@ -77,6 +79,7 @@ smooth_scroll_free (gpointer data)
 {
   SmoothScroll *ss = data;
   g_weak_ref_clear (&ss->nested_horizontal);
+  g_weak_ref_clear (&ss->intent_owner);
   if (ss->observed_adjustment) {
     if (ss->value_handler)
       g_signal_handler_disconnect (ss->observed_adjustment, ss->value_handler);
@@ -463,6 +466,15 @@ smooth_scroll_tick (GtkWidget *widget, GdkFrameClock *clock, gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
+static void
+notify_scroll_intent (SmoothScroll *ss, double destination, double delta)
+{
+  if (!ss->intent_observer) return;
+  g_autoptr(GObject) owner = g_weak_ref_get (&ss->intent_owner);
+  if (owner)
+    ss->intent_observer (ss->scroller, destination, delta, owner);
+}
+
 static gboolean
 on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user_data)
 {
@@ -513,6 +525,10 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
         return GDK_EVENT_STOP;
       }
     }
+    /* GtkScrolledWindow scales surface deltas by 2.5 before applying them.
+     * Observe that destination without taking over its kinetic scrolling. */
+    if (ss->orientation == GTK_ORIENTATION_VERTICAL)
+      notify_scroll_intent (ss, CLAMP (value + delta * 2.5, lower, upper), delta);
     return GDK_EVENT_PROPAGATE;
   }
 #else
@@ -526,6 +542,7 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
       ss->tick = 0;
       ss->target = ss->last_set = value;
     }
+    notify_scroll_intent (ss, value, delta);
     /* A wheel over a horizontal shelf can continue vertically on its parent.
      * A terminal page edge, however, should not enter GTK overshoot at all. */
     GtkOrientation parent_axis = ss->orientation == GTK_ORIENTATION_HORIZONTAL &&
@@ -571,6 +588,7 @@ on_scroll (GtkEventControllerScroll *ctrl, gdouble dx, gdouble dy, gpointer user
   scroll_character (&step, NULL);
   ss->target   = CLAMP (base + delta * step, lower, upper);
   ss->last_set = value;
+  notify_scroll_intent (ss, ss->target, delta);
   if (ss->tick == 0) {
     ss->last_frame_us = 0;   /* first frame of a new flick eases by one frame */
     ss->tick = gtk_widget_add_tick_callback (GTK_WIDGET (ss->scroller),
@@ -594,6 +612,7 @@ spotifygtk_smooth_scroll_attach (GtkScrolledWindow *scroller,
   ss->orientation = orientation;
   ss->trace       = g_getenv ("SPOTIFY_SCROLL_STATS") != NULL;
   g_weak_ref_init (&ss->nested_horizontal, NULL);
+  g_weak_ref_init (&ss->intent_owner, NULL);
 
   /* Tied to the widget's lifetime: the tick callback is removed with the
    * widget, and this frees with it, so there is nothing to unregister. */
@@ -734,4 +753,16 @@ spotifygtk_smooth_scroll_cancel (GtkScrolledWindow *scroller)
   gtk_widget_remove_tick_callback (GTK_WIDGET (scroller), ss->tick);
   ss->tick = 0;
   ss->target = ss->last_set = value;
+}
+
+
+void
+spotifygtk_smooth_scroll_set_intent_observer (GtkScrolledWindow *scroller,
+                                              SpotifyGtkScrollIntentFunc observer,
+                                              GObject *owner)
+{
+  SmoothScroll *ss = g_object_get_data (G_OBJECT (scroller), "spotifygtk-smooth-scroll");
+  g_return_if_fail (ss != NULL);
+  ss->intent_observer = observer;
+  g_weak_ref_set (&ss->intent_owner, owner);
 }

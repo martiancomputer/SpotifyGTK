@@ -228,7 +228,7 @@ test_search_result_geometry (void)
   settle ();
   GtkWidget *card = find_class (GTK_WIDGET (albums), "media-card");
   g_assert_nonnull (card);
-  g_assert_cmpint (gtk_widget_get_margin_start (card), ==, SPOTIFYGTK_TRACK_GUTTER_START);
+  g_assert_cmpint (gtk_widget_get_margin_start (card), ==, 18);
   GtkWidget *bar = find_class (GTK_WIDGET (search), "search-page-scrollbar");
   GtkWidget *overlay = gtk_widget_get_parent (bar);
   GtkWidget *header = gtk_widget_get_parent (section);
@@ -250,7 +250,7 @@ test_search_result_geometry (void)
     spotifygtk_album_grid_get_scroller (albums));
   gtk_adjustment_set_value (horizontal, 400);
   settle ();
-  g_assert_cmpfloat (gtk_adjustment_get_value (horizontal), >, 35);
+  g_assert_cmpfloat (gtk_adjustment_get_value (horizontal), ==, 400);
   gtk_widget_set_visible (section, FALSE);
   settle ();
   g_assert_cmpfloat (bounds (bar, overlay).origin.y, <, b.origin.y);
@@ -2275,6 +2275,89 @@ test_restore_playback_bookmark (void)
   g_assert_cmpint (g_unlink (path), ==, 0);
 }
 
+static void
+count_library_header_requests (GtkRevealer *header, GParamSpec *property, guint *requests)
+{
+  (*requests)++;
+  g_test_message ("Header request %u: %s", *requests,
+                  gtk_revealer_get_reveal_child (header) ? "show" : "hide");
+  (void) property;
+}
+
+static void
+library_scrollbar_request (GtkScrolledWindow *scroller, double target)
+{
+  GtkWidget *range = gtk_widget_get_first_child (gtk_scrolled_window_get_vscrollbar (scroller));
+  g_assert_true (GTK_IS_RANGE (range));
+  gboolean handled = FALSE;
+  g_signal_emit_by_name (range, "change-value", GTK_SCROLL_JUMP, target, &handled);
+}
+
+static void
+test_library_header_layout_feedback (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  gtk_window_set_default_size (GTK_WINDOW (window), 1000, 720);
+  SpotifyGtkLibraryPage *page = spotifygtk_library_page_new ();
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (page));
+  SpotifyGtkAlbumGrid *grid = spotifygtk_library_page_get_album_grid (page);
+  GtkScrolledWindow *scroller = spotifygtk_album_grid_get_scroller (grid);
+  GtkAdjustment *adj = gtk_scrolled_window_get_vadjustment (scroller);
+  GtkRevealer *header = GTK_REVEALER (find_type (GTK_WIDGET (page), GTK_TYPE_REVEALER));
+  guint requests = 0;
+  g_signal_connect (header, "notify::reveal-child", G_CALLBACK (count_library_header_requests), &requests);
+  SpotifyGtkCardSpec cards[80] = {0};
+  g_autoptr(GPtrArray) uris = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < G_N_ELEMENTS (cards); i++) {
+    gchar *uri = g_strdup_printf ("spotify:album:%022u", i);
+    g_ptr_array_add (uris, uri);
+    cards[i].uri = uri;
+    cards[i].title = "Fixture album";
+  }
+  spotifygtk_album_grid_set_cards (grid, cards, G_N_ELEMENTS (cards));
+  g_object_set (gtk_settings_get_default (), "gtk-enable-animations", TRUE, NULL);
+  gtk_window_present (GTK_WINDOW (window));
+  settle ();
+
+  library_scrollbar_request (scroller, 95);
+  g_assert_false (gtk_revealer_get_reveal_child (header));
+  gtk_adjustment_configure (adj, 5, 0, 500, 10, 100, 490);
+  settle ();
+  g_assert_false (gtk_revealer_get_child_revealed (header));
+  g_assert_cmpuint (requests, ==, 1);
+
+  gtk_adjustment_configure (adj, 100, 0, 3000, 10, 100, 600);
+  library_scrollbar_request (scroller, 0);
+  g_assert_true (gtk_revealer_get_reveal_child (header));
+  for (guint i = 0; i < 3; i++) {
+    gtk_adjustment_set_value (adj, 0);
+    library_scrollbar_request (scroller, 130);
+    gtk_adjustment_set_value (adj, 100);
+    library_scrollbar_request (scroller, 0);
+  }
+  settle ();
+  g_assert_true (gtk_revealer_get_child_revealed (header));
+  g_assert_cmpuint (requests, ==, 8);
+
+  gtk_adjustment_set_value (adj, 0);
+  library_scrollbar_request (scroller, 100);
+  gtk_window_set_default_size (GTK_WINDOW (window), 860, 800);
+  spotifygtk_album_grid_set_cards (grid, cards, 28);
+  settle ();
+  g_assert_false (gtk_revealer_get_child_revealed (header));
+  g_assert_cmpuint (requests, ==, 9);
+  const gchar *views[] = { "Albums", "Playlists", "Artists", "Local Files" };
+  for (guint i = 0; i < G_N_ELEMENTS (views); i++) {
+    GtkWidget *button = button_for (GTK_WIDGET (page), views[i]);
+    g_signal_emit_by_name (button, "clicked");
+    settle ();
+    g_assert_true (gtk_revealer_get_child_revealed (header));
+  }
+  g_assert_cmpuint (requests, ==, 10);
+  gtk_window_destroy (GTK_WINDOW (window));
+  g_object_set (gtk_settings_get_default (), "gtk-enable-animations", FALSE, NULL);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2321,6 +2404,7 @@ main (int argc, char **argv)
   g_test_add_func ("/ui/home/responsive-shelf", test_home_responsive_shelf);
   g_test_add_func ("/ui/liked/remove-anchor", test_liked_remove_preserves_anchor);
   g_test_add_func ("/ui/tracks/playing-model-replace", test_playing_survives_model_replace);
+  g_test_add_func ("/ui/library/header-layout-feedback", test_library_header_layout_feedback);
   g_test_add_func ("/ui/library/order-direction", test_library_order_and_direction);
   g_test_add_data_func ("/ui/playlists/picker-shared-create", GINT_TO_POINTER (1100),
                         test_playlist_picker_and_shared_create);

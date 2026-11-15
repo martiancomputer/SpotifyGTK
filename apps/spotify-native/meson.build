@@ -1,5 +1,5 @@
 project('spotify-native', 'c',
-  version: '1.1.7',
+  version: '1.1.8',
   meson_version: '>= 1.0.0',
   default_options: [
     'warning_level=2',
