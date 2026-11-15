@@ -3324,12 +3324,12 @@ pick_scan_artwork (gpointer data)
   for (guint i = 0; i < pick->bound_rows->len; i++) {
     SpotifyGtkTrackRow *row = pick->bound_rows->pdata[i];
     graphene_rect_t bounds;
-    gboolean near = gtk_widget_get_mapped (GTK_WIDGET (row)) &&
+    gboolean within_prefetch = gtk_widget_get_mapped (GTK_WIDGET (row)) &&
       gtk_widget_compute_bounds (GTK_WIDGET (row), GTK_WIDGET (pick->scroller), &bounds) &&
       bounds.origin.y + bounds.size.height > -80 &&
       bounds.origin.y < gtk_widget_get_height (GTK_WIDGET (pick->scroller)) + 80;
-    spotifygtk_track_row_set_cover_hold (row, !near);
-    if (!near) { spotifygtk_track_row_release_cover (row); continue; }
+    spotifygtk_track_row_set_cover_hold (row, !within_prefetch);
+    if (!within_prefetch) { spotifygtk_track_row_release_cover (row); continue; }
     spotifygtk_track_row_retry_cover (row);
     SpotifyGtkTrackItem *item = g_object_get_data (G_OBJECT (row), "picker-item");
     const gchar *uri = item ? spotifygtk_track_item_get_uri (item) : NULL;
